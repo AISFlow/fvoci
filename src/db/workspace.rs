@@ -497,6 +497,7 @@ pub async fn ensure_personal_workspace(
     pool: &PgPool,
     user_id: Uuid,
     session_id: Uuid,
+    client_ip: Option<&str>,
 ) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
     let existing: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT personal_workspace_id FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL",
@@ -566,6 +567,25 @@ pub async fn ensure_personal_workspace(
     .bind(user_id)
     .bind(workspace_id)
     .execute(&mut *tx)
+    .await?;
+    let payload = json!({
+        "workspaceId": workspace_id.to_string(),
+        "ownerId": user_id.to_string(),
+        "kind": "personal",
+        "slug": slug,
+    });
+    record_workspace_event_and_audit(
+        &mut tx,
+        WorkspaceChangeRecord {
+            workspace_id,
+            actor_user_id: user_id,
+            verb: "workspace.personal_created",
+            target_type: "workspace",
+            target_id: workspace_id,
+            payload,
+            client_ip,
+        },
+    )
     .await?;
     tx.commit().await?;
     Ok(Ok(WorkspaceMeta {

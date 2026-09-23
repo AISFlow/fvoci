@@ -1711,6 +1711,160 @@ async fn personal_workspace_is_immutable_and_idempotent() {
             .await
             .unwrap();
     assert_eq!(pointer.0.unwrap().to_string(), personal_id);
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'workspace.personal_created' AND actor_user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 1);
+    let (status, _, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'workspace.personal_created' AND actor_user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn personal_workspace_creation_writes_event_and_audit() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, user_id) = setup_session(&harness).await;
+    let peer = std::net::SocketAddr::from(([203, 0, 113, 70], 42424));
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&cookie),
+        &[],
+        Some(peer),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let personal_id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'workspace.personal_created' AND workspace_id = $1",
+    )
+    .bind(personal_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 1);
+    let audits: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'workspace.personal_created' AND actor_user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(audits.0, 1);
+    let ip: (Option<String>,) = sqlx::query_as(
+        "SELECT host(ip) FROM fvoci.audit_log WHERE verb = 'workspace.personal_created' AND actor_user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(ip.0.as_deref(), Some("203.0.113.70"));
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn personal_workspace_event_failure_rolls_back_creation() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, user_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    install_insert_fail_trigger(&admin, "events", "test_personal_event_fail").await;
+    let (status, _, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let pointer: (Option<Uuid>,) =
+        sqlx::query_as("SELECT personal_workspace_id FROM fvoci.users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert!(pointer.0.is_none());
+    let workspaces: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM fvoci.workspaces WHERE kind = 'personal'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(workspaces.0, 0);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn personal_workspace_audit_failure_rolls_back_creation() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, user_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    install_insert_fail_trigger(&admin, "audit_log", "test_personal_audit_fail").await;
+    let (status, _, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let pointer: (Option<Uuid>,) =
+        sqlx::query_as("SELECT personal_workspace_id FROM fvoci.users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert!(pointer.0.is_none());
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'workspace.personal_created'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 0);
     admin.close().await;
     harness.cleanup().await;
 }

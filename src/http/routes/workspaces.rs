@@ -218,6 +218,7 @@ async fn create_workspace(
 
 async fn personal_workspace(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<WorkspaceMetaResponse>, AppError> {
@@ -225,10 +226,15 @@ async fn personal_workspace(
     check_origin(&headers, &state.public_origin)?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let user_id = parse_user_id(&user.user_id)?;
-    let result =
-        crate::db::workspace::ensure_personal_workspace(&state.auth.db.pool, user_id, session_id)
-            .await
-            .map_err(internal)?;
+    let ip = peer_ip(peer.ip());
+    let result = crate::db::workspace::ensure_personal_workspace(
+        &state.auth.db.pool,
+        user_id,
+        session_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
     match result {
         Ok(meta) => Ok(Json(meta_response(meta))),
         Err(err) => Err(map_workspace_error(err, false)),
