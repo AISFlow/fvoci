@@ -4,7 +4,7 @@ import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { EmptyWorkspace } from "@/features/workspace/empty-workspace";
 import { WorkspaceCreateDialog } from "@/features/workspace/workspace-create-dialog";
-import { api, ensureOk } from "@/lib/api";
+import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { meQuery, workspacesQuery } from "@/lib/queries";
 import { useState } from "react";
 
@@ -32,6 +32,7 @@ export function HomePage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const me = useQuery(meQuery);
   const workspaces = useQuery(workspacesQuery);
 
@@ -40,7 +41,14 @@ export function HomePage() {
   }
 
   async function logout() {
-    await api.POST("/api/v1/auth/logout");
+    setLogoutError(null);
+    const result = await api.POST("/api/v1/auth/logout");
+    if (!result.response.ok) {
+      setLogoutError(
+        problemMessage(new ProblemError(result.response.status), "error.auth.logout"),
+      );
+      return;
+    }
     await queryClient.resetQueries();
     await navigate("/login", { replace: true });
   }
@@ -78,6 +86,11 @@ export function HomePage() {
   return (
     <div className="app-shell">
       <DeniedBanner />
+      {logoutError ? (
+        <div role="alert" className="border-b border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
+          {logoutError}
+        </div>
+      ) : null}
       <header className="app-shell__header">
         <h1 className="text-title font-semibold">{t("dashboard.title")}</h1>
         <div className="flex gap-2">

@@ -71,6 +71,36 @@ pub fn parse_patch_me(value: Value) -> Result<ProfilePatch, AppError> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::identity::FamilyNamePatch;
+    use serde_json::json;
+
+    #[test]
+    fn patch_me_family_name_omitted_preserves() {
+        let patch = parse_patch_me(json!({"givenName": "Renamed"})).expect("parse patch");
+        assert_eq!(patch.given_name, "Renamed");
+        assert!(matches!(patch.family_name, FamilyNamePatch::Preserve));
+    }
+
+    #[test]
+    fn patch_me_family_name_null_clears() {
+        let patch =
+            parse_patch_me(json!({"givenName": "Renamed", "familyName": null})).expect("parse patch");
+        assert_eq!(patch.given_name, "Renamed");
+        assert!(matches!(patch.family_name, FamilyNamePatch::Clear));
+    }
+
+    #[test]
+    fn patch_me_family_name_string_sets_value() {
+        let patch = parse_patch_me(json!({"givenName": "Renamed", "familyName": "Kim"}))
+            .expect("parse patch");
+        assert_eq!(patch.given_name, "Renamed");
+        assert!(matches!(patch.family_name, FamilyNamePatch::Set(ref name) if name == "Kim"));
+    }
+}
+
 fn parse_optional_string(
     obj: &serde_json::Map<String, Value>,
     field: &str,

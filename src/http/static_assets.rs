@@ -18,11 +18,32 @@ pub fn validate_static_root(path: &Path) -> Result<PathBuf, String> {
     if !canonical.is_dir() {
         return Err("FVOCI_STATIC_DIR must be a directory".into());
     }
+    resolve_static_index(&canonical)?;
+    Ok(canonical)
+}
+
+pub fn resolve_static_index(root: &Path) -> Result<PathBuf, String> {
+    let index = root.join("index.html");
+    let canonical = index
+        .canonicalize()
+        .map_err(|e| format!("missing index.html in FVOCI_STATIC_DIR: {e}"))?;
+    if !canonical.is_file() {
+        return Err("index.html must be a regular file".into());
+    }
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|e| format!("invalid FVOCI_STATIC_DIR: {e}"))?;
+    if !canonical.starts_with(&root_canonical) {
+        return Err("index.html resolves outside FVOCI_STATIC_DIR".into());
+    }
     Ok(canonical)
 }
 
 pub fn static_router(root: PathBuf) -> axum::Router {
-    let index = root.join("index.html");
+    let root = root
+        .canonicalize()
+        .expect("static root must exist when serving assets");
+    let index = resolve_static_index(&root).expect("static index must exist when serving assets");
     axum::Router::new().fallback_service(StaticFallback { root, index })
 }
 
@@ -65,6 +86,9 @@ async fn serve_static(req: Request<Body>, root: PathBuf, index: PathBuf) -> Resp
     }
 
     let rel = path.trim_start_matches('/');
+    if rel.starts_with("assets/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !rel.is_empty() && Path::new(rel).extension().is_some() {
         return StatusCode::NOT_FOUND.into_response();
     }

@@ -697,7 +697,7 @@
       },
       "PatchMeBody": {
         "type": "object",
-        "description": "PATCH /api/v1/auth/me body. `familyName` omitted preserves the value; null clears it.",
+        "description": "OpenAPI request-body schema for PATCH /api/v1/auth/me.\nRuntime parsing uses [`crate::http::json_input::parse_patch_me`].",
         "required": [
           "givenName"
         ],
@@ -706,7 +706,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Omitted preserves the current value; JSON `null` clears it."
           },
           "givenName": {
             "type": "string"
@@ -737,8 +738,7 @@
             ],
             "format": "int32"
           }
-        },
-        "additionalProperties": false
+        }
       },
       "PatchWorkspaceBody": {
         "type": "object",

@@ -179,8 +179,12 @@ export interface components {
         OkResponse: {
             ok: boolean;
         };
-        /** @description PATCH /api/v1/auth/me body. `familyName` omitted preserves the value; null clears it. */
+        /**
+         * @description OpenAPI request-body schema for PATCH /api/v1/auth/me.
+         *     Runtime parsing uses [`crate::http::json_input::parse_patch_me`].
+         */
         PatchMeBody: {
+            /** @description Omitted preserves the current value; JSON `null` clears it. */
             familyName?: string | null;
             givenName: string;
             locale?: string | null;

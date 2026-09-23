@@ -7,7 +7,9 @@ use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
 use fvoci_server::db::Db;
 use fvoci_server::http::rate_limit::RateLimiter;
-use fvoci_server::http::static_assets::{is_safe_static_path, static_router};
+use fvoci_server::http::static_assets::{
+    is_safe_static_path, resolve_static_index, static_router, validate_static_root,
+};
 use fvoci_server::http::{router, state::AppState};
 use tower::ServiceExt;
 
@@ -97,7 +99,55 @@ async fn static_router_serves_index_and_asset() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn static_router_rejects_outside_root_symlink_and_index_escape() {
+    let outside = std::env::temp_dir().join(format!("fvoci-outside-{}", uuid::Uuid::now_v7()));
+    let dir = std::env::temp_dir().join(format!("fvoci-static-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::create_dir_all(dir.join("assets")).expect("assets dir");
+    std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+    std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
+    std::os::unix::fs::symlink(&outside.join("secret.txt"), dir.join("assets/escape.txt")).unwrap();
+
+    let app: Router = static_router(dir.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/escape.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let outside_index = outside.join("outside.html");
+    std::fs::write(&outside_index, "<html>outside</html>").unwrap();
+    let index_link = dir.join("index.html");
+    std::fs::remove_file(&index_link).unwrap();
+    std::os::unix::fs::symlink(&outside_index, &index_link).unwrap();
+    assert!(validate_static_root(&dir).is_err());
+    assert!(resolve_static_index(&dir.canonicalize().unwrap()).is_err());
+
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
 }
 
 #[tokio::test]

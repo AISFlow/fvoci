@@ -60,7 +60,6 @@ pub struct SessionUserOutput {
     pub user_id: String,
     pub email: String,
     pub given_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub family_name: Option<String>,
     pub text_scale: i16,
     pub session_id: String,
@@ -72,21 +71,19 @@ pub struct SessionUserOutput {
     pub week_starts_on: i32,
 }
 
-/// PATCH /api/v1/auth/me body. `familyName` omitted preserves the value; null clears it.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// OpenAPI request-body schema for PATCH /api/v1/auth/me.
+/// Runtime parsing uses [`crate::http::json_input::parse_patch_me`].
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
+#[cfg_attr(feature = "api-schema", schema(rename_all = "camelCase"))]
 pub struct PatchMeBody {
     pub given_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub family_name: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Omitted preserves the current value; JSON `null` clears it.
+    #[cfg_attr(feature = "api-schema", schema(nullable))]
+    pub family_name: Option<String>,
     pub locale: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub week_starts_on: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_scale: Option<i16>,
 }
 
@@ -168,6 +165,33 @@ pub struct ProblemResponse {
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_user_output_serializes_null_family_name() {
+        let output = SessionUserOutput {
+            user_id: "user-1".into(),
+            email: "user@example.com".into(),
+            given_name: "Given".into(),
+            family_name: None,
+            text_scale: 16,
+            session_id: "session-1".into(),
+            email_verified_at: None,
+            has_password: true,
+            is_instance_admin: false,
+            locale: "ko".into(),
+            timezone: "Asia/Seoul".into(),
+            week_starts_on: 1,
+        };
+        let body = serde_json::to_value(output).expect("serialize session user");
+        let object = body.as_object().expect("session user object");
+        assert!(object.contains_key("familyName"), "familyName must be present");
+        assert!(object["familyName"].is_null(), "familyName must be null");
+    }
 }
 
 impl From<crate::auth::session::SessionUser> for SessionUserOutput {

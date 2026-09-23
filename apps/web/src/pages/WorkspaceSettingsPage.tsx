@@ -2,9 +2,8 @@ import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { ProblemError } from "@/lib/api";
 import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity";
-import { api, ensureOk } from "@/lib/api";
+import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { meQuery, workspacesQuery } from "@/lib/queries";
 import { useState } from "react";
 
@@ -17,6 +16,7 @@ export function WorkspaceSettingsPage() {
   const { slug } = useParams<{ slug: string }>();
   const queryClient = useQueryClient();
   const [nameError, setNameError] = useState<string | null>(null);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const me = useQuery(meQuery);
   const workspaces = useQuery(workspacesQuery);
 
@@ -71,6 +71,11 @@ export function WorkspaceSettingsPage() {
 
   return (
     <div className="app-shell">
+      {logoutError ? (
+        <div role="alert" className="border-b border-border bg-muted px-4 py-2 text-ui text-muted-foreground">
+          {logoutError}
+        </div>
+      ) : null}
       <header className="app-shell__header">
         <Link to="/" className="text-ui underline underline-offset-2">{t("nav.backHome")}</Link>
         <Button
@@ -78,7 +83,14 @@ export function WorkspaceSettingsPage() {
           size="sm"
           variant="outline"
           onClick={async () => {
-            await api.POST("/api/v1/auth/logout");
+            setLogoutError(null);
+            const result = await api.POST("/api/v1/auth/logout");
+            if (!result.response.ok) {
+              setLogoutError(
+                problemMessage(new ProblemError(result.response.status), "error.auth.logout"),
+              );
+              return;
+            }
             await queryClient.resetQueries();
             window.location.assign("/login");
           }}
