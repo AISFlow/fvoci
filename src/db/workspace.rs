@@ -819,6 +819,7 @@ async fn fetch_member(
     )
 }
 
+#[cfg(feature = "db-tests")]
 pub async fn insert_user_for_test(
     pool: &PgPool,
     user_id: Uuid,
@@ -836,6 +837,7 @@ pub async fn insert_user_for_test(
     Ok(())
 }
 
+#[cfg(feature = "db-tests")]
 pub async fn add_membership_for_test(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -856,6 +858,7 @@ pub async fn add_membership_for_test(
     Ok(())
 }
 
+#[cfg(feature = "db-tests")]
 pub async fn suspend_user_for_test(pool: &PgPool, user_id: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
         .bind(user_id)
@@ -864,6 +867,7 @@ pub async fn suspend_user_for_test(pool: &PgPool, user_id: Uuid) -> Result<(), s
     Ok(())
 }
 
+#[cfg(feature = "db-tests")]
 pub async fn tenant_context_probe(
     pool: &PgPool,
     tenant_workspace_id: Uuid,
@@ -879,6 +883,7 @@ pub async fn tenant_context_probe(
     Ok(row.map(|(id,)| id))
 }
 
+#[cfg(feature = "db-tests")]
 pub async fn lock_sign_in_user(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
