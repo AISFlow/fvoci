@@ -27,7 +27,8 @@ build_current_artifacts() {
   npm run build
 
   cd "$ROOT"
-  cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --features db-tests
+  cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
+  cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
 }
 
 require_prepared

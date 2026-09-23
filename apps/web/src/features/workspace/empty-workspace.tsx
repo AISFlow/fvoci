@@ -30,7 +30,7 @@ export function EmptyWorkspace(props: {
   if (props.error) {
     return (
       <div className="workspace-empty">
-        <p className="workspace-empty__lead">{t("load.listFailed")}</p>
+        <p role="alert" className="workspace-empty__lead">{props.error}</p>
         <Button type="button" size="sm" className="w-fit" onClick={props.onRetry}>{t("load.retry")}</Button>
       </div>
     );

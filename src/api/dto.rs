@@ -153,6 +153,7 @@ pub struct CreateWorkspaceBody {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct PatchWorkspaceBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = false))]
     pub name: Option<String>,
 }
 

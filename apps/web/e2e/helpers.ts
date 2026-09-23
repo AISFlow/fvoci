@@ -18,7 +18,7 @@ export function createE2eUser(
     throw new Error("FVOCI_E2E_ADMIN_DATABASE_URL is required for DB fixtures");
   }
   execFileSync(
-    path.join(root, "target/debug/fvoci-e2e-fixture"),
+    path.join(process.env.CARGO_TARGET_DIR ?? path.join(root, "target"), "debug/fvoci-e2e-fixture"),
     [],
     {
       env: {

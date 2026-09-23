@@ -79,8 +79,15 @@ async fn serve_static(req: Request<Body>, root: PathBuf, index: PathBuf) -> Resp
     }
 
     if let Some(file) = resolve_static_file(&root, path) {
+        let is_index = file == index;
         return match ServeFile::new(file).oneshot(req).await {
-            Ok(response) => response.map(Body::new),
+            Ok(response) => {
+                let mut response = response.map(Body::new);
+                if is_index {
+                    no_cache_headers(&mut response);
+                }
+                response
+            }
             Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
     }
@@ -94,7 +101,11 @@ async fn serve_static(req: Request<Body>, root: PathBuf, index: PathBuf) -> Resp
     }
 
     match ServeFile::new(index).oneshot(req).await {
-        Ok(response) => response.map(Body::new),
+        Ok(response) => {
+            let mut response = response.map(Body::new);
+            no_cache_headers(&mut response);
+            response
+        }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }

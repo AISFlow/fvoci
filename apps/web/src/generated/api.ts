@@ -195,7 +195,7 @@ export interface components {
             weekStartsOn?: number;
         };
         PatchWorkspaceBody: {
-            name?: string | null;
+            name: string;
         };
         ProblemResponse: {
             code: string;

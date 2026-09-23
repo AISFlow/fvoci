@@ -402,3 +402,19 @@ emailVerifiedAt 필수키/null, PATCH 나머지 optional-but-not-null을 실제 
 검사를 수행한다. 새5번째 브라우저 및 기존66 DB 회귀는 독립 Web/Rust 원격 CI에서
 이 통합 HEAD로 실행한 뒤 수락한다. 수정 후 예전 E2E4 성공을 새HEAD 성공으로
 사용하지 않는다. 전체 원본 UI/인증·문서·협업 지원으로 확대하지 않는다.
+
+### PR4 독립 검토 보강
+
+7f30140 원격 fast/lib11, 실제 PostgreSQL66(x64/ARM64), static5/schema1,
+React5, native52×2(x64/ARM64)가 모두 성공했다. Fable medium 고정 SHA 검토에서
+설정 화면의 me 오류 분기가 hook보다 먼저 반환하는 B1을 발견하여 수락 보류했다.
+후속 수정은 hook 순서를 고치고 실제 폐기 세션 쿠키로 설정 페이지를 다시 여는
+브라우저 회귀를 추가한다. nullable workspace rename 스키마, 빈 목록 오류 문구,
+index no-store, 실행 예시 bind/origin, 기본 feature 서버의 E2E 실행도 보강했다.
+현재 변경의 원격 CI·추가 검토는 새 HEAD에서 별도로 확인한다.
+
+비차단 후속: 개인 workspace 생성의 UI 연결, 알려지지 않은 오류 코드의 fallback,
+전체 API path/runtime 자동 대조, dialog 포커스/접근성 복원, 설정 화면의 네트워크
+오류와 인가 거부 구분. 이들을 완료했다고 표시하지 않는다. 문서 워커002bc57은
+icon null/정렬 prefix/parentId 및 실제 멤버 변경 경합을 수정하고 DB13을 통과했으나
+제품 router·migration4 통합은 PR4 수락 후 진행한다.

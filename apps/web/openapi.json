@@ -731,12 +731,12 @@
       },
       "PatchWorkspaceBody": {
         "type": "object",
+        "required": [
+          "name"
+        ],
         "properties": {
           "name": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           }
         },
         "additionalProperties": false

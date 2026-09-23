@@ -20,10 +20,6 @@ export function WorkspaceSettingsPage() {
   const me = useQuery(meQuery);
   const workspaces = useQuery(workspacesQuery);
 
-  if (me.isError) {
-    return <Navigate to="/login" replace />;
-  }
-
   const current = workspaces.data?.items.find((item) => item.slug === slug);
   const metaQuery = useQuery({
     queryKey: ["workspaces", current?.id, "meta"],
@@ -54,6 +50,10 @@ export function WorkspaceSettingsPage() {
       setNameError(err instanceof ProblemError ? err.title : t("error.network"));
     },
   });
+
+  if (me.isError) {
+    return <Navigate to="/login" replace />;
+  }
 
   if (workspaces.isLoading) {
     return <p className="p-8 text-muted-foreground">{t("load.loading")}</p>;

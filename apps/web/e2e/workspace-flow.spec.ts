@@ -134,3 +134,21 @@ test("logout transport failure keeps the current session visible", async ({ page
   await expect(page).toHaveURL(/\/$/);
   expect((await page.request.get("/api/v1/auth/me")).ok()).toBe(true);
 });
+
+
+test("settings with revoked session redirects without a React hook crash", async ({ page }) => {
+  await login(page, admin.email, admin.password);
+  await page.goto("/w/acme/settings");
+  await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toBeVisible();
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  // Real logout revokes the session; retain its cookie to exercise server rejection.
+  const cookies = await page.context().cookies();
+  const result = await page.request.post("/api/v1/auth/logout");
+  expect(result.ok()).toBe(true);
+  await page.context().addCookies(cookies);
+  await page.reload();
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByRole("button", { name: "로그인", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});

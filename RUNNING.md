@@ -15,8 +15,9 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `PASSWORD_PEPPER_KEYS` | JSON map of pepper key id → 64-char hex. |
 | `PASSWORD_PEPPER_ACTIVE_KEY_ID` | Active pepper id. |
 | `FVOCI_BIND` | Listen address (default `127.0.0.1:0`). |
-| `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. |
+| `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. An explicit port `0` follows the actual bound port. |
 | `FVOCI_COOKIE_SECURE` | `true`/`1` to set `Secure` on session cookies; defaults from `FVOCI_PUBLIC_ORIGIN` scheme. |
+| `FVOCI_STATIC_DIR` | Optional built frontend directory containing index.html; validated at startup. |
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
 
 Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. The crate uses SQLx `runtime-tokio-rustls`.
@@ -127,15 +128,16 @@ API_PROXY_TARGET=http://127.0.0.1:8080 npm run dev
 Production-style serving from the Rust binary (built assets required):
 
 ```sh
-cd apps/web && npm install && npm run build
+(cd apps/web && npm ci && npm run build)
 export FVOCI_STATIC_DIR="$PWD/apps/web/dist"
 export FVOCI_PUBLIC_ORIGIN=http://127.0.0.1:8080
+export FVOCI_BIND=127.0.0.1:8080
 cargo run --bin fvoci-server
 ```
 
 Browser end-to-end tests (isolated PostgreSQL, real app role, Playwright Chromium).
 Preparation installs dependencies and builds artifacts; the gate assumes preparation
-completed and refuses stale binaries:
+completed and rebuilds current contracts, assets and binaries offline:
 
 ```sh
 scripts/prepare-web-e2e.sh
