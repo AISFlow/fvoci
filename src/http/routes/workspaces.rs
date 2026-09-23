@@ -7,10 +7,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use serde::Deserialize;
-use serde::Serialize;
 use uuid::Uuid;
 
+use crate::api::dto::{
+    CreateWorkspaceBody, MemberResponse, MemberRoleBody, OkResponse, PatchWorkspaceBody,
+    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+};
 use crate::auth::session::SessionUser;
 use crate::db::workspace::{WorkspaceDbError, WorkspaceRole};
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
@@ -32,67 +34,6 @@ pub fn router() -> Router<AppState> {
             "/api/v1/workspaces/{workspace_id}/members/{user_id}",
             patch(patch_member).delete(remove_member),
         )
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkspaceListResponse {
-    items: Vec<WorkspaceListItemResponse>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkspaceListItemResponse {
-    id: String,
-    name: String,
-    slug: String,
-    role: String,
-    kind: String,
-    document_count: i32,
-    assigned_count: i32,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkspaceMetaResponse {
-    id: String,
-    name: String,
-    slug: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OkResponse {
-    ok: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MemberResponse {
-    user_id: String,
-    email: String,
-    given_name: String,
-    family_name: Option<String>,
-    role: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreateWorkspaceBody {
-    name: String,
-    slug: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PatchWorkspaceBody {
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MemberRoleBody {
-    role: String,
 }
 
 async fn list_my_workspaces(

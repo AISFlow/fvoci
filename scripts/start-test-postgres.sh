@@ -49,6 +49,7 @@ done
 
 port="$(docker port "$cid" 5432 | head -1 | awk -F: '{print $NF}')"
 export TEST_DATABASE_URL="postgres://postgres:${PASSWORD}@127.0.0.1:${port}/postgres"
+export FVOCI_TEST_PG_CONTAINER="$CONTAINER"
 
 # Keep this shell alive so EXIT cleans up after both successful and failed commands.
 "${CMD[@]}"

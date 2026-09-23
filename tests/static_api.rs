@@ -1,0 +1,135 @@
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use axum::Router;
+use fvoci_server::auth::password::Keyring;
+use fvoci_server::auth::AuthService;
+use fvoci_server::db::Db;
+use fvoci_server::http::rate_limit::RateLimiter;
+use fvoci_server::http::static_assets::{is_safe_static_path, static_router};
+use fvoci_server::http::{router, state::AppState};
+use tower::ServiceExt;
+
+const PEPPER: &str =
+    r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+
+async fn app_state() -> AppState {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/none")
+        .expect("lazy pool");
+    AppState {
+        auth: Arc::new(AuthService {
+            db: Db::new(pool),
+            password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
+        }),
+        branding_name: "FVOCI".to_string(),
+        public_origin: "http://localhost".to_string(),
+        cookie_secure: false,
+        rate_limiter: RateLimiter::new(),
+    }
+}
+
+#[tokio::test]
+async fn unknown_api_route_returns_problem_not_html() {
+    let app = router(app_state().await, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/unknown-endpoint")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json.get("code").and_then(|v| v.as_str()), Some("not_found"));
+}
+
+#[tokio::test]
+async fn static_root_rejects_traversal_paths() {
+    assert!(!is_safe_static_path("/../secret"));
+    assert!(!is_safe_static_path("/.env"));
+    assert!(is_safe_static_path("/assets/app.js"));
+}
+
+#[tokio::test]
+async fn static_router_serves_index_and_asset() {
+    let dir = std::env::temp_dir().join(format!("fvoci-static-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
+    std::fs::write(dir.join("assets.txt"), "asset").unwrap();
+
+    let app: Router = static_router(dir.clone());
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/assets.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/missing-asset.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn merged_router_returns_json_for_unknown_api_and_serves_static() {
+    let dir = std::env::temp_dir().join(format!("fvoci-app-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
+
+    let app = router(app_state().await, Some(dir.clone()));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/unknown-endpoint")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json.get("code").and_then(|v| v.as_str()), Some("not_found"));
+
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let _ = std::fs::remove_dir_all(dir);
+}

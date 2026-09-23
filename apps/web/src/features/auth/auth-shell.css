@@ -1,0 +1,130 @@
+/* apps/web/src/features/auth/auth-shell.css — layout shell for public auth surfaces */
+
+.auth-shell {
+	min-height: 100dvh;
+	background: var(--muted);
+	color: var(--foreground);
+}
+
+.auth-shell__main {
+	margin-inline: auto;
+	width: min(100%, 28rem);
+	padding: clamp(1.5rem, 4vw, 2.5rem) 1rem 2rem;
+}
+
+.auth-shell__main--wide {
+	width: min(100%, 42rem);
+}
+
+.auth-shell__panel {
+	border: 1px solid var(--border);
+	border-radius: calc(var(--radius) + 2px);
+	background: var(--card);
+	padding: clamp(1.25rem, 3vw, 1.75rem);
+}
+
+.auth-shell__heading {
+	margin: 0;
+	color: var(--foreground);
+	font-size: var(--text-title-size);
+	line-height: var(--text-title-leading);
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+
+.auth-shell__lead {
+	margin: 0.5rem 0 0;
+	color: var(--muted-foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+}
+
+.auth-shell__stack {
+	display: flex;
+	flex-direction: column;
+	gap: 1.25rem;
+}
+
+.auth-shell__stack--form {
+	gap: 1.5rem;
+}
+
+.auth-shell__field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.auth-shell__label {
+	color: var(--foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	font-weight: 500;
+}
+
+.auth-shell__hint {
+	margin: 0;
+	color: var(--muted-foreground);
+	font-size: var(--text-dense-size);
+	line-height: var(--text-dense-leading);
+}
+
+.auth-shell__alert {
+	margin: 0;
+	color: var(--destructive);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+}
+
+.auth-shell__status {
+	margin: 0;
+	color: var(--muted-foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+}
+
+.auth-shell__link {
+	color: var(--primary);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	text-decoration: underline;
+	text-underline-offset: 0.25rem;
+}
+
+.auth-shell__link:hover {
+	color: color-mix(in oklab, var(--primary) 85%, var(--foreground));
+}
+
+.auth-shell__footer {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 0.75rem 1.25rem;
+	margin-top: 1.5rem;
+	padding-bottom: 1.5rem;
+	color: var(--muted-foreground);
+	font-size: var(--text-caption-size);
+	line-height: var(--text-caption-leading);
+}
+
+.auth-shell__footer-link {
+	display: inline-flex;
+	min-height: 2.75rem;
+	align-items: center;
+	color: inherit;
+	text-decoration: underline;
+	text-underline-offset: 0.25rem;
+}
+
+.auth-shell__footer-link:hover {
+	color: var(--foreground);
+}
+
+.auth-shell__doc-body {
+	max-height: 16rem;
+	overflow-y: auto;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 0.875rem;
+	background: color-mix(in oklab, var(--muted) 55%, var(--card));
+}

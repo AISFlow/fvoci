@@ -3,7 +3,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{clear_self_user, lock_key_from_uuid, set_self_user, set_tenant};
-use crate::db::identity::{append_audit, append_event, lock_sign_in, AuditAppend, EventAppend};
+use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 
 const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
 
@@ -888,5 +888,5 @@ pub async fn lock_sign_in_user(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    lock_sign_in(tx, user_id).await
+    crate::db::identity::lock_sign_in(tx, user_id).await
 }

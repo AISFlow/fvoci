@@ -12,6 +12,16 @@ path = "src/main.rs"
 name = "fvoci-migrate"
 path = "src/bin/fvoci-migrate.rs"
 
+[[bin]]
+name = "fvoci-export-openapi"
+path = "src/bin/export-openapi.rs"
+required-features = ["api-schema"]
+
+[[bin]]
+name = "fvoci-e2e-fixture"
+path = "src/bin/e2e-fixture.rs"
+required-features = ["db-tests"]
+
 [dependencies]
 argon2 = "0.5"
 axum = { version = "0.8", default-features = false, features = ["macros", "json", "form", "query", "matched-path", "original-uri", "tokio", "http1"] }

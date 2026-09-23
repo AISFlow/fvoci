@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-accent: var(--accent);
+  --font-sans: "Noto Sans KR", system-ui, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --text-title: var(--text-title-size);
+  --text-title--line-height: var(--text-title-leading);
+  --text-ui: var(--text-ui-size);
+  --text-ui--line-height: var(--text-ui-leading);
+  --text-dense: var(--text-dense-size);
+  --text-dense--line-height: var(--text-dense-leading);
+  --text-caption: var(--text-caption-size);
+  --text-caption--line-height: var(--text-caption-leading);
+}
+
+:root {
+  color-scheme: light;
+  --radius: 0.5rem;
+  --background: #ffffff;
+  --foreground: #18262f;
+  --card: #ffffff;
+  --primary: #087579;
+  --primary-foreground: #ffffff;
+  --muted: #f3f6f8;
+  --muted-foreground: #5b6b76;
+  --destructive: #b42318;
+  --border: #d7e0e6;
+  --input: #d7e0e6;
+  --ring: #087579;
+  --accent: #eef4f6;
+  --text-title-size: 1.5rem;
+  --text-title-leading: 1.25;
+  --text-ui-size: 0.9375rem;
+  --text-ui-leading: 1.45;
+  --text-dense-size: 0.8125rem;
+  --text-dense-leading: 1.4;
+  --text-caption-size: 0.75rem;
+  --text-caption-leading: 1.35;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  font-family: var(--font-sans);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+#root {
+  min-height: 100dvh;
+}
+
+.app-shell {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-shell__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1rem;
+}
+
+.app-shell__main {
+  flex: 1;
+  padding: 1.5rem 1rem 2rem;
+}
+
+.workspace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.workspace-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+.workspace-list__item:hover {
+  background: var(--accent);
+}
+
+.unavailable-note {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  font-size: var(--text-ui-size);
+  line-height: var(--text-ui-leading);
+}

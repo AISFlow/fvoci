@@ -1,0 +1,206 @@
+/* Trash, workspace create, empty create, and child-document tree. Token colors only. */
+
+.trash-page {
+	display: flex;
+	flex-direction: column;
+	gap: 1rem;
+	margin-inline: auto;
+	width: 100%;
+	max-width: 40rem;
+	padding-block: 0.25rem 2rem;
+}
+
+.trash-page__title {
+	margin: 0;
+	color: var(--foreground);
+	font-size: var(--text-title-size);
+	line-height: var(--text-title-leading);
+	font-weight: 650;
+	letter-spacing: -0.01em;
+	word-break: keep-all;
+}
+
+.trash-page__note {
+	margin: 0;
+	color: var(--muted-foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	word-break: keep-all;
+}
+
+.trash-page__list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.trash-page__row {
+	display: flex;
+	min-width: 0;
+	align-items: center;
+	gap: 0.75rem;
+	border-radius: 0.5rem;
+	padding: 0.35rem 0.25rem 0.35rem 0.5rem;
+}
+
+.trash-page__copy {
+	display: flex;
+	min-width: 0;
+	flex: 1;
+	flex-direction: column;
+	gap: 0.1rem;
+}
+
+.trash-page__name {
+	min-width: 0;
+	overflow: hidden;
+	color: var(--foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	word-break: keep-all;
+}
+
+.trash-page__when {
+	color: var(--muted-foreground);
+	font-size: var(--text-dense-size);
+	line-height: var(--text-dense-leading);
+	font-variant-numeric: tabular-nums;
+}
+
+.workspace-create {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+}
+
+.workspace-create__field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.workspace-create__hint,
+.workspace-create__alert {
+	margin: 0;
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	word-break: keep-all;
+}
+
+.workspace-create__hint {
+	color: var(--muted-foreground);
+	font-size: var(--text-dense-size);
+	line-height: var(--text-dense-leading);
+}
+
+.workspace-create__alert {
+	color: var(--destructive);
+}
+
+.workspace-empty {
+	display: flex;
+	max-width: 28rem;
+	flex-direction: column;
+	gap: 1.25rem;
+}
+
+.workspace-empty__heading {
+	margin: 0;
+	color: var(--foreground);
+	font-size: var(--text-title-size);
+	line-height: var(--text-title-leading);
+	font-weight: 650;
+	letter-spacing: -0.01em;
+	word-break: keep-all;
+}
+
+.workspace-empty__lead {
+	margin: 0;
+	color: var(--foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	word-break: keep-all;
+}
+
+.workspace-empty__actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem;
+}
+
+.workspace-children {
+	display: flex;
+	flex-direction: column;
+	gap: 0.65rem;
+}
+
+.workspace-children__head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+}
+
+.workspace-children__title {
+	margin: 0;
+	color: var(--foreground);
+	font-size: var(--text-doc-size);
+	line-height: var(--text-doc-leading);
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	word-break: keep-all;
+}
+
+.workspace-children__list {
+	display: flex;
+	flex-direction: column;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.workspace-children__link {
+	display: flex;
+	min-height: 2.75rem;
+	min-width: 0;
+	align-items: center;
+	gap: 0.5rem;
+	border-radius: 0.45rem;
+	padding: 0.35rem 0.4rem;
+	color: var(--foreground);
+}
+
+.workspace-children__link:hover {
+	background: color-mix(in oklab, var(--accent) 55%, transparent);
+}
+
+.workspace-children__name {
+	min-width: 0;
+	flex: 1;
+	overflow-wrap: anywhere;
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	font-weight: 550;
+	word-break: keep-all;
+}
+
+.workspace-children__key {
+	flex-shrink: 0;
+	color: var(--muted-foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	font-variant-numeric: tabular-nums;
+}
+
+@media (pointer: fine) {
+	.trash-page__row,
+	.workspace-children__link {
+		min-height: 2rem;
+	}
+}

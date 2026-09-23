@@ -106,4 +106,42 @@ with the app credentials is restricted to an authenticated end user's authority.
 
 Document/task count fields currently return zero because those domains are not
 implemented. Counts, quotas, member listing, invitations, exports, deletion and
-the existing React UI are not yet supported by this slice.
+collaborative editing remain unsupported in this slice.
+
+## Web UI (React)
+
+Generate the OpenAPI contract and TypeScript client from Rust DTOs:
+
+```sh
+scripts/generate-api.sh
+```
+
+Development (Vite proxy to a running `fvoci-server` API):
+
+```sh
+cd apps/web
+npm install
+API_PROXY_TARGET=http://127.0.0.1:8080 npm run dev
+```
+
+Production-style serving from the Rust binary (built assets required):
+
+```sh
+cd apps/web && npm install && npm run build
+export FVOCI_STATIC_DIR="$PWD/apps/web/dist"
+export FVOCI_PUBLIC_ORIGIN=http://127.0.0.1:8080
+cargo run --bin fvoci-server
+```
+
+Browser end-to-end tests (isolated PostgreSQL, real app role, Playwright Chromium).
+Preparation installs dependencies and builds artifacts; the gate assumes preparation
+completed and refuses stale binaries:
+
+```sh
+scripts/prepare-web-e2e.sh
+scripts/run-web-e2e.sh
+```
+
+The UI reuses source auth/workspace/settings styling for setup, login, workspace
+list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,
+import/export, and deletion surfaces are shown as unavailable rather than faked.

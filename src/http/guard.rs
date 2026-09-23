@@ -1,6 +1,21 @@
+use std::net::SocketAddr;
+
 use axum::http::HeaderMap;
 
 use crate::error::{AppError, ProblemCode};
+
+pub fn resolve_public_origin(public_origin: &str, bind_addr: SocketAddr) -> Result<String, String> {
+    let parsed =
+        url::Url::parse(public_origin).map_err(|e| format!("invalid public origin: {e}"))?;
+    if parsed.port() == Some(0) {
+        let mut resolved = parsed;
+        resolved
+            .set_port(Some(bind_addr.port()))
+            .map_err(|_| "failed to set public origin port".to_string())?;
+        return normalize_public_origin(resolved.as_str());
+    }
+    normalize_public_origin(public_origin)
+}
 
 pub fn normalize_public_origin(origin: &str) -> Result<String, String> {
     let parsed = url::Url::parse(origin).map_err(|e| format!("invalid public origin: {e}"))?;

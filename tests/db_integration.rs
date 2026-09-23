@@ -239,7 +239,7 @@ fn extract_session_cookie(set_cookie: &str) -> String {
 }
 
 async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid) {
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     let (_, _, cookie_hdr, _) = json_request(
         app.clone(),
         "POST",
@@ -747,7 +747,7 @@ async fn patch_profile_waits_on_suspend_lock_then_returns_unauthorized() {
 #[tokio::test]
 async fn stored_password_hash_verifies_on_login() {
     let harness = TestDb::bootstrap().await;
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     json_request(
         app.clone(),
         "POST",
@@ -996,7 +996,7 @@ async fn patch_rejects_null_name_and_malformed_json_as_problem() {
 #[tokio::test]
 async fn setup_rejects_unknown_fields() {
     let harness = TestDb::bootstrap().await;
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     let (status, _, _, _) = json_request(
         app,
         "POST",
@@ -1084,7 +1084,7 @@ async fn patch_profile_waits_on_session_revoke_lock_then_returns_unauthorized() 
 #[tokio::test]
 async fn rate_limit_uses_socket_ip_not_forwarded_for() {
     let harness = TestDb::bootstrap().await;
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     let peer_a = std::net::SocketAddr::from(([203, 0, 113, 1], 42424));
     let peer_b = std::net::SocketAddr::from(([203, 0, 113, 2], 42424));
 
@@ -1132,7 +1132,7 @@ async fn rate_limit_uses_socket_ip_not_forwarded_for() {
 #[tokio::test]
 async fn setup_rejects_short_password_by_utf16_length() {
     let harness = TestDb::bootstrap().await;
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     let (status, body, _, _) = json_request(
         app,
         "POST",
@@ -1157,7 +1157,7 @@ async fn setup_rejects_short_password_by_utf16_length() {
 #[tokio::test]
 async fn login_rate_limit_returns_contract_fields() {
     let harness = TestDb::bootstrap().await;
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     let peer = std::net::SocketAddr::from(([203, 0, 113, 99], 42424));
     for _ in 0..10 {
         let (status, _, _, _) = json_request(
@@ -1215,7 +1215,7 @@ async fn origin_mismatch_returns_forbidden_problem() {
 #[tokio::test]
 async fn setup_records_client_ip_in_audit_log() {
     let harness = TestDb::bootstrap().await;
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     let peer = std::net::SocketAddr::from(([203, 0, 113, 50], 42424));
     let (_, _, _, _) = json_request(
         app,
@@ -1321,7 +1321,7 @@ async fn create_second_user_session(
 #[tokio::test]
 async fn logout_unknown_cookie_returns_no_content_without_event() {
     let harness = TestDb::bootstrap().await;
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     let (status, _, _, _) = json_request(
         app,
         "POST",
@@ -2744,7 +2744,7 @@ async fn non_instance_admin_cannot_create_workspace() {
         .unwrap();
     admin.close().await;
 
-    let app = router(app_state(&harness.app_url).await);
+    let app = router(app_state(&harness.app_url).await, None);
     let (status, body, _, _) = json_request(
         app,
         "POST",
