@@ -132,3 +132,12 @@ DB 검사는 원본 앱 역할 제한과 같은 종류의 실제 비특권 역�
 - bea3243은 사용자가 sample.hwp/sample.hwpx를 실제 Hancom 파일로 교체한 커밋이다. 사용자가 직접 파일을 확인하고 `안녕`을 입력했다고 확인하고 계속 진행하도록 승인했다. 기존 파일을 보존했으며 NOTICE/README를 실제 출처·기대 본문으로 수정했다. gen.py는 별도 빈 디렉터리만 받도록 변경하여 원본 fixture 덮어쓰기를 막았다. 임시 디렉터리 생성 성공, 비어 있지 않은/체크인 경로 거부, 기존 fixture SHA256 불변을 실제 검사했다.
 - bea3243 원격 CI35898327395 성공, auth 제품 코드 변화 없음. 관련 로컬 `bash compat/run.sh` exit0/0.76s; 기존 Yrs6사례와 Hocuspocus envelope 차이를 유지했고 HWPX token은 `안녕`이다. HWP probe는 여전히 CFB/FileHeader만 확인하며 native 본문 추출 성공을 뜻하지 않는다.
 - Fable 비차단 권고: 알 수 없는 세션 로그아웃의 불필요한 이벤트 저장은 Composer 소유 identity.rs에서 다음 slice에 회귀 검사와 함께 수정한다. 빈 familyName 정규화, timezone 제한, sliding cookie 갱신, hash 오류 진단, definer search_path 축소·반환 열 명시 및 관련 검사 보강은 추적 중이다. 기존 slice의 제한을 수락하는 것이며 전체 보안 동등성 선언이 아니다.
+
+### PR #1 머지 완료와 후속 기준
+
+- [PR #1](https://github.com/AISFlow/fvoci/pull/1) 실제 merged/closed 확인. 검증 HEAD `79d7b69a195edfa40b42f92e5b78797ec2e26bb2`를 기대 SHA로 지정한 squash merge SHA는 `fe30bd1b7c6f2632c354c4317c73969789de3f23`; 원격 main도 같은 SHA다.
+- 최신 HEAD Actions35899398689 fast+postgres 성공(lib6/DB24, ignored0). 같은 HEAD의 로컬 fmt/diff/compat 및 generator 격리 검사 성공. Fable의 제품 보안 검토 SHA는864a41e, fixture delta는bea3243; 그 이후 제품 Rust/SQL/테스트/Cargo/CI diff는 없으며 문서·생성기 수정은 코디네이터가 검토·검사했다. 최신 전체 SHA를 Fable이 승인했다고 과장하지 않는다.
+- post-merge push CI35900278533 진행 중. 다음 통합은 main fe30bd1에서 Orca가 만든 `/home/kinesis/orca/workspaces/fvoci/rust-workspace-integration`, branch `fvoci/rust-workspace-integration`에서 수행한다. 이전 daggertooth 및 작업 worktree는 미수락 코드 보존을 위해 삭제하지 않았다.
+- Workspace 첫 제출 `eaec22c`는 빠른 검사만 완료되어 미수락. 후속 검증 task `task_ed526f3bccd5` / `ctx_0c2f0b3e544b`가 같은 Composer 터미널과 파일 소유권을 인계했다. Fable fixed-eaec22c review task `task_d8dd8e9f40cc` / `ctx_441329a7aad7` 진행 중. DB gate 및 보완 지적 해결 후 통합한다.
+- Post-merge CI35900278533은 main fe30bd1에서 fast/postgres 모두 성공했다. Fable은 후속 메시지 msg_3230eda1ade0에서 79d7b69의 문서·생성기 diff도 별도로 검토해 수락 가능하다고 보고했다(전체 후속 workspace 승인 아님).
+- Rust DTO 기반 계약 생성을 위한 공통 의존성은 선택 feature `api-schema`의 utoipa `=6.0.0`으로 고정한다. 공식 crates sparse index와 실제 .crate Cargo.toml에서 MSRV1.88, MIT OR Apache-2.0 및 공식 Git tag를 확인했다. 기존 Rust1.98.1과 호환 범위이며 기본 인증 검사에서는 feature를 활성화하지 않는다. lockfile은 utoipa6.0.0/utoipa-gen6.0.1을 추가하고 기존 패키지 버전을 바꾸지 않았다. 실제 DTO→OpenAPI→TS 생성 연결은 다음 UI task에서 구현하며 의존성 추가만으로 완료 표시하지 않는다.

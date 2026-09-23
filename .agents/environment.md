@@ -67,3 +67,9 @@ Run: `run_b01d432a9dee`. 세부 허용 경로/명령/수락 조건은 각 Orca t
 ## 재개
 
 AGENTS → 이 기록 → docs/rewrite 최신 수락 → 해당 Run task와 실제 git status/worktree/프로세스를 대조한다. 마지막 검증 코드195a58f, 다음 workspace API/인가·RLS task를 아직 배정하지 않았다. 세션 종료 시 미수락 제품 diff 없음. 다음 명령은 `cargo fetch --locked`, 빠른 gate, `scripts/start-test-postgres.sh`; 기존 DB/credential 파일을 재사용하지 않는다.
+
+## 2026-09-24 재개 확인
+
+Orca1.4.207 기존 실행 경로와 Run을 유지했다. Composer2.5 / Grok4.6 / Claude Code Fable5.1 medium의 신규 dispatch 요청·유효 모델을 대조하고 실제 TUI 작업을 확인했다. 새 MCP·전역 설정 변경 없음. 사용자 승인 범위는 AGENTS.md의 대상 원격 반영 절을 따른다. PR1은 검증 후 merge했고, 후속 통합 worktree는 `rust-workspace-integration` (main fe30bd1 기반)이다. 최신 수락·task 상태는 docs/rewrite.md에 둔다.
+
+초기 rhwp Git dependency fetch가 공용 Cargo cache 잠금을 잡아 다른 worktree의 cargo clippy도 대기했다. target 출력은 분리되어 있으며 cache 대기를 컴파일/테스트 시간과 구분한다. 소유 불명 기존 PostgreSQL과 GitHub runner 컨테이너는 건드리지 않는다.
