@@ -46,3 +46,5 @@ GRANT EXECUTE ON FUNCTION public.app_self_user_id() TO :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.documents TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_states TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_collab_updates TO :"app_role";
+GRANT SELECT, INSERT ON fvoci.document_collab_op_receipts TO :"app_role";

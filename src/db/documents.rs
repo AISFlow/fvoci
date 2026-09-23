@@ -7,7 +7,7 @@ use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::workspace::WorkspaceRole;
 
-const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
+pub(crate) const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
 const TREE_LOCK_NAMESPACE: i32 = 1_907_005;
 pub const MAX_TREE_DEPTH: i32 = 20;
 pub const DOCUMENT_SCHEMA_VERSION: i32 = 2;
@@ -156,7 +156,7 @@ fn depth_of(path: &str) -> i32 {
     path.split('.').count() as i32
 }
 
-fn wiki_can_edit(role: Option<WorkspaceRole>) -> bool {
+pub(crate) fn wiki_can_edit(role: Option<WorkspaceRole>) -> bool {
     matches!(
         role,
         Some(WorkspaceRole::Owner | WorkspaceRole::Admin | WorkspaceRole::Member)
@@ -167,7 +167,7 @@ fn wiki_can_view(role: Option<WorkspaceRole>) -> bool {
     wiki_can_edit(role)
 }
 
-async fn lock_membership_users(
+pub(crate) async fn lock_membership_users(
     tx: &mut Transaction<'_, Postgres>,
     user_ids: &[Uuid],
 ) -> Result<(), sqlx::Error> {
@@ -199,7 +199,7 @@ async fn lock_tree(
     Ok(())
 }
 
-async fn recheck_session(
+pub(crate) async fn recheck_session(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
     session_id: Uuid,
@@ -265,7 +265,7 @@ async fn membership_role(
     Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
 }
 
-async fn membership_role_for_update(
+pub(crate) async fn membership_role_for_update(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,
@@ -280,7 +280,7 @@ async fn membership_role_for_update(
     Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
 }
 
-async fn workspace_is_live(
+pub(crate) async fn workspace_is_live(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
