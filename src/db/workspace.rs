@@ -699,12 +699,13 @@ pub async fn suspend_user_for_test(pool: &PgPool, user_id: Uuid) -> Result<(), s
 
 pub async fn tenant_context_probe(
     pool: &PgPool,
-    workspace_id: Uuid,
+    tenant_workspace_id: Uuid,
+    query_workspace_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, workspace_id).await?;
+    set_tenant(&mut tx, tenant_workspace_id).await?;
     let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE id = $1")
-        .bind(workspace_id)
+        .bind(query_workspace_id)
         .fetch_optional(&mut *tx)
         .await?;
     tx.rollback().await?;

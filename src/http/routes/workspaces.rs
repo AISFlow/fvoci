@@ -103,6 +103,8 @@ async fn list_my_workspaces(
     let listed = crate::db::workspace::list_workspaces_for_user(&state.auth.db.pool, user_id)
         .await
         .map_err(internal)?;
+    // documents/tasks are not implemented in this slice; source list shape requires
+    // these fields but counts stay zero until those domains exist.
     let items = listed
         .into_iter()
         .map(|w| WorkspaceListItemResponse {

@@ -1,4 +1,4 @@
-CREATE FUNCTION public.app_self_user_id()
+CREATE OR REPLACE FUNCTION public.app_self_user_id()
 RETURNS uuid
 LANGUAGE sql
 STABLE
