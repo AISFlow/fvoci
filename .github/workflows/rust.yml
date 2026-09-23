@@ -44,6 +44,7 @@ jobs:
       - run: cargo check --locked --offline --all-targets --features db-tests
       - run: cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings
       - run: cargo test --locked --offline --lib
+      - run: cargo test --locked --offline --test collab_wire
   postgres:
     name: ${{ matrix.check }}
     strategy:
@@ -91,4 +92,4 @@ jobs:
       - name: PostgreSQL integration tests
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
-        run: cargo test --locked --offline --features db-tests --test db_integration --test document_integration
+        run: cargo test --locked --offline --features db-tests --test db_integration --test document_integration --test collab_integration

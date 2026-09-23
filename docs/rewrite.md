@@ -473,3 +473,138 @@ Fable 검토 및 원격 전체 gate를 통과하기 전 미수락이다. CI에 t
 협업 자문은 decoder의 무제한 allocation/unchecked UTF8 문제를 확인했으나,
 rlimit child만으로 UB의 보안 경계가 완성된다는 제안은 수락하지 않았다.
 공식 Yrs 수정 버전/안전한 입력 경계를 확인한 뒤 제품 engine을 연결한다.
+
+### PR5 수락 및 협업 구현 재개
+
+PR5 https://github.com/AISFlow/fvoci/pull/5 는 d69fdd9951f1643ec8f63dcb330b26cdcb9fc7e4
+에서 Fable5.1 medium 독립 검토 차단0 및 원격 전체6job 성공 후 머지했다.
+main 머지 SHA421e70b19c5664b0468abc20b6b1616ed4ad4e3d, 상태 merged 확인.
+검사 synthetic merge c70328a = HEADd69fdd9 + base0617e7f. Rust35917137028:
+lib20, 실제 앱역할 DB66+13씩 x64/ARM64(ignored0). Web35917137015:
+static5/schema1/tree1/실제 React13(1.1분). Native35917136993 양 아키텍처 성공.
+Fable 읽기 전용 검토는 backend6e62e9f 및 최종delta d69fdd9의 실제diff를 확인했다.
+비차단: 빈 제목 blur 복원, breadcrumb cache 갱신, tree 오류 직접 표시, 기존slug대소문자.
+본문 편집/협업/첨부/검색은 아직 수락되지 않았다.
+
+collab 통합7647250은 codec11검사를 통과한 c28b5e2에 최신 main421e70b를 merge했다.
+codec 검사는 Hocuspocus framing만 보장하며 제품 /collab은 비활성이다.
+임시 optional yrs0.23.5 의존성은 checkedUTF8 결함 때문에 제거한다. 원본 저장
+형식을 변경하지 않고, 공식 yrs0.28.0 small-client/skip_gc/UTF16 후보의 실제
+Yjs13.6.32 pending/delete/복원 호환성을 별도 native crate에서 검증한다.
+이를 통과하기 전 엔진을 수락하거나 기존 설치 migration 지원을 선언하지 않는다.
+
+Composer task2d8c8f185502/ctx809d0a92afb8: rust-collab-persistence, main421e70b 기준,
+src/db/collab.rs·migration005·등록/앱권한·관련DB검사 단독 소유. 공통파일 중
+위 migration/권한의 해당 범위는 명시적으로 위임했고 root manifest/CI는 코디네이터 소유다.
+현재권한 재검사/철회와 append의 잠금순서, writer generation fence, op_id 조회,
+원자성과 snapshot cutoff를 실제앱역할로 검증한다. 로컬 무거운 DB 슬롯1개 배정.
+Grok 후속 native 엔진 작업은 crates/collab-engine만 단독 소유하며 root/API/DB를
+수정하지 않는다. 두 쓰기 워커, worktree별 target/실행별DB자원 분리 유지.
+다음 통합: 각각 제출SHA 검토 → 새 통합SHA 원격CI/독립검토 → 실제세션/Origin/
+문서인가를 포함한 socket 및 기존 두 React/Tiptap 클라이언트 연결.
+Fable 주간한도 도달 없음; Opus5.5 medium 대체는 아직 실행하지 않았다.
+
+Grok native 엔진 task72f3f1594e9e/ctx2de4ab3cf2f0는 rust-collab-engine에서
+crates/collab-engine(해당 manifest/lock 포함)의 단독 작성자다. 원본 Yjs13.6.32
+fixture 생성과 네이티브 worker 경계 검증을 수행한다. 미수락이며 제품경로 비활성.
+
+PR5 post-merge main421e70b의 Rust35917728923/Web35917728904/
+Native35917728889 전체 success 확인. 다음 협업 기반 통합06e3242에서
+fmt/clippy(all-targets,db-tests), codec11, actionlint 성공; DB/engine 제출은 진행 중.
+
+PR6 https://github.com/AISFlow/fvoci/pull/6 Draft, 첫 HEAD34e1caa의
+Rust35918208792/Web35918208561/Native35918208575 전체 success. 검사 merge ced4ae2
+=34e1caa+main421e70b, codec11/lib20/DB66+13 양 아키텍처 및 기존React13 포함.
+현재 DB/엔진 워커의 미제출 diff는 이 성공 근거에 포함하지 않는다.
+
+원본 collab-http.ts의 STATE_OVERSIZE_FACTOR=8 및 config 본문 기본1048576을
+확인해, 잠정1MiB CRDT 제한을 원본 기본8MiB로 정정했다. 초기 공통 한도는
+update/snapshot8MiB, snapshot+tail 총32MiB/64행, native JSONframe48MiB다.
+한도 초과는 명시적 실패이며 잘린 성공/부분 복원은 금지한다. 원본 환경변수
+COLLAB_MAX_PAYLOAD_BYTES override 연결은 아직 미구현이다. 원본 저장 데이터의
+이전 지원이나 대형 문서 전체 호환성을 이 기본값 확인만으로 수락하지 않는다.
+
+### 협업 기반 제출 검증 (진행 중)
+
+DB 제출3a08bc4를 통합0532bb0에 반영하고1ba6124에서 collab_integration을
+실제 x64/ARM64 PostgreSQL CI에 연결했다. 로컬 all-targets Clippy 경고1건을
+수정해 통과했고 actionlint 성공. PR6 HEAD1ba6124의 Rust35921661165,
+Web35921661087, Native35921661026 전체6job 성공 확인. 알려진 receipt 결함과
+독립 검토가 남아 해당 기능은 미수락이다.
+
+DB 원본 제출 worker task2d8c8f185502/ctx809d0a92afb8는 유효 완료 메시지를
+확인해 release했다. 앞뒤의 capability 누락/무효/폐기 완료 시도는 성공 증거에서 제외했다.
+새 Composer taskc7428b1b7d31/ctx8ee8395734c7는 같은 persistence worktree의
+receipt 권한·해시 기반 재확인·누적 조회 비용 보강을 소유한다. Fable medium
+task736355da318b/ctxdafa8d332309는 고정3a08bc4를 읽기 전용 검토 중이다.
+Grok engine9874a87 제출은 잠정2MiB 제한이 남아 미수락이며, 같은 터미널의
+후속 taska755ad0b14fa/ctx445b177a1ece가 최종8/32MiB 계약과 복원 가능한
+Apply 수락 경계를 보강한다. 통합 코디네이터는 native-engine CI를 준비 중이다.
+Fable 실제 주간 한도 도달 시 Claude Code Opus5.5 medium으로 대체한다는
+승인은 유지한다. 이번 검토의 요청/유효 모델은 Fable5.1 medium이며 대체 미실행.
+
+재개: 위 dispatch 제출/검토 확인 → 고정 커밋별 통합 → 최종 원격 CI 및
+독립 검토 → PR6 수락 판단. /collab 제품 경로·두 실제 편집기 수락은 아직 없다.
+
+engine 후속3eb3ded를 a42d503으로 통합했다(기초9874a87→a80a4f6). 워커가
+worker21검사4.96초/test-hang23검사6.04초를 보고했고, 통합 fmt 및 all-targets
+clippy(test-hang)는7.60초 성공했다. Linux x64/ARM64 별도2job에 실제 native
+검사와 production 테스트제어 거부·부모 no-default-features 컴파일을 연결한다.
+Fable taskc7193b74e436/ctx05cc4dbef3ca는 고정3eb3ded 엔진을 읽기 전용 검토 중.
+Grok 보강 dispatch445b177a1ece는 유효 제출 확인 후 release했고 worktree는 보존했다.
+
+954421b의 native-engine CI35922263737은 x64/ARM64 모두 nested_any 회귀에서
+stdout EOF/자식 종료 관찰 순서에 따른 Protocol 분류 실패로 중단됐다. 재실행으로
+숨기지 않는다. Grok taska20ddcbc6736/ctx785570683988가 고정3eb3ded 이후
+process 경계·회귀만 보강한다. Fable 엔진 검토는 고정3eb3ded에 계속 적용한다.
+
+Fable DB 검토3a08bc4: receipt UPDATE/DELETE grant 결함 확인, CI 누락은
+통합1ba6124에서 해소. hash+length+actor+seq만 남기는 append-only receipt와
+임의100만회 lifetime hardstop 제거 설계를 자문 확인 후 결정했다. 오래된 receipt를
+삭제하면 불명확한 commit 확인/op_id 중복 방지가 깨지므로 나이/cutoff 삭제는 금지한다.
+작은 고정 크기 기록과 이벤트/감사 DB 저장량은 계속 증가하며 quota/자동보존기간
+지원은 아직 주장하지 않는다. 복원 메모리·tail32MiB/64행 제한은 유지한다.
+Fable DB dispatchdafa8d332309는 보고·추가 판단 후 release. Composer 보강은
+c9124c9를 보존하면서 실제 동시 session revoke/크기경계/upgrade 앱권한 검사와
+최종 receipt 설계를 진행 중이다. 검토 차단 해소·최종 CI 전 PR6 Draft 유지.
+
+DB 보강c9124c9/e7c6751을5fdbe9f/c4e9f21으로 통합했다. 워커 보고:
+collab22+순수collab4+기존DB66 성공(~77초), 자원 정리 후 release. 통합의
+format 차이2곳을 정리한 뒤 all-targets clippy1.37초/lib24검사5.33초 성공.
+Fable 고정e7c6751 delta task0e1aeca68e92/ctxbbe9ffa4b746 검토 중이다.
+
+엔진 EOF 수정9a76f00은5e5bf2c로 통합했다. 워커는 CI와 같은 nodebug 조건의
+process_boundary worker8/test-hang10 성공을 보고했다. Fable3eb3ded 검토는
+EOF 분류 및 32MiB load 대비256MiB AS 부족을 차단으로 확인했다. 측정된
+29.5MiB load의 VmPeak413MiB를 근거로 입력계약은 유지하고 AS1GiB/RSS512MiB,
+최대8children의 최대 관찰 RSS예산4GiB로 조정·검증한다. 구조가 더 무거운 입력은
+명시적 resource 실패가 가능하며 모든8MiB 문서 처리 성공을 보장하지 않는다.
+요청별8초 wall deadline은 유지하고 누적CPU예산을 별도로 고친다. Apply의
+복원 가능 크기 검사는 유지하되 매번 전체snapshot 전송은 제거한다.
+Grok 후속 task89714a09237e/ctx987fc1e02c63가 같은engine worktree 단독소유.
+Fable ctx05cc4dbef3ca는 보고 후 release; 후속delta는 다시 검토한다.
+
+Fable DB 최종delta e7c6751: 차단0, receipt 권한/identity/성장 의미와 실제경합
+보강 확인. dispatchbbe9ffa4b746는 보고 후 release. 남은 비차단 권고 중
+세션 경합 overlap을 코디네이터가 추가 강화했다. 두 쿼리의 실제 lock wait를
+pg_blocking_pids로 확인한다. 최초 좁은 blocker PID 가정은 wins 검사에서 실패;
+PostgreSQL soft-blocker(앞서 대기 중인 append PID)도 포함해 수정했다.
+동일 명령 `bash scripts/start-test-postgres.sh cargo test --locked --offline
+--features db-tests --test collab_integration session_revoke_barrier` 재검사:
+실제2개 성공2.48초(compile1.42초), 컨테이너 trap 정리, fmt/clippy0.62초 성공.
+제품 DB 구현은 검토된e7c6751과 동일하다.
+
+1899886 원격 native-engine35923500285 양 아키텍처 성공으로 EOF 수정 검증.
+후속 메모리/누적CPU 한도 변경은 아직 미제출이며 이 성공에 포함하지 않는다.
+
+엔진4b1039d를13812ed로 통합했다. AS1GiB/RSS512MiB, 요청별8초 유지,
+누적CPU 예산 분리, Apply metadata 응답과 별도 Snapshot, Load 재사용 거부,
+이미 전달된 frame/종료 순서 및 SIGABRT stack 분류를 보강했다. 워커 보고:
+worker35검사10.05초/test-hang38검사12.34초, clippy각0.53/0.51초 성공.
+작은96byte 텍스트 약65761개로7.36MiB snapshot을686ms에 생성하고 반복 tail과
+함께 near32MiB 복원을 검사했다. 최초 fixture의 반복전체encode/뒤삽입은
+준비 CPU 병목으로 중단했고, 앞삽입/최대4encode로 수정했다. 제품 timeout을
+늘리거나 실패검사를 skip하지 않았다. 워커ctx987fc1e02c63 제출 후 release,
+worktree/커밋 보존. 통합 fmt 성공. Fable5.1medium 요청/유효 설정의
+읽기 전용 task38dbfeb88a25/ctx68339aebfecd가13812ed delta를 검토 중이다.
+원격8job 최종 결과·독립 검토 전 PR6 Draft/미수락; /collab 제품 연결은 미구현.

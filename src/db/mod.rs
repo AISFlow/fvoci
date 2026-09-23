@@ -1,3 +1,4 @@
+pub mod collab;
 pub mod context;
 pub mod documents;
 pub mod identity;
