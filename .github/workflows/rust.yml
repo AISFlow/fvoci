@@ -40,8 +40,6 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 2s --health-timeout 2s --health-retries 30
-    env:
-      TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports[5432] }}/postgres
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.1 --profile minimal
@@ -53,4 +51,7 @@ jobs:
             target
           key: rust-db-${{ runner.os }}-1.98.1-${{ hashFiles('Cargo.lock') }}
       - run: cargo fetch --locked
-      - run: cargo test --locked --offline --features db-tests --test db_integration
+      - name: PostgreSQL integration tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+        run: cargo test --locked --offline --features db-tests --test db_integration
