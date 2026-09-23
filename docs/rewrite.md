@@ -9,12 +9,12 @@
 
 ## 현재 수락 지점
 
-제품 기능 수락 없음. 환경 준비와 고정 SHA 계약 조사 중. Run `run_b01d432a9dee`.
+첫 코드 `775f64d` 통합, 제품 기능 수락 보류: 독립 검사에서 추가 결함을 확인하여 보강 중. 환경 준비와 첫 계약 조사는 완료. Run `run_b01d432a9dee`.
 
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
-| 설치·세션·인증된 프로필 변경 | PR HEAD에서 조사 중 | 활성 사용자, 정지 경합, 프로필/이벤트/감사 원자성 | 미착수 | 미실행 | 첫 수직 기능 |
-| 협업·문서 처리 | PR HEAD에서 조사 중 | 저장 문서, 실제 provider, 한글/이모지, 철회·복원 | 미착수 | 미실행 | 조기 호환성 위험 검사 |
+| 설치·세션·인증된 프로필 변경 | identity/routes.ts, core/auth.ts, pg/identity-access.ts, contracts/identity.ts | 활성 사용자, 정지 경합, 프로필/이벤트/감사 원자성 | 부분 구현 src/auth, src/db, src/http | 775f64d 순수4/DB13 성공, clippy 실패 | 철회 경합·입력·실행 경계 보강 후 재수락 |
+| 협업·문서 처리 | editor/package.json 및 서버 구현 | 저장 문서, 실제 provider, 한글/이모지, 철회·복원 | 제품 미착수, compat 조사 코드 | 좁은 probe 성공·불일치 확인 (아래) | 전체 UI/철회/복원 및 HWP 본문 미구현 |
 | 나머지 제품 기능 | 실제 라우트·UI 목록 조사 예정 | 원본 기능·보안·데이터 계약 | 미착수 | 미실행 | 인증 확장, 워크스페이스/프로젝트/태스크/문서, 첨부/검색/알림/연동, MCP/CLI/운영/백업 |
 
 ## 설계·자원 결정
@@ -65,3 +65,9 @@ Grok 제출 e94ac2d를 통합한 d154a60에서 코디네이터가 다시 실행�
 이 결과는 제품 협업/추출 지원 수락이 아니다. Yrs0.23.5와 Yjs13.6.32의 gc:false updateV1 왕복·상태벡터·후속 편집은 확인했지만 전체 Tiptap 확장, 실제 FVOCI 두 UI, awareness 동작, 인가/철회, WebSocket 종료·재시작은 미실행. Hocuspocus4.6.0의 document-name/type/Auth/Stateless 프레임 어댑터와 HWP 본문/운영 수준 추출·썸네일 구현이 남았다. 제품 런타임에서 compat JS를 호출하지 않는다. 상세 범위·fixture 출처는 compat/README.md와 fixtures/NOTICE.md.
 
 통합 후 probe runner는 호스트 전용 기본 경로를 제거하고 locked/offline 빌드 및 Node 검사별 30초 상한으로 정리했다. `bash compat/run.sh` 재실행 exit0, warm0.704s. 라이브러리 코드는 변경하지 않았다.
+
+## 첫 제품 독립 검사 (775f64d)
+
+네이티브 x86_64, Rust1.98.1, PG18.3; 공유 crate 다운로드 캐시만 재사용하고 통합 target은 새로 빌드했다. `cargo fmt --check` 성공, `cargo check --locked --offline --all-targets --features db-tests` 성공(9.99s). `cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings`는 6개 진단으로 실패. 별도로 `cargo test --locked --offline --lib`: 4개 성공, build10.84s/본문5.62s/전체16.53s. `TEST_DATABASE_URL=<private-file> cargo test --locked --offline --features db-tests --test db_integration`: 13개 성공, build3.05s/본문8.48s/전체11.60s. 이 결과는 원본과 동등 범위의 성능 비교가 아니다.
+
+프로필 감사는 원본 audit:false와 달리 사용자 요구에 맞춰 함께 커밋한다. 첫 버전에서 발견한 세션 철회 중 쓰기, null/누락 구분, 신뢰되지 않은 forwarded IP, 테스트 자원 공유 경로 및 병렬 migration 문제는 후속 Composer task에서 수정 중이다. Fable은 고정 제출 SHA6a77f76을 독립 검토 중이다. CI workflow를 추가했으나 원격 실행은 아직 하지 않았다.

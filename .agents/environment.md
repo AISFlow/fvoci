@@ -1,6 +1,6 @@
 # Orca 환경·도구 검증 기록
 
-상태: **준비 검증 진행 중, 2026-09-24**. 모델 목록과 launch receipt를 대조했고 읽기 전용 완료 반환을 확인 중이다. PENDING은 미검증이다.
+상태: **초기 준비 검증 완료, 첫 제품 수락 검증 중 (2026-09-24)**. 모델 목록·launch receipt·실제 읽기 전용 완료 반환을 대조했다.
 
 ## 실행 환경
 
@@ -46,18 +46,18 @@ Orca의 MCP 연결이 워커 CLI에도 로딩되는지 확인한다. JSON/TOML�
 
 ## 준비 확인
 
-- [ ] 저장소·기준 SHA·기존 변경 보존 확인.
-- [ ] 지정 모델과 확인 가능한 추론 강도 실제 실행 확인.
-- [ ] 짧은 읽기 전용 task의 cwd/규칙/스킬 읽기와 완료 반환 확인.
-- [ ] 필요한 도구의 실제 최소 권한 호출 확인.
-- [ ] 작업 소유권과 자원 분리 규칙 확정. 런타임 검증은 구현 후 실시.
-- [ ] task/dispatch 추적과 중단 후 재개 위치 확인.
+- [x] 저장소·기준 SHA·기존 변경 보존 확인.
+- [x] 지정 모델과 확인 가능한 추론 강도 실제 실행 확인.
+- [x] 짧은 읽기 전용 task의 cwd/규칙/스킬 읽기와 완료 반환 확인.
+- [x] 필요한 도구의 실제 최소 권한 호출 확인.
+- [x] 작업 소유권과 자원 분리 규칙 확정. 런타임 검증은 구현 후 실시.
+- [x] task/dispatch 추적과 중단 후 재개 위치 확인.
 
 준비가 끝나면 설정 탐색을 반복하지 말고 첫 제품 기능을 구현한다. 실행 파일/버전/권한이 바뀌면 영향받는 항목만 다시 확인한다.
 
 ## 현재 준비 진행
 
-Rust 1.98.1을 프로젝트 전용 `/home/kinesis/orca/toolchains/fvoci-rust`에 설치 중. rustup-init 1.28.2의 공식 SHA256 대조 성공; 셸 PATH와 전역 설정 변경 없음. Docker 29.8.1 연결 확인. DB/port 격리 실증은 제품 검사 시 수행한다. 원본은 private, 대상 remote는 public이므로 비공개 소스나 계약 내용을 원격에 게시하지 않고 로컬 구현/검토만 수행한다. 선택 MCP 추가 없음.
+Rust 1.98.1을 프로젝트 전용 `/home/kinesis/orca/toolchains/fvoci-rust`에 설치 완료. rustup-init 1.28.2의 공식 SHA256 대조 성공; 셸 PATH와 전역 설정 변경 없음. Docker 29.8.1 연결 확인. DB/port 격리 실증은 제품 검사 시 수행한다. 원본은 private, 대상 remote는 public이므로 비공개 소스나 계약 내용을 원격에 게시하지 않고 로컬 구현/검토만 수행한다. 선택 MCP 추가 없음.
 
 ## 배정 (정본은 Orca task)
 
@@ -65,3 +65,11 @@ Rust 1.98.1을 프로젝트 전용 `/home/kinesis/orca/toolchains/fvoci-rust`에
 - Grok task_988a8245f639 / ctx_cb0170f995ac: 고정 원본 읽기 전용 계약 조사.
 - Fable task_9f44ee133c43 / ctx_2988b16d4927: Claude Code 초기 설계 자문 완료. release는 runtime이 user_takeover로 retained 응답하여 보존.
 - 원본 user.name_updated는 audit:false. 사용자 요구에 따라 Rust에서는 프로필 감사 원자성을 강화하고 호환 차이로 기록한다.
+
+## 첫 제품 제출·독립 검증
+
+Composer 제출 `6a77f76`을 통합한 `775f64d`에서 코디네이터가 fmt/check 성공, 순수 4개(본문5.62s), PG18.3 실제 앱 역할 통합 13개(본문8.48s)를 확인했다. clippy는 6개 진단으로 실패하여 수락하지 않았다. 시험은 각 UUID DB/앱 역할을 생성한다. 격리 컨테이너는 `fvoci-rust-b01d432a9dee`, loopback 동적 포트, tmpfs 데이터, 실행별 비공개 credential 파일을 사용한다. 실제 서버 재시작 및 두 실행 간 간섭 검증은 아직 미실행이다.
+
+- Fable 고정 SHA 검토 task_43a2bfe9a062 / ctx_f447be92fcf1: Claude Code `claude-fable-5-1`, medium requested/effective 일치. 읽기 전용 rust-profile-review.
+- Composer 후속 task_12716d8c1cc0 / ctx_cf69c321c975: base775f64d, rust-profile-hardening. 단독 쓰기 src/tests/scripts/migrations/RUNNING.md; manifest·CI·공통 문서는 코디네이터 소유. 세션 철회 경합·입력 null·실행 자원·마이그레이션·graceful shutdown 보강 중.
+- Grok compat 제출 및 통합 검증은 docs/rewrite.md에 기록. 두 조사 task와 초기 Composer terminal은 종료·release. 초기 Fable user_takeover terminal은 보존.
