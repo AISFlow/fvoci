@@ -73,3 +73,5 @@ Composer 제출 `6a77f76`을 통합한 `775f64d`에서 코디네이터가 fmt/ch
 - Fable 고정 SHA 검토 task_43a2bfe9a062 / ctx_f447be92fcf1: Claude Code `claude-fable-5-1`, medium requested/effective 일치. 읽기 전용 rust-profile-review.
 - Composer 후속 task_12716d8c1cc0 / ctx_cf69c321c975: base775f64d, rust-profile-hardening. 단독 쓰기 src/tests/scripts/migrations/RUNNING.md; manifest·CI·공통 문서는 코디네이터 소유. 세션 철회 경합·입력 null·실행 자원·마이그레이션·graceful shutdown 보강 중.
 - Grok compat 제출 및 통합 검증은 docs/rewrite.md에 기록. 두 조사 task와 초기 Composer terminal은 종료·release. 초기 Fable user_takeover terminal은 보존.
+
+현재 후속 task는 `task_0f2b86c05fc9 / ctx_f3fb566d9a40`, 동일 검증된 Composer2.5 terminal과 rust-profile-hardening worktree, 실제 시작31dda85다. 이전 e2a7380/31dda85 제출은 통합57b7910까지 보존했고 아직 제품 수락 전이다. 첫 재사용 시도 ctx_cdfbbb6d1ad2는 기존 follow-up 실행 중 readiness timeout으로 실패(새 작성자 미생성); 종료 확인 뒤 같은 task를 재시도했다. 이전 lifecycle ID로 보낸 추가 완료는 runtime이 거부했으며 새 검증 성공으로 취급하지 않는다. Fable/Grok 완료 terminal은 release했다.
