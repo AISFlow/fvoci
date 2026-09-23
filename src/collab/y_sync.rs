@@ -95,7 +95,10 @@ fn write_var_bytes(out: &mut Vec<u8>, value: &[u8]) {
 }
 
 /// Parse the y-protocol sync envelope inside a Hocuspocus Sync payload.
-pub fn parse_sync_payload(y_protocol: &[u8], max_binary: usize) -> Result<(SyncStep, Vec<u8>), YSyncError> {
+pub fn parse_sync_payload(
+    y_protocol: &[u8],
+    max_binary: usize,
+) -> Result<(SyncStep, Vec<u8>), YSyncError> {
     let mut cursor = Cursor::new(y_protocol, max_binary);
     let step_value = cursor.read_var_uint()?;
     let step = match step_value {

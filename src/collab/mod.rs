@@ -6,10 +6,12 @@
 pub mod awareness;
 pub mod config;
 pub mod engine_bridge;
+pub mod guard;
 pub mod hub;
 pub mod origin;
 pub mod room;
 pub mod transport;
+pub mod validation;
 pub mod wire;
 pub mod y_sync;
 

@@ -26,14 +26,13 @@ pub fn validate_collab_origin(
     if values.next().is_some() {
         return Err(CollabOriginError::Multiple);
     }
-    let raw = first
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim);
+    let raw = first.and_then(|v| v.to_str().ok()).map(str::trim);
     let origin = match raw {
         Some(value) if !value.is_empty() => value,
         _ => return Err(CollabOriginError::NonUtf8),
     };
-    let expected = normalize_public_origin(public_origin).map_err(|_| CollabOriginError::Malformed)?;
+    let expected =
+        normalize_public_origin(public_origin).map_err(|_| CollabOriginError::Malformed)?;
     let actual = normalize_public_origin(origin).map_err(|_| CollabOriginError::Malformed)?;
     if actual == expected {
         Ok(())

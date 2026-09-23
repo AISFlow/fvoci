@@ -36,9 +36,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
     eprintln!("fvoci-server listening on http://{addr}");
 
-    let collab = CollabConfig::from_env().map(|cfg| {
-        Arc::new(CollabHub::new(cfg, pool.clone()))
-    });
+    let collab = CollabConfig::from_env().map(|cfg| Arc::new(CollabHub::new(cfg, pool.clone())));
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool),

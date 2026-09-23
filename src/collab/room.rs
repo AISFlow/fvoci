@@ -4,21 +4,26 @@ use std::time::{Duration, Instant};
 use collab_engine::b64;
 use collab_engine::outcome::EngineStatus;
 use collab_engine::protocol::Request;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPool;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
-use crate::collab::engine_bridge::{BridgeError, EngineBridge, fresh_validate_snapshot};
+use crate::collab::engine_bridge::{BridgeError, EngineBridge};
+use crate::collab::guard::RoomGuard;
+use crate::collab::validation::{
+    validate_recovery_bundle, validate_snapshot_only, BundleValidation,
+};
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
+use crate::db::collab::verify_collab_operation;
 use crate::db::collab::{
-    append_collab_update, claim_writer_and_load, compact_collab_snapshot,
-    load_collab_readonly, resolve_collab_admission, AppendCollabInput, CollabDbError,
-    CompactCollabInput, COLLAB_ROOM_SESSION_LOCK_NAMESPACE,
+    append_collab_update, claim_writer_and_load, compact_collab_snapshot, load_collab_readonly,
+    resolve_collab_admission, AppendCollabInput, AppendCollabResult, CollabDbError,
+    CompactCollabInput, VerifyCollabInput,
 };
-use crate::db::context::lock_key_from_uuid;
 use crate::db::identity::LiveSession;
 
 pub type RoomKey = (Uuid, Uuid);
@@ -84,10 +89,7 @@ pub struct RoomHandle {
 }
 
 impl RoomHandle {
-    pub async fn join(
-        &self,
-        join: RoomJoin,
-    ) -> Result<(), JoinError> {
+    pub async fn join(&self, join: RoomJoin) -> Result<(), JoinError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RoomCommand::Join(join, reply_tx))
@@ -101,15 +103,19 @@ impl RoomHandle {
     }
 
     pub async fn frame(&self, conn_id: Uuid, bytes: Vec<u8>) {
-        let _ = self
-            .tx
-            .send(RoomCommand::Frame { conn_id, bytes })
-            .await;
+        let _ = self.tx.send(RoomCommand::Frame { conn_id, bytes }).await;
     }
 
     pub async fn shutdown(&self) {
         let _ = self.tx.send(RoomCommand::Shutdown).await;
     }
+}
+
+struct CommittedBundle {
+    snapshot: Vec<u8>,
+    tail_payloads: Vec<Vec<u8>>,
+    tail_seq: i64,
+    snapshot_cutoff_seq: i64,
 }
 
 struct ConnectionState {
@@ -120,12 +126,14 @@ struct ConnectionState {
     events: mpsc::Sender<RoomClientEvent>,
     conn_generation: u64,
     pending_bytes: usize,
+    poisoned: bool,
+    pending_persist: VecDeque<PersistBarrier>,
+    in_flight: bool,
 }
 
 struct PersistBarrier {
     request_id: Uuid,
-    conn_id: Uuid,
-    prefix_seq: u64,
+    prefix_fifo: u64,
 }
 
 struct RoomActor {
@@ -134,18 +142,16 @@ struct RoomActor {
     config: CollabConfig,
     pool: PgPool,
     engine: EngineBridge,
+    room_guard: Option<RoomGuard>,
     writer_generation: Option<i64>,
-    tail_seq: i64,
-    snapshot_cutoff_seq: i64,
+    committed: CommittedBundle,
     connections: HashMap<Uuid, ConnectionState>,
     awareness: AwarenessRegistry,
     fifo_seq: u64,
     persist_failed: bool,
-    persist_pinned: bool,
-    pending_persist: VecDeque<PersistBarrier>,
     client_id_owner: HashMap<u32, (Uuid, Instant)>,
-    guard_conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
     shutting_down: bool,
+    last_acl_poll: Instant,
 }
 
 pub async fn spawn_room(
@@ -153,12 +159,10 @@ pub async fn spawn_room(
     document_id: Uuid,
     config: CollabConfig,
     pool: PgPool,
+    room_guard: RoomGuard,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
     let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
         .map_err(|_| JoinError::EngineUnavailable)?;
-    let guard_conn = acquire_room_guard(&pool, document_id)
-        .await
-        .map_err(|_| JoinError::DbError)?;
     let (tx, rx) = mpsc::channel(config.max_queued_room_ops);
     let (finished_tx, finished_rx) = oneshot::channel();
     let actor = RoomActor {
@@ -167,50 +171,27 @@ pub async fn spawn_room(
         config,
         pool,
         engine,
+        room_guard: Some(room_guard),
         writer_generation: None,
-        tail_seq: 0,
-        snapshot_cutoff_seq: 0,
+        committed: CommittedBundle {
+            snapshot: vec![0, 0],
+            tail_payloads: Vec::new(),
+            tail_seq: 0,
+            snapshot_cutoff_seq: 0,
+        },
         connections: HashMap::new(),
         awareness: AwarenessRegistry::new(),
         fifo_seq: 0,
         persist_failed: false,
-        persist_pinned: false,
-        pending_persist: VecDeque::new(),
         client_id_owner: HashMap::new(),
-        guard_conn: Some(guard_conn),
         shutting_down: false,
+        last_acl_poll: Instant::now(),
     };
     tokio::spawn(async move {
         actor.run(rx).await;
         let _ = finished_tx.send(());
     });
     Ok((RoomHandle { tx }, finished_rx))
-}
-
-async fn acquire_room_guard(
-    pool: &PgPool,
-    document_id: Uuid,
-) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
-    sqlx::query("SELECT pg_advisory_lock($1, $2)")
-        .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
-        .bind(lock_key_from_uuid(document_id))
-        .execute(&mut *conn)
-        .await?;
-    Ok(conn)
-}
-
-async fn release_room_guard(
-    conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
-    document_id: Uuid,
-) {
-    if let Some(mut conn) = conn {
-        let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-            .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
-            .bind(lock_key_from_uuid(document_id))
-            .execute(&mut *conn)
-            .await;
-    }
 }
 
 impl RoomActor {
@@ -221,9 +202,7 @@ impl RoomActor {
                     let result = self.handle_join(join).await;
                     let _ = reply.send(result);
                 }
-                RoomCommand::Leave(conn_id) => {
-                    self.handle_leave(conn_id);
-                }
+                RoomCommand::Leave(conn_id) => self.handle_leave(conn_id),
                 RoomCommand::Frame { conn_id, bytes } => {
                     self.handle_frame(conn_id, bytes).await;
                 }
@@ -232,6 +211,7 @@ impl RoomActor {
                     break;
                 }
             }
+            self.poll_acl().await;
             if self.connections.is_empty() && self.shutting_down {
                 break;
             }
@@ -245,8 +225,70 @@ impl RoomActor {
                 })
                 .await;
         }
-        let _ = self.engine.kill_and_reap().await;
-        release_room_guard(self.guard_conn.take(), self.document_id).await;
+        let engine = self.engine;
+        let _ = engine.stop().await;
+        if let Some(guard) = self.room_guard.take() {
+            guard.release().await;
+        }
+    }
+
+    async fn poll_acl(&mut self) {
+        let interval = Duration::from_millis(self.config.revoke_poll_ms);
+        if self.last_acl_poll.elapsed() < interval {
+            return;
+        }
+        self.last_acl_poll = Instant::now();
+        let mut to_close = Vec::new();
+        let snapshots = self
+            .connections
+            .iter()
+            .map(|(id, c)| (*id, c.session.clone(), c.read_only))
+            .collect::<Vec<_>>();
+        for (conn_id, session, read_only) in snapshots {
+            if !self.session_authorized(&session, read_only).await {
+                to_close.push(conn_id);
+            }
+        }
+        for conn_id in to_close {
+            self.close_connection(conn_id, 1008, "permission revoked");
+        }
+    }
+
+    async fn session_authorized(&self, session: &CollabSession, read_only: bool) -> bool {
+        match resolve_collab_admission(
+            &self.pool,
+            self.workspace_id,
+            session.user_id,
+            session.session_id,
+            self.document_id,
+        )
+        .await
+        {
+            Ok(Ok(admission)) => {
+                if read_only {
+                    true
+                } else {
+                    !admission.read_only
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn close_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
+        if let Some(conn) = self.connections.remove(&conn_id) {
+            let _ = conn.events.try_send(RoomClientEvent::Close {
+                code,
+                reason: reason.into(),
+            });
+            if let Some(encoded) = self
+                .awareness
+                .remove_client(conn.client_id, conn.conn_generation)
+            {
+                self.broadcast_awareness(&encoded);
+            }
+            self.client_id_owner.remove(&conn.client_id);
+        }
     }
 
     async fn handle_join(&mut self, join: RoomJoin) -> Result<(), JoinError> {
@@ -282,9 +324,8 @@ impl RoomActor {
                 _ => JoinError::AdmissionDenied,
             })?;
             self.writer_generation = Some(claim.writer_generation);
-            self.tail_seq = claim.load.tail_seq;
-            self.snapshot_cutoff_seq = claim.load.snapshot_cutoff_seq;
-            self.load_engine(&claim.load.snapshot, &claim.load.tail).await?;
+            self.set_committed_from_load(&claim.load);
+            self.load_engine_primary().await?;
         } else if self.writer_generation.is_none() && read_only {
             let load = load_collab_readonly(
                 &self.pool,
@@ -296,9 +337,8 @@ impl RoomActor {
             .await
             .map_err(|_| JoinError::DbError)?;
             let load = load.map_err(|_| JoinError::AdmissionDenied)?;
-            self.tail_seq = load.tail_seq;
-            self.snapshot_cutoff_seq = load.snapshot_cutoff_seq;
-            self.load_engine(&load.snapshot, &load.tail).await?;
+            self.set_committed_from_load(&load);
+            self.load_engine_primary().await?;
         }
         if !self.reserve_client_id(join.conn.client_id, join.conn.session.user_id) {
             return Err(JoinError::AdmissionDenied);
@@ -314,9 +354,19 @@ impl RoomActor {
                 events: join.events,
                 conn_generation,
                 pending_bytes: 0,
+                poisoned: false,
+                pending_persist: VecDeque::new(),
+                in_flight: false,
             },
         );
         Ok(())
+    }
+
+    fn set_committed_from_load(&mut self, load: &crate::db::collab::CollabLoadState) {
+        self.committed.snapshot = load.snapshot.clone();
+        self.committed.tail_payloads = load.tail.iter().map(|r| r.payload.clone()).collect();
+        self.committed.tail_seq = load.tail_seq;
+        self.committed.snapshot_cutoff_seq = load.snapshot_cutoff_seq;
     }
 
     fn reserve_client_id(&mut self, client_id: u32, user_id: Uuid) -> bool {
@@ -334,15 +384,7 @@ impl RoomActor {
     }
 
     fn handle_leave(&mut self, conn_id: Uuid) {
-        if let Some(conn) = self.connections.remove(&conn_id) {
-            if let Some(encoded) = self
-                .awareness
-                .remove_client(conn.client_id, conn.conn_generation)
-            {
-                self.broadcast_awareness(&encoded);
-            }
-            self.client_id_owner.remove(&conn.client_id);
-        }
+        self.close_connection(conn_id, 1000, "client leave");
     }
 
     async fn handle_frame(&mut self, conn_id: Uuid, bytes: Vec<u8>) {
@@ -350,13 +392,7 @@ impl RoomActor {
             return;
         };
         if conn.pending_bytes + bytes.len() > self.config.max_pending_bytes_per_connection {
-            let _ = conn
-                .events
-                .send(RoomClientEvent::Close {
-                    code: 1009,
-                    reason: "pending bytes exceeded".into(),
-                })
-                .await;
+            self.close_connection(conn_id, 1009, "pending bytes exceeded");
             return;
         }
         conn.pending_bytes += bytes.len();
@@ -370,12 +406,7 @@ impl RoomActor {
         let frame = match crate::collab::wire::decode(&bytes) {
             Ok(frame) => frame,
             Err(_) => {
-                let _ = events
-                    .send(RoomClientEvent::Close {
-                        code: 1003,
-                        reason: "invalid frame".into(),
-                    })
-                    .await;
+                self.close_connection(conn_id, 1003, "invalid frame");
                 return;
             }
         };
@@ -393,12 +424,11 @@ impl RoomActor {
                     return;
                 }
                 if room.is_none() {
-                    let _ = events
-                        .send(RoomClientEvent::Close {
-                            code: 1008,
-                            reason: "invalid room".into(),
-                        })
-                        .await;
+                    self.close_connection(conn_id, 1008, "invalid room");
+                    return;
+                }
+                if !self.session_authorized(&session, read_only).await {
+                    self.close_connection(conn_id, 1008, "permission revoked");
                     return;
                 }
                 self.handle_document_message(
@@ -443,35 +473,21 @@ impl RoomActor {
                 self.handle_auth(events, routing_key, auth).await;
             }
             DocumentMessage::Sync(sync) => {
-                self.handle_sync(
-                    conn_id,
-                    events,
-                    routing_key,
-                    read_only,
-                    sync,
-                )
-                .await;
+                self.handle_sync(conn_id, events, routing_key, read_only, sync)
+                    .await;
             }
             DocumentMessage::Awareness(payload) => {
-                self.handle_awareness(
-                    conn_id,
-                    client_id,
-                    session,
-                    conn_generation,
-                    routing_key,
-                    payload,
-                )
-                .await;
+                if !self.session_authorized(session, read_only).await {
+                    self.close_connection(conn_id, 1008, "permission revoked");
+                    return;
+                }
+                self.handle_awareness(conn_id, client_id, session, conn_generation, payload);
             }
             DocumentMessage::QueryAwareness => {
                 let encoded = self.awareness.encode_all();
                 if !encoded.is_empty() {
-                    self.send_document(
-                        events,
-                        routing_key,
-                        DocumentMessage::Awareness(encoded),
-                    )
-                    .await;
+                    self.send_document(events, routing_key, DocumentMessage::Awareness(encoded))
+                        .await;
                 }
             }
             DocumentMessage::Stateless(payload) => {
@@ -479,12 +495,7 @@ impl RoomActor {
                     .await;
             }
             DocumentMessage::Close { .. } => {
-                let _ = events
-                    .send(RoomClientEvent::Close {
-                        code: 1000,
-                        reason: "client close".into(),
-                    })
-                    .await;
+                self.close_connection(conn_id, 1000, "client close");
             }
             _ => {}
         }
@@ -497,12 +508,11 @@ impl RoomActor {
         auth: AuthMessage,
     ) {
         if let AuthMessage::Token { .. } = auth {
-            let scope = "read-write";
             self.send_document(
                 events,
                 routing_key,
                 DocumentMessage::Auth(AuthMessage::Authenticated {
-                    scope: scope.into(),
+                    scope: "read-write".into(),
                 }),
             )
             .await;
@@ -524,10 +534,14 @@ impl RoomActor {
         };
         match step {
             SyncStep::Step1 => {
-                let report = match self.engine.call(Request::Sync {
-                    state_vector_b64: payload,
-                    encoding: 1,
-                }).await {
+                let report = match self
+                    .engine
+                    .call(Request::Sync {
+                        state_vector_b64: payload,
+                        encoding: 1,
+                    })
+                    .await
+                {
                     Ok(report) => report,
                     Err(BridgeError::Dead) => return,
                 };
@@ -558,105 +572,234 @@ impl RoomActor {
                     self.send_sync_status(events, routing_key, true).await;
                     return;
                 }
-                let report = match self.engine.call(Request::Apply {
-                    update_b64: payload.clone(),
-                    encoding: 1,
-                }).await {
-                    Ok(report) => report,
-                    Err(BridgeError::Dead) => {
-                        self.send_sync_status(events, routing_key, false).await;
-                        return;
-                    }
-                };
-                if !report.outcome.is_applied_ok() {
-                    self.reload_engine_from_db().await;
+                let conn = self.connections.get_mut(&conn_id);
+                if conn.map(|c| c.poisoned || c.in_flight).unwrap_or(true) {
                     self.send_sync_status(events, routing_key, false).await;
                     return;
                 }
-                let snapshot_report = match self.engine.call(Request::Snapshot).await {
-                    Ok(report) => report,
-                    Err(BridgeError::Dead) => {
-                        self.reload_engine_from_db().await;
-                        self.send_sync_status(events, routing_key, false).await;
-                        return;
-                    }
-                };
-                let proposed = match snapshot_report.outcome {
-                    EngineStatus::Ok {
-                        update_b64: Some(bytes_b64),
-                        ..
-                    } => match b64::decode(&bytes_b64) {
-                        Ok(bytes) => bytes,
-                        Err(_) => {
-                            self.reload_engine_from_db().await;
-                            self.send_sync_status(events, routing_key, false).await;
-                            return;
-                        }
-                    },
-                    _ => {
-                        self.reload_engine_from_db().await;
-                        self.send_sync_status(events, routing_key, false).await;
-                        return;
-                    }
-                };
-                if !fresh_validate_snapshot(
+                if let Some(c) = self.connections.get_mut(&conn_id) {
+                    c.in_flight = true;
+                }
+
+                let validation = validate_recovery_bundle(
                     self.engine.engine_bin().to_path_buf(),
                     self.engine.limits(),
-                    proposed,
+                    self.committed.snapshot.clone(),
+                    self.committed.tail_payloads.clone(),
+                    payload.clone(),
                 )
-                .await
-                {
-                    self.reload_engine_from_db().await;
-                    self.send_sync_status(events, routing_key, false).await;
+                .await;
+                if validation != BundleValidation::Ok {
+                    self.reject_candidate(conn_id, events, routing_key).await;
                     return;
                 }
-                self.fifo_seq += 1;
-                let op_prefix = self.fifo_seq;
-                if let Some(writer_generation) = self.writer_generation {
-                    let op_id = Uuid::now_v7();
-                    let append = append_collab_update(
-                        &self.pool,
-                        AppendCollabInput {
-                            workspace_id: self.workspace_id,
-                            actor_user_id: self.connections.get(&conn_id).map(|c| c.session.user_id).unwrap_or_default(),
-                            session_id: self.connections.get(&conn_id).map(|c| c.session.session_id).unwrap_or_default(),
-                            document_id: self.document_id,
-                            writer_generation,
-                            op_id,
-                            payload: &payload,
-                            client_ip: None,
-                        },
-                    )
-                    .await;
-                    match append {
-                        Ok(Ok(result)) => {
-                            self.tail_seq = match result {
-                                crate::db::collab::AppendCollabResult::Committed { seq } => seq,
-                                crate::db::collab::AppendCollabResult::DuplicateAck { seq } => seq,
-                            };
-                            self.broadcast_update(routing_key, &sync.y_protocol);
-                            self.send_sync_status(events, routing_key, true).await;
-                            self.resolve_persist_barriers(op_prefix).await;
-                        }
-                        _ => {
-                            self.reload_engine_from_db().await;
-                            self.send_sync_status(events, routing_key, false).await;
+
+                let writer_generation = self.writer_generation;
+                let Some(writer_generation) = writer_generation else {
+                    self.reject_candidate(conn_id, events, routing_key).await;
+                    return;
+                };
+                let (session_id, actor_user_id) = self
+                    .connections
+                    .get(&conn_id)
+                    .map(|c| (c.session.session_id, c.session.user_id))
+                    .unwrap_or_default();
+                if !self
+                    .session_authorized_by_ids(actor_user_id, session_id, read_only)
+                    .await
+                {
+                    self.reject_candidate(conn_id, events, routing_key).await;
+                    return;
+                }
+
+                let op_id = Uuid::now_v7();
+                let expected_tail = self.committed.tail_seq;
+                let digest = payload_digest(&payload);
+                let append = append_collab_update(
+                    &self.pool,
+                    AppendCollabInput {
+                        workspace_id: self.workspace_id,
+                        actor_user_id,
+                        session_id,
+                        document_id: self.document_id,
+                        writer_generation,
+                        expected_tail_seq: expected_tail,
+                        op_id,
+                        payload: &payload,
+                        client_ip: None,
+                    },
+                )
+                .await;
+
+                let committed = match append {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(CollabDbError::StaleWriter)) => {
+                        self.fatal_writer_stale();
+                        self.reject_candidate(conn_id, events, routing_key).await;
+                        return;
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        match verify_collab_operation(
+                            &self.pool,
+                            VerifyCollabInput {
+                                workspace_id: self.workspace_id,
+                                actor_user_id,
+                                session_id,
+                                document_id: self.document_id,
+                                op_id,
+                                expected_payload_len: payload.len() as i64,
+                                expected_payload_sha256: &digest,
+                                expected_actor_user_id: actor_user_id,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(Ok(lookup)) => AppendCollabResult::DuplicateAck { seq: lookup.seq },
+                            Ok(Err(CollabDbError::NotFound)) => {
+                                match append_collab_update(
+                                    &self.pool,
+                                    AppendCollabInput {
+                                        workspace_id: self.workspace_id,
+                                        actor_user_id,
+                                        session_id,
+                                        document_id: self.document_id,
+                                        writer_generation,
+                                        expected_tail_seq: expected_tail,
+                                        op_id,
+                                        payload: &payload,
+                                        client_ip: None,
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(Ok(result)) => result,
+                                    _ => {
+                                        self.reject_candidate(conn_id, events, routing_key).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            _ => {
+                                self.reject_candidate(conn_id, events, routing_key).await;
+                                return;
+                            }
                         }
                     }
-                } else {
-                    self.send_sync_status(events, routing_key, false).await;
+                };
+
+                let seq = match committed {
+                    AppendCollabResult::Committed { seq }
+                    | AppendCollabResult::DuplicateAck { seq } => seq,
+                };
+
+                self.committed.tail_payloads.push(payload.clone());
+                self.committed.tail_seq = seq;
+                self.fifo_seq += 1;
+                let op_prefix = self.fifo_seq;
+
+                if !self.apply_primary(&payload).await {
+                    self.reload_primary_from_committed().await;
+                    self.reject_candidate(conn_id, events, routing_key).await;
+                    return;
                 }
+
+                self.broadcast_update(routing_key, &sync.y_protocol);
+                self.send_sync_status(events, routing_key, true).await;
+                if let Some(c) = self.connections.get_mut(&conn_id) {
+                    c.in_flight = false;
+                }
+                self.flush_connection_persist(conn_id, op_prefix).await;
+                self.maybe_compact().await;
             }
         }
     }
 
-    async fn handle_awareness(
+    async fn session_authorized_by_ids(
+        &self,
+        user_id: Uuid,
+        session_id: Uuid,
+        read_only: bool,
+    ) -> bool {
+        match resolve_collab_admission(
+            &self.pool,
+            self.workspace_id,
+            user_id,
+            session_id,
+            self.document_id,
+        )
+        .await
+        {
+            Ok(Ok(admission)) => read_only || !admission.read_only,
+            _ => false,
+        }
+    }
+
+    async fn reject_candidate(
         &mut self,
-        _conn_id: Uuid,
+        conn_id: Uuid,
+        events: &mpsc::Sender<RoomClientEvent>,
+        routing_key: &str,
+    ) {
+        self.reload_primary_from_committed().await;
+        if let Some(c) = self.connections.get_mut(&conn_id) {
+            c.in_flight = false;
+            c.poisoned = true;
+        }
+        self.send_sync_status(events, routing_key, false).await;
+        self.close_connection(conn_id, 1008, "update rejected");
+    }
+
+    fn fatal_writer_stale(&mut self) {
+        for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
+            self.close_connection(conn_id, 1008, "writer stale");
+        }
+        self.writer_generation = None;
+    }
+
+    async fn apply_primary(&mut self, payload: &[u8]) -> bool {
+        let report = match self
+            .engine
+            .call(Request::Apply {
+                update_b64: payload.to_vec(),
+                encoding: 1,
+            })
+            .await
+        {
+            Ok(report) => report,
+            Err(BridgeError::Dead) => return false,
+        };
+        report.outcome.is_applied_ok()
+    }
+
+    async fn reload_primary_from_committed(&mut self) {
+        let _ = self.engine.recycle().await;
+        let _ = self.load_engine_primary().await;
+    }
+
+    async fn load_engine_primary(&mut self) -> Result<(), JoinError> {
+        let tail_b64 = self.committed.tail_payloads.clone();
+        let report = self
+            .engine
+            .call(Request::Load {
+                snapshot_b64: Some(self.committed.snapshot.clone()),
+                tail_b64,
+                encoding: 1,
+            })
+            .await
+            .map_err(|_| JoinError::EngineUnavailable)?;
+        if report.outcome.is_applied_ok() {
+            Ok(())
+        } else {
+            Err(JoinError::EngineUnavailable)
+        }
+    }
+
+    fn handle_awareness(
+        &mut self,
+        conn_id: Uuid,
         client_id: u32,
         session: &CollabSession,
         conn_generation: u64,
-        _routing_key: &str,
         payload: Vec<u8>,
     ) {
         let updates = decode_awareness(&payload).unwrap_or_default();
@@ -675,6 +818,7 @@ impl RoomActor {
         ) {
             self.broadcast_awareness(&encoded);
         }
+        let _ = conn_id;
     }
 
     async fn handle_stateless(
@@ -692,59 +836,65 @@ impl RoomActor {
                     return;
                 }
                 let prefix = self.fifo_seq;
-                self.pending_persist.push_back(PersistBarrier {
-                    request_id: id,
-                    conn_id,
-                    prefix_seq: prefix,
-                });
-                self.flush_persist_barriers(events, routing_key).await;
+                if let Some(conn) = self.connections.get_mut(&conn_id) {
+                    conn.pending_persist.push_back(PersistBarrier {
+                        request_id: id,
+                        prefix_fifo: prefix,
+                    });
+                }
+                self.flush_connection_persist(conn_id, self.fifo_seq).await;
             }
         }
     }
 
-    async fn flush_persist_barriers(
-        &mut self,
-        events: &mpsc::Sender<RoomClientEvent>,
-        routing_key: &str,
-    ) {
-        while let Some(front) = self.pending_persist.front() {
-            if front.prefix_seq > self.fifo_seq {
-                break;
+    async fn flush_connection_persist(&mut self, conn_id: Uuid, current_fifo: u64) {
+        let (routing_key, events, ready) = {
+            let Some(conn) = self.connections.get_mut(&conn_id) else {
+                return;
+            };
+            let ready = conn
+                .pending_persist
+                .iter()
+                .filter(|b| b.prefix_fifo <= current_fifo)
+                .map(|b| b.request_id)
+                .collect::<Vec<_>>();
+            (conn.routing_key.clone(), conn.events.clone(), ready)
+        };
+        for request_id in ready {
+            if let Some(conn) = self.connections.get_mut(&conn_id) {
+                conn.pending_persist.retain(|b| b.request_id != request_id);
             }
-            let barrier = self.pending_persist.pop_front().unwrap();
-            let result = self.run_persist(barrier.request_id).await;
-            if self.connections.contains_key(&barrier.conn_id) {
-                self.send_stateless(events, routing_key, result).await;
-            }
+            let result = self.run_persist_for(conn_id, request_id).await;
+            self.send_stateless(&events, &routing_key, result).await;
         }
     }
 
-    async fn resolve_persist_barriers(&mut self, _current_seq: u64) {
-        let ready = self
-            .pending_persist
-            .iter()
-            .filter(|b| b.prefix_seq <= self.fifo_seq)
-            .map(|b| (b.conn_id, b.request_id))
-            .collect::<Vec<_>>();
-        for (conn_id, request_id) in ready {
-            self.pending_persist.retain(|b| b.request_id != request_id);
-            let result = self.run_persist(request_id).await;
-            if let Some(conn) = self.connections.get(&conn_id) {
-                self.send_stateless(&conn.events, &conn.routing_key, result)
-                    .await;
-            }
-        }
+    fn any_pending_persist(&self) -> bool {
+        self.connections
+            .values()
+            .any(|c| !c.pending_persist.is_empty())
     }
 
-    async fn run_persist(&mut self, request_id: Uuid) -> String {
+    async fn run_persist_for(&mut self, conn_id: Uuid, request_id: Uuid) -> String {
         if self.persist_failed {
             return format!("persist-failed:{request_id}");
         }
+        let Some(conn) = self.connections.get(&conn_id) else {
+            return format!("persist-failed:{request_id}");
+        };
+        let actor_user_id = conn.session.user_id;
+        let session_id = conn.session.session_id;
+        if !self
+            .session_authorized_by_ids(actor_user_id, session_id, conn.read_only)
+            .await
+        {
+            return format!("persist-failed:{request_id}");
+        }
+
         let snapshot_report = match self.engine.call(Request::Snapshot).await {
             Ok(report) => report,
             Err(BridgeError::Dead) => {
                 self.persist_failed = true;
-                self.persist_pinned = true;
                 return format!("persist-failed:{request_id}");
             }
         };
@@ -756,17 +906,15 @@ impl RoomActor {
                 Ok(bytes) => bytes,
                 Err(_) => {
                     self.persist_failed = true;
-                    self.persist_pinned = true;
                     return format!("persist-failed:{request_id}");
                 }
             },
             _ => {
                 self.persist_failed = true;
-                self.persist_pinned = true;
                 return format!("persist-failed:{request_id}");
             }
         };
-        if !fresh_validate_snapshot(
+        if !validate_snapshot_only(
             self.engine.engine_bin().to_path_buf(),
             self.engine.limits(),
             snapshot.clone(),
@@ -774,31 +922,20 @@ impl RoomActor {
         .await
         {
             self.persist_failed = true;
-            self.persist_pinned = true;
             return format!("persist-failed:{request_id}");
         }
         if let Some(writer_generation) = self.writer_generation {
-            let cutoff = self.tail_seq;
+            let cutoff = self.committed.tail_seq;
             let compact = compact_collab_snapshot(
                 &self.pool,
                 CompactCollabInput {
                     workspace_id: self.workspace_id,
-                    actor_user_id: self
-                        .connections
-                        .values()
-                        .next()
-                        .map(|c| c.session.user_id)
-                        .unwrap_or_default(),
-                    session_id: self
-                        .connections
-                        .values()
-                        .next()
-                        .map(|c| c.session.session_id)
-                        .unwrap_or_default(),
+                    actor_user_id,
+                    session_id,
                     document_id: self.document_id,
                     writer_generation,
                     cutoff_seq: cutoff,
-                    expected_tail_seq: self.tail_seq,
+                    expected_tail_seq: cutoff,
                     new_snapshot: &snapshot,
                     client_ip: None,
                 },
@@ -806,13 +943,11 @@ impl RoomActor {
             .await;
             match compact {
                 Ok(Ok(load)) => {
-                    self.snapshot_cutoff_seq = load.snapshot_cutoff_seq;
-                    self.tail_seq = load.tail_seq;
+                    self.set_committed_from_load(&load);
                     format!("persisted:{request_id}")
                 }
                 _ => {
                     self.persist_failed = true;
-                    self.persist_pinned = true;
                     format!("persist-failed:{request_id}")
                 }
             }
@@ -821,53 +956,27 @@ impl RoomActor {
         }
     }
 
-    async fn load_engine(
-        &mut self,
-        snapshot: &[u8],
-        tail: &[crate::db::collab::CollabUpdateRow],
-    ) -> Result<(), JoinError> {
-        let tail_b64 = tail.iter().map(|row| row.payload.clone()).collect();
-        let report = self
-            .engine
-            .call(Request::Load {
-                snapshot_b64: Some(snapshot.to_vec()),
-                tail_b64,
-                encoding: 1,
-            })
-            .await
-            .map_err(|_| JoinError::EngineUnavailable)?;
-        if report.outcome.is_applied_ok() {
-            Ok(())
-        } else {
-            Err(JoinError::EngineUnavailable)
+    async fn maybe_compact(&mut self) {
+        if self.any_pending_persist() || self.persist_failed {
+            return;
         }
-    }
-
-    async fn reload_engine_from_db(&mut self) {
-        let _ = self.engine.kill_and_reap().await;
-        if self.writer_generation.is_some() {
-            if let Ok(Ok(claim)) = claim_writer_and_load(
-                &self.pool,
-                self.workspace_id,
+        if self.committed.tail_payloads.len() < 32 {
+            return;
+        }
+        let conn_id = self
+            .connections
+            .iter()
+            .find(|(_, c)| !c.read_only && !c.pending_persist.is_empty())
+            .map(|(id, _)| *id)
+            .or_else(|| {
                 self.connections
-                    .values()
-                    .next()
-                    .map(|c| c.session.user_id)
-                    .unwrap_or_default(),
-                self.connections
-                    .values()
-                    .next()
-                    .map(|c| c.session.session_id)
-                    .unwrap_or_default(),
-                self.document_id,
-            )
-            .await
-            {
-                self.writer_generation = Some(claim.writer_generation);
-                self.tail_seq = claim.load.tail_seq;
-                self.snapshot_cutoff_seq = claim.load.snapshot_cutoff_seq;
-                let _ = self.load_engine(&claim.load.snapshot, &claim.load.tail).await;
-            }
+                    .iter()
+                    .find(|(_, c)| !c.read_only)
+                    .map(|(id, _)| *id)
+            });
+        if let Some(conn_id) = conn_id {
+            let request_id = Uuid::now_v7();
+            let _ = self.run_persist_for(conn_id, request_id).await;
         }
     }
 
@@ -881,9 +990,10 @@ impl RoomActor {
             }),
         })
         .unwrap_or_default();
-        for (id, conn) in &self.connections {
-            let _ = id;
-            let _ = conn.events.try_send(RoomClientEvent::Outbound(frame.clone()));
+        for conn in self.connections.values() {
+            let _ = conn
+                .events
+                .try_send(RoomClientEvent::Outbound(frame.clone()));
         }
     }
 
@@ -920,12 +1030,8 @@ impl RoomActor {
         routing_key: &str,
         applied: bool,
     ) {
-        self.send_document(
-            events,
-            routing_key,
-            DocumentMessage::SyncStatus { applied },
-        )
-        .await;
+        self.send_document(events, routing_key, DocumentMessage::SyncStatus { applied })
+            .await;
     }
 
     async fn send_stateless(
@@ -937,6 +1043,12 @@ impl RoomActor {
         self.send_document(events, routing_key, DocumentMessage::Stateless(payload))
             .await;
     }
+}
+
+fn payload_digest(payload: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(payload);
+    hasher.finalize().to_vec()
 }
 
 pub fn parse_client_id(token: &str) -> Option<u32> {

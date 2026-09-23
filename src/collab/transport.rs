@@ -126,7 +126,12 @@ pub async fn collab_get_without_upgrade() -> impl IntoResponse {
     )
 }
 
-async fn handle_socket(socket: WebSocket, hub: Arc<CollabHub>, live: CollabSession, _peer: SocketAddr) {
+async fn handle_socket(
+    socket: WebSocket,
+    hub: Arc<CollabHub>,
+    live: CollabSession,
+    _peer: SocketAddr,
+) {
     let (mut sender, mut receiver) = socket.split();
     let conn_id = Uuid::now_v7();
     let (events_tx, mut events_rx) = mpsc::channel(64);
@@ -195,7 +200,12 @@ async fn first_room_from_frame(
     events: &mpsc::Sender<RoomClientEvent>,
 ) -> Option<(crate::collab::room::RoomKey, String, bool)> {
     let frame = crate::collab::wire::decode(bytes).ok()?;
-    let WireFrame::Document { routing_key, room, message } = frame else {
+    let WireFrame::Document {
+        routing_key,
+        room,
+        message,
+    } = frame
+    else {
         return None;
     };
     let room_name = room?;
@@ -251,7 +261,10 @@ async fn try_authenticate(
         },
         events: events.clone(),
     };
-    match hub.join_room((room.workspace_id, room.resource_id), join).await {
+    match hub
+        .join_room((room.workspace_id, room.resource_id), join)
+        .await
+    {
         Ok(()) => {
             let scope = "read-write";
             send_auth_ok(events, routing_key, scope).await;

@@ -153,6 +153,7 @@ pub struct AppendCollabInput<'a> {
     pub session_id: Uuid,
     pub document_id: Uuid,
     pub writer_generation: i64,
+    pub expected_tail_seq: i64,
     pub op_id: Uuid,
     pub payload: &'a [u8],
     pub client_ip: Option<&'a str>,
@@ -636,6 +637,7 @@ pub async fn append_collab_update(
         session_id,
         document_id,
         writer_generation,
+        expected_tail_seq,
         op_id,
         payload,
         client_ip,
@@ -702,6 +704,10 @@ pub async fn append_collab_update(
         }
         tx.rollback().await?;
         return Ok(Err(CollabDbError::OpIdConflict));
+    }
+    if state.4 != expected_tail_seq {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleCutoff));
     }
 
     match tail_budget_allows_append(

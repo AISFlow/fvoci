@@ -12,11 +12,16 @@ use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::new_token;
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::config::CollabConfig;
-use fvoci_server::collab::wire::{encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, WireFrame};
+use fvoci_server::collab::wire::{
+    encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, SyncMessage, SyncStep,
+    WireFrame,
+};
+use fvoci_server::collab::y_sync::encode_sync_payload;
 use fvoci_server::collab::CollabHub;
+use fvoci_server::db::collab::load_collab_document;
 use fvoci_server::db::documents::CreateDocumentInput;
-use fvoci_server::db::{documents, migrate, pool, Db};
 use fvoci_server::db::workspace;
+use fvoci_server::db::{documents, migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
 use rand::RngCore;
@@ -291,6 +296,67 @@ fn room_key(workspace_id: Uuid, document_id: Uuid) -> String {
     .routing_key()
 }
 
+fn sample_hi_update() -> Vec<u8> {
+    hex::decode("0101e8eda5a2070004010b70726f73656d6972726f7202686900").expect("fixture")
+}
+
+fn sync_update_frame(routing_key: &str, update: &[u8]) -> Vec<u8> {
+    encode(&WireFrame::Document {
+        routing_key: routing_key.to_string(),
+        room: CollabRoomName::parse(routing_key),
+        message: DocumentMessage::Sync(fvoci_server::collab::wire::SyncMessage {
+            step: SyncStep::Update,
+            y_protocol: encode_sync_payload(SyncStep::Update, update),
+        }),
+    })
+    .expect("encode update")
+}
+
+async fn connect_member(
+    addr: SocketAddr,
+    session_token: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let mut request = format!("ws://{addr}/collab").into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("origin", PUBLIC_ORIGIN.parse().unwrap());
+    request.headers_mut().insert(
+        "cookie",
+        format!("fvoci_session={session_token}").parse().unwrap(),
+    );
+    tokio_tungstenite::connect_async(request)
+        .await
+        .expect("connect")
+        .0
+}
+
+async fn auth_and_join(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    routing_key: &str,
+    client_id: u32,
+) {
+    ws.send(Message::Binary(
+        auth_token_frame(routing_key, client_id).into(),
+    ))
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(10), ws.next())
+        .await
+        .expect("timeout")
+        .expect("stream")
+        .expect("frame");
+    let frame = fvoci_server::collab::wire::decode(&msg.into_data()).expect("decode");
+    assert!(matches!(
+        frame,
+        WireFrame::Document {
+            message: DocumentMessage::Auth(AuthMessage::Authenticated { .. }),
+            ..
+        }
+    ));
+}
+
 fn auth_token_frame(routing_key: &str, client_id: u32) -> Vec<u8> {
     encode(&WireFrame::Document {
         routing_key: routing_key.to_string(),
@@ -305,13 +371,10 @@ fn auth_token_frame(routing_key: &str, client_id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn collab_requires_native_helper_env() {
-    let path = std::env::var("FVOCI_COLLAB_ENGINE").ok();
-    let default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/collab-engine/target/debug/collab-engine");
-    assert!(
-        path.as_deref().map(|p| !p.is_empty()).unwrap_or(false) || default.is_file(),
-        "FVOCI_COLLAB_ENGINE or crates/collab-engine/target/debug/collab-engine required"
-    );
+    let path = std::env::var("FVOCI_COLLAB_ENGINE")
+        .expect("FVOCI_COLLAB_ENGINE must be set for collab product tests");
+    let path = PathBuf::from(path.trim());
+    assert!(path.is_file(), "FVOCI_COLLAB_ENGINE must point at built collab-engine binary");
 }
 
 #[tokio::test]
@@ -334,9 +397,7 @@ async fn collab_rejects_missing_origin_on_upgrade() {
     let harness = TestDb::bootstrap().await;
     let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
     let addr = spawn_server(app).await;
-    let request = format!("ws://{addr}/collab")
-        .into_client_request()
-        .unwrap();
+    let request = format!("ws://{addr}/collab").into_client_request().unwrap();
     let err = tokio_tungstenite::connect_async(request).await.unwrap_err();
     assert!(
         err.to_string().contains("403") || err.to_string().contains("Forbidden"),
@@ -354,9 +415,7 @@ async fn collab_auth_handshake_succeeds_for_member() {
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let client_id = 42_424_242u32;
 
-    let mut request = format!("ws://{addr}/collab")
-        .into_client_request()
-        .unwrap();
+    let mut request = format!("ws://{addr}/collab").into_client_request().unwrap();
     request
         .headers_mut()
         .insert("origin", PUBLIC_ORIGIN.parse().unwrap());
@@ -370,9 +429,11 @@ async fn collab_auth_handshake_succeeds_for_member() {
     let (mut ws, _) = tokio_tungstenite::connect_async(request)
         .await
         .expect("websocket connect");
-    ws.send(Message::Binary(auth_token_frame(&routing_key, client_id).into()))
-        .await
-        .unwrap();
+    ws.send(Message::Binary(
+        auth_token_frame(&routing_key, client_id).into(),
+    ))
+    .await
+    .unwrap();
 
     let msg = tokio::time::timeout(Duration::from_secs(10), ws.next())
         .await
@@ -388,5 +449,186 @@ async fn collab_auth_handshake_succeeds_for_member() {
         } => assert!(scope.contains("read")),
         other => panic!("expected authenticated, got {other:?}"),
     }
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_nonmember_is_denied() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let outsider = setup_owner_session(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut ws = connect_member(addr, &outsider.session_token).await;
+    ws.send(Message::Binary(auth_token_frame(&routing_key, 1).into()))
+        .await
+        .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(10), ws.next())
+        .await
+        .expect("timeout")
+        .expect("stream")
+        .expect("frame");
+    let frame = fvoci_server::collab::wire::decode(&msg.into_data()).expect("decode");
+    assert!(matches!(
+        frame,
+        WireFrame::Document {
+            message: DocumentMessage::Auth(AuthMessage::PermissionDenied { .. }),
+            ..
+        }
+    ));
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_two_clients_update_persists_and_broadcasts() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let update = sample_hi_update();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 11).await;
+    let mut reader = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut reader, &routing_key, 22).await;
+
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_applied = false;
+    for _ in 0..8 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), writer.next())
+            .await
+            .expect("timeout");
+        if msg.is_none() {
+            break;
+        }
+        let frame =
+            fvoci_server::collab::wire::decode(&msg.unwrap().unwrap().into_data()).expect("decode");
+        if matches!(
+            frame,
+            WireFrame::Document {
+                message: DocumentMessage::SyncStatus { applied: true },
+                ..
+            }
+        ) {
+            saw_applied = true;
+            break;
+        }
+    }
+    assert!(saw_applied, "writer should receive applied sync status");
+
+    let mut saw_broadcast = false;
+    for _ in 0..8 {
+        let msg = tokio::time::timeout(Duration::from_secs(10), reader.next())
+            .await
+            .expect("timeout");
+        if msg.is_none() {
+            break;
+        }
+        let frame =
+            fvoci_server::collab::wire::decode(&msg.unwrap().unwrap().into_data()).expect("decode");
+        if matches!(
+            frame,
+            WireFrame::Document {
+                message: DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Update,
+                    ..
+                }),
+                ..
+            }
+        ) {
+            saw_broadcast = true;
+            break;
+        }
+    }
+    assert!(saw_broadcast, "reader should receive broadcast update");
+
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(load.tail.len(), 1);
+    assert_eq!(load.tail[0].payload, update);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_concurrent_first_joins_both_succeed() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let token = wiki.session.session_token.clone();
+
+    let (a, b) = tokio::join!(
+        async {
+            let mut ws = connect_member(addr, &token).await;
+            auth_and_join(&mut ws, &routing_key, 1).await;
+            ws
+        },
+        async {
+            let mut ws = connect_member(addr, &token).await;
+            auth_and_join(&mut ws, &routing_key, 2).await;
+            ws
+        }
+    );
+    let _ = (a, b);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_archived_document_rejects_mutation() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = $1")
+        .bind(wiki.document_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut ws = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut ws, &routing_key, 5).await;
+
+    ws.send(Message::Binary(
+        sync_update_frame(&routing_key, &sample_hi_update()).into(),
+    ))
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(10), ws.next())
+        .await
+        .expect("timeout")
+        .expect("stream")
+        .expect("frame");
+    let frame = fvoci_server::collab::wire::decode(&msg.into_data()).expect("decode");
+    assert!(matches!(
+        frame,
+        WireFrame::Document {
+            message: DocumentMessage::SyncStatus { applied: false },
+            ..
+        }
+    ));
     harness.cleanup().await;
 }

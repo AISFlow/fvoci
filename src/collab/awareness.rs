@@ -161,7 +161,10 @@ pub fn sanitize_user_state(
     let obj = value.as_object()?;
     let mut out = serde_json::Map::new();
     out.insert("id".into(), serde_json::Value::String(user_id.to_string()));
-    out.insert("name".into(), serde_json::Value::String(display_name.to_string()));
+    out.insert(
+        "name".into(),
+        serde_json::Value::String(display_name.to_string()),
+    );
     out.insert("color".into(), serde_json::Value::String(color.to_string()));
     if let Some(cursor) = obj.get("cursor") {
         out.insert("cursor".into(), cursor.clone());
@@ -227,10 +230,8 @@ impl AwarenessRegistry {
             };
             match state {
                 Some(bytes) => {
-                    self.by_client.insert(
-                        update.client_id,
-                        (update.clock, bytes, conn_generation),
-                    );
+                    self.by_client
+                        .insert(update.client_id, (update.clock, bytes, conn_generation));
                     changed = true;
                 }
                 None if update.state.is_none() => {

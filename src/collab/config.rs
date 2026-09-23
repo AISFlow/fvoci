@@ -60,7 +60,7 @@ impl CollabConfig {
         Some(Self {
             engine_bin,
             limits: Limits::default(),
-            max_rooms: max_rooms.max(1),
+            max_rooms: max_rooms.clamp(1, 4),
             max_connections_per_room: max_connections_per_room.max(1),
             max_queued_room_ops: max_queued_room_ops.max(16),
             max_pending_bytes_per_connection: max_pending_bytes_per_connection.max(64 * 1024),
