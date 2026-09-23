@@ -46,7 +46,8 @@ test("setup → home → rename → logout → login → denied workspace", asyn
   expect(meBody.email).toBe("admin@example.com");
 
   await page.getByRole("link", { name: admin.workspaceName }).click();
-  await expect(page).toHaveURL(/\/w\/acme\/settings$/);
+  await expect(page).toHaveURL(/\/w\/acme\/wiki$/);
+  await page.goto("/w/acme/settings");
   const renamed = "Renamed 워크스페이스";
   await page.getByLabel("워크스페이스 이름", { exact: true }).fill(renamed);
   await page.getByRole("button", { name: "저장" }).click();
@@ -90,8 +91,10 @@ test("instance admin creates a team workspace from home dialog", async ({ page }
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByRole("link", { name: betaName })).toBeVisible();
   await page.getByRole("link", { name: betaName }).click();
-  await expect(page).toHaveURL(new RegExp(`/w/${betaSlug}/settings$`));
-  await expect(page.getByText(betaName)).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/w/${betaSlug}/wiki$`));
+  await page.goto(`/w/${betaSlug}/settings`);
+  await expect(page.getByRole("heading", { name: "워크스페이스" })).toBeVisible();
+  await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveValue(betaName);
 });
 
 test("readonly member sees read-only settings and refreshed name after admin edit", async ({ page }) => {
@@ -107,6 +110,7 @@ test("readonly member sees read-only settings and refreshed name after admin edi
   await expect(page.getByRole("button", { name: "저장" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "로그아웃" }).click();
+  await expect(page).toHaveURL(/\/login$/);
   await login(page, admin.email, admin.password);
   await page.goto("/w/acme/settings");
   const memberVisibleName = "멤버에게 보이는 이름";
@@ -117,7 +121,7 @@ test("readonly member sees read-only settings and refreshed name after admin edi
   await page.getByRole("button", { name: "로그아웃" }).click();
   await login(page, readonlyMember.email, readonlyMember.password);
   await page.goto("/w/acme/settings");
-  await expect(page.getByText(memberVisibleName)).toBeVisible();
+  await expect(page.getByRole("main").getByText(memberVisibleName)).toBeVisible();
   await expect(page.getByText("설정을 변경하려면 관리자 권한이 필요합니다")).toBeVisible();
 });
 
@@ -132,6 +136,17 @@ test("logout transport failure keeps the current session visible", async ({ page
   await page.getByRole("button", { name: "로그아웃" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page).toHaveURL(/\/$/);
+  expect((await page.request.get("/api/v1/auth/me")).ok()).toBe(true);
+});
+
+test("wiki shell logout transport failure keeps the current session visible", async ({ page }) => {
+  await login(page, admin.email, admin.password);
+  await page.goto("/w/acme/wiki");
+  await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
+  await page.route("**/api/v1/auth/logout", (route) => route.abort("connectionfailed"));
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page).toHaveURL(/\/w\/acme\/wiki$/);
   expect((await page.request.get("/api/v1/auth/me")).ok()).toBe(true);
 });
 

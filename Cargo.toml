@@ -60,3 +60,8 @@ api-schema = ["dep:utoipa"]
 name = "db_integration"
 path = "tests/db_integration.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "document_integration"
+path = "tests/document_integration.rs"
+required-features = ["db-tests"]

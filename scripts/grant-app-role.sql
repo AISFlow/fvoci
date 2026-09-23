@@ -43,3 +43,6 @@ REVOKE EXECUTE ON FUNCTION public.app_system_ctx_on() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.app_system_ctx_on() TO :"app_role";
 REVOKE EXECUTE ON FUNCTION public.app_self_user_id() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.app_self_user_id() TO :"app_role";
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.documents TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_states TO :"app_role";
