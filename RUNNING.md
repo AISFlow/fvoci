@@ -41,6 +41,8 @@ cargo run --bin fvoci-server
 
 Migrations run once at startup via the owner URL; the server connects only through `DATABASE_APP_URL`. The app pool is closed explicitly on shutdown and startup failures.
 
+Rate limits use the direct socket peer. Forwarded headers are ignored; behind a reverse proxy, clients share the proxy's IP bucket. Trusted-proxy configuration and distributed limits are not implemented yet.
+
 ## Tests
 
 Pure unit tests:

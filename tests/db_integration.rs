@@ -930,11 +930,11 @@ async fn patch_family_name_omitted_preserves_existing_value() {
 }
 
 #[tokio::test]
-async fn patch_rejects_null_given_name_with_source() {
+async fn patch_rejects_null_name_and_malformed_json_as_problem() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _) = setup_session(&harness).await;
     let (status, body, _, _) = json_request(
-        app,
+        app.clone(),
         "PATCH",
         "/api/v1/auth/me",
         Some(json!({"givenName": null})),
@@ -946,6 +946,30 @@ async fn patch_rejects_null_given_name_with_source() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "invalid_input");
     assert_eq!(body["source"], "/givenName");
+    for content_type in [Some("application/json"), None] {
+        let mut request = Request::builder()
+            .method("PATCH")
+            .uri("/api/v1/auth/me")
+            .header("cookie", format!("fvoci_session={cookie}"));
+        if let Some(value) = content_type {
+            request = request.header("content-type", value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from("{")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let problem: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem["code"], "invalid_input");
+    }
     harness.cleanup().await;
 }
 
@@ -1059,16 +1083,28 @@ async fn rate_limit_uses_socket_ip_not_forwarded_for() {
     }
 
     let (status, _, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/login",
+        Some(json!({"email": "a@example.com", "password": "wrong-password"})),
+        None,
+        &[("x-forwarded-for", "10.0.0.100")],
+        Some(peer_a),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _, _, _) = json_request(
         app,
         "POST",
         "/api/v1/auth/login",
-        Some(json!({"email": "b@example.com", "password": "wrong-password"})),
+        Some(json!({"email": "a@example.com", "password": "wrong-password"})),
         None,
         &[("x-forwarded-for", "10.0.0.99")],
         Some(peer_b),
     )
     .await;
-    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     harness.cleanup().await;
 }
@@ -1202,6 +1238,11 @@ async fn app_role_cannot_read_secret_columns_or_migrations() {
             .fetch_optional(&app)
             .await;
     assert!(denied_password.is_err());
+    let denied_token =
+        sqlx::query_scalar::<_, String>("SELECT token_hash FROM fvoci.sessions LIMIT 1")
+            .fetch_optional(&app)
+            .await;
+    assert!(denied_token.is_err());
     let denied_migrations =
         sqlx::query_scalar::<_, i32>("SELECT version FROM fvoci.schema_migrations LIMIT 1")
             .fetch_optional(&app)

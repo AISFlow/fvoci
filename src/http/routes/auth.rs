@@ -137,8 +137,9 @@ async fn patch_me(
     State(state): State<AppState>,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<SessionUser>, AppError> {
+    let Json(body) = body.map_err(AppError::from)?;
     reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let token = jar
