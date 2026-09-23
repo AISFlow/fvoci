@@ -59,10 +59,7 @@ static FORCE_PRIMARY_LOAD_FAIL: std::sync::LazyLock<
 
 #[cfg(feature = "db-tests")]
 pub async fn arm_force_primary_apply_fail(document_id: Uuid) {
-    FORCE_PRIMARY_APPLY_FAIL
-        .lock()
-        .await
-        .insert(document_id);
+    FORCE_PRIMARY_APPLY_FAIL.lock().await.insert(document_id);
 }
 
 #[cfg(feature = "db-tests")]
@@ -430,6 +427,7 @@ impl RoomActor {
             self.primary_loaded = true;
             self.primary_dirty = false;
         }
+        self.ensure_primary_capacity().await?;
         if !self.reserve_client_id(join.conn.client_id, join.conn.session.user_id) {
             return Err(JoinError::AdmissionDenied);
         }
@@ -680,7 +678,7 @@ impl RoomActor {
             }
             SyncStep::Step2 | SyncStep::Update => {
                 if payload.is_empty() {
-                    self.send_sync_status(events, routing_key, false).await;
+                    self.reject_candidate(conn_id, events, routing_key).await;
                     return;
                 }
                 if read_only && !is_empty_update(&payload) {
@@ -809,7 +807,8 @@ impl RoomActor {
                     c.in_flight = false;
                 }
                 if !primary_ok {
-                    self.fatal_primary_unhealthy(actor_user_id, session_id).await;
+                    self.fatal_primary_unhealthy(actor_user_id, session_id)
+                        .await;
                     return;
                 }
                 self.flush_connection_persist(conn_id, op_prefix).await;
@@ -891,18 +890,11 @@ impl RoomActor {
                 .await
                 {
                     Ok(Ok(load)) => {
-                        if let Some(row) = load.tail.iter().find(|r| r.op_id == op_id) {
-                            if row.payload != payload {
-                                self.fatal_room_divergence(actor_user_id, session_id).await;
-                                return None;
-                            }
-                            let row_digest = payload_digest(&row.payload);
-                            if row_digest != digest {
-                                self.fatal_room_divergence(actor_user_id, session_id).await;
-                                return None;
-                            }
-                            self.set_committed_from_load(&load);
-                            return Some(AppendCollabResult::DuplicateAck { seq: row.seq });
+                        // Append and its immutable receipt commit atomically. A tail row
+                        // without that receipt is inconsistent, never proof of success.
+                        if load.tail.iter().any(|r| r.op_id == op_id) {
+                            self.fatal_room_divergence(actor_user_id, session_id).await;
+                            return None;
                         }
                         if load.tail_seq > expected_tail {
                             self.fatal_room_divergence(actor_user_id, session_id).await;
@@ -972,7 +964,7 @@ impl RoomActor {
     }
 
     async fn ensure_primary_capacity(&mut self) -> Result<(), JoinError> {
-        if self.engine.needs_recycle() {
+        if !self.primary_loaded || self.primary_dirty || self.engine.needs_recycle() {
             self.reload_primary_from_committed().await?;
         }
         Ok(())
@@ -1131,6 +1123,9 @@ impl RoomActor {
         let Some(conn) = self.connections.get(&conn_id) else {
             return format!("persist-failed:{request_id}");
         };
+        if conn.poisoned || conn.in_flight {
+            return format!("persist-failed:{request_id}");
+        }
         let actor_user_id = conn.session.user_id;
         let session_id = conn.session.session_id;
         if !self

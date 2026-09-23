@@ -1176,7 +1176,9 @@ async fn collab_reconnect_step1_includes_server_state_vector() {
     let mut writer = connect_member(addr, &wiki.session.session_token).await;
     auth_and_join(&mut writer, &routing_key, 11).await;
     writer
-        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
         .await
         .unwrap();
     for _ in 0..8 {
@@ -1190,7 +1192,9 @@ async fn collab_reconnect_step1_includes_server_state_vector() {
     }
 
     writer
-        .send(Message::Binary(sync_step1_frame(&routing_key, &[0, 0]).into()))
+        .send(Message::Binary(
+            sync_step1_frame(&routing_key, &[0, 0]).into(),
+        ))
         .await
         .unwrap();
 
@@ -1198,11 +1202,12 @@ async fn collab_reconnect_step1_includes_server_state_vector() {
     let mut saw_server_step1 = false;
     for _ in 0..12 {
         let frame = recv_document_frame(&mut writer, 1).await;
-        match frame {
-            Some(WireFrame::Document {
-                message: DocumentMessage::Sync(SyncMessage { step, y_protocol }),
-                ..
-            }) => match step {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::Sync(SyncMessage { step, y_protocol }),
+            ..
+        }) = frame
+        {
+            match step {
                 SyncStep::Step2 if !saw_step2 => saw_step2 = true,
                 SyncStep::Step1 if saw_step2 => {
                     let (_, sv) = parse_sync_payload(&y_protocol, 4 * 1024 * 1024).unwrap();
@@ -1211,12 +1216,14 @@ async fn collab_reconnect_step1_includes_server_state_vector() {
                     break;
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
     }
     assert!(saw_step2, "client should receive Step2");
-    assert!(saw_server_step1, "client should receive server Step1 after Step2");
+    assert!(
+        saw_server_step1,
+        "client should receive server Step1 after Step2"
+    );
     harness.cleanup().await;
 }
 
@@ -1246,7 +1253,10 @@ async fn collab_empty_byte_update_is_rejected() {
             break;
         }
     }
-    assert!(saw_rejected, "byte-empty update must be rejected as malformed");
+    assert!(
+        saw_rejected,
+        "byte-empty update must be rejected as malformed"
+    );
 
     let load = load_collab_document(
         &wiki.session.pool,
@@ -1273,7 +1283,9 @@ async fn collab_canonical_noop_update_is_not_stored() {
     let mut writer = connect_member(addr, &wiki.session.session_token).await;
     auth_and_join(&mut writer, &routing_key, 31).await;
     writer
-        .send(Message::Binary(sync_update_frame(&routing_key, &[0, 0]).into()))
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &[0, 0]).into(),
+        ))
         .await
         .unwrap();
 
@@ -1300,7 +1312,10 @@ async fn collab_canonical_noop_update_is_not_stored() {
     .await
     .unwrap()
     .unwrap();
-    assert!(load.tail.is_empty(), "noop update must not create a tail row");
+    assert!(
+        load.tail.is_empty(),
+        "noop update must not create a tail row"
+    );
     harness.cleanup().await;
 }
 
@@ -1317,7 +1332,9 @@ async fn collab_persist_barrier_and_id_correlation() {
     let mut writer = connect_member(addr, &wiki.session.session_token).await;
     auth_and_join(&mut writer, &routing_key, 41).await;
     writer
-        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
         .await
         .unwrap();
     for _ in 0..8 {
@@ -1508,7 +1525,9 @@ async fn collab_readonly_first_then_writer_edits() {
 
     let update = sample_hi_update();
     writer
-        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
         .await
         .unwrap();
 
@@ -1523,15 +1542,19 @@ async fn collab_readonly_first_then_writer_edits() {
             break;
         }
     }
-    assert!(writer_applied, "writer should apply after readonly-first room");
+    assert!(
+        writer_applied,
+        "writer should apply after readonly-first room"
+    );
 
     let mut reader_saw = false;
     for _ in 0..8 {
         if let Some(WireFrame::Document {
-            message: DocumentMessage::Sync(SyncMessage {
-                step: SyncStep::Update,
-                ..
-            }),
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Update,
+                    ..
+                }),
             ..
         }) = recv_document_frame(&mut reader, 1).await
         {
@@ -1539,7 +1562,10 @@ async fn collab_readonly_first_then_writer_edits() {
             break;
         }
     }
-    assert!(reader_saw, "reader should receive broadcast after writer edit");
+    assert!(
+        reader_saw,
+        "reader should receive broadcast after writer edit"
+    );
     harness.cleanup().await;
 }
 
@@ -1559,7 +1585,9 @@ async fn collab_delete_only_round_trip_persists() {
 
     for payload in [&base, &delete_only] {
         writer
-            .send(Message::Binary(sync_update_frame(&routing_key, payload).into()))
+            .send(Message::Binary(
+                sync_update_frame(&routing_key, payload).into(),
+            ))
             .await
             .unwrap();
         for _ in 0..8 {
@@ -1671,7 +1699,10 @@ async fn collab_two_readonly_joins_then_writer_edits() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert_eq!(tail_len, 1, "writer update must persist after two readonly joins");
+        assert_eq!(
+            tail_len, 1,
+            "writer update must persist after two readonly joins"
+        );
         hub.shutdown().await;
         harness.cleanup().await;
     })
@@ -1691,7 +1722,9 @@ async fn collab_committed_update_survives_primary_apply_fail_reload() {
     auth_and_join(&mut writer, &routing_key, 91).await;
     arm_force_primary_apply_fail(wiki.document_id).await;
     writer
-        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
         .await
         .unwrap();
     assert!(
@@ -1730,7 +1763,9 @@ async fn collab_reload_failure_after_commit_preserves_durable_tail() {
     arm_force_primary_apply_fail(wiki.document_id).await;
     arm_force_primary_load_fail(wiki.document_id).await;
     writer
-        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
         .await
         .unwrap();
     writer
@@ -1755,11 +1790,9 @@ async fn collab_reload_failure_after_commit_preserves_durable_tail() {
             Some(WireFrame::Document {
                 message: DocumentMessage::Stateless(body),
                 ..
-            }) => {
-                if body.starts_with("persisted:") {
-                    saw_persisted = true;
-                    break;
-                }
+            }) if body.starts_with("persisted:") => {
+                saw_persisted = true;
+                break;
             }
             _ => {}
         }
@@ -1767,7 +1800,10 @@ async fn collab_reload_failure_after_commit_preserves_durable_tail() {
             break;
         }
     }
-    assert!(saw_applied, "durable commit must ack even when primary reload fails");
+    assert!(
+        saw_applied,
+        "durable commit must ack even when primary reload fails"
+    );
     assert!(!saw_persisted, "stale primary must not emit persisted ack");
     disarm_force_primary_load_fail(wiki.document_id).await;
     disarm_force_primary_apply_fail(wiki.document_id).await;
@@ -1789,62 +1825,86 @@ async fn collab_reload_failure_after_commit_preserves_durable_tail() {
 
 #[tokio::test]
 async fn collab_lifecycle_foreign_leave_does_not_evict_member() {
-    run_lifecycle_test("collab_lifecycle_foreign_leave_does_not_evict_member", async {
-        let harness = TestDb::bootstrap().await;
-        let wiki = setup_wiki_doc(&harness).await;
-        let hub = CollabHub::new(test_collab_config(4, 200), wiki.session.pool.clone());
-        let key = (wiki.session.workspace_id, wiki.document_id);
-        let conn_id = hub_join(&hub, &wiki, 1).await.expect("join");
-        assert_eq!(hub.room_lifecycle_phase(key).await, RoomLifecyclePhase::Live);
+    run_lifecycle_test(
+        "collab_lifecycle_foreign_leave_does_not_evict_member",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let hub = CollabHub::new(test_collab_config(4, 200), wiki.session.pool.clone());
+            let key = (wiki.session.workspace_id, wiki.document_id);
+            let conn_id = hub_join(&hub, &wiki, 1).await.expect("join");
+            assert_eq!(
+                hub.room_lifecycle_phase(key).await,
+                RoomLifecyclePhase::Live
+            );
 
-        hub.leave_room(key, Uuid::now_v7()).await;
-        assert_eq!(hub.room_lifecycle_phase(key).await, RoomLifecyclePhase::Live);
+            hub.leave_room(key, Uuid::now_v7()).await;
+            assert_eq!(
+                hub.room_member_count(key).await,
+                1,
+                "unknown leave must not remove the actual member from eviction accounting"
+            );
+            assert_eq!(
+                hub.room_lifecycle_phase(key).await,
+                RoomLifecyclePhase::Live
+            );
 
-        hub.leave_room(key, conn_id).await;
-        wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
-        hub.shutdown().await;
-        harness.cleanup().await;
-    })
+            hub.leave_room(key, conn_id).await;
+            wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
+            hub.shutdown().await;
+            harness.cleanup().await;
+        },
+    )
     .await;
 }
 
 #[tokio::test]
 async fn collab_lifecycle_shutdown_during_booting_reclaims_slot() {
-    run_lifecycle_test("collab_lifecycle_shutdown_during_booting_reclaims_slot", async {
-        let harness = TestDb::bootstrap().await;
-        let wiki = setup_wiki_doc(&harness).await;
-        let release = arm_spawn_room_block(wiki.document_id).await;
-        let hub = Arc::new(CollabHub::new(
-            test_collab_config(4, 30_000),
-            wiki.session.pool.clone(),
-        ));
-        let key = (wiki.session.workspace_id, wiki.document_id);
-        let slots_before = hub.available_room_slots();
+    run_lifecycle_test(
+        "collab_lifecycle_shutdown_during_booting_reclaims_slot",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let release = arm_spawn_room_block(wiki.document_id).await;
+            let hub = Arc::new(CollabHub::new(
+                test_collab_config(4, 30_000),
+                wiki.session.pool.clone(),
+            ));
+            let key = (wiki.session.workspace_id, wiki.document_id);
+            let slots_before = hub.available_room_slots();
 
-        let join_task = tokio::spawn({
-            let hub = hub.clone();
-            let wiki = wiki.clone_fixture();
-            async move { hub_join(&hub, &wiki, 1).await }
-        });
-        wait_for_booting(&hub, key).await;
-        assert_eq!(hub.available_room_slots(), slots_before - 1);
+            let join_task = tokio::spawn({
+                let hub = hub.clone();
+                let wiki = wiki.clone_fixture();
+                async move { hub_join(&hub, &wiki, 1).await }
+            });
+            wait_for_booting(&hub, key).await;
+            assert_eq!(hub.available_room_slots(), slots_before - 1);
 
-        let shutdown_task = tokio::spawn({
-            let hub = hub.clone();
-            async move { hub.shutdown().await }
-        });
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
+            let shutdown_task = tokio::spawn({
+                let hub = hub.clone();
+                async move { hub.shutdown().await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !hub.is_shutting_down() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("shutdown must reach the admission barrier");
 
-        release.send(()).expect("release startup gate");
-        let join_result = join_task.await.expect("join task");
-        assert!(join_result.is_err(), "join during shutdown must fail");
-        shutdown_task.await.expect("shutdown task");
-        assert_eq!(hub.available_room_slots(), slots_before);
-        assert_eq!(hub.room_lifecycle_phase(key).await, RoomLifecyclePhase::Absent);
-        disarm_spawn_room_block(wiki.document_id).await;
-        harness.cleanup().await;
-    })
+            release.send(()).expect("release startup gate");
+            let join_result = join_task.await.expect("join task");
+            assert!(join_result.is_err(), "join during shutdown must fail");
+            shutdown_task.await.expect("shutdown task");
+            assert_eq!(hub.available_room_slots(), slots_before);
+            assert_eq!(
+                hub.room_lifecycle_phase(key).await,
+                RoomLifecyclePhase::Absent
+            );
+            disarm_spawn_room_block(wiki.document_id).await;
+            harness.cleanup().await;
+        },
+    )
     .await;
 }

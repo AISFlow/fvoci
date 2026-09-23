@@ -595,8 +595,7 @@ mod tests {
         write_var_uint(&mut over_count, (MAX_AWARENESS_CLIENTS as u64) + 1);
         assert_eq!(decode_awareness(&over_count), Err(AwarenessError::TooLarge));
 
-        let mut huge = Vec::new();
-        huge.resize(MAX_AWARENESS_BYTES + 1, 0);
+        let huge = vec![0; MAX_AWARENESS_BYTES + 1];
         assert_eq!(decode_awareness(&huge), Err(AwarenessError::TooLarge));
 
         assert_eq!(
@@ -731,7 +730,7 @@ mod tests {
 
         let peer9 = live(9, 3, "peer", serde_json::json!({}));
         assert!(reg
-            .apply_connection_updates(9, &[peer9.clone()], "peer", "B", "#c2410c", g1)
+            .apply_connection_updates(9, std::slice::from_ref(&peer9), "peer", "B", "#c2410c", g1)
             .is_some());
         assert_eq!(decode_awareness(&reg.encode_all()).unwrap().len(), 1);
 

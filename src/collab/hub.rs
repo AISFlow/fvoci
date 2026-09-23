@@ -90,6 +90,23 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn room_member_count(&self, key: RoomKey) -> usize {
+        let Some(slot) = self.room_slot(key).await else {
+            return 0;
+        };
+        let phase = slot.phase.lock().await;
+        match &*phase {
+            RoomPhase::Live(live) => live.members.len(),
+            _ => 0,
+        }
+    }
+
+    #[cfg(feature = "db-tests")]
     pub fn available_room_slots(&self) -> usize {
         self.room_permits.available_permits()
     }
