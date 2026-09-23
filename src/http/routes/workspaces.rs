@@ -1,5 +1,7 @@
+use std::net::SocketAddr;
+
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -13,6 +15,7 @@ use crate::auth::session::SessionUser;
 use crate::db::workspace::{WorkspaceDbError, WorkspaceRole};
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::guard::{check_origin, reject_bearer};
+use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::validate::{normalize_slug, validate_given_name};
 
@@ -145,6 +148,7 @@ async fn get_workspace(
 
 async fn patch_workspace(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
     Path(workspace_id): Path<Uuid>,
@@ -160,12 +164,14 @@ async fn patch_workspace(
     validate_given_name(name.trim())?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::update_workspace_meta(
         &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
         name.trim(),
+        Some(&ip),
     )
     .await
     .map_err(internal)?;
@@ -177,6 +183,7 @@ async fn patch_workspace(
 
 async fn create_workspace(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
     body: Result<Json<CreateWorkspaceBody>, JsonRejection>,
@@ -188,12 +195,14 @@ async fn create_workspace(
     let slug = normalize_slug(&body.slug)?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::create_workspace_as_instance_admin(
         &state.auth.db.pool,
         user_id,
         session_id,
         body.name.trim(),
         &slug,
+        Some(&ip),
     )
     .await
     .map_err(internal)?;
@@ -213,6 +222,7 @@ async fn personal_workspace(
     jar: CookieJar,
 ) -> Result<Json<WorkspaceMetaResponse>, AppError> {
     reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let user_id = parse_user_id(&user.user_id)?;
     let result =
@@ -227,6 +237,7 @@ async fn personal_workspace(
 
 async fn patch_member(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
     Path((workspace_id, target_user_id)): Path<(Uuid, Uuid)>,
@@ -239,6 +250,7 @@ async fn patch_member(
         .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput))?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::set_member_role(
         &state.auth.db.pool,
         workspace_id,
@@ -246,6 +258,7 @@ async fn patch_member(
         session_id,
         target_user_id,
         next_role,
+        Some(&ip),
     )
     .await
     .map_err(internal)?;
@@ -263,6 +276,7 @@ async fn patch_member(
 
 async fn remove_member(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
     Path((workspace_id, target_user_id)): Path<(Uuid, Uuid)>,
@@ -271,12 +285,14 @@ async fn remove_member(
     check_origin(&headers, &state.public_origin)?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::remove_member(
         &state.auth.db.pool,
         workspace_id,
         actor_user_id,
         session_id,
         target_user_id,
+        Some(&ip),
     )
     .await
     .map_err(internal)?;

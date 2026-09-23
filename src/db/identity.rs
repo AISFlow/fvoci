@@ -22,14 +22,14 @@ pub(crate) struct EventAppend {
 }
 
 pub(crate) struct AuditAppend {
-    id: Uuid,
-    workspace_id: Option<Uuid>,
-    actor_user_id: Option<Uuid>,
-    verb: String,
-    target_type: Option<String>,
-    target_id: Option<Uuid>,
-    payload: Value,
-    ip: Option<String>,
+    pub id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub actor_user_id: Option<Uuid>,
+    pub verb: String,
+    pub target_type: Option<String>,
+    pub target_id: Option<Uuid>,
+    pub payload: Value,
+    pub ip: Option<String>,
 }
 
 pub struct SetupSessionParams {

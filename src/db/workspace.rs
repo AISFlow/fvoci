@@ -2,10 +2,8 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{
-    clear_self_user, lock_key_from_uuid, set_self_user, set_system, set_tenant,
-};
-use crate::db::identity::{append_event, lock_sign_in, EventAppend};
+use crate::db::context::{clear_self_user, lock_key_from_uuid, set_self_user, set_tenant};
+use crate::db::identity::{append_audit, append_event, lock_sign_in, AuditAppend, EventAppend};
 
 const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
 
@@ -110,6 +108,31 @@ async fn lock_membership_users(
     Ok(())
 }
 
+async fn session_is_live(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let live: Option<(bool,)> = sqlx::query_as(
+        r#"
+        SELECT (
+            s.revoked_at IS NULL
+            AND s.expires_at > clock_timestamp()
+            AND u.deleted_at IS NULL
+            AND u.suspended_at IS NULL
+        )
+        FROM fvoci.users u
+        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
+        WHERE u.id = $1
+        "#,
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(live.map(|(v,)| v).unwrap_or(false))
+}
+
 async fn recheck_session(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
@@ -136,6 +159,62 @@ async fn recheck_session(
     Ok(live.map(|(v,)| v).unwrap_or(false))
 }
 
+async fn user_is_active(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(bool,)> =
+        sqlx::query_as("SELECT deleted_at IS NULL FROM fvoci.users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(row.map(|(active,)| active).unwrap_or(false))
+}
+
+struct WorkspaceChangeRecord<'a> {
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    verb: &'a str,
+    target_type: &'a str,
+    target_id: Uuid,
+    payload: serde_json::Value,
+    client_ip: Option<&'a str>,
+}
+
+async fn record_workspace_event_and_audit(
+    tx: &mut Transaction<'_, Postgres>,
+    change: WorkspaceChangeRecord<'_>,
+) -> Result<(), sqlx::Error> {
+    append_event(
+        tx,
+        EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(change.workspace_id),
+            actor_user_id: Some(change.actor_user_id),
+            verb: change.verb.to_string(),
+            target_type: Some(change.target_type.to_string()),
+            target_id: Some(change.target_id),
+            payload: change.payload.clone(),
+        },
+    )
+    .await?;
+    append_audit(
+        tx,
+        AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(change.workspace_id),
+            actor_user_id: Some(change.actor_user_id),
+            verb: change.verb.to_string(),
+            target_type: Some(change.target_type.to_string()),
+            target_id: Some(change.target_id),
+            payload: change.payload,
+            ip: change.client_ip.map(str::to_string),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 async fn membership_role(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -149,6 +228,21 @@ async fn membership_role(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
+}
+
+async fn workspace_kind_read(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as("SELECT kind, deleted_at FROM fvoci.workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    match row {
+        Some((kind, deleted)) if deleted.is_none() => Ok(kind),
+        _ => Ok(None),
+    }
 }
 
 async fn workspace_kind(
@@ -214,7 +308,7 @@ pub async fn get_workspace_meta(
 ) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::Forbidden));
     }
@@ -225,6 +319,10 @@ pub async fn get_workspace_meta(
     {
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    if workspace_kind_read(&mut tx, workspace_id).await?.is_none() {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
     }
     let row = sqlx::query_as::<_, (Uuid, String, String)>(
         "SELECT id, name, slug FROM fvoci.workspaces WHERE id = $1 AND deleted_at IS NULL",
@@ -245,12 +343,19 @@ pub async fn update_workspace_meta(
     actor_user_id: Uuid,
     session_id: Uuid,
     name: &str,
+    client_ip: Option<&str>,
 ) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
     if !recheck_session(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    let kind = workspace_kind(&mut tx, workspace_id).await?;
+    if kind.is_none() {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
     }
     let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
     if !role
@@ -260,11 +365,19 @@ pub async fn update_workspace_meta(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::Forbidden));
     }
-    let kind = workspace_kind(&mut tx, workspace_id).await?;
     if kind.as_deref() == Some("personal") {
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::PersonalImmutable));
     }
+    let previous_name: Option<(String,)> =
+        sqlx::query_as("SELECT name FROM fvoci.workspaces WHERE id = $1 AND deleted_at IS NULL")
+            .bind(workspace_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((from_name,)) = previous_name else {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
+    };
     let row = sqlx::query_as::<_, (Uuid, String, String)>(
         r#"
         UPDATE fvoci.workspaces
@@ -277,11 +390,30 @@ pub async fn update_workspace_meta(
     .bind(name)
     .fetch_optional(&mut *tx)
     .await?;
+    let Some((id, name, slug)) = row else {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
+    };
+    let payload = json!({
+        "workspaceId": workspace_id.to_string(),
+        "name": name,
+        "fromName": from_name,
+    });
+    record_workspace_event_and_audit(
+        &mut tx,
+        WorkspaceChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "workspace.name_updated",
+            target_type: "workspace",
+            target_id: workspace_id,
+            payload,
+            client_ip,
+        },
+    )
+    .await?;
     tx.commit().await?;
-    match row {
-        Some((id, name, slug)) => Ok(Ok(WorkspaceMeta { id, name, slug })),
-        None => Ok(Err(WorkspaceDbError::NotFound)),
-    }
+    Ok(Ok(WorkspaceMeta { id, name, slug }))
 }
 
 pub async fn create_workspace_as_instance_admin(
@@ -290,6 +422,7 @@ pub async fn create_workspace_as_instance_admin(
     session_id: Uuid,
     name: &str,
     slug: &str,
+    client_ip: Option<&str>,
 ) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
     let workspace_id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
@@ -337,20 +470,22 @@ pub async fn create_workspace_as_instance_admin(
     .bind(actor_user_id)
     .execute(&mut *tx)
     .await?;
-    set_system(&mut tx).await?;
-    append_event(
+    let payload = json!({
+        "workspaceId": workspace_id.to_string(),
+        "ownerId": actor_user_id.to_string(),
+        "name": name,
+        "slug": slug,
+    });
+    record_workspace_event_and_audit(
         &mut tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: "workspace.created".to_string(),
-            target_type: Some("workspace".to_string()),
-            target_id: Some(workspace_id),
-            payload: json!({
-                "workspaceId": workspace_id.to_string(),
-                "ownerId": actor_user_id.to_string(),
-            }),
+        WorkspaceChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "workspace.created",
+            target_type: "workspace",
+            target_id: workspace_id,
+            payload,
+            client_ip,
         },
     )
     .await?;
@@ -447,6 +582,7 @@ pub async fn set_member_role(
     session_id: Uuid,
     target_user_id: Uuid,
     next_role: WorkspaceRole,
+    client_ip: Option<&str>,
 ) -> Result<Result<MemberRow, WorkspaceDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -460,6 +596,14 @@ pub async fn set_member_role(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::NotFound));
     }
+    let actor_role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    let actor_role = match actor_role {
+        Some(r) if r.at_least(WorkspaceRole::Admin) => r,
+        _ => {
+            tx.rollback().await?;
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+    };
     if kind.as_deref() == Some("personal") {
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::PersonalImmutable));
@@ -468,15 +612,11 @@ pub async fn set_member_role(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::SelfChange));
     }
-    let actor_role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    if !user_is_active(&mut tx, target_user_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
+    }
     let target_role = membership_role(&mut tx, workspace_id, target_user_id).await?;
-    let actor_role = match actor_role {
-        Some(r) if r.at_least(WorkspaceRole::Admin) => r,
-        _ => {
-            tx.rollback().await?;
-            return Ok(Err(WorkspaceDbError::Forbidden));
-        }
-    };
     let target_role = match target_role {
         Some(r) => r,
         None => {
@@ -508,20 +648,21 @@ pub async fn set_member_role(
     .bind(next_role.as_str())
     .execute(&mut *tx)
     .await?;
-    append_event(
+    let payload = json!({
+        "userId": target_user_id.to_string(),
+        "fromRole": target_role.as_str(),
+        "role": next_role.as_str(),
+    });
+    record_workspace_event_and_audit(
         &mut tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: "workspace_member.role_changed".to_string(),
-            target_type: Some("workspace_member".to_string()),
-            target_id: Some(target_user_id),
-            payload: json!({
-                "userId": target_user_id.to_string(),
-                "fromRole": target_role.as_str(),
-                "role": next_role.as_str(),
-            }),
+        WorkspaceChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "workspace_member.role_changed",
+            target_type: "workspace_member",
+            target_id: target_user_id,
+            payload,
+            client_ip,
         },
     )
     .await?;
@@ -536,6 +677,7 @@ pub async fn remove_member(
     actor_user_id: Uuid,
     session_id: Uuid,
     target_user_id: Uuid,
+    client_ip: Option<&str>,
 ) -> Result<Result<(), WorkspaceDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -549,6 +691,14 @@ pub async fn remove_member(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::NotFound));
     }
+    let actor_role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    let actor_role = match actor_role {
+        Some(r) if r.at_least(WorkspaceRole::Admin) => r,
+        _ => {
+            tx.rollback().await?;
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+    };
     if kind.as_deref() == Some("personal") {
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::PersonalImmutable));
@@ -557,15 +707,11 @@ pub async fn remove_member(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::SelfChange));
     }
-    let actor_role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    if !user_is_active(&mut tx, target_user_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
+    }
     let target_role = membership_role(&mut tx, workspace_id, target_user_id).await?;
-    let actor_role = match actor_role {
-        Some(r) if r.at_least(WorkspaceRole::Admin) => r,
-        _ => {
-            tx.rollback().await?;
-            return Ok(Err(WorkspaceDbError::Forbidden));
-        }
-    };
     let target_role = match target_role {
         Some(r) => r,
         None => {
@@ -586,19 +732,20 @@ pub async fn remove_member(
         .bind(target_user_id)
         .execute(&mut *tx)
         .await?;
-    append_event(
+    let payload = json!({
+        "userId": target_user_id.to_string(),
+        "role": target_role.as_str(),
+    });
+    record_workspace_event_and_audit(
         &mut tx,
-        EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: Some(workspace_id),
-            actor_user_id: Some(actor_user_id),
-            verb: "workspace_member.removed".to_string(),
-            target_type: Some("workspace_member".to_string()),
-            target_id: Some(target_user_id),
-            payload: json!({
-                "userId": target_user_id.to_string(),
-                "role": target_role.as_str(),
-            }),
+        WorkspaceChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "workspace_member.removed",
+            target_type: "workspace_member",
+            target_id: target_user_id,
+            payload,
+            client_ip,
         },
     )
     .await?;

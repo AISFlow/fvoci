@@ -788,6 +788,14 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .execute(&admin)
         .await
         .unwrap();
+    sqlx::query("ALTER TABLE fvoci.users DROP CONSTRAINT IF EXISTS users_personal_workspace_fk")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DROP INDEX IF EXISTS fvoci.users_personal_workspace_id_unique")
+        .execute(&admin)
+        .await
+        .unwrap();
     sqlx::query(
         "DROP FUNCTION IF EXISTS public.app_tenant_id(), public.app_system_ctx_on(), public.app_self_user_id()",
     )
@@ -1932,6 +1940,14 @@ async fn migration_001_002_database_upgrades_to_003() {
         .execute(&admin)
         .await
         .unwrap();
+    sqlx::query("ALTER TABLE fvoci.users DROP CONSTRAINT IF EXISTS users_personal_workspace_fk")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DROP INDEX IF EXISTS fvoci.users_personal_workspace_id_unique")
+        .execute(&admin)
+        .await
+        .unwrap();
     sqlx::query("DROP FUNCTION IF EXISTS public.app_self_user_id()")
         .execute(&admin)
         .await
@@ -1949,6 +1965,20 @@ async fn migration_001_002_database_upgrades_to_003() {
             .await
             .unwrap();
     assert!(has_fn.0);
+    let has_fk: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_personal_workspace_fk')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(has_fk.0);
+    let has_idx: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'users_personal_workspace_id_unique')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(has_idx.0);
     let versions: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.schema_migrations")
         .fetch_one(&admin)
         .await
@@ -2433,5 +2463,643 @@ async fn non_instance_admin_cannot_create_workspace() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["code"], "insufficient_permissions");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_name_patch_writes_event_and_audit() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, user_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let peer = std::net::SocketAddr::from(([203, 0, 113, 60], 42424));
+    let (status, body, _, _) = json_request(
+        app,
+        "PATCH",
+        &format!("/api/v1/workspaces/{}", workspace_id.0),
+        Some(json!({"name": "Renamed Co"})),
+        Some(&cookie),
+        &[],
+        Some(peer),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "Renamed Co");
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'workspace.name_updated' AND workspace_id = $1",
+    )
+    .bind(workspace_id.0)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 1);
+    let audits: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'workspace.name_updated' AND actor_user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(audits.0, 1);
+    let payload: (serde_json::Value,) = sqlx::query_as(
+        "SELECT payload FROM fvoci.events WHERE verb = 'workspace.name_updated' AND workspace_id = $1",
+    )
+    .bind(workspace_id.0)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(payload.0["name"], "Renamed Co");
+    assert_eq!(payload.0["fromName"], "Acme");
+    let ip: (Option<String>,) = sqlx::query_as(
+        "SELECT host(ip) FROM fvoci.audit_log WHERE verb = 'workspace.name_updated' AND actor_user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(ip.0.as_deref(), Some("203.0.113.60"));
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_name_event_failure_rolls_back_update() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    install_insert_fail_trigger(&admin, "events", "test_ws_name_event_fail").await;
+    let (status, _, _, _) = json_request(
+        app,
+        "PATCH",
+        &format!("/api/v1/workspaces/{}", workspace_id.0),
+        Some(json!({"name": "Blocked"})),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let name: (String,) = sqlx::query_as("SELECT name FROM fvoci.workspaces WHERE id = $1")
+        .bind(workspace_id.0)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(name.0, "Acme");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_name_audit_failure_rolls_back_update() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    install_insert_fail_trigger(&admin, "audit_log", "test_ws_name_audit_fail").await;
+    let (status, _, _, _) = json_request(
+        app,
+        "PATCH",
+        &format!("/api/v1/workspaces/{}", workspace_id.0),
+        Some(json!({"name": "Blocked"})),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let name: (String,) = sqlx::query_as("SELECT name FROM fvoci.workspaces WHERE id = $1")
+        .bind(workspace_id.0)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(name.0, "Acme");
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'workspace.name_updated' AND workspace_id = $1",
+    )
+    .bind(workspace_id.0)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 0);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_member_audit_failure_rolls_back_role_change() {
+    let harness = TestDb::bootstrap().await;
+    let (app, admin_cookie, _) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let (member_id, _) = create_second_user_session(&harness, "aud@example.com", "Aud").await;
+    fvoci_server::db::workspace::add_membership_for_test(
+        &pool::connect_app(&harness.app_url).await.unwrap(),
+        workspace_id.0,
+        member_id,
+        fvoci_server::db::workspace::WorkspaceRole::Member,
+    )
+    .await
+    .unwrap();
+    install_insert_fail_trigger(&admin, "audit_log", "test_ws_member_audit_fail").await;
+    let (status, _, _, _) = json_request(
+        app,
+        "PATCH",
+        &format!(
+            "/api/v1/workspaces/{}/members/{}",
+            workspace_id.0, member_id
+        ),
+        Some(json!({"role": "admin"})),
+        Some(&admin_cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let role: (String,) = sqlx::query_as(
+        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id.0)
+    .bind(member_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(role.0, "member");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_delete_member_writes_event_and_audit() {
+    let harness = TestDb::bootstrap().await;
+    let (app, admin_cookie, owner_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let (member_id, _) = create_second_user_session(&harness, "del@example.com", "Del").await;
+    fvoci_server::db::workspace::add_membership_for_test(
+        &pool::connect_app(&harness.app_url).await.unwrap(),
+        workspace_id.0,
+        member_id,
+        fvoci_server::db::workspace::WorkspaceRole::Member,
+    )
+    .await
+    .unwrap();
+    let (status, _, _, _) = json_request(
+        app,
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{}/members/{}",
+            workspace_id.0, member_id
+        ),
+        None,
+        Some(&admin_cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let members: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id.0)
+    .bind(member_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(members.0, 0);
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'workspace_member.removed' AND workspace_id = $1",
+    )
+    .bind(workspace_id.0)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 1);
+    let audits: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'workspace_member.removed' AND actor_user_id = $1",
+    )
+    .bind(owner_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(audits.0, 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_delete_member_event_failure_rolls_back_removal() {
+    let harness = TestDb::bootstrap().await;
+    let (app, admin_cookie, _) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let (member_id, _) = create_second_user_session(&harness, "del2@example.com", "Del2").await;
+    fvoci_server::db::workspace::add_membership_for_test(
+        &pool::connect_app(&harness.app_url).await.unwrap(),
+        workspace_id.0,
+        member_id,
+        fvoci_server::db::workspace::WorkspaceRole::Member,
+    )
+    .await
+    .unwrap();
+    install_insert_fail_trigger(&admin, "events", "test_ws_remove_event_fail").await;
+    let (status, _, _, _) = json_request(
+        app,
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{}/members/{}",
+            workspace_id.0, member_id
+        ),
+        None,
+        Some(&admin_cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let members: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id.0)
+    .bind(member_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(members.0, 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_admin_cannot_demote_owner_returns_forbidden() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, owner_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let (admin_id, admin_cookie) =
+        create_second_user_session(&harness, "wsadmin@example.com", "WsAdmin").await;
+    fvoci_server::db::workspace::add_membership_for_test(
+        &pool::connect_app(&harness.app_url).await.unwrap(),
+        workspace_id.0,
+        admin_id,
+        fvoci_server::db::workspace::WorkspaceRole::Admin,
+    )
+    .await
+    .unwrap();
+    admin.close().await;
+    let (status, body, _, _) = json_request(
+        app,
+        "PATCH",
+        &format!("/api/v1/workspaces/{}/members/{}", workspace_id.0, owner_id),
+        Some(json!({"role": "member"})),
+        Some(&admin_cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "cannot_manage_a_role_above_your_own");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn deleted_target_member_patch_returns_not_found_before_mutation() {
+    let harness = TestDb::bootstrap().await;
+    let (app, admin_cookie, _) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let (member_id, _) = create_second_user_session(&harness, "gone@example.com", "Gone").await;
+    fvoci_server::db::workspace::add_membership_for_test(
+        &pool::connect_app(&harness.app_url).await.unwrap(),
+        workspace_id.0,
+        member_id,
+        fvoci_server::db::workspace::WorkspaceRole::Member,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE fvoci.users SET deleted_at = now() WHERE id = $1")
+        .bind(member_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, body, _, _) = json_request(
+        app,
+        "PATCH",
+        &format!(
+            "/api/v1/workspaces/{}/members/{}",
+            workspace_id.0, member_id
+        ),
+        Some(json!({"role": "admin"})),
+        Some(&admin_cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+    let role: (String,) = sqlx::query_as(
+        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id.0)
+    .bind(member_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(role.0, "member");
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'workspace_member.role_changed' AND workspace_id = $1",
+    )
+    .bind(workspace_id.0)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 0);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn nonmember_personal_workspace_member_patch_returns_not_found() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, owner_id) = setup_session(&harness).await;
+    let (_, stranger_cookie) =
+        create_second_user_session(&harness, "stranger@example.com", "Stranger").await;
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&owner_cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let personal_id = body["id"].as_str().unwrap();
+    let (status, body, _, _) = json_request(
+        app,
+        "PATCH",
+        &format!("/api/v1/workspaces/{}/members/{}", personal_id, owner_id),
+        Some(json!({"role": "guest"})),
+        Some(&stranger_cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn personal_workspace_origin_mismatch_returns_forbidden() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&cookie),
+        &[("origin", "http://evil.example.com")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "origin_mismatch");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_mutating_routes_reject_origin_mismatch() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let (member_id, _) = create_second_user_session(&harness, "ori@example.com", "Ori").await;
+    fvoci_server::db::workspace::add_membership_for_test(
+        &pool::connect_app(&harness.app_url).await.unwrap(),
+        workspace_id.0,
+        member_id,
+        fvoci_server::db::workspace::WorkspaceRole::Member,
+    )
+    .await
+    .unwrap();
+    admin.close().await;
+    let evil = &[("origin", "http://evil.example.com")];
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{}", workspace_id.0),
+        Some(json!({"name": "Evil"})),
+        Some(&cookie),
+        evil,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "origin_mismatch");
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!(
+            "/api/v1/workspaces/{}/members/{}",
+            workspace_id.0, member_id
+        ),
+        Some(json!({"role": "admin"})),
+        Some(&cookie),
+        evil,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "origin_mismatch");
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{}/members/{}",
+            workspace_id.0, member_id
+        ),
+        None,
+        Some(&cookie),
+        evil,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "origin_mismatch");
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"name": "Evil", "slug": "evil-ws"})),
+        Some(&cookie),
+        evil,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "origin_mismatch");
+    let _ = owner_id;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn pool_self_user_and_system_ctx_reset_after_commit_rollback_and_error() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, user_id) = setup_session(&harness).await;
+    drop(app);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.app_url)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.self_user_id', $1, true)")
+        .bind(user_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.self_user_id', $1, true)")
+        .bind(user_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.self_user_id', $1, true)")
+        .bind(user_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let bad = sqlx::query("SELECT 1 / 0").execute(&mut *tx).await;
+    assert!(bad.is_err());
+    tx.rollback().await.unwrap();
+
+    let self_user: Option<String> =
+        sqlx::query_scalar("SELECT current_setting('app.self_user_id', true)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(self_user.is_none() || self_user.as_deref() == Some(""));
+    let system_ctx: Option<String> =
+        sqlx::query_scalar("SELECT current_setting('app.system_ctx', true)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(system_ctx.is_none() || system_ctx.as_deref() == Some(""));
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn fresh_migration_003_adds_personal_workspace_constraints() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let has_fk: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_personal_workspace_fk')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(has_fk.0);
+    let has_idx: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'users_personal_workspace_id_unique')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(has_idx.0);
+    admin.close().await;
     harness.cleanup().await;
 }
