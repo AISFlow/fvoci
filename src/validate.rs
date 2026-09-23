@@ -23,15 +23,28 @@ pub fn normalize_email(email: &str) -> Result<String, AppError> {
     Ok(trimmed.to_ascii_lowercase())
 }
 
+fn nfkc_compat(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| {
+            if ('\u{FF01}'..='\u{FF5E}').contains(&c) || ('\u{FF10}'..='\u{FF19}').contains(&c) {
+                char::from_u32(c as u32 - 0xFEE0).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 pub fn normalize_slug(slug: &str) -> Result<String, AppError> {
-    let folded = slug.trim();
-    if !SLUG_RE.is_match(folded) {
+    let folded = nfkc_compat(slug.trim());
+    if !SLUG_RE.is_match(&folded) {
         return Err(AppError::problem(
             axum::http::StatusCode::BAD_REQUEST,
             ProblemCode::InvalidInput,
         ));
     }
-    Ok(folded.to_string())
+    Ok(folded)
 }
 
 pub fn validate_locale(locale: &str) -> Result<(), AppError> {

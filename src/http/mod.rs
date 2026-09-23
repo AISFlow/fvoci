@@ -14,6 +14,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(routes::setup::router())
         .merge(routes::auth::router())
+        .merge(routes::workspaces::router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }

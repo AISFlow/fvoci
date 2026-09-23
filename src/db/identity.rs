@@ -11,17 +11,17 @@ const SESSION_SLIDE_THRESHOLD_SECS: i64 = 15 * 24 * 60 * 60;
 
 const INSTANCE_ADMIN_LOCK_KEY: i64 = 847_291_003_551;
 
-struct EventAppend {
-    id: Uuid,
-    workspace_id: Option<Uuid>,
-    actor_user_id: Option<Uuid>,
-    verb: String,
-    target_type: Option<String>,
-    target_id: Option<Uuid>,
-    payload: Value,
+pub(crate) struct EventAppend {
+    pub id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub actor_user_id: Option<Uuid>,
+    pub verb: String,
+    pub target_type: Option<String>,
+    pub target_id: Option<Uuid>,
+    pub payload: Value,
 }
 
-struct AuditAppend {
+pub(crate) struct AuditAppend {
     id: Uuid,
     workspace_id: Option<Uuid>,
     actor_user_id: Option<Uuid>,
@@ -447,7 +447,7 @@ pub async fn revoke_session(
         lock_sign_in(&mut tx, user_id).await?;
     }
 
-    if let Some((session_id,)) =
+    let revoked = if let Some((session_id,)) =
         sqlx::query_as::<_, (Uuid,)>("SELECT id FROM fvoci.app_session_by_token_hash($1)")
             .bind(token_hash)
             .fetch_optional(&mut *tx)
@@ -457,26 +457,31 @@ pub async fn revoke_session(
             .bind(session_id)
             .execute(&mut *tx)
             .await?;
-    }
+        true
+    } else {
+        false
+    };
 
-    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
-        .execute(&mut *tx)
+    if revoked {
+        sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+            .execute(&mut *tx)
+            .await?;
+
+        let event_id = Uuid::now_v7();
+        append_event(
+            &mut tx,
+            EventAppend {
+                id: event_id,
+                workspace_id: None,
+                actor_user_id,
+                verb: "auth.logout".to_string(),
+                target_type: None,
+                target_id: None,
+                payload: json!({}),
+            },
+        )
         .await?;
-
-    let event_id = Uuid::now_v7();
-    append_event(
-        &mut tx,
-        EventAppend {
-            id: event_id,
-            workspace_id: None,
-            actor_user_id,
-            verb: "auth.logout".to_string(),
-            target_type: None,
-            target_id: None,
-            payload: json!({}),
-        },
-    )
-    .await?;
+    }
 
     tx.commit().await?;
     Ok(())
@@ -722,7 +727,7 @@ pub async fn authenticate_password(
     Ok(Some(user_id))
 }
 
-async fn append_event(
+pub(crate) async fn append_event(
     tx: &mut Transaction<'_, Postgres>,
     row: EventAppend,
 ) -> Result<(), sqlx::Error> {
@@ -745,7 +750,7 @@ async fn append_event(
     Ok(())
 }
 
-async fn append_audit(
+pub(crate) async fn append_audit(
     tx: &mut Transaction<'_, Postgres>,
     row: AuditAppend,
 ) -> Result<(), sqlx::Error> {
