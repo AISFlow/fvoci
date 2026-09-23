@@ -34,6 +34,8 @@ fn spawn(limits: Limits) -> EngineSession {
         engine_bin: bin(),
         limits,
         test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome))
 }
@@ -532,6 +534,8 @@ fn missing_binary_is_worker_failure() {
         engine_bin: PathBuf::from("/no/such/collab-engine"),
         limits: Limits::for_tests(),
         test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
     });
     let err = report.err().expect("spawn fail");
     assert!(

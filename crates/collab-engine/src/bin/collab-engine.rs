@@ -13,6 +13,10 @@ fn main() {
     let mut limits = Limits::default();
     #[cfg(feature = "test-hang")]
     let mut dump_rlimits = false;
+    #[cfg(feature = "test-hang")]
+    let mut test_exit_after_read: Option<i32> = None;
+    #[cfg(feature = "test-hang")]
+    let mut test_close_stdout_hang_ms: Option<u64> = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -37,6 +41,14 @@ fn main() {
             }
             #[cfg(feature = "test-hang")]
             "--dump-rlimits" => dump_rlimits = true,
+            #[cfg(feature = "test-hang")]
+            "--test-exit-after-read" => {
+                test_exit_after_read = Some(parse_i32(&require_arg(&mut args)));
+            }
+            #[cfg(feature = "test-hang")]
+            "--test-close-stdout-then-hang-ms" => {
+                test_close_stdout_hang_ms = Some(parse_u64(&require_arg(&mut args)));
+            }
             "--help" | "-h" => usage(),
             other => {
                 eprintln!("unknown arg {other}");
@@ -63,6 +75,11 @@ fn main() {
         print_applied_rlimits();
         return;
     }
+    #[cfg(feature = "test-hang")]
+    if let Some(_ms) = test_close_stdout_hang_ms {
+        close_own_stdout();
+        hang_until_killed();
+    }
 
     let mut engine = CollabEngine::new(limits);
     let stdin = io::stdin();
@@ -72,6 +89,10 @@ fn main() {
         match read_frame(&mut reader, limits.max_frame_bytes) {
             Ok(None) => break,
             Ok(Some(buf)) => {
+                #[cfg(feature = "test-hang")]
+                if let Some(code) = test_exit_after_read {
+                    std::process::exit(code);
+                }
                 let report = match serde_json::from_slice::<serde_json::Value>(&buf) {
                     Ok(v) => match preflight_wire_json(&v, &limits) {
                         Err(outcome) => EngineReport::new(outcome),
@@ -155,6 +176,26 @@ fn require_arg(args: &mut impl Iterator<Item = String>) -> String {
 
 fn parse_u64(s: &str) -> u64 {
     s.parse().unwrap_or_else(|_| usage())
+}
+
+#[cfg(feature = "test-hang")]
+fn parse_i32(s: &str) -> i32 {
+    s.parse().unwrap_or_else(|_| usage())
+}
+
+#[cfg(feature = "test-hang")]
+fn close_own_stdout() {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::close(libc::STDOUT_FILENO);
+    }
+}
+
+#[cfg(feature = "test-hang")]
+fn hang_until_killed() -> ! {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
 }
 
 fn usage() -> ! {

@@ -21,6 +21,8 @@ fn spawn(limits: Limits) -> EngineSession {
         engine_bin: bin(),
         limits,
         test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome))
 }
@@ -52,6 +54,8 @@ fn extract_killable_timeout_reaps_product_helper() {
         engine_bin: bin(),
         limits,
         test_hang_ms: Some(20_000),
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
     let report = session.call(&Request::Ping);
@@ -106,6 +110,38 @@ fn production_bin_rejects_test_hang_flag() {
     );
 }
 
+#[cfg(not(feature = "test-hang"))]
+#[test]
+fn production_bin_rejects_test_exit_after_read_flag() {
+    let out = Command::new(bin())
+        .args(["--test-exit-after-read", "7"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown arg"),
+        "production must not honor --test-exit-after-read: {stderr}"
+    );
+}
+
+#[cfg(not(feature = "test-hang"))]
+#[test]
+fn production_bin_rejects_close_stdout_hang_flag() {
+    let out = Command::new(bin())
+        .args(["--test-close-stdout-then-hang-ms", "1"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown arg"),
+        "production must not honor --test-close-stdout-then-hang-ms: {stderr}"
+    );
+}
+
 #[cfg(feature = "test-hang")]
 #[test]
 fn child_applies_forwarded_rlimit_as_and_stack() {
@@ -146,6 +182,8 @@ fn zero_timeout_is_invalid_limits() {
         engine_bin: bin(),
         limits,
         test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
     });
     let err = report.err().expect("invalid");
     assert!(
@@ -229,6 +267,8 @@ fn ninth_live_child_is_immediate_resource_limit() {
         engine_bin: bin(),
         limits: Limits::for_tests(),
         test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
     });
     let err = ninth.err().expect("9th must be refused");
     assert!(
@@ -259,6 +299,8 @@ fn write_times_out_when_child_stops_reading() {
         engine_bin: bin(),
         limits,
         test_hang_ms: Some(20_000),
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
     let pid = session.pid().expect("pid");
@@ -281,6 +323,84 @@ fn write_times_out_when_child_stops_reading() {
     assert!(
         started.elapsed().as_secs() < 5,
         "send timeout blocked too long"
+    );
+}
+
+#[cfg(feature = "test-hang")]
+#[test]
+fn abrupt_child_exit_is_crash_not_protocol() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut limits = Limits::for_tests();
+    limits.timeout_ms = 2_000;
+    let started = Instant::now();
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin: bin(),
+        limits,
+        test_hang_ms: None,
+        test_exit_after_read: Some(7),
+        test_close_stdout_hang_ms: None,
+    })
+    .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
+    let pid = session.pid().expect("pid");
+    let report = session.call(&Request::Ping);
+    match report.outcome {
+        EngineStatus::WorkerFailure {
+            reason: WorkerFailureReason::ChildCrash,
+            ref detail,
+        } => {
+            assert!(
+                detail.contains("exit Some(7)"),
+                "abrupt exit must preserve ChildCrash exit code, got {detail}"
+            );
+        }
+        other => panic!("expected ChildCrash for abrupt child exit, got {other:?}"),
+    }
+    if session.pid().is_some() {
+        session.kill_and_reap();
+    }
+    assert_fully_reaped(pid);
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "abrupt-exit observation blocked too long"
+    );
+}
+
+#[cfg(feature = "test-hang")]
+#[test]
+fn stdout_close_with_live_child_is_protocol() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut limits = Limits::for_tests();
+    limits.timeout_ms = 500;
+    let started = Instant::now();
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin: bin(),
+        limits,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: Some(20_000),
+    })
+    .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
+    let pid = session.pid().expect("pid");
+    let report = session.call(&Request::Ping);
+    match report.outcome {
+        EngineStatus::WorkerFailure {
+            reason: WorkerFailureReason::Protocol,
+            ref detail,
+        } => {
+            assert!(
+                detail.contains("child closed stdout before a frame"),
+                "live child stdout close must stay Protocol, got {detail}"
+            );
+        }
+        other => panic!("expected Protocol for live stdout close, got {other:?}"),
+    }
+    if session.pid().is_some() {
+        session.kill_and_reap();
+    }
+    assert_fully_reaped(pid);
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "live-stdout protocol wait blocked too long"
     );
 }
 

@@ -50,6 +50,10 @@ pub struct SpawnRequest {
     pub engine_bin: PathBuf,
     pub limits: Limits,
     pub test_hang_ms: Option<u64>,
+    /// `--features test-hang` only: child exits with this code after one request frame.
+    pub test_exit_after_read: Option<i32>,
+    /// `--features test-hang` only: close stdout then stay alive for this many ms.
+    pub test_close_stdout_hang_ms: Option<u64>,
 }
 
 /// Observation of the last product helper spawned by [`EngineSession::spawn`].
@@ -233,10 +237,15 @@ impl EngineSession {
                     let _ = writer.join();
                     #[cfg(feature = "test-hang")]
                     add_helpers_joined(1);
-                    return result.map_err(|err| {
-                        worker_fail(WorkerFailureReason::Protocol, format!("write frame: {err}"))
-                            .with_child_pid(pid)
-                    });
+                    return match result {
+                        Ok(()) => Ok(()),
+                        Err(err) => Err(classify_pipe_close(
+                            live,
+                            pid,
+                            deadline,
+                            format!("write frame: {err}"),
+                        )),
+                    };
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     if Instant::now() >= deadline {
@@ -335,11 +344,12 @@ impl EngineSession {
                     add_helpers_joined(1);
                     break match result {
                         Ok(Some(buf)) => parse_child_json(&buf, pid),
-                        Ok(None) => Err(worker_fail(
-                            WorkerFailureReason::Protocol,
-                            "child closed stdout before a frame",
-                        )
-                        .with_child_pid(pid)),
+                        Ok(None) => Err(classify_pipe_close(
+                            live,
+                            pid,
+                            deadline,
+                            "child closed stdout before a frame".into(),
+                        )),
                         Err(FrameError::TooLarge { len, max }) => {
                             Err(EngineReport::new(EngineStatus::ResourceLimit {
                                 kind: LimitKind::Frame,
@@ -348,8 +358,7 @@ impl EngineSession {
                             .with_child_pid(pid))
                         }
                         Err(FrameError::Io(detail)) => {
-                            Err(worker_fail(WorkerFailureReason::Protocol, detail)
-                                .with_child_pid(pid))
+                            Err(classify_pipe_close(live, pid, deadline, detail))
                         }
                     };
                 }
@@ -492,8 +501,21 @@ fn spawn_child(req: SpawnRequest, slot: SlotGuard) -> Result<EngineSession, Engi
     if let Some(ms) = req.test_hang_ms {
         cmd.arg("--test-hang-ms").arg(ms.to_string());
     }
+    #[cfg(feature = "test-hang")]
+    if let Some(code) = req.test_exit_after_read {
+        cmd.arg("--test-exit-after-read").arg(code.to_string());
+    }
+    #[cfg(feature = "test-hang")]
+    if let Some(ms) = req.test_close_stdout_hang_ms {
+        cmd.arg("--test-close-stdout-then-hang-ms")
+            .arg(ms.to_string());
+    }
     #[cfg(not(feature = "test-hang"))]
-    let _ = req.test_hang_ms;
+    let _ = (
+        req.test_hang_ms,
+        req.test_exit_after_read,
+        req.test_close_stdout_hang_ms,
+    );
 
     let mut child = cmd.spawn().map_err(|err| {
         worker_fail(
@@ -584,6 +606,53 @@ fn join_pipe(handle: Option<JoinHandle<Result<Vec<u8>, String>>>) -> Result<Vec<
 fn join_any<T>(handle: Option<JoinHandle<T>>) {
     if let Some(h) = handle {
         let _ = h.join();
+    }
+}
+
+/// EOF/IO on a child pipe is not itself a protocol verdict. A crashing child
+/// closes stdout as it dies; reporting `Protocol` there races `try_wait`'s
+/// `ChildCrash` / rlimit mapping. Poll for an observed exit only until the
+/// same request deadline so a live child that closed stdout cannot hang us.
+fn classify_pipe_close(
+    live: &mut LiveChild,
+    pid: u32,
+    deadline: Instant,
+    protocol_detail: String,
+) -> EngineReport {
+    loop {
+        match live.child.try_wait() {
+            Ok(Some(status)) => {
+                let stderr = join_pipe(live.stderr_join.take());
+                #[cfg(feature = "test-hang")]
+                add_helpers_joined(1);
+                return classify_child_exit(status, pid, &stderr);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = live.child.kill();
+                    let _ = live.child.wait();
+                    if live.stderr_join.is_some() {
+                        join_any(live.stderr_join.take());
+                        #[cfg(feature = "test-hang")]
+                        add_helpers_joined(1);
+                    }
+                    return worker_fail(WorkerFailureReason::Protocol, protocol_detail)
+                        .with_child_pid(pid);
+                }
+                thread::sleep(Duration::from_millis(RSS_POLL_MS));
+            }
+            Err(err) => {
+                let _ = live.child.kill();
+                let _ = live.child.wait();
+                if live.stderr_join.is_some() {
+                    join_any(live.stderr_join.take());
+                    #[cfg(feature = "test-hang")]
+                    add_helpers_joined(1);
+                }
+                return worker_fail(WorkerFailureReason::Wait, format!("wait failed: {err}"))
+                    .with_child_pid(pid);
+            }
+        }
     }
 }
 
