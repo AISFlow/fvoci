@@ -441,6 +441,15 @@ async fn wait_for_lock_blocked_by(
     query_like: &str,
     lock_like: &str,
 ) -> i32 {
+    wait_for_lock_blocked_by_any(admin, &[blocker_pid], query_like, lock_like).await
+}
+
+async fn wait_for_lock_blocked_by_any(
+    admin: &PgPool,
+    blocker_pids: &[i32],
+    query_like: &str,
+    lock_like: &str,
+) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         let blocked: Option<i32> = sqlx::query_scalar(
@@ -451,11 +460,11 @@ async fn wait_for_lock_blocked_by(
               AND activity.state = 'active'
               AND activity.query ILIKE $2
               AND activity.query ILIKE $3
-              AND $1 = ANY(pg_blocking_pids(activity.pid))
+              AND pg_blocking_pids(activity.pid) && $1::integer[]
             LIMIT 1
             ",
         )
-        .bind(blocker_pid)
+        .bind(blocker_pids)
         .bind(query_like)
         .bind(lock_like)
         .fetch_optional(admin)
@@ -1041,7 +1050,7 @@ async fn collab_append_loses_to_session_revoke_barrier() {
         let token_hash = fixture.session.token_hash.clone();
         async move { revoke_session(&pool, &token_hash, None).await }
     });
-    wait_for_session_revoke_blocked(&admin, blocker_pid).await;
+    let revoke_pid = wait_for_session_revoke_blocked(&admin, blocker_pid).await;
 
     let append = tokio::spawn({
         let pool = fixture.session.pool.clone();
@@ -1067,17 +1076,13 @@ async fn collab_append_loses_to_session_revoke_barrier() {
             .await
         }
     });
-    let append_started = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < append_started {
-        if !append.is_finished() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(
-        !append.is_finished(),
-        "append finished before concurrent revoke race began"
-    );
+    wait_for_lock_blocked_by_any(
+        &admin,
+        &[revoke_pid, blocker_pid],
+        "%FROM fvoci.users u%",
+        "%FOR UPDATE OF u, s%",
+    )
+    .await;
     barrier.commit().await.unwrap();
 
     tokio::time::timeout(Duration::from_secs(10), revoke)
@@ -1158,14 +1163,20 @@ async fn collab_append_wins_before_session_revoke_barrier() {
             .await
         }
     });
-    wait_for_lock_sign_in_blocked(&admin, blocker_pid).await;
+    let append_pid = wait_for_lock_sign_in_blocked(&admin, blocker_pid).await;
 
     let revoke = tokio::spawn({
         let pool = fixture.session.pool.clone();
         let token_hash = fixture.session.token_hash.clone();
         async move { revoke_session(&pool, &token_hash, None).await }
     });
-    wait_for_users_for_update(&admin, blocker_pid).await;
+    wait_for_lock_blocked_by_any(
+        &admin,
+        &[blocker_pid, append_pid],
+        "%FROM fvoci.users WHERE id = $1 FOR UPDATE%",
+        "%FOR UPDATE%",
+    )
+    .await;
     barrier.commit().await.unwrap();
 
     let result = tokio::time::timeout(Duration::from_secs(10), append)

@@ -583,3 +583,16 @@ EOF 분류 및 32MiB load 대비256MiB AS 부족을 차단으로 확인했다. �
 복원 가능 크기 검사는 유지하되 매번 전체snapshot 전송은 제거한다.
 Grok 후속 task89714a09237e/ctx987fc1e02c63가 같은engine worktree 단독소유.
 Fable ctx05cc4dbef3ca는 보고 후 release; 후속delta는 다시 검토한다.
+
+Fable DB 최종delta e7c6751: 차단0, receipt 권한/identity/성장 의미와 실제경합
+보강 확인. dispatchbbe9ffa4b746는 보고 후 release. 남은 비차단 권고 중
+세션 경합 overlap을 코디네이터가 추가 강화했다. 두 쿼리의 실제 lock wait를
+pg_blocking_pids로 확인한다. 최초 좁은 blocker PID 가정은 wins 검사에서 실패;
+PostgreSQL soft-blocker(앞서 대기 중인 append PID)도 포함해 수정했다.
+동일 명령 `bash scripts/start-test-postgres.sh cargo test --locked --offline
+--features db-tests --test collab_integration session_revoke_barrier` 재검사:
+실제2개 성공2.48초(compile1.42초), 컨테이너 trap 정리, fmt/clippy0.62초 성공.
+제품 DB 구현은 검토된e7c6751과 동일하다.
+
+1899886 원격 native-engine35923500285 양 아키텍처 성공으로 EOF 수정 검증.
+후속 메모리/누적CPU 한도 변경은 아직 미제출이며 이 성공에 포함하지 않는다.
