@@ -1,6 +1,7 @@
 use std::env;
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use crate::auth::password::Keyring;
 
@@ -12,6 +13,7 @@ pub struct Config {
     pub branding_name: String,
     pub public_origin: String,
     pub cookie_secure: bool,
+    pub static_dir: Option<PathBuf>,
 }
 
 impl Clone for Config {
@@ -24,6 +26,7 @@ impl Clone for Config {
             branding_name: self.branding_name.clone(),
             public_origin: self.public_origin.clone(),
             cookie_secure: self.cookie_secure,
+            static_dir: self.static_dir.clone(),
         }
     }
 }
@@ -37,6 +40,7 @@ impl fmt::Debug for Config {
             .field("branding_name", &self.branding_name)
             .field("public_origin", &self.public_origin)
             .field("cookie_secure", &self.cookie_secure)
+            .field("static_dir", &self.static_dir)
             .finish()
     }
 }
@@ -86,6 +90,15 @@ impl Config {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(public_origin.starts_with("https://"));
 
+        let static_dir = match env::var("FVOCI_STATIC_DIR") {
+            Ok(value) if !value.trim().is_empty() => {
+                Some(crate::http::static_assets::validate_static_root(
+                    PathBuf::from(value.trim()).as_path(),
+                )?)
+            }
+            _ => None,
+        };
+
         Ok(Self {
             bind,
             migration_url,
@@ -94,6 +107,7 @@ impl Config {
             branding_name,
             public_origin,
             cookie_secure,
+            static_dir,
         })
     }
 }

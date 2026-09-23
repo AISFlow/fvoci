@@ -7,11 +7,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::api::dto::{LoginBody, LoginResponse, SessionUserOutput};
 use crate::auth::session::SessionUser;
 use crate::db::identity::FamilyNamePatch;
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
@@ -30,19 +29,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(me).patch(patch_me))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LoginBody {
-    email: String,
-    password: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LoginResponse {
-    user_id: String,
 }
 
 async fn login(
@@ -127,10 +113,10 @@ async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<SessionUser>, AppError> {
+) -> Result<Json<SessionUserOutput>, AppError> {
     reject_bearer(&headers)?;
     let user = require_session(&state, &jar).await?;
-    Ok(Json(user))
+    Ok(Json(SessionUserOutput::from(user)))
 }
 
 async fn patch_me(
@@ -138,7 +124,7 @@ async fn patch_me(
     headers: HeaderMap,
     jar: CookieJar,
     body: Result<Json<Value>, JsonRejection>,
-) -> Result<Json<SessionUser>, AppError> {
+) -> Result<Json<SessionUserOutput>, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
     reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
@@ -194,7 +180,7 @@ async fn patch_me(
         .await
         .map_err(internal)?;
     match updated {
-        Ok(user) => Ok(Json(user)),
+        Ok(user) => Ok(Json(SessionUserOutput::from(user))),
         Err(()) => Err(AppError::from_code(ProblemCode::AuthenticationRequired)),
     }
 }

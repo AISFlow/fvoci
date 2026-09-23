@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${ROOT:?ROOT is required}"
+: "${SERVER_LOG:?SERVER_LOG is required}"
+: "${PEPPER:?PEPPER is required}"
+
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+SERVER_BIN="$CARGO_TARGET_DIR/debug/fvoci-server"
+MIGRATE_BIN="$CARGO_TARGET_DIR/debug/fvoci-migrate"
+
+SERVER_PID=""
+cleanup_server() {
+  if [[ -n "${SERVER_PID}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup_server EXIT
+
+PG_CONTAINER="${FVOCI_TEST_PG_CONTAINER:?missing test postgres container}"
+psql_admin() {
+  docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 "$@"
+}
+
+DB_NAME="fvoci_e2e_$(openssl rand -hex 8)"
+ROLE_NAME="fvoci_app_$(echo "$DB_NAME" | tr '-' '_')"
+ROLE_PASSWORD="$(openssl rand -hex 16)"
+psql_admin -d postgres -c "CREATE DATABASE \"$DB_NAME\"" >/dev/null
+
+mapfile -t _db_urls < <(python3 - <<PY
+import os, urllib.parse
+admin = urllib.parse.urlparse(os.environ["TEST_DATABASE_URL"])
+db_name = "${DB_NAME}"
+role = "${ROLE_NAME}"
+role_password = "${ROLE_PASSWORD}"
+admin_db = admin._replace(path=f"/{db_name}")
+print(urllib.parse.urlunparse(admin_db))
+host = admin.hostname or "127.0.0.1"
+port = admin.port or 5432
+user = urllib.parse.quote(role, safe="")
+password = urllib.parse.quote(role_password, safe="")
+print(f"postgres://{user}:{password}@{host}:{port}/{db_name}")
+PY
+)
+DATABASE_URL="${_db_urls[0]}"
+DATABASE_APP_URL="${_db_urls[1]}"
+export DATABASE_URL DATABASE_APP_URL
+"$MIGRATE_BIN" >/dev/null
+psql_admin -d "$DB_NAME" -c "CREATE ROLE \"$ROLE_NAME\" LOGIN PASSWORD '$ROLE_PASSWORD' NOSUPERUSER NOBYPASSRLS" >/dev/null
+docker exec -i "$PG_CONTAINER" psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -v app_role="$ROLE_NAME" \
+  -f - <"$ROOT/scripts/grant-app-role.sql" >/dev/null
+
+export PASSWORD_PEPPER_KEYS="$PEPPER"
+export PASSWORD_PEPPER_ACTIVE_KEY_ID=test
+export FVOCI_BIND="127.0.0.1:0"
+export FVOCI_PUBLIC_ORIGIN="http://127.0.0.1:0"
+export FVOCI_STATIC_DIR="$ROOT/apps/web/dist"
+"$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
+
+BASE_URL=""
+for _ in $(seq 1 120); do
+  BASE_URL="$(grep -m1 'fvoci-server listening on ' "$SERVER_LOG" 2>/dev/null | sed 's/.*listening on //' | tr -d '\r' || true)"
+  if [[ -n "$BASE_URL" ]] && curl -fsS "$BASE_URL/api/v1/setup" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    cat "$SERVER_LOG" >&2
+    exit 1
+  fi
+  sleep 0.25
+done
+
+if [[ -z "$BASE_URL" ]]; then
+  echo "server did not become ready within 30s" >&2
+  cat "$SERVER_LOG" >&2
+  exit 1
+fi
+
+cd "$ROOT/apps/web"
+export PLAYWRIGHT_BASE_URL="$BASE_URL"
+export FVOCI_E2E_ADMIN_DATABASE_URL="$DATABASE_URL"
+"$ROOT/apps/web/node_modules/.bin/playwright" test

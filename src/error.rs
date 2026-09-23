@@ -18,6 +18,11 @@ pub enum ProblemCode {
     SlugTaken,
     OriginMismatch,
     NotFound,
+    InsufficientPermissions,
+    PersonalWorkspaceImmutable,
+    WorkspaceLastOwnerRequired,
+    WorkspaceMemberSelfChangeForbidden,
+    CannotManageRoleAboveOwn,
     RateLimitExceeded,
     InternalError,
 }
@@ -33,6 +38,11 @@ impl ProblemCode {
             Self::SlugTaken => "slug_taken",
             Self::OriginMismatch => "origin_mismatch",
             Self::NotFound => "not_found",
+            Self::InsufficientPermissions => "insufficient_permissions",
+            Self::PersonalWorkspaceImmutable => "personal_workspace_is_immutable",
+            Self::WorkspaceLastOwnerRequired => "workspace_last_owner_required",
+            Self::WorkspaceMemberSelfChangeForbidden => "workspace_member_self_change_forbidden",
+            Self::CannotManageRoleAboveOwn => "cannot_manage_a_role_above_your_own",
             Self::RateLimitExceeded => "rate_limit_exceeded",
             Self::InternalError => "internal_error",
         }
@@ -48,6 +58,13 @@ impl ProblemCode {
             Self::SlugTaken => "slug taken",
             Self::OriginMismatch => "origin mismatch",
             Self::NotFound => "not found",
+            Self::InsufficientPermissions => "insufficient permissions",
+            Self::PersonalWorkspaceImmutable => "personal workspace is immutable",
+            Self::WorkspaceLastOwnerRequired => "workspace must retain an owner",
+            Self::WorkspaceMemberSelfChangeForbidden => {
+                "workspace members cannot change or remove themselves here"
+            }
+            Self::CannotManageRoleAboveOwn => "cannot manage a workspace role above your own",
             Self::RateLimitExceeded => "rate limit exceeded",
             Self::InternalError => "internal error",
         }
@@ -58,7 +75,11 @@ impl ProblemCode {
             Self::AuthenticationRequired | Self::InvalidEmailOrPassword => StatusCode::UNAUTHORIZED,
             Self::InvalidInput | Self::PasswordInvalid => StatusCode::BAD_REQUEST,
             Self::InstanceSetupAlreadyCompleted | Self::NotFound => StatusCode::NOT_FOUND,
-            Self::SlugTaken => StatusCode::CONFLICT,
+            Self::SlugTaken
+            | Self::PersonalWorkspaceImmutable
+            | Self::WorkspaceLastOwnerRequired
+            | Self::WorkspaceMemberSelfChangeForbidden => StatusCode::CONFLICT,
+            Self::InsufficientPermissions | Self::CannotManageRoleAboveOwn => StatusCode::FORBIDDEN,
             Self::OriginMismatch => StatusCode::FORBIDDEN,
             Self::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,

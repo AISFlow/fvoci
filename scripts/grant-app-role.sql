@@ -18,7 +18,8 @@ GRANT SELECT (
     is_instance_admin, auth_generation, personal_workspace_id
 ) ON fvoci.users TO :"app_role";
 GRANT UPDATE (
-    given_name, family_name, text_scale, locale, timezone, week_starts_on, updated_at
+    given_name, family_name, text_scale, locale, timezone, week_starts_on,
+    personal_workspace_id, updated_at
 ) ON fvoci.users TO :"app_role";
 
 REVOKE SELECT, UPDATE ON fvoci.sessions FROM :"app_role";
@@ -40,3 +41,5 @@ REVOKE EXECUTE ON FUNCTION public.app_tenant_id() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.app_tenant_id() TO :"app_role";
 REVOKE EXECUTE ON FUNCTION public.app_system_ctx_on() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.app_system_ctx_on() TO :"app_role";
+REVOKE EXECUTE ON FUNCTION public.app_self_user_id() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.app_self_user_id() TO :"app_role";

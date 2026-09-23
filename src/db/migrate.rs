@@ -4,6 +4,7 @@ use sqlx::PgPool;
 const MIGRATIONS: &[(&str, i32)] = &[
     (include_str!("../../migrations/001_schema.sql"), 1),
     (include_str!("../../migrations/002_functions.sql"), 2),
+    (include_str!("../../migrations/003_workspace.sql"), 3),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;

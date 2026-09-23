@@ -29,24 +29,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     migrate::assert_app_role(&pool).await?;
 
+    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    let addr = listener.local_addr()?;
+    let public_origin =
+        fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
+    eprintln!("fvoci-server listening on http://{addr}");
+
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: config.password_keys.clone(),
         }),
         branding_name: config.branding_name.clone(),
-        public_origin: config.public_origin.clone(),
+        public_origin,
         cookie_secure: config.cookie_secure,
         rate_limiter: RateLimiter::new(),
     };
 
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    let addr = listener.local_addr()?;
-    eprintln!("fvoci-server listening on http://{addr}");
-
     axum::serve(
         listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        router(state, config.static_dir.clone())
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;

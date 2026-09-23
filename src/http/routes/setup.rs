@@ -1,14 +1,6 @@
 use std::net::SocketAddr;
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::{Json, Router};
-use serde::Deserialize;
-use serde::Serialize;
-
+use crate::api::dto::{BrandingOutput, SetupBody, SetupResponse, SetupStatusResponse};
 use crate::auth::service::{SetupError, SetupInstanceInput};
 use crate::error::{AppError, ProblemCode};
 use crate::http::cookie::set_session_cookie;
@@ -19,20 +11,15 @@ use crate::validate::{
     normalize_email, normalize_slug, utf16_len, validate_family_name, validate_given_name,
     validate_password_length,
 };
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/v1/setup", get(setup_status).post(setup_run))
-}
-
-#[derive(Serialize)]
-struct SetupStatusResponse {
-    needed: bool,
-    branding: Branding,
-}
-
-#[derive(Serialize)]
-struct Branding {
-    name: String,
 }
 
 async fn setup_status(
@@ -41,28 +28,10 @@ async fn setup_status(
     let needed = state.auth.setup_needed().await.map_err(internal)?;
     Ok(Json(SetupStatusResponse {
         needed,
-        branding: Branding {
+        branding: BrandingOutput {
             name: state.branding_name.clone(),
         },
     }))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SetupBody {
-    email: String,
-    password: String,
-    given_name: String,
-    family_name: Option<String>,
-    workspace_slug: String,
-    workspace_name: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SetupResponse {
-    user_id: String,
-    workspace_id: String,
 }
 
 async fn setup_run(

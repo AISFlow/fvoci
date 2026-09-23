@@ -1,0 +1,131 @@
+/* Settings share the app sidebar; the content remains a single reading column. */
+.settings-page {
+	min-width: 0;
+	width: 100%;
+	max-width: 48rem;
+	margin-inline: auto;
+	background: var(--background);
+	color: var(--foreground);
+}
+.settings-nav__label {
+	margin: 1rem 0 0.25rem;
+	padding-inline: 0.75rem;
+	color: var(--muted-foreground);
+	font-size: var(--text-caption-size);
+	line-height: var(--text-caption-leading);
+}
+.settings-nav__label:first-child {
+	margin-top: 0;
+}
+
+.settings-stack {
+	display: flex;
+	min-width: 0;
+	flex-direction: column;
+	gap: 1.75rem;
+	max-width: 48rem;
+}
+
+.settings-section {
+	display: flex;
+	flex-direction: column;
+	gap: 0.85rem;
+}
+
+.settings-section__title {
+	margin: 0;
+	color: var(--foreground);
+	font-size: var(--text-title-size);
+	line-height: var(--text-title-leading);
+	font-weight: 650;
+	letter-spacing: -0.01em;
+	word-break: keep-all;
+}
+
+.settings-tabular {
+	font-variant-numeric: tabular-nums;
+}
+
+.settings-section__lede {
+	margin: 0;
+	color: var(--muted-foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	word-break: keep-all;
+}
+
+.settings-form {
+	display: flex;
+	flex-direction: column;
+	gap: 0.65rem;
+}
+
+.settings-form__row {
+	display: flex;
+	min-width: 0;
+	flex-wrap: wrap;
+	align-items: end;
+	gap: 0.5rem;
+}
+
+.settings-form__row > * {
+	min-width: 0;
+}
+
+.settings-notice {
+	margin: 0;
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	word-break: keep-all;
+}
+
+.settings-notice--ok {
+	color: var(--foreground);
+}
+
+.settings-notice--danger {
+	color: var(--destructive);
+}
+
+.settings-disclosure {
+	border-bottom: 1px solid var(--border);
+	padding-block: 0.25rem;
+}
+
+.settings-disclosure > summary {
+	min-height: 2.75rem;
+	cursor: pointer;
+	padding-block: 0.75rem;
+	color: var(--foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	font-weight: 550;
+	word-break: keep-all;
+}
+
+.settings-disclosure__body {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	padding-bottom: 0.85rem;
+}
+
+.settings-project-nav ul {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem;
+}
+
+.settings-file__trigger {
+	display: inline-flex;
+	align-items: center;
+	min-height: 2.75rem;
+	padding-inline: 0.75rem;
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	color: var(--foreground);
+	font-size: var(--text-ui-size);
+	line-height: var(--text-ui-leading);
+	cursor: pointer;
+	word-break: keep-all;
+}

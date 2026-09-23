@@ -9,13 +9,29 @@
 
 ## 현재 수락 지점
 
-**첫 수직 기능 수락**: 코드 `195a58f0a3a9bc77c980279cd7960b1d1ec4f069` (2026-09-24). 실제 설치·비밀번호 로그인·세션 조회/폐기·인증된 프로필 변경을 Rust HTTP → PostgreSQL 앱 역할 → 트랜잭션/이벤트/감사 → 응답까지 검증했다. 이후 문서 커밋은 제품 코드를 바꾸지 않는다. 전체 재작성은 **부분 구현**이며 아래 미착수 범위를 유지한다. Run `run_b01d432a9dee`.
+전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
+
+- PR1 인증 slice merged `fe30bd1`; 원격/실제 DB·HTTP 검증 완료.
+- [PR2](https://github.com/AISFlow/fvoci/pull/2) native 추출 merged `1fc8af347246b1ae26881103d621268155c5c3d7`.
+  검증 HEAD `0d3fb355119adeea8309c3d9a53ba3804dab6cb1`, 최신 로컬 fmt/clippy와
+  production/test-hang 각52개 성공(ignored0). 원격 Rust35908128293 fast/postgres,
+  Native35908128283 actual52+52 성공. Fable12140a6+0d3fb35 차단 없음.
+  기대 HEAD를 지정해 squash merge하고 actual merged/main 반영 확인. Post-merge CI 대기.
+- Workspace backend `bf1ab03`: 로컬 lib7/DB66와 Fable 검토 완료, 원격 수락 전.
+  통합은 `rust-workspace-integration`에서 새 main을 병합했다. UI는 Composer
+  `task_ebca570d74e9 / ctx_4761880b5c3a` (`rust-workspace-web`) 구현 중.
+- 다음 문서 기반은 Grok `task_76f95af84a63 / ctx_db38f9d1f96e`
+  (`rust-wiki-document`, base d5da209): 신규documents route/DB/004/grants와 독립검사.
+  UI와 파일 소유권을 분리했고 production router 연결은 UI 제출 뒤 코디네이터 담당.
+  Workspace/UI PR 수락 뒤 문서/협업 후속 PR로 통합하며 stacked PR은 만들지 않는다.
 
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
-| 설치·세션·인증된 프로필 변경 | identity/routes.ts, core/auth.ts, pg/identity-access.ts, contracts/identity.ts | 활성 사용자, 정지 경합, 프로필/이벤트/감사 원자성 | 첫 수직 기능 검증 완료: src/auth, src/db, src/http | 최종 순수6/DB24 + 실제 두 서버 HTTP·재시작 성공 | 확장 인증·정책/프론트 연결은 아래 미착수 |
-| 협업·문서 처리 | editor/package.json 및 서버 구현 | 저장 문서, 실제 provider, 한글/이모지, 철회·복원 | 제품 미착수, compat 조사 코드 | 좁은 probe 성공·불일치 확인 (아래) | 전체 UI/철회/복원 및 HWP 본문 미구현 |
-| 나머지 제품 기능 | 실제 라우트·UI 목록 조사 예정 | 원본 기능·보안·데이터 계약 | 미착수 | 미실행 | 인증 확장, 워크스페이스/프로젝트/태스크/문서, 첨부/검색/알림/연동, MCP/CLI/운영/백업 |
+| 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 검증 완료, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | 확장 인증·정책·UI 연결 |
+| 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | backend 부분 수락bf1ab03 | lib7/실제DB66/Fable | UI/원격gate 진행, counts·quota·groups·members-list 등 미구현 |
+| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component 검증 완료, PR2 merged | 로컬·CI52+52/Fable | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
+| 문서·협업 | domains/documents/collab, 기존 React/Tiptap | 문서 권한·provider envelope·철회·CRDT 저장/복원 | 문서 기반 구현 중, 협업은 probe만 있음 | 제품 검증 미실행 | 실제2UI 편집·awareness·재접속·persist·새 프로세스 복원 후 편집 |
+| 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
 
@@ -36,7 +52,7 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 인증 확장·PAT·OIDC·MFA·사용자 생명주기 | packages/contracts/src/routes.ts auth/me/admin, core/auth.ts | 세션 폐기, 범위, 마지막 관리자, 탈퇴/복구 | 재작성 미착수 | 미실행 | 첫 로그인 외 전체 |
-| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 재작성 미착수 | 미실행 | 첫 workspace slice에서 실제 앱 역할 RLS 수락 |
+| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend 부분 수락bf1ab03 | 실제 앱 역할DB66/Fable | UI 진행, groups/확장 정책 등 미구현 |
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
 | 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | 재작성 미착수 | 미실행 | 전체 |
 | 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | 재작성 미착수 | 조사 중 | CRDT 호환과 provider 호환을 별도로 검증 |
@@ -133,6 +149,105 @@ DB 검사는 원본 앱 역할 제한과 같은 종류의 실제 비특권 역�
 - bea3243 원격 CI35898327395 성공, auth 제품 코드 변화 없음. 관련 로컬 `bash compat/run.sh` exit0/0.76s; 기존 Yrs6사례와 Hocuspocus envelope 차이를 유지했고 HWPX token은 `안녕`이다. HWP probe는 여전히 CFB/FileHeader만 확인하며 native 본문 추출 성공을 뜻하지 않는다.
 - Fable 비차단 권고: 알 수 없는 세션 로그아웃의 불필요한 이벤트 저장은 Composer 소유 identity.rs에서 다음 slice에 회귀 검사와 함께 수정한다. 빈 familyName 정규화, timezone 제한, sliding cookie 갱신, hash 오류 진단, definer search_path 축소·반환 열 명시 및 관련 검사 보강은 추적 중이다. 기존 slice의 제한을 수락하는 것이며 전체 보안 동등성 선언이 아니다.
 
+### PR #1 머지 완료와 후속 기준
+
+- [PR #1](https://github.com/AISFlow/fvoci/pull/1) 실제 merged/closed 확인. 검증 HEAD `79d7b69a195edfa40b42f92e5b78797ec2e26bb2`를 기대 SHA로 지정한 squash merge SHA는 `fe30bd1b7c6f2632c354c4317c73969789de3f23`; 원격 main도 같은 SHA다.
+- 최신 HEAD Actions35899398689 fast+postgres 성공(lib6/DB24, ignored0). 같은 HEAD의 로컬 fmt/diff/compat 및 generator 격리 검사 성공. Fable의 제품 보안 검토 SHA는864a41e, fixture delta는bea3243; 그 이후 제품 Rust/SQL/테스트/Cargo/CI diff는 없으며 문서·생성기 수정은 코디네이터가 검토·검사했다. 최신 전체 SHA를 Fable이 승인했다고 과장하지 않는다.
+- post-merge push CI35900278533 진행 중. 다음 통합은 main fe30bd1에서 Orca가 만든 `/home/kinesis/orca/workspaces/fvoci/rust-workspace-integration`, branch `fvoci/rust-workspace-integration`에서 수행한다. 이전 daggertooth 및 작업 worktree는 미수락 코드 보존을 위해 삭제하지 않았다.
+- Workspace 첫 제출 `eaec22c`는 빠른 검사만 완료되어 미수락. 후속 검증 task `task_ed526f3bccd5` / `ctx_0c2f0b3e544b`가 같은 Composer 터미널과 파일 소유권을 인계했다. Fable fixed-eaec22c review task `task_d8dd8e9f40cc` / `ctx_441329a7aad7` 진행 중. DB gate 및 보완 지적 해결 후 통합한다.
+- Post-merge CI35900278533은 main fe30bd1에서 fast/postgres 모두 성공했다. Fable은 후속 메시지 msg_3230eda1ade0에서 79d7b69의 문서·생성기 diff도 별도로 검토해 수락 가능하다고 보고했다(전체 후속 workspace 승인 아님).
+- Rust DTO 기반 계약 생성을 위한 공통 의존성은 선택 feature `api-schema`의 utoipa `=6.0.0`으로 고정한다. 공식 crates sparse index와 실제 .crate Cargo.toml에서 MSRV1.88, MIT OR Apache-2.0 및 공식 Git tag를 확인했다. 기존 Rust1.98.1과 호환 범위이며 기본 인증 검사에서는 feature를 활성화하지 않는다. lockfile은 utoipa6.0.0/utoipa-gen6.0.1을 추가하고 기존 패키지 버전을 바꾸지 않았다. 실제 DTO→OpenAPI→TS 생성 연결은 다음 UI task에서 구현하며 의존성 추가만으로 완료 표시하지 않는다.
+
+### 후속 구현 검토·보완 체크포인트
+
+- Workspace 후속 `41da1b58eeef8c3d316e905609acae964afe913a`는 워커가 DB41/41(42.84s)과 lib6/clippy 성공을 보고했으나 **미수락**이다. 고정 eaec22c의 Fable 보고서 `/tmp/fvoci-workspace-review-eaec22c.md`와 후속 diff 확인에서 감사 기록 원자성, 인가 전 개인 workspace 정보 노출, 삭제된 대상 사용자 변경, 개인 workspace FK/unique 보강이 남았다. 보고된 검사 개수만으로 기능을 수락하지 않는다.
+- 보완 task `task_89edff0528f8` / `ctx_66cc86b4814d`는 같은 Composer 터미널·worktree와 src/tests/신규003/grant 스크립트 소유권을 인계했다. 이전 두 제출 커밋은 보존하며 통합 전 차단 지적을 수정한다. 다음은 고정 제출 SHA 검토와 통합 SHA의 실제 DB 검사다.
+- rhwp task `task_d8508aa82dc4` / `ctx_ecd7e7cf88f4`는 native crate를 구현 중이며 아직 실제 native 검사·수락 전이다. upstream Git 전체 이력 fetch가 공유 crate 캐시를 막아 해당 소유 fetch만 중단했다. 정확한 rhwp revision의 얕은 sparse checkout을 준비 단계에서 검증하는 경로로 바꾼다. Cargo.lock만으로 path 의존성 내용이 고정되지는 않으므로 manifest metadata의 revision과 checkout origin/HEAD/clean 검사가 필수다. 테스트/build.rs에서 다운로드하지 않는다.
+- 무거운 검사 슬롯은 Composer DB 종료 후 rhwp native build/test로 이관했다. 두 워커의 파일/target은 별도다. native 완료와 실제 부모 권한·첨부 저장·검색 연결 완료를 구분한다.
+- 공통 통합 `43fc7bb`의 `cargo check --locked --offline --all-targets --features db-tests,api-schema` 성공(새 target17.71s). DTO/TS 생성 기능 자체는 아직 구현 전이다. PR #1 이후 추가 제품 코드는 아직 통합·push하지 않았고 후속 PR도 아직 생성하지 않았다.
+
+- 후속 공통 `bb5c268`: 고정 tower-http0.6.11의 `fs` feature와 필요한4개 lock 패키지 추가. 실제 `cargo check --locked --offline --all-targets --features db-tests,api-schema` exit0/5.76s. Rust의 정적 자산 제공을 위한 준비이며 React 연결 완료는 아니다.
+- Workspace `fcafb5d` 및 개인 workspace 원자 기록 delta `f209310` 제출. Fable `task_cfa3723946b8 / ctx_c0ca3ffbb59b`는 고정 fcafb5d와 별도 f209310 delta를 읽기 전용 검토 중이다. f209310 실제 DB57 중56성공/1실패/ignored0, exit101, 본문52.38s·전체55.27s. 실패는 fresh migration fixture가 스키마 삭제 후 해당 테이블 제약을 삭제하려 한 순서 오류이며 수정·재실행 중이다. 성공으로 기록하지 않는다. 기존35s 예산은 auth24개 기준이고 이번 검사 범위가 늘었으며 같은 범위의 속도 개선을 주장하지 않는다.
+- Native 첫 제출 `222a80b`: Grok는25개 fixture/process 검사 및 clippy 성공을 보고했다. 코디네이터가 해당 task의 빌드된 native CLI를 사용자 HWP/HWPX에 직접 실행해 두 경우 `status:ok`, 본문 `안녕`, `used_preview_stream:false`를 확인했다. 단, helper 종료 검사가 실제 제품 경로를 충분히 검사하지 않고 출력 줄바꿈 한도·누락 내용 분류 결함이 있어 **미수락**이다. 보완 task `task_e512f2100714 / ctx_2e8a2222db50`에 동일 crate 소유권을 이관했다. 첨부·검색·썸네일은 미연결이다.
+
+
+### Workspace integrated candidate bf1ab03 (2026-09-24)
+
+- Composer backend submissions eaec22c/41da1b5/fcafb5d/f209310 and final regression
+  handoff59a24d2 are preserved and integrated in `rust-workspace-integration`.
+  Coordinator bf1ab03 replaces the partial fullwidth mapping with pinned
+  unicode-normalization0.1.25 (MIT OR Apache-2.0, already transitive in the lock).
+  Source3937952 `_shared.ts` requires NFKC then lowercase-only pattern: uppercase
+  and surrounding whitespace are rejected, not silently lowercased/trimmed.
+- Local exact bf1ab03: `cargo fmt --check`0.13s;
+  `cargo check --locked --offline --all-targets --features db-tests,api-schema`0.17s;
+  corresponding clippy `-- -D warnings`2.12s; `cargo test --locked --offline --lib`
+  7 passed/0 ignored, body5.67s, total17.43s including fresh feature build.
+  `bash scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test db_integration`
+  66 passed/0 failed/0 ignored, build5.70s, body57.21s, total65.80s including
+  ephemeral PG setup/cleanup. The prior35s budget measured auth24 tests; added
+  workspace/RLS/revocation/rollback/upgrade cases change the scope. No speedup claimed.
+- Actual app-role tests cover membership self-policy negatives, foreign tenant
+  SQLSTATE42501, commit/rollback/error/dropped-transaction pool reuse, suspension
+  and role/membership/session revocation races, event/audit rollback, concurrent
+  owner demotion/removal exact404 loser and 001/002→003 migration plus grants.
+- Fable fixed-fcafb5d/f209310 review found no remaining blocking product defect but
+  required test corrections. Focused bf1ab03 delta review task6280ab04ca66 /
+  ctx0446f2b9d341 is pending; this is tested candidate code, not final acceptance.
+  Composer prior task89edff0528f8 is settled/released with clean worktree59a24d2.
+- Current narrow API and deployment limits are in RUNNING.md. Counts remain zero
+  placeholders, not computed aggregate parity; quotas/member-list/invitations/
+  shared-view side effects/delete/UI remain incomplete. The Rust-only name and
+  personal-workspace event+audit records intentionally strengthen atomicity.
+- Native [PR2](https://github.com/AISFlow/fvoci/pull/2) is Draft at7034135.
+  Rust35905000682 and documents35905000886 CI jobs succeeded, but independent
+  Fable review found silent failed-section and table-caption omission. Grok task
+  task_9b0113938837 / ctx_ac064a370261 owns crates/document-extract/** in its
+  separate worktree and is fixing these blockers. Native acceptance and attachment
+  product integration remain incomplete; no merge authorized by a green CI alone.
+- Next: finish fixed-SHA delta reviews, accept backend only after closure, assign
+  existing React flow and Rust DTO→OpenAPI→TS implementation to Composer; integrate
+  native fixes into PR2, re-run relevant native gates and remote CI before merge.
+
+
+### 사용자 추가 결정: 초기 협업 수락
+
+서버 스택은 AGENTS.md의 고정 경계를 따른다. workspace 수락 뒤 기존 React
+사용 흐름 → 최소 문서 권한/저장 → Hocuspocus4.6.0 envelope adapter + Yrs 제품
+slice를 우선한다. adapter와 CRDT engine은 분리하고 document-name, Sync,
+Awareness, Auth, QueryAwareness, Stateless persist/persisted/persist-failed,
+Ping/Pong 및 close/error를 원본 provider에 맞춘다. 새 provider로 우회하지 않는다.
+
+두 실제 React/Tiptap 클라이언트에서 동시입력·한글/이모지/문단, offline/reconnect,
+중복/순서변경, awareness, 기존 연결 권한철회, persist/DB/socket 실패를 검사한다.
+원본 clientId/state-vector/updateV1/gc 계약을 유지하며 새 프로세스에서 저장 CRDT를
+복원하고 추가 편집 convergence까지 확인해야 수락한다. 현재는 모두 미구현이다.
+문서별 task 소유권/idle eviction/flush/cancellation/join을 두고 종료는 새 연결 중단
+→write 중단→flush→persist 확인→awareness/socket 종료→task join 순서다.
+첨부 native 검증은 병행하되 무인가 업로드나 가짜 부모 리소스로 제품 연결을 대신하지 않는다.
+
+
+### Workspace backend review closure and active UI task
+
+- Fable5.1 medium `task_6280ab04ca66 / ctx_0446f2b9d341` reviewed fixed
+  `bf1ab031933f5243cd91eceb87f703d9f9469ddc`, read the integrated logs and closed
+  B1/B2/R1–R5. Report `/tmp/fvoci-workspace-review-bf1ab03.md`; no blocking issue
+  for the narrow backend scope. Local backend is accepted; remote workspace CI,
+  UI and whole-domain parity are still pending. Transaction-drop coverage is not
+  an HTTP abort test. Default-feature unused import is assigned for correction.
+- Composer2.5 `task_ebca570d74e9 / ctx_4761880b5c3a`, base `f1b97f0`, owns
+  `rust-workspace-web` apps/web plus the explicitly scoped Rust schema/static
+  transport changes and browser tests. It must reuse actual source React UI,
+  generate TS from Rust DTOs, and run against real Rust+nonprivileged PostgreSQL.
+  Root dependency/lock/CI/migration final ownership remains coordinator; only an
+  exporter bin manifest entry was narrowly delegated. No UI result accepted yet.
+- Grok4.6 `task_8f11568ea952 / ctx_c4d11404c451` is read-only for exact next
+  document/collaboration contracts; no repeat of the already proven envelope
+  mismatch. Source contracts will drive real initial document + two-client slice.
+- Native fix4011be3 was pushed to PR2 after coordinator fmt/clippy and50 tests
+  each production/test-hang passed, ignored0. Remote latest CI and Fable fixed
+  delta review are pending; possible valid-empty HWPX classification remains under
+  investigation through the pinned upstream public parser API. No merge yet.
 ## Native HWP/HWPX 추출 후보 — PR #1 이후
 
 PR #1은 검증 HEAD79d7b69에서 squash merge되어 main `fe30bd1b7c6f2632c354c4317c73969789de3f23`에 반영됐고 post-merge CI35900278533도 성공했다. 이 후속 브랜치는 해당 main에서 분기했으며 workspace 제품 변경과 독립적이다.
@@ -175,6 +290,40 @@ PR #1은 검증 HEAD79d7b69에서 squash merge되어 main `fe30bd1b7c6f2632c354c
   independently generated valid empty documents are tested without claiming that provenance.
 
 
+### 다음 문서/협업 설계 결정
+
+원본 계약 조사 `/tmp/fvoci-document-collab-contract.md`의 wiki-only parentId/null,
+WIKI 번호·tree/get·prosemirror/updateV1/gc:false 계약을 사용한다. 사용자 요구가
+원본보다 우선한다: 원본의 persist 권한 재검사 누락을 복제하지 않고 현재 write
+권한을 트랜잭션에서 보장한다. Node provider 검사만으로2실제UI 수락을 대신하지 않는다.
+현재 단일 프로세스 범위에서 문서별 task를 소유하게 하되 Redis/다중인스턴스 기능은
+미지원으로 추적한다. 데이터 손실 방지를 위해 공유DB에서 중복 room 소유와 오래된
+snapshot 덮어쓰기를 방지하는 경계까지 다음 보안 설계 검토에 포함한다.
+
+
+### 동시편집 보완 수락 계약 (진행 작업 유지)
+
+사용자 보완을 현재 wiki task `ctx_db38f9d1f96e`와 UI task `ctx_4761880b5c3a`에
+전달했다. 원본3937952 및 설치 provider를 기준으로 다음을 제품 구현에서 검사한다.
+
+| 경계 | 필수 보장·회귀 |
+| --- | --- |
+| 인증/room | fvoci_session + 실제 Origin 정책 + 존재/소속/현재 ACL; token은 String(clientID) awareness 선언일 뿐 인증 아님; 각 논리 room 독립 인가 |
+| clientID/readonly | claim 변경 시 기존 Y.Doc/미전송 이력 보존; struct의 과거 clientID를 socket claim으로 제한 금지; Update·SyncStep2 등 모든 변경 거부, 정상 readonly sync 유지 |
+| 철회 순서 | 실제 공유 DB 잠금/조건으로 update-first와 revoke-first를 barrier 검사; 거부 update가 peer나 후속 정상 저장에 섞이지 않음; 철회 후 새 sync/broadcast/awareness 제한, 이미 전달한 데이터 회수 주장 금지 |
+| 수락/영속화 | 입력 검증→현재 인가→durable bounded batch→공유 상태 반영/broadcast/ack 순서 또는 동등 보장; Yrs rollback/Undo로 DB 실패를 취소한다고 가정 금지; txn/lock guard를 await 넘어 보유 금지; commit 불명은 작업 식별·영속 상태 확인 전 성공 ack 금지 |
+| persist barrier | flush 후 persist:id/persisted:id/persist-failed:id 문자열 유지; 연결·room별 앞선 처리 prefix를 고정해 commit 후 같은id 응답; 뒤 편집으로 무한 대기 금지; 거부/실패 prefix를 성공으로 응답 금지 |
+| 삭제/정본 | state-vector만으로 dirty 판정 금지; delete set/pending update와 updateV1 정본 보존, JSON 재생성 금지; 순수/전체 삭제 및 reconnect/restart 검사 |
+| 소유권 | 문서별 task + 지원하는 모든 쓰기 경로, 동시 최초접속/eviction재접속/늦은저장 검사; 단일프로세스 제한·공유DB 중복실행/stale-writer 거부, 자체 lease 플랫폼 금지 |
+| awareness/구조 | 검증 사용자 정보·허용필드·연결세대별 claim, 오래된close가 새presence 제거 금지; UTF16 offset/API 검증; 중간삽입/삭제/선택/서식 및 실제 Tiptap 표/link/mention/참조/고유ID 보존 |
+| crash | persisted 확인→기존client재전송차단→종료/크래시→freshclient DB복원→구조/삭제/후속편집→기존client복귀; commit후ack전/ack후/삭제only/flush경합/오래된저장 회귀 |
+| 자원/수락 | frame 외 연결·room·큐·송신buffer·pendingCRDT·누적메모리·느린peer·빈도·decode/apply/shutdown 한도; 조용한drop후ack 금지; 합성 한글/composition과 실제 OS IME 검증 구분 |
+
+Fable의 우선 독립 검토는 철회/수락 순서, DB 실패 후 공유 상태 오염,
+persist·삭제-only barrier, fresh-client crash 복원이다. 기반 PR은 제한을 명시해
+수락할 수 있으나 미완성 협업을 기본 활성화하거나 전체 협업 완료로 선언하지 않는다.
+
+
 ### CI 병렬화 후보 (2026-09-24)
 
 - main 1fc8af3 이후 별도 CI 변경. 기존 fast/postgres/native-extraction check 이름을
@@ -199,3 +348,73 @@ PR #1은 검증 HEAD79d7b69에서 squash merge되어 main `fe30bd1b7c6f2632c354c
 - 최신 사용자 지침에 따라 동일 통합 코드의 원격 수락 검사를 코디네이터가
   SHA/명령/실행 수와 함께 확인하면 같은 전체 검사를 로컬에서 반복하지 않는다.
   현재 제품 워커2개(UI/wiki)의 소유 경로와 로컬 heavy slot은 유지한다.
+
+
+### CI PR3 수락·머지 및 현재 제품 작업
+
+- [PR3](https://github.com/AISFlow/fvoci/pull/3) merged. 검증 HEAD
+  f707a476af24dfdcb884958bea02a9b2e385c7e1, base1fc8af3, GitHub PR 검사
+  synthetic merge ea994ef. 기대 HEAD를 지정한 squash merge 결과
+  2fb61f9f7f51c6161e2b980ac05906c29a39891a가 실제 main임을 확인했다.
+- Rust35910131684 / Native35910131855 cold attempt1 및 측정용 warm attempt2
+  모두5job 성공. x64/ARM64 lib6·DB24, 각 native test-hang52+production52,
+  ignored0. actionlint1.7.12 성공; Fable5.1 medium task1656eae5142d /
+  ctx0bd3abce1e20 고정f707 검토 차단0, release. 주간 한도 미도달/Opus 미사용.
+- job 초 단위 cold→warm: fast98→35, postgres111→90, ARMpostgres130→72,
+  native178→28, ARMnative184→30. 이전 warm x64 fast30/postgres97/native77.
+  한 번의 hosted sample이며 fast는5초 늘었다. 가장 느린 warm job97→90,
+  native 캐시 복원32초→합계약5초. 테스트 범위는 ARM 추가 외 동일하다.
+  새 native target cache236MB(x64)/227MB(ARM), 이전 main 통합cache1.36GB.
+  캐시 누적은 관찰하되 타 작업 캐시 삭제나 quota 변경을 하지 않았다.
+- main post-merge Rust35910871258 / Native35910871128 실행 중. CI만 수락이며
+  전체앱 ARM 배포·첨부 연결·협업 완료가 아니다. 로컬 full gate 중복 실행 없음.
+- 기존 workspace 통합에 최신 main을03a7509로 normal merge, append 문서
+  충돌만 양쪽 보존하여 해결했다. Composer UI95da0dc를8f4c75a로 반영했으나
+  오류 처리·정적 경로·stale 산출물·브라우저 권한 검사 보완 전 미수락이다.
+  파일 소유권은 Composer UI, 코디네이터 CI/통합, wiki는 제출 후 반납 상태다.
+- Grok wiki task76f95af84a63 / ctxdb38f9d1f96e, ca3193a(base d5da209) 제출/
+  release. 실제 앱 역할 document_integration10/10, body8.35초/전체16.37초.
+  Fable task4863a0e3f377 / ctxffd857259342 고정ca3193a 검토 중. 아직 제품
+  router 미연결이고004 적용에 맞춘 기존 migration count 검사 갱신이 필요하다.
+  workspace/UI 수락 후 최신 main에서 wiki 통합 및 협업 제품 경로로 이어간다.
+
+- PR3 post-merge CI35910871258/35910871128도 실제5job 성공 확인.
+- UI95da0dc의 null 누락·정적 fallback·오류 처리·mtime 기반 gate 및 권한별
+  브라우저 검사 보완은 Composer `task_9799a8e15bca / ctx_54a9dbbcbc45`가
+  rust-workspace-web에서 수행한다. 기존 terminal 재사용 readiness timeout
+  `ctx_4d7ad5d92b50`는 실패로 기록했고, 완료된 이전 dispatch를 공식 release한 뒤
+  같은 task를 지정 Composer2.5 새 terminal로 재시도하여 실제 실행을 확인했다.
+- Fable wiki ca3193a 검토는 인가/원자성 차단0이나 icon:null clearing 결함,
+  fractional 짧은 prefix panic과 실제 product revoke 경합 검사 보완을 발견했다.
+  Grok `task_462531dfba7e / ctx_9a264a3d7793`가 같은8개 소유 경로에서 수정한다.
+  UI E2E가 로컬 heavy slot 소유, wiki DB는 별도 배정 후 실행한다. 검토자는 release.
+
+### Workspace/React 통합 수락 후보
+
+Composer c8d438e를7905973에 통합했다. 해당 worker 기록은 lib11, static5,
+실제 앱 역할/port0 Playwright4 성공(브라우저 약20.6초), clean/release다.
+코디네이터는 누락/nullable 생성 계약을 추가 수정하여 응답 familyName과
+emailVerifiedAt 필수키/null, PATCH 나머지 optional-but-not-null을 실제 parser와
+대조하는 schema 검사를 추가했다. logout 네트워크 실패도 화면에 표시하고
+세션 성공으로 오인하지 않는5번째 브라우저 검사를 추가했다.
+
+통합 로컬 fmt/check/clippy(db-tests,api-schema), schema1, static5, TypeScript
+검사를 수행한다. 새5번째 브라우저 및 기존66 DB 회귀는 독립 Web/Rust 원격 CI에서
+이 통합 HEAD로 실행한 뒤 수락한다. 수정 후 예전 E2E4 성공을 새HEAD 성공으로
+사용하지 않는다. 전체 원본 UI/인증·문서·협업 지원으로 확대하지 않는다.
+
+### PR4 독립 검토 보강
+
+7f30140 원격 fast/lib11, 실제 PostgreSQL66(x64/ARM64), static5/schema1,
+React5, native52×2(x64/ARM64)가 모두 성공했다. Fable medium 고정 SHA 검토에서
+설정 화면의 me 오류 분기가 hook보다 먼저 반환하는 B1을 발견하여 수락 보류했다.
+후속 수정은 hook 순서를 고치고 실제 폐기 세션 쿠키로 설정 페이지를 다시 여는
+브라우저 회귀를 추가한다. nullable workspace rename 스키마, 빈 목록 오류 문구,
+index no-store, 실행 예시 bind/origin, 기본 feature 서버의 E2E 실행도 보강했다.
+현재 변경의 원격 CI·추가 검토는 새 HEAD에서 별도로 확인한다.
+
+비차단 후속: 개인 workspace 생성의 UI 연결, 알려지지 않은 오류 코드의 fallback,
+전체 API path/runtime 자동 대조, dialog 포커스/접근성 복원, 설정 화면의 네트워크
+오류와 인가 거부 구분. 이들을 완료했다고 표시하지 않는다. 문서 워커002bc57은
+icon null/정렬 prefix/parentId 및 실제 멤버 변경 경합을 수정하고 DB13을 통과했으나
+제품 router·migration4 통합은 PR4 수락 후 진행한다.
