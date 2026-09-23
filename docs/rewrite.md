@@ -829,3 +829,41 @@ base8dd30cd, 허용 src/collab/awareness.rs와 inline tests만. 원본 provider 
 Composer room/제품검사 파일과 겹치지 않는다. 두 쓰기 워커가 진행 중이며 기존
 모든 커밋/worktree/retained 자원을 보존한다. 다음 명령은 해당 두 dispatch의
 `orchestration check` 결과 확인, 제출 SHA 검토 후 하나씩 통합·관련 검사다.
+
+PR7 후속 통합 코드 b06a9a849218fc610c0c8d0457f51a41fc5c397d (미수락):
+Composer5737f39/ccbaf0b/aff84e8와 Grok79a26a5를 순차 통합했다. helper 재생성,
+실패한 Load의 unhealthy 상태 유지, snapshot-only 검사, readonly 재접속,
+실제 y-protocols awareness framing·verified user·tombstone을 반영했다.
+코디네이터는 receipt 없는 tail 성공 추정을 제거하고 dirty/unloaded primary 복구,
+malformed empty update 연결 거부, persist의 poisoned/in-flight 거부를 보완했다.
+
+통합 로컬 검증: `cargo check --locked --offline --all-targets --features db-tests`,
+`cargo fmt --check`, `cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings` 성공.
+처음 clippy는 제출된 테스트의 네 경고로 실패했으며 해당 표현을 수정했다.
+`cargo test --locked --offline --lib collab::awareness` 8/8, skip0.
+`FVOCI_COLLAB_ENGINE=$PWD/crates/collab-engine/target/debug/collab-engine scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test collab_product -- --test-threads=4`
+27/27, skip0, compile6.72s/본문42.63s. 뒤이어 종료 barrier와 실제 멤버 수 검사를
+강화한 `collab_lifecycle_` 선택 검사는 9/9, compile4.35s/본문8.18s.
+마지막 변경은 테스트 표현/서식이며 최신 통합 전체 원격 gate는 아직 대기다.
+
+직전 원격 HEAD70088ea의 10 jobs 성공(Rust35934513996/Web35934514155/
+Documents35934514047/Engine35934513998). 새 코드의 원격 증거로 재사용하지 않는다.
+PR7은 Draft/open이며 전체 협업 수락·머지하지 않았다. Composer ctx5e5b80a00614와
+Grok ctxf628dd69a966는 유효 완료 보고 후 release, 커밋/worktree는 보존했다.
+
+다음 진행 (동일 Run run_b01d432a9dee):
+- Composer task_f5025d90f3a7/ctx_477df6e00c12, rust-collab-delivery,
+  baseb06a9a8, transport/room/config/hub/product검사 소유. 현재 recipient 인가,
+  idle 철회·세션 만료, bounded socket/backpressure와 실제 DB 회귀. 현지 heavy bundle 소유.
+- Grok task_11abb7be7bc5/ctx_dc9df3677ffa, rust-collab-ui-acceptance,
+  baseb06a9a8, e2e-pending 협업 검사만 소유. 실제 React 두 클라이언트와 fresh-client
+  crash 복원 검사 구현; heavy 실행은 Composer 종료 후 배정한다.
+- Fable task_81309013842e/ctx_6b5d9cb29a2e, 고정b06a9a8 읽기 전용 검토.
+  요청/유효 Claude Code claude-fable-5-1 medium 일치. 실제 주간 한도 오류 없음,
+  Opus5.5 medium 전환 미실행. 한도 도달 시에만 실제 지원/유효 설정 확인 후 대체한다.
+
+미완료: 수신자 현재 인가·slow-client 처리, SIGTERM helper 회수, 실제 두 UI의
+권한 철회·삭제·fresh-client crash 복원, REST 본문 projection 정합성, 구조 보존.
+제품 협업은 명시적 helper 환경 설정 없이 비활성 상태를 유지한다. OS IME 미검증.
+다음 명령: 위 dispatch의 `orchestration check`로 질문/제출 처리 후 고정 SHA 검토,
+각 제출 하나씩 통합·관련 검사·PR CI 확인. 저장소 밖 소유 불명 자원은 건드리지 않았다.
