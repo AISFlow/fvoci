@@ -55,3 +55,5 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 - 원본 확인: 설치 GET/POST /api/v1/setup, 성공201 {userId,workspaceId}, 재설치404 instance_setup_already_completed. 로그인 POST /api/v1/auth/login, 성공200 {userId}, 누락/오류/정지401 invalid_email_or_password. 설치는 실제 첫 workspace/owner도 원자 생성해야 한다.
 - 협업 위험 probe: Grok task_1532bb645f74 / ctx_00b1baf38504, rust-compat-probe worktree, base31b6790, 단독 소유 compat/**. 저장 updateV1과 Hocuspocus 프레임 호환을 따로 확인하며 실제 UI/권한 검증 미실행을 감추지 않는다.
 - 의존성 공식 확인: docs.rs axum0.8.9/SQLx 및 crates.io 버전 메타데이터(axum0.8.9 MIT/Rust1.80, SQLx0.8.6 MIT OR Apache-2.0, Tokio1.47.1 MIT/Rust1.70, Serde1.0.228 MIT OR Apache-2.0). 선택 실제 버전은 Cargo.lock에서 고정·검증한다. 이 조회는 벤치마크가 아니다.
+
+원본 CI 실패 로그 확인: apps/server/test/init.test.ts:119의 `usage 문자열에 init` 정규식 검사가 중첩 CLI usage의 `>`에서 실패했다. Rust에서는 이 소스 텍스트 정규식 하네스를 복제하지 않고 실제 CLI 호출을 검사한다. 이 원본 실패를 수정하거나 원본 PR에 쓰지는 않았다.
