@@ -764,3 +764,34 @@ Fable의 실제 주간 한도 시에만 검증된 Claude Code Opus5.5 medium 대
 통합한다. 수신자 현재 인가·backpressure·실제 두 React 클라이언트·fresh-client
 crash 복원 검증은 남아 있다. /collab은 명시적 FVOCI_COLLAB_ENGINE 설정이 없으면
 활성화되지 않는다. 협업 지원 완료나 OS IME 검증 완료로 표시하지 않는다.
+
+원격 진행: Draft PR #7 https://github.com/AISFlow/fvoci/pull/7,
+HEAD759ebfe2bc1bf3abce0bf16f8f515fc71c7dc1d6/baseba19932/
+GitHub merge6823f0fe3e90c5eeab27ac932cc68e24315d2c35.
+Rust35933136653/Web35933136821/NativeEngine35933136717/Documents35933136856
+실제 jobs 시작 확인; 아직 성공/수락/머지 아님. 기존 기본 CI8개와 새 collaboration
+x64/ARM64 2개가 독립 실행하며 branch push 중복 실행은 없다.
+
+진행 task: Composer taskae5936c89d8d/ctxb50a9487aa87는 rust-collab-room
+base924fdc6에서 room/validation/engine_bridge/y_sync/product검사 단독 소유,
+현지 무거운 검증도 이 worker 한 묶음에 배정. Grok task602cc4bdbbc3/
+ctx35da0fcbd36e는 rust-collab-react UI ack/실제 reconnect 세대 수정 소유.
+Fable task8dae21bc41e6/ctx7a57eaf493fc는 고정 d5aec64 lifecycle 읽기 전용 검토,
+Claude Code Fable5.1 medium 요청/유효 설정과 turn 시작 확인. quota 대체 없음.
+
+후속 차단 근거: src/main.rs가 hub.shutdown을 호출하지 않아 explicit hub 검사와
+실제 프로세스 종료 보장을 구분해야 한다. src/collab/awareness.rs의 chunk별
+길이 framing은 실제 y-protocols의 count→clientID→clock→JSON string과 다르다.
+원본 collab.ts205–262의 user 중첩/허용 cursor·block·title/null 계약과 현재
+sanitize 결과도 다르며 generation 증가/삭제 tombstone 전달이 필요하다.
+compat/fixtures/hocus-wire.json의 실제 provider awareness fixture를 재사용하여
+제품 parser/registry의 독립 회귀를 추가할 다음 좁은 작업으로 남긴다.
+
+PR7 첫 CI 결과: HEAD759ebfe에서 fast·collaboration x64/ARM64·Web·rhwp2·
+engine2 성공, postgres x64/ARM64 실패(전체10 jobs 중8성공2실패).
+실패는 `append_rejects_state_budget_exhaustion`이 64행 fixture에 expected_tail=0을
+전달해 StateBudgetExceeded 이전 StaleCutoff를 받은 것. 제품 조건을 약화하지 않고
+fixture expected_tail을64로 맞춘 e245122의 실제 PostgreSQL 단일 회귀가 성공했다
+(`scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test collab_integration append_rejects_state_budget_exhaustion -- --exact`,
+compile4.95s/본문2.63s, 1passed/21filtered/0ignored). 전체 원격 gate는 재실행 필요.
+Web 성공은 현재 등록된 기존 사용자 흐름이며 e2e-pending 협업 수락을 포함하지 않는다.
