@@ -24,9 +24,11 @@ required-features = ["db-tests"]
 
 [dependencies]
 argon2 = "0.5"
-axum = { version = "0.8", default-features = false, features = ["macros", "json", "form", "query", "matched-path", "original-uri", "tokio", "http1"] }
+axum = { version = "0.8", default-features = false, features = ["macros", "json", "form", "query", "matched-path", "original-uri", "tokio", "http1", "ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 base64 = "0.22"
+collab-engine = { path = "crates/collab-engine", default-features = false }
+futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 hex = "0.4"
 hmac = "0.12"
@@ -49,6 +51,7 @@ uuid = { version = "1", features = ["v7", "serde"] }
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
 
 [dev-dependencies]
+tokio-tungstenite = "=0.29.0"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
 

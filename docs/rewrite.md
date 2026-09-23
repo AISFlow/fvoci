@@ -30,7 +30,7 @@
 | 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 검증 완료, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | 확장 인증·정책·UI 연결 |
 | 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락5d8cac8, PR4 merged | lib12/DB66 양 아키텍처/React6/CI/Fable | counts·quota·groups·members-list 등 미구현 |
 | HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component 검증 완료, PR2 merged | 로컬·CI52+52/Fable | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
-| 문서·협업 | domains/documents/collab, 기존 React/Tiptap | 문서 권한·provider envelope·철회·CRDT 저장/복원 | wiki 기반 PR5 통합 중; codec 교차 검토 중, /collab 미연결 | 문서 워커DB13, 통합 원격 미수락 | 실제2UI 편집·awareness·재접속·persist·새 프로세스 복원 후 편집 |
+| 문서·협업 | domains/documents/collab, 기존 React/Tiptap | 문서 권한·provider envelope·철회·CRDT 저장/복원 | wiki PR5 수락; codec/DB/native engine PR6 수락, /collab 미연결 | PR5/6 실제 앱역할 DB·양 아키텍처 CI/Fable 통과 | 실제2UI 편집·awareness·재접속·persist·새 프로세스 복원 후 편집 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
@@ -55,7 +55,7 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend/React 수락5d8cac8, PR4 merged | 실제 앱 역할DB66 양 아키텍처/React6/CI/Fable | groups/확장 정책 등 미구현 |
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
 | 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata 부분 구현 PR5 | 워커DB13, 통합/UI 검증 진행 | 본문 편집·댓글·공유·리비전 미구현 |
-| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec 부분 구현, 제품 미연결 | 실제 provider fixture 교차 검토 중 | 문서/인가 기반 뒤 durable Yrs·실제2UI 수락 필요 |
+| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine 기반 PR6 수락, 제품 미연결 | provider fixture11/native35·38 양 아키텍처 검증 | 문서/인가 기반 뒤 durable Yrs·실제2UI 수락 필요 |
 | 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | 재작성 미착수 | 조사 중 | native 대체 실증 필요 |
 | 검색·색인·AI | server domains/search, packages/search, routes.ts ai | 검색에서도 인가·철회·색인 복구 | 재작성 미착수 | 미실행 | 전체 |
 | 알림·메일·webhook·연동 | server domains/notifications, packages/jobs, routes.ts github/webhooks | outbox·커밋 후 전달·중복/재시도 | 재작성 미착수 | 미실행 | 전체 |
@@ -608,3 +608,38 @@ worker35검사10.05초/test-hang38검사12.34초, clippy각0.53/0.51초 성공.
 worktree/커밋 보존. 통합 fmt 성공. Fable5.1medium 요청/유효 설정의
 읽기 전용 task38dbfeb88a25/ctx68339aebfecd가13812ed delta를 검토 중이다.
 원격8job 최종 결과·독립 검토 전 PR6 Draft/미수락; /collab 제품 연결은 미구현.
+
+### PR6 기반 수락 및 실제 동시편집 착수
+
+PR6 https://github.com/AISFlow/fvoci/pull/6 merged. 수락 HEAD
+`e0b6adecad2ebf59a17a5f9dd7d2a6eb80a7d69d`, 코드 검토13812ed,
+GitHub 합성170374a(main421e70b). 머지/main SHA
+`ba19932b03a98a69b24479e33ade68946b5bbd47` 실제 확인.
+Rust35926096857/Web35926096961/Native documents35926096855/Native engine35926096916
+8job 성공: lib24/codec11, DB22+66+13 각각 x64·ARM64 ignored0, React13,
+engine worker35/test-hang38 각각 양 아키텍처. 최장 x64 DB job225초,
+engine x64/ARM45/48초. 필요한 원격 검사와 동등한 전체 로컬 반복은 하지 않았다.
+Fable5.1 medium 최종13812ed delta 검토 차단0; 독립 scratch native35/38,
+실제 stack/순차 distinct-tail28.9MiB load 재현도 성공. ctx68339aebfecd release.
+주간 한도 오류·Opus 대체는 발생하지 않았다.
+
+남은 engine 비차단 회귀 권고: distinct-tail fixture 추가, 실제 stack 결과와
+exit-first 경로의 결정적 검사. 중요한 제품 선행 위험: 서로 다른 client가 같은
+위치에 대량 삽입한7MiB 상태가 Yrs/Yjs conflict scan 비용 때문에8초 reload를
+넘겼다. helper는 kill/reap로 제한되지만 byte cap만으로 ack된 데이터의 복원을
+보장할 수 없다. 실제 쓰기 수락 전에 proposed durable state의 bounded recovery를
+검증하거나 동등한 보장을 마련하고 회귀로 고정한다. 제한을 늘려 숨기지 않는다.
+전체snapshot capacity encode 비용(대표7.4MiB release100ms)도 batch 비용에 포함한다.
+/콜랩 제품 경로·두 React/Tiptap·persist barrier·fresh-client crash는 아직 미수락.
+
+다음 통합 worktree `rust-collab-live`, base ba19932. axum0.8.9의 공식 로컬
+manifest ws→tokio-tungstenite0.29를 대조하고 ws feature와 native parent API를
+연결할 의존성만 준비한다. root는 collab-engine default-features=false로
+Yrs 엔진 빌드를 분리한다. 공개 registry fetch는 검사 전 명시 실행.
+Grok task9d8a756baf43/ctx259ebcae441c: rust-collab-react base ba19932,
+packages/editor/** 및 apps/web/**(generated API 제외), web manifest/lock 단독위임.
+실제 source editor/session/schema 연결과 관련 검사를 구현 중. Cargo/CI/migration
+및 통합 상태 문서는 코디네이터 소유다. 동시 쓰기 최대2 유지.
+main post-merge Rust35927307111/Web35927307116 진행 중, native35927307145/35927307100 성공.
+재개: 실제 task/미커밋 대조→Rust room/transport 작업 배정→고정 제출 통합→
+실제 두 UI/인가·철회·삭제·fresh crash 검증 및 Fable 검토.
