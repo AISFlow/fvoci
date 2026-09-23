@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 
 use collab_engine::limits::Limits;
@@ -14,6 +15,7 @@ pub struct EngineBridge {
     tx: Option<mpsc::Sender<BridgeJob>>,
     engine_bin: PathBuf,
     limits: Limits,
+    ops_used: Arc<AtomicU32>,
     join: JoinHandle<()>,
 }
 
@@ -33,9 +35,11 @@ impl EngineBridge {
     pub fn spawn(engine_bin: PathBuf, limits: Limits) -> Result<Self, EngineReport> {
         let (tx, rx) = mpsc::channel();
         let bin = engine_bin.clone();
+        let ops_used = Arc::new(AtomicU32::new(0));
+        let ops_tracker = ops_used.clone();
         let join = thread::Builder::new()
             .name("fvoci-collab-engine".into())
-            .spawn(move || worker_loop(rx, engine_bin, limits))
+            .spawn(move || worker_loop(rx, engine_bin, limits, ops_tracker))
             .map_err(|e| {
                 EngineReport::new(EngineStatus::WorkerFailure {
                     reason: collab_engine::outcome::WorkerFailureReason::Spawn,
@@ -46,6 +50,7 @@ impl EngineBridge {
             tx: Some(tx),
             engine_bin: bin,
             limits,
+            ops_used,
             join,
         })
     }
@@ -97,6 +102,17 @@ impl EngineBridge {
     pub fn limits(&self) -> Limits {
         self.limits
     }
+
+    /// Child op count since the last recycle (each engine request counts as one).
+    pub fn ops_used(&self) -> u32 {
+        self.ops_used.load(Ordering::Relaxed)
+    }
+
+    /// True when the next op would hit the child's hard cap.
+    pub fn needs_recycle(&self) -> bool {
+        let max = self.limits.max_ops;
+        max > 0 && self.ops_used() >= max - 1
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,15 +120,22 @@ pub enum BridgeError {
     Dead,
 }
 
-fn worker_loop(rx: mpsc::Receiver<BridgeJob>, engine_bin: PathBuf, limits: Limits) {
+fn worker_loop(
+    rx: mpsc::Receiver<BridgeJob>,
+    engine_bin: PathBuf,
+    limits: Limits,
+    ops_used: Arc<AtomicU32>,
+) {
     let mut session = match spawn_session(&engine_bin, limits) {
         Ok(session) => session,
         Err(_) => return,
     };
+    ops_used.store(0, Ordering::Relaxed);
     while let Ok(job) = rx.recv() {
         match job {
             BridgeJob::Call { request, reply } => {
                 let report = session.call(&request);
+                ops_used.fetch_add(1, Ordering::Relaxed);
                 let _ = reply.send(report);
             }
             BridgeJob::Recycle { reply } => {
@@ -121,6 +144,7 @@ fn worker_loop(rx: mpsc::Receiver<BridgeJob>, engine_bin: PathBuf, limits: Limit
                     Ok(s) => s,
                     Err(_) => break,
                 };
+                ops_used.store(0, Ordering::Relaxed);
                 let _ = reply.send(());
             }
             BridgeJob::Stop { reply } => {

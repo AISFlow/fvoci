@@ -179,7 +179,10 @@ struct RoomActor {
     connections: HashMap<Uuid, ConnectionState>,
     awareness: AwarenessRegistry,
     fifo_seq: u64,
-    persist_failed: bool,
+    /// Last compaction attempt failed; auto-compact backs off until a manual persist succeeds.
+    compact_unhealthy: bool,
+    primary_loaded: bool,
+    primary_dirty: bool,
     client_id_owner: HashMap<u32, (Uuid, Instant)>,
     shutting_down: bool,
     last_acl_poll: Instant,
@@ -214,7 +217,9 @@ pub async fn spawn_room(
         connections: HashMap::new(),
         awareness: AwarenessRegistry::new(),
         fifo_seq: 0,
-        persist_failed: false,
+        compact_unhealthy: false,
+        primary_loaded: false,
+        primary_dirty: false,
         client_id_owner: HashMap::new(),
         shutting_down: false,
         last_acl_poll: Instant::now(),
@@ -355,9 +360,14 @@ impl RoomActor {
                 CollabDbError::StaleWriter => JoinError::WriterStale,
                 _ => JoinError::AdmissionDenied,
             })?;
-            self.writer_generation = Some(claim.writer_generation);
             self.set_committed_from_load(&claim.load);
+            if self.primary_loaded {
+                let _ = self.engine.recycle().await;
+            }
             self.load_engine_primary().await?;
+            self.writer_generation = Some(claim.writer_generation);
+            self.primary_loaded = true;
+            self.primary_dirty = false;
         } else if self.writer_generation.is_none() && read_only {
             let load = load_collab_readonly(
                 &self.pool,
@@ -371,6 +381,8 @@ impl RoomActor {
             let load = load.map_err(|_| JoinError::AdmissionDenied)?;
             self.set_committed_from_load(&load);
             self.load_engine_primary().await?;
+            self.primary_loaded = true;
+            self.primary_dirty = false;
         }
         if !self.reserve_client_id(join.conn.client_id, join.conn.session.user_id) {
             return Err(JoinError::AdmissionDenied);
@@ -567,6 +579,9 @@ impl RoomActor {
         };
         match step {
             SyncStep::Step1 => {
+                if self.ensure_primary_capacity().await.is_err() {
+                    return;
+                }
                 let report = match self
                     .engine
                     .call(Request::Sync {
@@ -595,6 +610,27 @@ impl RoomActor {
                     )
                     .await;
                 }
+                let inspect = match self.engine.call(Request::Inspect).await {
+                    Ok(report) => report,
+                    Err(BridgeError::Dead) => return,
+                };
+                if let EngineStatus::Ok {
+                    state_vector_b64: Some(sv_b64),
+                    ..
+                } = inspect.outcome
+                {
+                    let sv = b64::decode(&sv_b64).unwrap_or_default();
+                    let y_protocol = encode_sync_payload(SyncStep::Step1, &sv);
+                    self.send_document(
+                        events,
+                        routing_key,
+                        DocumentMessage::Sync(crate::collab::wire::SyncMessage {
+                            step: SyncStep::Step1,
+                            y_protocol,
+                        }),
+                    )
+                    .await;
+                }
             }
             SyncStep::Step2 | SyncStep::Update => {
                 if read_only && !is_empty_update(&payload) {
@@ -612,6 +648,11 @@ impl RoomActor {
                 }
                 if let Some(c) = self.connections.get_mut(&conn_id) {
                     c.in_flight = true;
+                }
+
+                if self.ensure_primary_capacity().await.is_err() {
+                    self.reject_candidate(conn_id, events, routing_key).await;
+                    return;
                 }
 
                 let validation = validate_recovery_bundle(
@@ -672,47 +713,19 @@ impl RoomActor {
                         return;
                     }
                     Ok(Err(_)) | Err(_) => {
-                        match verify_collab_operation(
-                            &self.pool,
-                            VerifyCollabInput {
-                                workspace_id: self.workspace_id,
+                        match self
+                            .reconcile_ambiguous_append(
                                 actor_user_id,
                                 session_id,
-                                document_id: self.document_id,
                                 op_id,
-                                expected_payload_len: payload.len() as i64,
-                                expected_payload_sha256: &digest,
-                                expected_actor_user_id: actor_user_id,
-                            },
-                        )
-                        .await
+                                expected_tail,
+                                &payload,
+                                &digest,
+                            )
+                            .await
                         {
-                            Ok(Ok(lookup)) => AppendCollabResult::DuplicateAck { seq: lookup.seq },
-                            Ok(Err(CollabDbError::NotFound)) => {
-                                match append_collab_update(
-                                    &self.pool,
-                                    AppendCollabInput {
-                                        workspace_id: self.workspace_id,
-                                        actor_user_id,
-                                        session_id,
-                                        document_id: self.document_id,
-                                        writer_generation,
-                                        expected_tail_seq: expected_tail,
-                                        op_id,
-                                        payload: &payload,
-                                        client_ip: None,
-                                    },
-                                )
-                                .await
-                                {
-                                    Ok(Ok(result)) => result,
-                                    _ => {
-                                        self.reject_candidate(conn_id, events, routing_key).await;
-                                        return;
-                                    }
-                                }
-                            }
-                            _ => {
+                            Some(result) => result,
+                            None => {
                                 self.reject_candidate(conn_id, events, routing_key).await;
                                 return;
                             }
@@ -722,7 +735,14 @@ impl RoomActor {
 
                 let seq = match committed {
                     AppendCollabResult::Committed { seq }
-                    | AppendCollabResult::DuplicateAck { seq } => seq,
+                    | AppendCollabResult::DuplicateAck { seq } => {
+                        if seq != expected_tail + 1 {
+                            self.fatal_room_divergence(actor_user_id, session_id).await;
+                            self.reject_candidate(conn_id, events, routing_key).await;
+                            return;
+                        }
+                        seq
+                    }
                 };
 
                 self.committed.tail_payloads.push(payload.clone());
@@ -730,13 +750,9 @@ impl RoomActor {
                 self.fifo_seq += 1;
                 let op_prefix = self.fifo_seq;
 
-                if !self.apply_primary(&payload).await {
-                    self.reload_primary_from_committed().await;
-                    self.reject_candidate(conn_id, events, routing_key).await;
-                    return;
-                }
+                self.broadcast_update(&sync.y_protocol);
+                self.integrate_committed_update(&payload).await;
 
-                self.broadcast_update(routing_key, &sync.y_protocol);
                 self.send_sync_status(events, routing_key, true).await;
                 if let Some(c) = self.connections.get_mut(&conn_id) {
                     c.in_flight = false;
@@ -773,7 +789,9 @@ impl RoomActor {
         events: &mpsc::Sender<RoomClientEvent>,
         routing_key: &str,
     ) {
-        self.reload_primary_from_committed().await;
+        if self.primary_dirty {
+            let _ = self.reload_primary_from_committed().await;
+        }
         if let Some(c) = self.connections.get_mut(&conn_id) {
             c.in_flight = false;
             c.poisoned = true;
@@ -782,11 +800,119 @@ impl RoomActor {
         self.close_connection(conn_id, 1008, "update rejected");
     }
 
+    async fn reconcile_ambiguous_append(
+        &mut self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        op_id: Uuid,
+        expected_tail: i64,
+        payload: &[u8],
+        digest: &[u8],
+    ) -> Option<AppendCollabResult> {
+        match verify_collab_operation(
+            &self.pool,
+            VerifyCollabInput {
+                workspace_id: self.workspace_id,
+                actor_user_id,
+                session_id,
+                document_id: self.document_id,
+                op_id,
+                expected_payload_len: payload.len() as i64,
+                expected_payload_sha256: digest,
+                expected_actor_user_id: actor_user_id,
+            },
+        )
+        .await
+        {
+            Ok(Ok(lookup)) => Some(AppendCollabResult::DuplicateAck { seq: lookup.seq }),
+            Ok(Err(CollabDbError::NotFound)) => {
+                match load_collab_readonly(
+                    &self.pool,
+                    self.workspace_id,
+                    actor_user_id,
+                    session_id,
+                    self.document_id,
+                )
+                .await
+                {
+                    Ok(Ok(load)) => {
+                        if let Some(row) = load.tail.iter().find(|r| r.op_id == op_id) {
+                            self.set_committed_from_load(&load);
+                            return Some(AppendCollabResult::DuplicateAck { seq: row.seq });
+                        }
+                        if load.tail_seq > expected_tail {
+                            self.fatal_room_divergence(actor_user_id, session_id).await;
+                            return None;
+                        }
+                        None
+                    }
+                    _ => {
+                        self.fatal_room_divergence(actor_user_id, session_id).await;
+                        None
+                    }
+                }
+            }
+            Ok(Err(CollabDbError::StaleWriter | CollabDbError::StaleCutoff)) => {
+                self.fatal_room_divergence(actor_user_id, session_id).await;
+                None
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.fatal_room_divergence(actor_user_id, session_id).await;
+                None
+            }
+        }
+    }
+
     fn fatal_writer_stale(&mut self) {
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
             self.close_connection(conn_id, 1008, "writer stale");
         }
         self.writer_generation = None;
+    }
+
+    async fn fatal_room_divergence(&mut self, actor_user_id: Uuid, session_id: Uuid) {
+        if let Ok(Ok(load)) = load_collab_readonly(
+            &self.pool,
+            self.workspace_id,
+            actor_user_id,
+            session_id,
+            self.document_id,
+        )
+        .await
+        {
+            self.set_committed_from_load(&load);
+            let _ = self.engine.recycle().await;
+            let _ = self.load_engine_primary().await;
+            self.primary_loaded = true;
+            self.primary_dirty = false;
+        }
+        self.writer_generation = None;
+        for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
+            self.close_connection(conn_id, 1011, "room state diverged");
+        }
+    }
+
+    async fn ensure_primary_capacity(&mut self) -> Result<(), JoinError> {
+        if self.engine.needs_recycle() {
+            let _ = self.engine.recycle().await;
+            self.load_engine_primary().await?;
+            self.primary_loaded = true;
+            self.primary_dirty = false;
+        }
+        Ok(())
+    }
+
+    async fn integrate_committed_update(&mut self, payload: &[u8]) {
+        if self.engine.needs_recycle() {
+            let _ = self.reload_primary_from_committed().await;
+            return;
+        }
+        self.primary_dirty = true;
+        if !self.apply_primary(payload).await {
+            let _ = self.reload_primary_from_committed().await;
+        } else {
+            self.primary_dirty = false;
+        }
     }
 
     async fn apply_primary(&mut self, payload: &[u8]) -> bool {
@@ -807,6 +933,8 @@ impl RoomActor {
     async fn reload_primary_from_committed(&mut self) {
         let _ = self.engine.recycle().await;
         let _ = self.load_engine_primary().await;
+        self.primary_loaded = true;
+        self.primary_dirty = false;
     }
 
     async fn load_engine_primary(&mut self) -> Result<(), JoinError> {
@@ -857,17 +985,12 @@ impl RoomActor {
     async fn handle_stateless(
         &mut self,
         conn_id: Uuid,
-        events: &mpsc::Sender<RoomClientEvent>,
-        routing_key: &str,
+        _events: &mpsc::Sender<RoomClientEvent>,
+        _routing_key: &str,
         payload: String,
     ) {
         if let Some(request_id) = payload.strip_prefix("persist:") {
             if let Ok(id) = Uuid::parse_str(request_id) {
-                if self.persist_failed {
-                    self.send_stateless(events, routing_key, format!("persist-failed:{id}"))
-                        .await;
-                    return;
-                }
                 let prefix = self.fifo_seq;
                 if let Some(conn) = self.connections.get_mut(&conn_id) {
                     conn.pending_persist.push_back(PersistBarrier {
@@ -909,9 +1032,6 @@ impl RoomActor {
     }
 
     async fn run_persist_for(&mut self, conn_id: Uuid, request_id: Uuid) -> String {
-        if self.persist_failed {
-            return format!("persist-failed:{request_id}");
-        }
         let Some(conn) = self.connections.get(&conn_id) else {
             return format!("persist-failed:{request_id}");
         };
@@ -924,10 +1044,15 @@ impl RoomActor {
             return format!("persist-failed:{request_id}");
         }
 
+        if self.ensure_primary_capacity().await.is_err() {
+            self.compact_unhealthy = true;
+            return format!("persist-failed:{request_id}");
+        }
+
         let snapshot_report = match self.engine.call(Request::Snapshot).await {
             Ok(report) => report,
             Err(BridgeError::Dead) => {
-                self.persist_failed = true;
+                self.compact_unhealthy = true;
                 return format!("persist-failed:{request_id}");
             }
         };
@@ -938,12 +1063,12 @@ impl RoomActor {
             } => match b64::decode(&bytes_b64) {
                 Ok(bytes) => bytes,
                 Err(_) => {
-                    self.persist_failed = true;
+                    self.compact_unhealthy = true;
                     return format!("persist-failed:{request_id}");
                 }
             },
             _ => {
-                self.persist_failed = true;
+                self.compact_unhealthy = true;
                 return format!("persist-failed:{request_id}");
             }
         };
@@ -954,7 +1079,7 @@ impl RoomActor {
         )
         .await
         {
-            self.persist_failed = true;
+            self.compact_unhealthy = true;
             return format!("persist-failed:{request_id}");
         }
         if let Some(writer_generation) = self.writer_generation {
@@ -976,11 +1101,19 @@ impl RoomActor {
             .await;
             match compact {
                 Ok(Ok(load)) => {
+                    self.compact_unhealthy = false;
                     self.set_committed_from_load(&load);
+                    if self.engine.needs_recycle() {
+                        let _ = self.reload_primary_from_committed().await;
+                    }
                     format!("persisted:{request_id}")
                 }
+                Ok(Err(CollabDbError::StaleCutoff | CollabDbError::StaleWriter)) => {
+                    self.fatal_room_divergence(actor_user_id, session_id).await;
+                    format!("persist-failed:{request_id}")
+                }
                 _ => {
-                    self.persist_failed = true;
+                    self.compact_unhealthy = true;
                     format!("persist-failed:{request_id}")
                 }
             }
@@ -990,7 +1123,7 @@ impl RoomActor {
     }
 
     async fn maybe_compact(&mut self) {
-        if self.any_pending_persist() || self.persist_failed {
+        if self.any_pending_persist() || self.compact_unhealthy {
             return;
         }
         if self.committed.tail_payloads.len() < 32 {
@@ -1013,20 +1146,18 @@ impl RoomActor {
         }
     }
 
-    fn broadcast_update(&self, routing_key: &str, y_protocol: &[u8]) {
-        let frame = encode(&WireFrame::Document {
-            routing_key: routing_key.to_string(),
-            room: None,
-            message: DocumentMessage::Sync(crate::collab::wire::SyncMessage {
-                step: SyncStep::Update,
-                y_protocol: y_protocol.to_vec(),
-            }),
-        })
-        .unwrap_or_default();
+    fn broadcast_update(&self, y_protocol: &[u8]) {
         for conn in self.connections.values() {
-            let _ = conn
-                .events
-                .try_send(RoomClientEvent::Outbound(frame.clone()));
+            let frame = encode(&WireFrame::Document {
+                routing_key: conn.routing_key.clone(),
+                room: None,
+                message: DocumentMessage::Sync(crate::collab::wire::SyncMessage {
+                    step: SyncStep::Update,
+                    y_protocol: y_protocol.to_vec(),
+                }),
+            })
+            .unwrap_or_default();
+            let _ = conn.events.try_send(RoomClientEvent::Outbound(frame));
         }
     }
 

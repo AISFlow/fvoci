@@ -22,7 +22,7 @@ use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, SyncMessage, SyncStep,
     WireFrame,
 };
-use fvoci_server::collab::y_sync::encode_sync_payload;
+use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
 use fvoci_server::db::collab::load_collab_document;
 use fvoci_server::db::documents::CreateDocumentInput;
@@ -42,6 +42,7 @@ const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
 const PUBLIC_ORIGIN: &str = "http://localhost";
 const LIFECYCLE_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const OP_CAP_TEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 async fn run_lifecycle_test<Fut>(name: &str, case: Fut)
 where
@@ -435,6 +436,121 @@ fn room_key(workspace_id: Uuid, document_id: Uuid) -> String {
 
 fn sample_hi_update() -> Vec<u8> {
     hex::decode("0101e8eda5a2070004010b70726f73656d6972726f7202686900").expect("fixture")
+}
+
+fn engine_fixture(name: &str) -> Vec<u8> {
+    std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/collab-engine/fixtures")
+            .join(name),
+    )
+    .unwrap_or_else(|e| panic!("read fixture {name}: {e}"))
+}
+
+fn sync_step1_frame(routing_key: &str, state_vector: &[u8]) -> Vec<u8> {
+    encode(&WireFrame::Document {
+        routing_key: routing_key.to_string(),
+        room: CollabRoomName::parse(routing_key),
+        message: DocumentMessage::Sync(SyncMessage {
+            step: SyncStep::Step1,
+            y_protocol: encode_sync_payload(SyncStep::Step1, state_vector),
+        }),
+    })
+    .expect("encode step1")
+}
+
+fn stateless_frame(routing_key: &str, payload: &str) -> Vec<u8> {
+    encode(&WireFrame::Document {
+        routing_key: routing_key.to_string(),
+        room: CollabRoomName::parse(routing_key),
+        message: DocumentMessage::Stateless(payload.to_string()),
+    })
+    .expect("encode stateless")
+}
+
+async fn recv_document_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    attempts: usize,
+) -> Option<WireFrame> {
+    for _ in 0..attempts {
+        let msg = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .ok()
+            .flatten()?;
+        if let Ok(Message::Binary(bytes)) = msg {
+            return fvoci_server::collab::wire::decode(&bytes).ok();
+        }
+    }
+    None
+}
+
+async fn recv_document_frame_within(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) -> Option<WireFrame> {
+    let msg = tokio::time::timeout(within, ws.next())
+        .await
+        .ok()
+        .flatten()?;
+    if let Ok(Message::Binary(bytes)) = msg {
+        return fvoci_server::collab::wire::decode(&bytes).ok();
+    }
+    None
+}
+
+async fn wait_for_sync_applied(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match recv_document_frame_within(ws, remaining.min(Duration::from_millis(200))).await {
+            Some(WireFrame::Document {
+                message: DocumentMessage::SyncStatus { applied: true },
+                ..
+            }) => return true,
+            Some(WireFrame::Document {
+                message: DocumentMessage::SyncStatus { applied: false },
+                ..
+            }) => return false,
+            Some(WireFrame::Document {
+                message: DocumentMessage::Close { .. },
+                ..
+            }) => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+async fn wait_for_stateless_prefix(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    prefix: &str,
+    within: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::Stateless(body),
+            ..
+        }) = recv_document_frame_within(ws, remaining.min(Duration::from_millis(200))).await
+        {
+            if body.starts_with(prefix) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn sync_update_frame(routing_key: &str, update: &[u8]) -> Vec<u8> {
@@ -1015,5 +1131,408 @@ async fn collab_archived_document_rejects_mutation() {
             ..
         }
     ));
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_reconnect_step1_includes_server_state_vector() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let update = sample_hi_update();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 11).await;
+    writer
+        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::SyncStatus { applied: true },
+            ..
+        }) = recv_document_frame(&mut writer, 1).await
+        {
+            break;
+        }
+    }
+
+    writer
+        .send(Message::Binary(sync_step1_frame(&routing_key, &[0, 0]).into()))
+        .await
+        .unwrap();
+
+    let mut saw_step2 = false;
+    let mut saw_server_step1 = false;
+    for _ in 0..12 {
+        let frame = recv_document_frame(&mut writer, 1).await;
+        match frame {
+            Some(WireFrame::Document {
+                message: DocumentMessage::Sync(SyncMessage { step, y_protocol }),
+                ..
+            }) => match step {
+                SyncStep::Step2 if !saw_step2 => saw_step2 = true,
+                SyncStep::Step1 if saw_step2 => {
+                    let (_, sv) = parse_sync_payload(&y_protocol, 4 * 1024 * 1024).unwrap();
+                    assert!(!sv.is_empty(), "server Step1 must carry a state vector");
+                    saw_server_step1 = true;
+                    break;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    assert!(saw_step2, "client should receive Step2");
+    assert!(saw_server_step1, "client should receive server Step1 after Step2");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_noop_update_is_not_stored() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 31).await;
+    writer
+        .send(Message::Binary(sync_update_frame(&routing_key, &[0, 0]).into()))
+        .await
+        .unwrap();
+
+    let mut saw_applied = false;
+    for _ in 0..6 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::SyncStatus { applied: true },
+            ..
+        }) = recv_document_frame(&mut writer, 1).await
+        {
+            saw_applied = true;
+            break;
+        }
+    }
+    assert!(saw_applied, "noop update should ack without rejection");
+
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(load.tail.is_empty(), "noop update must not create a tail row");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_persist_barrier_and_id_correlation() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let update = sample_hi_update();
+    let request_id = Uuid::now_v7();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 41).await;
+    writer
+        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::SyncStatus { applied: true },
+            ..
+        }) = recv_document_frame(&mut writer, 1).await
+        {
+            break;
+        }
+    }
+
+    writer
+        .send(Message::Binary(
+            stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_persisted = false;
+    for _ in 0..8 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::Stateless(body),
+            ..
+        }) = recv_document_frame(&mut writer, 1).await
+        {
+            if body == format!("persisted:{request_id}") {
+                saw_persisted = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_persisted, "persist reply must echo request id");
+
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(load.snapshot_cutoff_seq, load.tail_seq);
+    assert!(load.tail.is_empty(), "persist should compact tail");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_primary_recycles_after_op_cap_then_edits_persist() {
+    tokio::time::timeout(OP_CAP_TEST_TIMEOUT, async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let app =
+            fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+        let addr = spawn_server(app).await;
+        let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+        let update = sample_hi_update();
+        let request_id = Uuid::now_v7();
+
+        let mut writer = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut writer, &routing_key, 51).await;
+
+        // Each Step1 costs one Sync + one Inspect on the primary child (256-op cap).
+        for round in 0..128 {
+            writer
+                .send(Message::Binary(sync_step1_frame(&routing_key, &[0, 0]).into()))
+                .await
+                .unwrap();
+            let mut saw_step2 = false;
+            let mut saw_server_step1 = false;
+            let round_deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+            while tokio::time::Instant::now() < round_deadline
+                && !(saw_step2 && saw_server_step1)
+            {
+                let remaining = round_deadline.saturating_duration_since(tokio::time::Instant::now());
+                match recv_document_frame_within(
+                    &mut writer,
+                    remaining.min(Duration::from_millis(100)),
+                )
+                .await
+                {
+                    Some(WireFrame::Document {
+                        message: DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Step2,
+                            ..
+                        }),
+                        ..
+                    }) => saw_step2 = true,
+                    Some(WireFrame::Document {
+                        message: DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Step1,
+                            ..
+                        }),
+                        ..
+                    }) if saw_step2 => saw_server_step1 = true,
+                    _ => {}
+                }
+            }
+            assert!(
+                saw_step2 && saw_server_step1,
+                "round {round}: expected Step2 then server Step1"
+            );
+        }
+
+        writer
+            .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+            .await
+            .unwrap();
+        assert!(
+            wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+            "distinct edit must apply after primary recycle"
+        );
+
+        writer
+            .send(Message::Binary(
+                stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            wait_for_stateless_prefix(&mut writer, &format!("persisted:{request_id}"), Duration::from_secs(5)).await,
+            "persist must succeed after op-cap recycle"
+        );
+
+        let load = load_collab_document(
+            &wiki.session.pool,
+            wiki.session.workspace_id,
+            wiki.session.user_id,
+            wiki.session.session_id,
+            wiki.document_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(load.tail_seq, 1);
+        assert_eq!(load.snapshot_cutoff_seq, load.tail_seq);
+        assert!(load.tail.is_empty(), "persist compacts accepted tail");
+        assert_ne!(load.snapshot, vec![0, 0], "snapshot must hold the edit");
+        harness.cleanup().await;
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "collab_primary_recycles_after_op_cap_then_edits_persist hung (>{OP_CAP_TEST_TIMEOUT:?}) including cleanup"
+        )
+    });
+}
+
+#[tokio::test]
+async fn collab_readonly_first_then_writer_edits() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = $1")
+        .bind(wiki.document_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+    let mut reader = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut reader, &routing_key, 61).await;
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.documents SET status = 'published' WHERE id = $1")
+        .bind(wiki.document_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 62).await;
+
+    let update = sample_hi_update();
+    writer
+        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .await
+        .unwrap();
+
+    let mut writer_applied = false;
+    for _ in 0..8 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::SyncStatus { applied: true },
+            ..
+        }) = recv_document_frame(&mut writer, 1).await
+        {
+            writer_applied = true;
+            break;
+        }
+    }
+    assert!(writer_applied, "writer should apply after readonly-first room");
+
+    let mut reader_saw = false;
+    for _ in 0..8 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::Sync(SyncMessage {
+                step: SyncStep::Update,
+                ..
+            }),
+            ..
+        }) = recv_document_frame(&mut reader, 1).await
+        {
+            reader_saw = true;
+            break;
+        }
+    }
+    assert!(reader_saw, "reader should receive broadcast after writer edit");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_delete_only_round_trip_persists() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let base = engine_fixture("delete_only_base.v1");
+    let delete_only = engine_fixture("delete_only.v1");
+    let request_id = Uuid::now_v7();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 71).await;
+
+    for payload in [&base, &delete_only] {
+        writer
+            .send(Message::Binary(sync_update_frame(&routing_key, payload).into()))
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            if let Some(WireFrame::Document {
+                message: DocumentMessage::SyncStatus { applied: true },
+                ..
+            }) = recv_document_frame(&mut writer, 1).await
+            {
+                break;
+            }
+        }
+    }
+
+    writer
+        .send(Message::Binary(
+            stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::Stateless(body),
+            ..
+        }) = recv_document_frame(&mut writer, 1).await
+        {
+            if body.starts_with("persisted:") {
+                break;
+            }
+        }
+    }
+
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(load.tail.is_empty());
+    assert!(
+        !load.snapshot.is_empty() && load.snapshot != [0, 0],
+        "delete-only state should be snapshotted"
+    );
     harness.cleanup().await;
 }

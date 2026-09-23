@@ -126,6 +126,7 @@ pub fn encode_sync_payload(step: SyncStep, payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Canonical empty Yjs updateV1 (`[0, 0]`) and byte-emptiness.
 pub fn is_empty_update(payload: &[u8]) -> bool {
-    payload.is_empty()
+    payload.is_empty() || payload == [0, 0]
 }
