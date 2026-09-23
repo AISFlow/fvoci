@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyWorkspace } from "@/features/workspace/empty-workspace";
 import { WorkspaceCreateDialog } from "@/features/workspace/workspace-create-dialog";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
+import { wikiPath } from "@/lib/href";
 import { meQuery, workspacesQuery } from "@/lib/queries";
 import { useState } from "react";
 
@@ -116,7 +117,7 @@ export function HomePage() {
             <Link
               key={workspace.id}
               className="workspace-list__item"
-              to={`/w/${workspace.slug}/settings`}
+              to={wikiPath(workspace.slug)}
             >
               <div>
                 <strong>{workspace.name}</strong>

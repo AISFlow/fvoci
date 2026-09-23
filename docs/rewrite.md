@@ -28,9 +28,9 @@
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 검증 완료, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | 확장 인증·정책·UI 연결 |
-| 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | backend 부분 수락bf1ab03 | lib7/실제DB66/Fable | UI/원격gate 진행, counts·quota·groups·members-list 등 미구현 |
+| 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락5d8cac8, PR4 merged | lib12/DB66 양 아키텍처/React6/CI/Fable | counts·quota·groups·members-list 등 미구현 |
 | HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component 검증 완료, PR2 merged | 로컬·CI52+52/Fable | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
-| 문서·협업 | domains/documents/collab, 기존 React/Tiptap | 문서 권한·provider envelope·철회·CRDT 저장/복원 | 문서 기반 구현 중, 협업은 probe만 있음 | 제품 검증 미실행 | 실제2UI 편집·awareness·재접속·persist·새 프로세스 복원 후 편집 |
+| 문서·협업 | domains/documents/collab, 기존 React/Tiptap | 문서 권한·provider envelope·철회·CRDT 저장/복원 | wiki 기반 PR5 통합 중; codec 교차 검토 중, /collab 미연결 | 문서 워커DB13, 통합 원격 미수락 | 실제2UI 편집·awareness·재접속·persist·새 프로세스 복원 후 편집 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
@@ -52,10 +52,10 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 인증 확장·PAT·OIDC·MFA·사용자 생명주기 | packages/contracts/src/routes.ts auth/me/admin, core/auth.ts | 세션 폐기, 범위, 마지막 관리자, 탈퇴/복구 | 재작성 미착수 | 미실행 | 첫 로그인 외 전체 |
-| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend 부분 수락bf1ab03 | 실제 앱 역할DB66/Fable | UI 진행, groups/확장 정책 등 미구현 |
+| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend/React 수락5d8cac8, PR4 merged | 실제 앱 역할DB66 양 아키텍처/React6/CI/Fable | groups/확장 정책 등 미구현 |
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
-| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | 재작성 미착수 | 미실행 | 전체 |
-| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | 재작성 미착수 | 조사 중 | CRDT 호환과 provider 호환을 별도로 검증 |
+| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata 부분 구현 PR5 | 워커DB13, 통합/UI 검증 진행 | 본문 편집·댓글·공유·리비전 미구현 |
+| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec 부분 구현, 제품 미연결 | 실제 provider fixture 교차 검토 중 | 문서/인가 기반 뒤 durable Yrs·실제2UI 수락 필요 |
 | 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | 재작성 미착수 | 조사 중 | native 대체 실증 필요 |
 | 검색·색인·AI | server domains/search, packages/search, routes.ts ai | 검색에서도 인가·철회·색인 복구 | 재작성 미착수 | 미실행 | 전체 |
 | 알림·메일·webhook·연동 | server domains/notifications, packages/jobs, routes.ts github/webhooks | outbox·커밋 후 전달·중복/재시도 | 재작성 미착수 | 미실행 | 전체 |
@@ -418,3 +418,58 @@ index no-store, 실행 예시 bind/origin, 기본 feature 서버의 E2E 실행�
 오류와 인가 거부 구분. 이들을 완료했다고 표시하지 않는다. 문서 워커002bc57은
 icon null/정렬 prefix/parentId 및 실제 멤버 변경 경합을 수정하고 DB13을 통과했으나
 제품 router·migration4 통합은 PR4 수락 후 진행한다.
+
+
+### PR4 수락·머지와 문서 통합 재개
+
+PR4 https://github.com/AISFlow/fvoci/pull/4 는 수락 코드5d8cac8에서
+Fable medium 추가 검토 차단0 및 원격 Rust35913683110/Web35913683261/
+Native35913683122 전체6job 성공 후 squash merge했다. main 머지 SHA는
+0617e7f9ed716a696eaa0ed80648959d09351477. lib12, 실제 DB66씩 x64/ARM64,
+static5/schema1/React6(35초), native 양 아키텍처 성공. reviewer 종료 당시
+진행 중이던 x64DB도 코디네이터가 66/0ignored를 확인했다. post-merge CI는 확인 중.
+
+새 통합 worktree rust-document-integration은 main0617e7f에서 시작했다.
+Grok 제출ca3193a+002bc57을 순서대로 통합하고 실제 제품 router에 wiki
+생성/tree/조회/ancestors/body/metadata PATCH를 연결한다. migration004와
+기존003 업그레이드·RLS·현재 역할/정지/폐기·atomic audit/event 검사가 범위다.
+기존 승인 migration001–003은 수정하지 않는다. 원격 PostgreSQL job은 기존66과
+새 document_integration13을 실제 실행하며, 통합/독립 검토 전 미수락이다.
+문서 본문 변경·CRDT·첨부·프로젝트 문서·복구/이전은 아직 제품 구현이 아니다.
+
+codec 제출f7a7307은 실제 provider4.6 고정 계약을 Grok task4b18c0b69cec/
+ctx_a0b85bb5b3e4가 교차 검증 중이다. 아직 /collab 비활성. Fable 주간 한도는
+도달하지 않았고 Opus로 전환하지 않았다. 기존 모든 작업 커밋/worktree 보존.
+
+문서 통합 PR5: https://github.com/AISFlow/fvoci/pull/5 (Draft, 기준6e62e9f).
+Composer task3aee2da6437a/ctx761ff4e13add, worktree rust-wiki-web가
+apps/web, packages/i18n, src/api, HTTP documents DTO 및 generator의 단독 작성자다.
+root 공통 파일·DB·migration·CI는 코디네이터 소유로 유지한다. Fable
+ task18cb8e899c76/ctx7bf431f22c16는 고정6e62e9f DB/인가 수정 읽기 전용 검토.
+Grok task4b18c0b69cec/ctxa0b85bb5b3e4는 rust-collab-wire의 codec/fixture만 수정한다.
+동시 쓰기 워커2개, 로컬 무거운 검증 슬롯은 Composer의 실제 wiki E2E에 배정.
+coordinator 통합 check/clippy(api-schema,db-tests) 및 lib19 성공; 원격 검사는 진행 중.
+
+PR4 post-merge main0617e7f의 Rust35914216752/Web35914216744/Native35914216656 모두 success 확인.
+문서 DB suite도 required-features=[db-tests]로 명시해 feature 없는 명시적
+DB test 호출이 0개 성공으로 끝나지 않게 한다(다음 통합 커밋에 포함).
+
+문서 UI 제출35e4538(8 browser 성공)을 bb77ec9로 통합했지만 새 헤더의 로그아웃
+실패 처리·생성 오류 표시 등을 보강 중이다(Composer task9edd377f0505/
+ctxf49beb3df3e1, UI 경로 단독 소유). 코디네이터는 문서 생성 DTO를 runtime과
+OpenAPI의 같은 타입으로 합치고 parentId required-nullable/UUID, 응답의
+present-nullable 필드, PATCH title/status의 null 거부를 원본 계약에 맞춰 고쳤다.
+로컬 api-schema lib21/clippy/TS 성공, HTTP null 회귀는 다음 원격 DB 검사에서 실행한다.
+
+codec45da379 교차 검증은 11개 성공(가짜4/6 opcode·routingKey·varint·trailing
+입력 수정). 제품 미연결 상태를 유지한다. 협업 설계 자문에서 제안한 후보 Doc
+방식의 decode 메모리 근거는 Yrs update.rs의 untrusted try_reserve 때문에
+코디네이터가 재검토를 요청했다. 자문을 구현/검증 성공으로 기록하지 않는다.
+
+문서 UI 보강5693f65를 f969a94로 통합했다. 워커의 실제 브라우저13/13(48.8초),
+wiki-tree 단위1, build/typecheck 성공; 통합된 공유 DTO 변경은 원격에서 재검사한다.
+통합 로컬 fmt/clippy와 api-schema lib21 성공. PR5 신규 UI/DTO 고정 SHA의
+Fable 검토 및 원격 전체 gate를 통과하기 전 미수락이다. CI에 tree 단위 검사도 연결했다.
+협업 자문은 decoder의 무제한 allocation/unchecked UTF8 문제를 확인했으나,
+rlimit child만으로 UB의 보안 경계가 완성된다는 제안은 수락하지 않았다.
+공식 Yrs 수정 버전/안전한 입력 경계를 확인한 뒤 제품 engine을 연결한다.
