@@ -15,8 +15,9 @@ use fvoci_server::collab::config::CollabConfig;
 use fvoci_server::collab::guard::RoomGuard;
 use fvoci_server::collab::hub::RoomLifecyclePhase;
 use fvoci_server::collab::room::{
-    arm_force_primary_apply_fail, arm_spawn_room_block, disarm_force_primary_apply_fail,
-    disarm_spawn_room_block, AuthenticatedConnection, CollabSession, JoinError, RoomJoin,
+    arm_force_primary_apply_fail, arm_force_primary_load_fail, arm_spawn_room_block,
+    disarm_force_primary_apply_fail, disarm_force_primary_load_fail, disarm_spawn_room_block,
+    AuthenticatedConnection, CollabSession, JoinError, RoomJoin,
 };
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, SyncMessage, SyncStep,
@@ -1688,7 +1689,7 @@ async fn collab_committed_update_survives_primary_apply_fail_reload() {
 
     let mut writer = connect_member(addr, &wiki.session.session_token).await;
     auth_and_join(&mut writer, &routing_key, 91).await;
-    arm_force_primary_apply_fail();
+    arm_force_primary_apply_fail(wiki.document_id).await;
     writer
         .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
         .await
@@ -1697,7 +1698,79 @@ async fn collab_committed_update_survives_primary_apply_fail_reload() {
         wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
         "durable commit must not be rejected when primary apply fails"
     );
-    disarm_force_primary_apply_fail();
+    disarm_force_primary_apply_fail(wiki.document_id).await;
+
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(load.tail.len(), 1);
+    assert_eq!(load.tail[0].payload, update);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_reload_failure_after_commit_preserves_durable_tail() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let update = sample_hi_update();
+    let request_id = Uuid::now_v7();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 92).await;
+    arm_force_primary_apply_fail(wiki.document_id).await;
+    arm_force_primary_load_fail(wiki.document_id).await;
+    writer
+        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .await
+        .unwrap();
+    writer
+        .send(Message::Binary(
+            stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
+        ))
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_applied = false;
+    let mut saw_persisted = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match recv_document_frame_within(&mut writer, remaining.min(Duration::from_millis(200)))
+            .await
+        {
+            Some(WireFrame::Document {
+                message: DocumentMessage::SyncStatus { applied: true },
+                ..
+            }) => saw_applied = true,
+            Some(WireFrame::Document {
+                message: DocumentMessage::Stateless(body),
+                ..
+            }) => {
+                if body.starts_with("persisted:") {
+                    saw_persisted = true;
+                    break;
+                }
+            }
+            _ => {}
+        }
+        if saw_applied && saw_persisted {
+            break;
+        }
+    }
+    assert!(saw_applied, "durable commit must ack even when primary reload fails");
+    assert!(!saw_persisted, "stale primary must not emit persisted ack");
+    disarm_force_primary_load_fail(wiki.document_id).await;
+    disarm_force_primary_apply_fail(wiki.document_id).await;
 
     let load = load_collab_document(
         &wiki.session.pool,

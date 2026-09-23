@@ -48,17 +48,46 @@ pub async fn disarm_spawn_room_block(document_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
-static FORCE_PRIMARY_APPLY_FAIL: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static FORCE_PRIMARY_APPLY_FAIL: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashSet<Uuid>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
 
 #[cfg(feature = "db-tests")]
-pub fn arm_force_primary_apply_fail() {
-    FORCE_PRIMARY_APPLY_FAIL.store(true, std::sync::atomic::Ordering::SeqCst);
+static FORCE_PRIMARY_LOAD_FAIL: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashSet<Uuid>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_force_primary_apply_fail(document_id: Uuid) {
+    FORCE_PRIMARY_APPLY_FAIL
+        .lock()
+        .await
+        .insert(document_id);
 }
 
 #[cfg(feature = "db-tests")]
-pub fn disarm_force_primary_apply_fail() {
-    FORCE_PRIMARY_APPLY_FAIL.store(false, std::sync::atomic::Ordering::SeqCst);
+pub async fn disarm_force_primary_apply_fail(document_id: Uuid) {
+    FORCE_PRIMARY_APPLY_FAIL.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_force_primary_load_fail(document_id: Uuid) {
+    FORCE_PRIMARY_LOAD_FAIL.lock().await.insert(document_id);
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_force_primary_load_fail(document_id: Uuid) {
+    FORCE_PRIMARY_LOAD_FAIL.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn consume_force_primary_apply_fail(document_id: Uuid) -> bool {
+    FORCE_PRIMARY_APPLY_FAIL.lock().await.remove(&document_id)
+}
+
+#[cfg(feature = "db-tests")]
+async fn primary_load_fail_armed(document_id: Uuid) -> bool {
+    FORCE_PRIMARY_LOAD_FAIL.lock().await.contains(&document_id)
 }
 
 async fn wait_spawn_room_block(_document_id: Uuid) {
@@ -963,7 +992,7 @@ impl RoomActor {
 
     async fn apply_primary(&mut self, payload: &[u8]) -> bool {
         #[cfg(feature = "db-tests")]
-        if FORCE_PRIMARY_APPLY_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
+        if consume_force_primary_apply_fail(self.document_id).await {
             return false;
         }
         let report = match self
@@ -1001,6 +1030,10 @@ impl RoomActor {
     }
 
     async fn load_engine_primary(&mut self) -> Result<(), JoinError> {
+        #[cfg(feature = "db-tests")]
+        if primary_load_fail_armed(self.document_id).await {
+            return Err(JoinError::EngineUnavailable);
+        }
         let tail_b64 = self.committed.tail_payloads.clone();
         let report = self
             .engine
