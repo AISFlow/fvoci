@@ -139,7 +139,10 @@ export function useCollabSession(
 	});
 	const bindRef = useRef(bind);
 	bindRef.current = bind;
+	const persistAbortsRef = useRef(new Set<AbortController>());
 	const ack = bind.ack;
+	const generationKey = `${ack.documentId}\0${ack.connectionId}`;
+	const generationKeyRef = useRef(generationKey);
 
 	useHocuspocusEvent("synced", ({ state }) => {
 		if (state) setSynced(true);
@@ -160,6 +163,13 @@ export function useCollabSession(
 			syncPersistBind(prev, { provider, status: connectionStatus, documentId }),
 		);
 	}, [provider, connectionStatus, documentId]);
+
+	useEffect(() => {
+		if (generationKeyRef.current === generationKey) return;
+		generationKeyRef.current = generationKey;
+		for (const abort of persistAbortsRef.current) abort.abort();
+		persistAbortsRef.current.clear();
+	}, [generationKey]);
 
 	useHocuspocusEvent("disconnect", () => {
 		setBind((prev) =>
@@ -238,6 +248,8 @@ export function useCollabSession(
 			readOnly,
 			persistNow: () => {
 				const scope = bindRef.current.ack;
+				const abort = new AbortController();
+				persistAbortsRef.current.add(abort);
 				return persistNow(
 					provider,
 					scopedPersistObserver(
@@ -247,7 +259,10 @@ export function useCollabSession(
 							setBind((prev) => reducePersistBind(prev, event));
 						},
 					),
-				);
+					{ signal: abort.signal },
+				).finally(() => {
+					persistAbortsRef.current.delete(abort);
+				});
 			},
 		}),
 		[provider, unauthorized, connectionStatus, synced, unsent, readOnly, peers, ack],

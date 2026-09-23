@@ -7,6 +7,7 @@ import { presenceColorOf } from "../../lib/presence.ts";
 import type {
 	HocuspocusProvider,
 	onStatelessParameters,
+	onStatusParameters,
 } from "@hocuspocus/provider";
 import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
@@ -158,30 +159,47 @@ export const CLAIM_RETRY_LIMIT = 3;
 
 export const PERSIST_TIMEOUT_MS = 5000;
 
+export const PERSIST_DISCONNECTED_MESSAGE = "collab persist disconnected";
+
 export interface PersistNowObserver {
 	onRequest?: (requestId: string) => void;
 	onAck?: (requestId: string) => void;
 	onFail?: (requestId: string) => void;
 	onTimeout?: (requestId: string) => void;
+	onAbort?: (requestId: string) => void;
 }
 
-/* WHY: 저장 응답은 요청별로 확인한다. timeout·실패 응답은 저장 성공이 아니므로
- * 보관·내보내기·버전 저장 호출자가 작업을 중단하고 오류를 표시한다. */
+export interface PersistNowOptions {
+	signal?: AbortSignal;
+}
+
+/* WHY: 저장 응답은 요청별로 확인한다. timeout·실패·연결 세대 상실은 저장 성공이
+ * 아니므로 보관·내보내기·버전 저장 호출자가 작업을 중단하고 오류를 표시한다. */
 export function persistNow(
 	provider: HocuspocusProvider,
 	observer?: PersistNowObserver,
+	options?: PersistNowOptions,
 ): Promise<void> {
 	const requestId = crypto.randomUUID();
 	return new Promise((resolve, reject) => {
 		let settled = false;
-		const done = (kind: "ack" | "fail" | "timeout", error?: Error) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const done = (
+			kind: "ack" | "fail" | "timeout" | "abort",
+			error?: Error,
+		) => {
 			if (settled) return;
 			settled = true;
 			globalThis.clearTimeout(timer);
 			provider.off("stateless", onStateless);
+			provider.off("disconnect", onDisconnected);
+			provider.off("status", onStatus);
+			provider.off("destroy", onDisconnected);
+			options?.signal?.removeEventListener("abort", onAbort);
 			if (kind === "ack") observer?.onAck?.(requestId);
 			else if (kind === "fail") observer?.onFail?.(requestId);
-			else observer?.onTimeout?.(requestId);
+			else if (kind === "timeout") observer?.onTimeout?.(requestId);
+			else observer?.onAbort?.(requestId);
 			if (error) reject(error);
 			else resolve();
 		};
@@ -191,10 +209,30 @@ export function persistNow(
 				done("fail", new Error("collab persist failed"));
 			}
 		};
-		const timer = globalThis.setTimeout(() => {
+		const onDisconnected = () => {
+			done("abort", new Error(PERSIST_DISCONNECTED_MESSAGE));
+		};
+		const onStatus = ({ status }: onStatusParameters) => {
+			if (status === "disconnected") onDisconnected();
+		};
+		const onAbort = () => {
+			done("abort", new Error(PERSIST_DISCONNECTED_MESSAGE));
+		};
+		timer = globalThis.setTimeout(() => {
 			done("timeout", new Error("collab persist timed out"));
 		}, PERSIST_TIMEOUT_MS);
 		provider.on("stateless", onStateless);
+		provider.on("disconnect", onDisconnected);
+		provider.on("status", onStatus);
+		provider.on("destroy", onDisconnected);
+		if (options?.signal) {
+			if (options.signal.aborted) {
+				onAbort();
+				return;
+			}
+			options.signal.addEventListener("abort", onAbort);
+		}
+		if (settled) return;
 		/* WHY: flushDelay 배칭은 문서 업데이트만 묶고 stateless 는 직행이라 마지막 ≤200ms 편집을 추월한다 — 먼저 내보낸다. */
 		try {
 			provider.flushPendingUpdates();

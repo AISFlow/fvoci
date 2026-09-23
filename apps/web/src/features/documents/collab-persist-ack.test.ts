@@ -6,7 +6,7 @@ import {
 } from "@fvoci/editor/collab";
 import type { HocuspocusProvider, onStatelessParameters } from "@hocuspocus/provider";
 import * as Y from "yjs";
-import { persistNow } from "./collab-model.ts";
+import { PERSIST_DISCONNECTED_MESSAGE, persistNow } from "./collab-model.ts";
 import {
   advanceConnectionGeneration,
   applyPersistAck,
@@ -294,7 +294,10 @@ test("same provider reconnect and delayed old persistNow ack cannot confirm save
       bind = reducePersistBind(bind, event);
     },
   );
-  const inflight = persistNow(fake.provider, oldObserver);
+  const abort = new AbortController();
+  const inflight = persistNow(fake.provider, oldObserver, {
+    signal: abort.signal,
+  });
   const requestLine = fake.calls.find((call) =>
     call.startsWith(`stateless:${COLLAB_PERSIST_REQUEST}:`),
   );
@@ -309,6 +312,8 @@ test("same provider reconnect and delayed old persistNow ack cannot confirm save
     { provider, status: "disconnected", documentId: DOC },
     ids,
   );
+  abort.abort();
+  await assert.rejects(inflight, { message: PERSIST_DISCONNECTED_MESSAGE });
   assert.equal(bind.ack.connectionId, "g2");
   assert.equal(isDurablySaved(bind.ack), false);
 
@@ -325,9 +330,7 @@ test("same provider reconnect and delayed old persistNow ack cannot confirm save
   assert.equal(bind.ack.connectionId, "g2");
 
   fake.emit(`${COLLAB_PERSIST_DONE}:${requestId}`);
-  await inflight;
   assert.equal(isDurablySaved(bind.ack), false);
-  assert.equal(bind.ack.inflight, null);
 
   assert.equal(doc.clientID, clientId);
   assert.equal(text.toString(), "미전송 한글");

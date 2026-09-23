@@ -28,7 +28,8 @@ export type PersistAckEvent =
   | ({ type: "request"; requestId: string } & PersistAckScope)
   | ({ type: "ack"; requestId: string } & PersistAckScope)
   | ({ type: "fail"; requestId: string } & PersistAckScope)
-  | ({ type: "timeout"; requestId: string } & PersistAckScope);
+  | ({ type: "timeout"; requestId: string } & PersistAckScope)
+  | ({ type: "abort"; requestId: string } & PersistAckScope);
 
 export type CollabConnectionStatus =
   | "connecting"
@@ -52,6 +53,7 @@ export interface ScopedPersistObserver {
   onAck: (requestId: string) => void;
   onFail: (requestId: string) => void;
   onTimeout: (requestId: string) => void;
+  onAbort: (requestId: string) => void;
 }
 
 function cryptoRandomId(): string {
@@ -174,6 +176,7 @@ export function scopedPersistObserver(
     onFail: (requestId) => dispatch({ type: "fail", requestId, ...scope }),
     onTimeout: (requestId) =>
       dispatch({ type: "timeout", requestId, ...scope }),
+    onAbort: (requestId) => dispatch({ type: "abort", requestId, ...scope }),
   };
 }
 
@@ -210,6 +213,7 @@ export function applyPersistAck(
     }
     case "fail":
     case "timeout":
+    case "abort":
       if (!sameScope(state, event)) return state;
       if (!state.inflight || state.inflight.requestId !== event.requestId) {
         return state;
