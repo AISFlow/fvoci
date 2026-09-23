@@ -9,13 +9,13 @@
 | Orca 버전·실행 파일 | 1.4.207, `/home/kinesis/.local/bin/orca-ide` | live guide 및 runtime ready 확인. PATH의 `orca`는 0바이트 파일이므로 사용 금지; 전역 파일 수정 없음 |
 | 원본 저장소·기준 SHA | docs/rewrite.md의 고정 SHA | 별도 clone `/home/kinesis/orca/references/fvoci-rust-source-20260924`, PR HEAD detached; 기존 원본 개발 checkout 불변 |
 | 대상 경로·통합 SHA | `fvoci/daggertooth`, 초기 97a3fe61 | 기존 미추적 starter 파일 보존. 제품 수락 없음 |
-| codex 실행 파일·Astra 실제 ID·medium | PENDING | 요청값/유효값 대조 |
-| Fable 실행 경로·실제 ID·medium | Claude Code 2.1.280, `--model fable --effort medium` | ctx_2988b16d4927 receipt 일치; 실제 5.1 모델 확인 진행. 잘못 실행한 Cursor Fable ctx_abdf08f0a2aa는 지정 검토로 불인정 |
+| codex 실행 파일·Astra 실제 ID·medium | codex 0.156.1, gpt-6-astra, medium | 현재 cwd의 로컬 turn_context model/effort/collaboration 설정 일치 확인 |
+| Fable 실행 경로·실제 ID·medium | Claude Code 2.1.280, `--model fable --effort medium` | ctx_2988b16d4927 receipt 일치; 세션 JSONL claude-fable-5-1/medium 확인, 읽기 전용 자문 완료. 잘못 실행한 Cursor Fable ctx_abdf08f0a2aa는 지정 검토로 불인정 |
 | cursor-agent 실행 파일·Composer 2.5 ID | 2026.09.18-9a7762b, composer-2.5 | ctx_866afd0e5dff 요청/적용 일치 및 실제 완료. agent와 cursor-agent는 동일 설치 파일 |
 | cursor-agent 실행 파일·Grok 4.6 ID | cursor-grok-4.6-high | 목록 표시명 Grok 4.6, 비-Fast; 별도 effort 지정 없음. ctx_6ca17e6bc982 요청/적용 일치 및 완료 |
 | 공식 Orca 스킬 출처·버전 | 설치된 1.4.207 live guide | skills list, skills get orca-cli, orchestration --full 및 필요한 reference 조회 |
-| Rust toolchain·Cargo·nextest 사용 여부 | PENDING | 실제 설치/호환성 |
-| 프로젝트 스킬 로딩 | PENDING | Codex/Cursor/Fable 경로 각각 확인 |
+| Rust toolchain·Cargo·nextest 사용 여부 | Rust 1.98.1, rustfmt/clippy | 프로젝트 전용 설치 완료. cargo test 사용; nextest 미설치 |
+| 프로젝트 스킬 로딩 | Codex 목록 발견 및 명시 읽기, Cursor 명시 읽기 성공 | Claude Code 자동 발견 없음: 정본 명시 읽기 성공. 별도 adapter/복제 없음 |
 | task 조정 경로 | Run run_b01d432a9dee | 공식 Run/Task/Dispatch; 기존 다른 Run 불변. 모든 워커 prompt에 검증된 CLI 절대 경로 명시 |
 | 격리·샌드박스 실효 범위 | Git/자원 논리 격리; 보안 샌드박스 아님 | 현재 사용자 개발 권한 상속. OS가 원본 쓰기/자격 증명 접근을 차단한다고 주장하지 않음 |
 
@@ -58,3 +58,10 @@ Orca의 MCP 연결이 워커 CLI에도 로딩되는지 확인한다. JSON/TOML�
 ## 현재 준비 진행
 
 Rust 1.98.1을 프로젝트 전용 `/home/kinesis/orca/toolchains/fvoci-rust`에 설치 중. rustup-init 1.28.2의 공식 SHA256 대조 성공; 셸 PATH와 전역 설정 변경 없음. Docker 29.8.1 연결 확인. DB/port 격리 실증은 제품 검사 시 수행한다. 원본은 private, 대상 remote는 public이므로 비공개 소스나 계약 내용을 원격에 게시하지 않고 로컬 구현/검토만 수행한다. 선택 MCP 추가 없음.
+
+## 배정 (정본은 Orca task)
+
+- Composer task_3377f29385d5 / ctx_6f56b812c5f0: base d692134, rust-profile-slice worktree. 단독 쓰기: src/tests/migrations/scripts 및 Cargo manifest/lock, toolchain, gitignore, CI, RUNNING.md. 공통 파일 최종 소유권은 통합 시 코디네이터가 회수. 검증: fmt/check/순수 테스트; DB gate는 코디네이터.
+- Grok task_988a8245f639 / ctx_cb0170f995ac: 고정 원본 읽기 전용 계약 조사.
+- Fable task_9f44ee133c43 / ctx_2988b16d4927: Claude Code 초기 설계 자문 완료. release는 runtime이 user_takeover로 retained 응답하여 보존.
+- 원본 user.name_updated는 audit:false. 사용자 요구에 따라 Rust에서는 프로필 감사 원자성을 강화하고 호환 차이로 기록한다.
