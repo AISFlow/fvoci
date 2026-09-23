@@ -348,3 +348,32 @@ persist·삭제-only barrier, fresh-client crash 복원이다. 기반 PR은 제�
 - 최신 사용자 지침에 따라 동일 통합 코드의 원격 수락 검사를 코디네이터가
   SHA/명령/실행 수와 함께 확인하면 같은 전체 검사를 로컬에서 반복하지 않는다.
   현재 제품 워커2개(UI/wiki)의 소유 경로와 로컬 heavy slot은 유지한다.
+
+
+### CI PR3 수락·머지 및 현재 제품 작업
+
+- [PR3](https://github.com/AISFlow/fvoci/pull/3) merged. 검증 HEAD
+  f707a476af24dfdcb884958bea02a9b2e385c7e1, base1fc8af3, GitHub PR 검사
+  synthetic merge ea994ef. 기대 HEAD를 지정한 squash merge 결과
+  2fb61f9f7f51c6161e2b980ac05906c29a39891a가 실제 main임을 확인했다.
+- Rust35910131684 / Native35910131855 cold attempt1 및 측정용 warm attempt2
+  모두5job 성공. x64/ARM64 lib6·DB24, 각 native test-hang52+production52,
+  ignored0. actionlint1.7.12 성공; Fable5.1 medium task1656eae5142d /
+  ctx0bd3abce1e20 고정f707 검토 차단0, release. 주간 한도 미도달/Opus 미사용.
+- job 초 단위 cold→warm: fast98→35, postgres111→90, ARMpostgres130→72,
+  native178→28, ARMnative184→30. 이전 warm x64 fast30/postgres97/native77.
+  한 번의 hosted sample이며 fast는5초 늘었다. 가장 느린 warm job97→90,
+  native 캐시 복원32초→합계약5초. 테스트 범위는 ARM 추가 외 동일하다.
+  새 native target cache236MB(x64)/227MB(ARM), 이전 main 통합cache1.36GB.
+  캐시 누적은 관찰하되 타 작업 캐시 삭제나 quota 변경을 하지 않았다.
+- main post-merge Rust35910871258 / Native35910871128 실행 중. CI만 수락이며
+  전체앱 ARM 배포·첨부 연결·협업 완료가 아니다. 로컬 full gate 중복 실행 없음.
+- 기존 workspace 통합에 최신 main을03a7509로 normal merge, append 문서
+  충돌만 양쪽 보존하여 해결했다. Composer UI95da0dc를8f4c75a로 반영했으나
+  오류 처리·정적 경로·stale 산출물·브라우저 권한 검사 보완 전 미수락이다.
+  파일 소유권은 Composer UI, 코디네이터 CI/통합, wiki는 제출 후 반납 상태다.
+- Grok wiki task76f95af84a63 / ctxdb38f9d1f96e, ca3193a(base d5da209) 제출/
+  release. 실제 앱 역할 document_integration10/10, body8.35초/전체16.37초.
+  Fable task4863a0e3f377 / ctxffd857259342 고정ca3193a 검토 중. 아직 제품
+  router 미연결이고004 적용에 맞춘 기존 migration count 검사 갱신이 필요하다.
+  workspace/UI 수락 후 최신 main에서 wiki 통합 및 협업 제품 경로로 이어간다.
