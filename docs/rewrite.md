@@ -57,3 +57,11 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 - 의존성 공식 확인: docs.rs axum0.8.9/SQLx 및 crates.io 버전 메타데이터(axum0.8.9 MIT/Rust1.80, SQLx0.8.6 MIT OR Apache-2.0, Tokio1.47.1 MIT/Rust1.70, Serde1.0.228 MIT OR Apache-2.0). 선택 실제 버전은 Cargo.lock에서 고정·검증한다. 이 조회는 벤치마크가 아니다.
 
 원본 CI 실패 로그 확인: apps/server/test/init.test.ts:119의 `usage 문자열에 init` 정규식 검사가 중첩 CLI usage의 `>`에서 실패했다. Rust에서는 이 소스 텍스트 정규식 하네스를 복제하지 않고 실제 CLI 호출을 검사한다. 이 원본 실패를 수정하거나 원본 PR에 쓰지는 않았다.
+
+## 협업·문서 초기 위험 검증 — 통합 d154a60
+
+Grok 제출 e94ac2d를 통합한 d154a60에서 코디네이터가 다시 실행했다. `npm --prefix compat/js ci --ignore-scripts --no-audit --no-fund` 성공(51 packages, 0.9s), `cargo build --locked --offline --manifest-path compat/Cargo.toml --bins` 성공(별도 비어 있던 target, 캐시된 crate, 6.25s). `YRS_BRIDGE=.../compat/target/debug/yrs-bridge node compat/js/probe.mjs` 6개 성공(0.141s), `node compat/js/hocuspocus-handshake.mjs` 실행 성공(0.472s) 및 프레임 불일치 재현. `compat/target/debug/extract-probe compat/fixtures/sample.{pdf,docx,hwpx,hwp}` 실행 성공(0.002s): 생성한 유효 형식 fixture의 PDF literal/DOCX·HWPX XML 토큰만 확인, HWP 본문 parser 없음.
+
+이 결과는 제품 협업/추출 지원 수락이 아니다. Yrs0.23.5와 Yjs13.6.32의 gc:false updateV1 왕복·상태벡터·후속 편집은 확인했지만 전체 Tiptap 확장, 실제 FVOCI 두 UI, awareness 동작, 인가/철회, WebSocket 종료·재시작은 미실행. Hocuspocus4.6.0의 document-name/type/Auth/Stateless 프레임 어댑터와 HWP 본문/운영 수준 추출·썸네일 구현이 남았다. 제품 런타임에서 compat JS를 호출하지 않는다. 상세 범위·fixture 출처는 compat/README.md와 fixtures/NOTICE.md.
+
+통합 후 probe runner는 호스트 전용 기본 경로를 제거하고 locked/offline 빌드 및 Node 검사별 30초 상한으로 정리했다. `bash compat/run.sh` 재실행 exit0, warm0.704s. 라이브러리 코드는 변경하지 않았다.

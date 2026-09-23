@@ -25,18 +25,18 @@ JS deps are dev-only (`compat/js`). `node_modules/` and `target/` are gitignored
 
 ```bash
 python3 fixtures/gen.py
-npm --prefix js install --ignore-scripts
+npm --prefix js ci --ignore-scripts
 export CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo
 export RUSTUP_HOME=/home/kinesis/orca/toolchains/fvoci-rust/rustup
 export PATH="$CARGO_HOME/bin:$PATH"
 export CARGO_TARGET_DIR="$PWD/target"
-cargo build --bins
+cargo build --locked --bins
 YRS_BRIDGE="$PWD/target/debug/yrs-bridge" node js/probe.mjs
 node js/hocuspocus-handshake.mjs
 ./target/debug/extract-probe fixtures/sample.pdf fixtures/sample.docx fixtures/sample.hwpx fixtures/sample.hwp
 ```
 
-Or `bash run.sh`.
+After preparing dependencies, `bash run.sh` builds with `--locked --offline` and bounds each Node probe to 30 seconds. It uses the caller's Rust environment; the exports above describe this session's local toolchain only.
 
 ## Results (this worktree)
 
