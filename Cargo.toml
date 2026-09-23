@@ -65,3 +65,8 @@ required-features = ["db-tests"]
 name = "document_integration"
 path = "tests/document_integration.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "collab_integration"
+path = "tests/collab_integration.rs"
+required-features = ["db-tests"]

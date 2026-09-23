@@ -1353,7 +1353,7 @@ async fn lookup_hides_operation_from_forbidden_actor() {
             session_id: member.session_id,
             document_id: fixture.document_id,
             writer_generation: claim.writer_generation,
-            op_id: op_id,
+            op_id,
             payload: b"secret",
             client_ip: None,
         },
