@@ -876,6 +876,33 @@ async fn invalid_auth_and_input_are_source_errors() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _, workspace_id) = setup_session(&harness).await;
 
+    let (created, document, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"parentId": null, "title": "Null regression"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(created, StatusCode::CREATED);
+    for field in ["title", "status"] {
+        let (status, body, _, _) = json_request(
+            app.clone(),
+            "PATCH",
+            &format!(
+                "/api/v1/workspaces/{workspace_id}/documents/{}",
+                document["id"].as_str().unwrap()
+            ),
+            Some(json!({field: null})),
+            Some(&cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_input");
+    }
+
     let (status, body, _, _) = json_request(
         app.clone(),
         "POST",

@@ -453,3 +453,15 @@ coordinator 통합 check/clippy(api-schema,db-tests) 및 lib19 성공; 원격 �
 PR4 post-merge main0617e7f의 Rust35914216752/Web35914216744/Native35914216656 모두 success 확인.
 문서 DB suite도 required-features=[db-tests]로 명시해 feature 없는 명시적
 DB test 호출이 0개 성공으로 끝나지 않게 한다(다음 통합 커밋에 포함).
+
+문서 UI 제출35e4538(8 browser 성공)을 bb77ec9로 통합했지만 새 헤더의 로그아웃
+실패 처리·생성 오류 표시 등을 보강 중이다(Composer task9edd377f0505/
+ctxf49beb3df3e1, UI 경로 단독 소유). 코디네이터는 문서 생성 DTO를 runtime과
+OpenAPI의 같은 타입으로 합치고 parentId required-nullable/UUID, 응답의
+present-nullable 필드, PATCH title/status의 null 거부를 원본 계약에 맞춰 고쳤다.
+로컬 api-schema lib21/clippy/TS 성공, HTTP null 회귀는 다음 원격 DB 검사에서 실행한다.
+
+codec45da379 교차 검증은 11개 성공(가짜4/6 opcode·routingKey·varint·trailing
+입력 수정). 제품 미연결 상태를 유지한다. 협업 설계 자문에서 제안한 후보 Doc
+방식의 decode 메모리 근거는 Yrs update.rs의 untrusted try_reserve 때문에
+코디네이터가 재검토를 요청했다. 자문을 구현/검증 성공으로 기록하지 않는다.

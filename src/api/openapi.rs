@@ -408,6 +408,42 @@ mod tests {
                     .contains(&json!("null")));
             }
         }
+        for (name, fields) in [
+            (
+                "DocumentMetaResponse",
+                &["icon", "parentId", "projectId"][..],
+            ),
+            ("TreeNodeResponse", &["icon", "parentId", "projectId"][..]),
+            ("AncestorResponse", &["icon", "projectId"][..]),
+        ] {
+            for field in fields {
+                assert!(schemas[name]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field)));
+                assert!(schemas[name]["properties"][field]["type"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("null")));
+            }
+        }
+        let create = &schemas["CreateDocumentBody"];
+        assert!(create["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("parentId")));
+        assert_eq!(create["properties"]["parentId"]["format"], "uuid");
+        assert_eq!(schemas["PatchWorkspaceBody"]["required"], json!(["name"]));
+        assert_eq!(
+            schemas["PatchWorkspaceBody"]["properties"]["name"]["type"],
+            "string"
+        );
+        for field in ["title", "status"] {
+            assert_eq!(
+                schemas["PatchDocumentBody"]["properties"][field]["type"],
+                "string"
+            );
+        }
         let patch = &schemas["PatchMeBody"];
         assert_eq!(patch["required"], json!(["givenName"]));
         assert!(patch["properties"]["familyName"]["type"]

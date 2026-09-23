@@ -233,12 +233,12 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         AncestorResponse: {
-            icon?: string | null;
+            icon: string | null;
             id: string;
             /** Format: int32 */
             number: number;
             path: string;
-            projectId?: string | null;
+            projectId: string | null;
             title: string;
         };
         AncestorsResponse: {
@@ -254,6 +254,7 @@ export interface components {
         };
         CreateDocumentBody: {
             icon?: string | null;
+            /** Format: uuid */
             parentId: string | null;
             title: string;
         };
@@ -265,14 +266,14 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             createdBy: string;
-            displayId?: string | null;
-            icon?: string | null;
+            displayId?: string;
+            icon: string | null;
             id: string;
             /** Format: int32 */
             number: number;
-            parentId?: string | null;
+            parentId: string | null;
             path: string;
-            projectId?: string | null;
+            projectId: string | null;
             /** Format: int32 */
             schemaVersion: number;
             sortKey: string;
@@ -306,8 +307,8 @@ export interface components {
         };
         PatchDocumentBody: {
             icon?: string | null;
-            status?: string | null;
-            title?: string | null;
+            status?: string;
+            title?: string;
         };
         /**
          * @description OpenAPI request-body schema for PATCH /api/v1/auth/me.
@@ -367,13 +368,13 @@ export interface components {
             needed: boolean;
         };
         TreeNodeResponse: {
-            icon?: string | null;
+            icon: string | null;
             id: string;
             /** Format: int32 */
             number: number;
-            parentId?: string | null;
+            parentId: string | null;
             path: string;
-            projectId?: string | null;
+            projectId: string | null;
             sortKey: string;
             status: string;
             title: string;

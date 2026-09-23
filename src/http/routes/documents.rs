@@ -7,14 +7,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use serde::de::Deserializer;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::api::dto::{
-    AncestorResponse, AncestorsResponse, BodyResponse, DocumentMetaResponse,
-    PatchDocumentBody, TreeNodeResponse, TreeResponse,
+    AncestorResponse, AncestorsResponse, BodyResponse, CreateDocumentBody, DocumentMetaResponse,
+    PatchDocumentBody, RequiredNullable, TreeNodeResponse, TreeResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::db::documents::{
@@ -47,36 +46,6 @@ pub fn router() -> Router<AppState> {
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/body",
             get(get_body),
         )
-}
-
-/// Source `parentId` is `uuid.nullable()`: present and null is allowed, omitted is not.
-/// `#[serde(default)]` plus a third Missing variant is required; a wrapper around
-/// `Option` would treat omitted fields as null because serde's missing-field path
-/// visits `none`.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum RequiredNullable<T> {
-    #[default]
-    Missing,
-    Null,
-    Value(T),
-}
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for RequiredNullable<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(match Option::<T>::deserialize(deserializer)? {
-            None => Self::Null,
-            Some(value) => Self::Value(value),
-        })
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreateDocumentBody {
-    #[serde(default)]
-    parent_id: RequiredNullable<Uuid>,
-    title: String,
-    icon: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -473,10 +442,12 @@ mod tests {
     }
 
     #[test]
-    fn patch_document_body_deserializes_double_option_icon() {
-        let body: PatchDocumentBody =
-            serde_json::from_str(r#"{"icon":"📄","status":"draft"}"#).unwrap();
-        assert_eq!(body.icon, Some(Some("📄".to_string())));
-        assert_eq!(body.status.as_deref(), Some("draft"));
+    fn patch_title_and_status_are_optional_but_not_nullable() {
+        let omitted: PatchDocumentBody = serde_json::from_str("{}").unwrap();
+        assert!(omitted.title.is_none() && omitted.status.is_none());
+        for field in ["title", "status"] {
+            let body = serde_json::json!({field: null});
+            assert!(serde_json::from_value::<PatchDocumentBody>(body).is_err());
+        }
     }
 }

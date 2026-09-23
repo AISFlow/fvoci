@@ -2,6 +2,13 @@ use chrono::{DateTime, Utc};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
+
+fn deserialize_present_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
 
 fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -174,12 +181,34 @@ pub struct MemberRoleBody {
     pub role: String,
 }
 
+/// Source `parentId` is `uuid.nullable()`: present and null is allowed, omitted is not.
+/// `#[serde(default)]` plus a third Missing variant is required; a wrapper around
+/// `Option` would treat omitted fields as null because serde's missing-field path
+/// visits `none`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RequiredNullable<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for RequiredNullable<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            None => Self::Null,
+            Some(value) => Self::Value(value),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct CreateDocumentBody {
-    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
-    pub parent_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Option<Uuid>, required = true, nullable = true))]
+    #[serde(default)]
+    pub parent_id: RequiredNullable<Uuid>,
     pub title: String,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     #[cfg_attr(feature = "api-schema", schema(nullable = true))]
@@ -190,10 +219,14 @@ pub struct CreateDocumentBody {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct PatchDocumentBody {
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub title: Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     #[cfg_attr(feature = "api-schema", schema(nullable = true))]
     pub icon: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub status: Option<String>,
 }
 
@@ -205,13 +238,13 @@ pub struct DocumentMetaResponse {
     pub workspace_id: String,
     pub title: String,
     pub number: i32,
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub icon: Option<String>,
     pub path: String,
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub parent_id: Option<String>,
     pub sort_key: String,
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub project_id: Option<String>,
     pub status: String,
     pub schema_version: i32,
@@ -220,7 +253,7 @@ pub struct DocumentMetaResponse {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = false, nullable = false))]
     pub display_id: Option<String>,
 }
 
@@ -237,12 +270,12 @@ pub struct TreeResponse {
 pub struct TreeNodeResponse {
     pub id: String,
     pub workspace_id: String,
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub parent_id: Option<String>,
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub project_id: Option<String>,
     pub title: String,
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub icon: Option<String>,
     pub path: String,
     pub sort_key: String,
@@ -263,10 +296,10 @@ pub struct AncestorsResponse {
 pub struct AncestorResponse {
     pub id: String,
     pub title: String,
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub icon: Option<String>,
     pub path: String,
-    #[cfg_attr(feature = "api-schema", schema(nullable = true))]
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub project_id: Option<String>,
     pub number: i32,
 }
