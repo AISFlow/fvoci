@@ -12,7 +12,12 @@
 //! - `load_collab_document(pool, workspace_id, actor_user_id, session_id, document_id)`
 //! - `append_collab_update(pool, AppendCollabInput)` → `AppendCollabResult` | `CollabDbError`
 //! - `lookup_collab_operation(pool, workspace_id, actor_user_id, session_id, document_id, op_id)`
-//! - `verify_collab_operation(pool, VerifyCollabInput)` → payload+actor mismatch → `OpIdConflict`
+//! - `verify_collab_operation(pool, VerifyCollabInput)` → length+digest+actor mismatch → `OpIdConflict`
+//!
+//! ## Op receipts (immutable identity, no raw payload)
+//! Receipts retain `seq`, `actor_user_id`, `payload_len`, and `payload_sha256` only.
+//! They do not store historical update bytes; callers cannot recover raw payload from a
+//! receipt alone and must load the canonical snapshot plus tail for payload bytes.
 //! - `compact_collab_snapshot(pool, CompactCollabInput)` — exact cutoff fence; receipts retained
 //!
 //! ## Lock order within one transaction (sorted when multiple user ids):
@@ -88,26 +93,11 @@ async fn tail_budget_allows_append(
     Ok(Ok(()))
 }
 
-async fn receipt_budget_allows_append(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    document_id: Uuid,
-) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    let count: (i64,) = sqlx::query_as(
-        r#"
-        SELECT count(*)::bigint
-        FROM fvoci.document_collab_op_receipts
-        WHERE workspace_id = $1 AND document_id = $2
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    if count.0 + 1 > MAX_COLLAB_OP_RECEIPTS {
-        return Ok(Err(CollabDbError::StateBudgetExceeded));
+fn receipt_budget_allows_append(tail_seq: i64) -> Result<(), CollabDbError> {
+    if tail_seq + 1 > MAX_COLLAB_OP_RECEIPTS {
+        return Err(CollabDbError::StateBudgetExceeded);
     }
-    Ok(Ok(()))
+    Ok(())
 }
 
 fn load_budget_allows(
@@ -200,7 +190,8 @@ struct CollabAuditRecord<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollabOperationLookup {
     pub seq: i64,
-    pub payload: Vec<u8>,
+    pub payload_len: i64,
+    pub payload_sha256: Vec<u8>,
     pub actor_user_id: Uuid,
 }
 
@@ -210,7 +201,8 @@ pub struct VerifyCollabInput<'a> {
     pub session_id: Uuid,
     pub document_id: Uuid,
     pub op_id: Uuid,
-    pub expected_payload: &'a [u8],
+    pub expected_payload_len: i64,
+    pub expected_payload_sha256: &'a [u8],
     pub expected_actor_user_id: Uuid,
 }
 
@@ -693,9 +685,11 @@ pub async fn append_collab_update(
         return Ok(Err(CollabDbError::StaleWriter));
     }
 
-    let existing: Option<(i64, Vec<u8>, Uuid)> = sqlx::query_as(
+    let incoming_len = payload.len() as i64;
+    let incoming_digest = payload_sha256(payload);
+    let existing: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(
         r#"
-        SELECT seq, payload, actor_user_id
+        SELECT seq, payload_len, payload_sha256, actor_user_id
         FROM fvoci.document_collab_op_receipts
         WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
         "#,
@@ -705,8 +699,11 @@ pub async fn append_collab_update(
     .bind(op_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some((seq, existing_payload, existing_actor)) = existing {
-        if existing_payload.as_slice() == payload && existing_actor == actor_user_id {
+    if let Some((seq, existing_len, existing_digest, existing_actor)) = existing {
+        if existing_len == incoming_len
+            && existing_digest.as_slice() == incoming_digest.as_slice()
+            && existing_actor == actor_user_id
+        {
             tx.commit().await?;
             return Ok(Ok(AppendCollabResult::DuplicateAck { seq }));
         }
@@ -730,12 +727,9 @@ pub async fn append_collab_update(
             return Ok(Err(err));
         }
     }
-    match receipt_budget_allows_append(&mut tx, workspace_id, document_id).await? {
-        Ok(()) => {}
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
+    if let Err(err) = receipt_budget_allows_append(state.4) {
+        tx.rollback().await?;
+        return Ok(Err(err));
     }
 
     let next_seq: Option<(i64,)> = sqlx::query_as(
@@ -773,11 +767,10 @@ pub async fn append_collab_update(
     .execute(&mut *tx)
     .await?;
 
-    let digest = payload_sha256(payload);
     sqlx::query(
         r#"
         INSERT INTO fvoci.document_collab_op_receipts (
-            workspace_id, document_id, op_id, seq, payload, payload_sha256, actor_user_id
+            workspace_id, document_id, op_id, seq, payload_len, payload_sha256, actor_user_id
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
@@ -785,8 +778,8 @@ pub async fn append_collab_update(
     .bind(document_id)
     .bind(op_id)
     .bind(seq)
-    .bind(payload)
-    .bind(digest)
+    .bind(incoming_len)
+    .bind(&incoming_digest)
     .bind(actor_user_id)
     .execute(&mut *tx)
     .await?;
@@ -834,9 +827,9 @@ pub async fn lookup_collab_operation(
             return Ok(Err(err));
         }
     }
-    let row: Option<(i64, Vec<u8>, Uuid)> = sqlx::query_as(
+    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(
         r#"
-        SELECT seq, payload, actor_user_id
+        SELECT seq, payload_len, payload_sha256, actor_user_id
         FROM fvoci.document_collab_op_receipts
         WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
         "#,
@@ -847,10 +840,11 @@ pub async fn lookup_collab_operation(
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Ok(row.map(|(seq, payload, actor_user_id)| {
+    Ok(Ok(row.map(|(seq, payload_len, payload_sha256, actor_user_id)| {
         CollabOperationLookup {
             seq,
-            payload,
+            payload_len,
+            payload_sha256,
             actor_user_id,
         }
     })))
@@ -866,7 +860,8 @@ pub async fn verify_collab_operation(
         session_id,
         document_id,
         op_id,
-        expected_payload,
+        expected_payload_len,
+        expected_payload_sha256,
         expected_actor_user_id,
     } = input;
     let mut tx = pool.begin().await?;
@@ -886,9 +881,9 @@ pub async fn verify_collab_operation(
             return Ok(Err(err));
         }
     }
-    let row: Option<(i64, Vec<u8>, Uuid)> = sqlx::query_as(
+    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(
         r#"
-        SELECT seq, payload, actor_user_id
+        SELECT seq, payload_len, payload_sha256, actor_user_id
         FROM fvoci.document_collab_op_receipts
         WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
         "#,
@@ -899,15 +894,19 @@ pub async fn verify_collab_operation(
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
-    let Some((seq, payload, stored_actor)) = row else {
+    let Some((seq, payload_len, payload_sha256, stored_actor)) = row else {
         return Ok(Err(CollabDbError::NotFound));
     };
-    if payload.as_slice() != expected_payload || stored_actor != expected_actor_user_id {
+    if payload_len != expected_payload_len
+        || payload_sha256.as_slice() != expected_payload_sha256
+        || stored_actor != expected_actor_user_id
+    {
         return Ok(Err(CollabDbError::OpIdConflict));
     }
     Ok(Ok(CollabOperationLookup {
         seq,
-        payload,
+        payload_len,
+        payload_sha256,
         actor_user_id: stored_actor,
     }))
 }

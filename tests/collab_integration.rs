@@ -15,9 +15,14 @@ use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::workspace::{self, WorkspaceRole};
 use fvoci_server::db::{documents, migrate, pool};
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+fn payload_digest(payload: &[u8]) -> Vec<u8> {
+    Sha256::digest(payload).to_vec()
+}
 
 const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
@@ -1414,7 +1419,8 @@ async fn lookup_hides_operation_from_forbidden_actor() {
     .unwrap()
     .unwrap()
     .expect("owner can see op");
-    assert_eq!(owner_lookup.payload, b"secret");
+    assert_eq!(owner_lookup.payload_len, b"secret".len() as i64);
+    assert_eq!(owner_lookup.payload_sha256, payload_digest(b"secret"));
     assert_eq!(owner_lookup.actor_user_id, member.user_id);
     member.pool.close().await;
     stranger.pool.close().await;
@@ -1566,6 +1572,98 @@ async fn pool_tenant_context_resets_after_collab_commit_and_rollback() {
             .unwrap();
     assert!(visible.is_some());
     tx.commit().await.unwrap();
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn app_role_cannot_update_or_delete_collab_receipts() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let op_id = Uuid::now_v7();
+    append_collab_update(
+        &fixture.session.pool,
+        append_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            op_id,
+            b"immutable-receipt",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    for (sql, label) in [
+        (
+            r#"
+            UPDATE fvoci.document_collab_op_receipts
+            SET payload_len = 99
+            WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
+            "#,
+            "receipt update",
+        ),
+        (
+            r#"
+            DELETE FROM fvoci.document_collab_op_receipts
+            WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
+            "#,
+            "receipt delete",
+        ),
+    ] {
+        let mut tx = fixture.session.pool.begin().await.unwrap();
+        sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
+            .bind(fixture.session.workspace_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let err = sqlx::query(sql)
+            .bind(fixture.session.workspace_id)
+            .bind(fixture.document_id)
+            .bind(op_id)
+            .execute(&mut *tx)
+            .await
+            .expect_err(label);
+        assert_eq!(
+            err.as_database_error()
+                .and_then(|e| e.code())
+                .map(|c| c.to_string()),
+            Some("42501".to_string())
+        );
+        tx.rollback().await.unwrap();
+    }
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let stored_len: (i64,) = sqlx::query_as(
+        r#"
+        SELECT payload_len
+        FROM fvoci.document_collab_op_receipts
+        WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
+        "#,
+    )
+    .bind(fixture.session.workspace_id)
+    .bind(fixture.document_id)
+    .bind(op_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(stored_len.0, b"immutable-receipt".len() as i64);
+    admin.close().await;
     fixture.session.pool.close().await;
     harness.cleanup().await;
 }
@@ -1881,7 +1979,8 @@ async fn compact_preserves_receipt_lookup_and_duplicate_ack() {
     .unwrap()
     .unwrap()
     .expect("receipt survives compaction");
-    assert_eq!(lookup.payload, payload);
+    assert_eq!(lookup.payload_len, payload.len() as i64);
+    assert_eq!(lookup.payload_sha256, payload_digest(payload));
     assert_eq!(lookup.actor_user_id, fixture.session.user_id);
 
     let dup = append_collab_update(
@@ -2002,6 +2101,8 @@ async fn verify_collab_operation_rejects_payload_and_actor_mismatch() {
     .unwrap()
     .unwrap();
 
+    let truth = b"truth";
+    let truth_digest = payload_digest(truth);
     let bad_payload = verify_collab_operation(
         &fixture.session.pool,
         VerifyCollabInput {
@@ -2010,7 +2111,8 @@ async fn verify_collab_operation_rejects_payload_and_actor_mismatch() {
             session_id: fixture.session.session_id,
             document_id: fixture.document_id,
             op_id,
-            expected_payload: b"lie",
+            expected_payload_len: truth.len() as i64,
+            expected_payload_sha256: &payload_digest(b"lie"),
             expected_actor_user_id: member.user_id,
         },
     )
@@ -2026,7 +2128,8 @@ async fn verify_collab_operation_rejects_payload_and_actor_mismatch() {
             session_id: fixture.session.session_id,
             document_id: fixture.document_id,
             op_id,
-            expected_payload: b"truth",
+            expected_payload_len: truth.len() as i64,
+            expected_payload_sha256: &truth_digest,
             expected_actor_user_id: fixture.session.user_id,
         },
     )
@@ -2042,14 +2145,16 @@ async fn verify_collab_operation_rejects_payload_and_actor_mismatch() {
             session_id: fixture.session.session_id,
             document_id: fixture.document_id,
             op_id,
-            expected_payload: b"truth",
+            expected_payload_len: truth.len() as i64,
+            expected_payload_sha256: &truth_digest,
             expected_actor_user_id: member.user_id,
         },
     )
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(ok.payload, b"truth");
+    assert_eq!(ok.payload_len, truth.len() as i64);
+    assert_eq!(ok.payload_sha256, truth_digest);
     assert_eq!(ok.actor_user_id, member.user_id);
     member.pool.close().await;
     fixture.session.pool.close().await;

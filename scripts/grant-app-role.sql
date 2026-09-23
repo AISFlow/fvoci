@@ -48,3 +48,4 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.documents TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_states TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_collab_updates TO :"app_role";
 GRANT SELECT, INSERT ON fvoci.document_collab_op_receipts TO :"app_role";
+REVOKE UPDATE, DELETE ON fvoci.document_collab_op_receipts FROM :"app_role";

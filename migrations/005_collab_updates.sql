@@ -29,7 +29,7 @@ CREATE TABLE fvoci.document_collab_op_receipts (
     document_id uuid NOT NULL,
     op_id uuid NOT NULL,
     seq bigint NOT NULL,
-    payload bytea NOT NULL,
+    payload_len bigint NOT NULL,
     payload_sha256 bytea NOT NULL,
     actor_user_id uuid NOT NULL REFERENCES fvoci.users (id),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -37,7 +37,13 @@ CREATE TABLE fvoci.document_collab_op_receipts (
     CONSTRAINT document_collab_op_receipts_workspace_document_fk
         FOREIGN KEY (workspace_id, document_id)
         REFERENCES fvoci.documents (workspace_id, id)
-        ON DELETE CASCADE
+        ON DELETE CASCADE,
+    CONSTRAINT document_collab_op_receipts_payload_len_check CHECK (
+        payload_len >= 1 AND payload_len <= 8388608
+    ),
+    CONSTRAINT document_collab_op_receipts_sha256_len_check CHECK (
+        octet_length(payload_sha256) = 32
+    )
 );
 
 CREATE INDEX document_collab_op_receipts_lookup_idx
