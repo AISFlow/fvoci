@@ -29,7 +29,13 @@ impl Limits {
     };
 }
 
-/// Provider/server multiplex message type after the routing key.
+/// lib0 `readVarUint` throws above `Number.MAX_SAFE_INTEGER`.
+const LIB0_MAX_SAFE_UINT: u64 = (1_u64 << 53) - 1;
+
+/// Provider 4.6.0 multiplex message type after the routing key.
+///
+/// Installed `@hocuspocus/provider@4.6.0` `MessageType` has no opcode 4 or 6.
+/// Connection-level Ping/Pong are not document-prefixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MessageType {
@@ -37,9 +43,7 @@ pub enum MessageType {
     Awareness = 1,
     Auth = 2,
     QueryAwareness = 3,
-    SyncReply = 4,
     Stateless = 5,
-    BroadcastStateless = 6,
     Close = 7,
     SyncStatus = 8,
     Ping = 9,
@@ -53,9 +57,7 @@ impl MessageType {
             1 => Some(Self::Awareness),
             2 => Some(Self::Auth),
             3 => Some(Self::QueryAwareness),
-            4 => Some(Self::SyncReply),
             5 => Some(Self::Stateless),
-            6 => Some(Self::BroadcastStateless),
             7 => Some(Self::Close),
             8 => Some(Self::SyncStatus),
             9 => Some(Self::Ping),
@@ -126,8 +128,18 @@ pub enum CollabKind {
     Task,
 }
 
+/// Source `z.uuid()` accepts hyphenated 8-4-4-4-12 form, not urn/simple/braced.
+fn parse_source_uuid(value: &str) -> Option<Uuid> {
+    if value.len() != 36 {
+        return None;
+    }
+    Uuid::try_parse(value).ok()
+}
+
 impl CollabRoomName {
     /// Parse `workspaceId:document|task:id` exactly like source `parseCollabName`.
+    ///
+    /// Call this on the document-name half of a routing key (`parseRoutingKey`).
     pub fn parse(name: &str) -> Option<Self> {
         let mut parts = name.split(':');
         let workspace_id = parts.next()?;
@@ -136,13 +148,16 @@ impl CollabRoomName {
         if parts.next().is_some() {
             return None;
         }
+        if workspace_id.is_empty() || kind.is_empty() || resource_id.is_empty() {
+            return None;
+        }
         let kind = match kind {
             "document" => CollabKind::Document,
             "task" => CollabKind::Task,
             _ => return None,
         };
-        let workspace_id = Uuid::parse_str(workspace_id).ok()?;
-        let resource_id = Uuid::parse_str(resource_id).ok()?;
+        let workspace_id = parse_source_uuid(workspace_id)?;
+        let resource_id = parse_source_uuid(resource_id)?;
         Some(Self {
             workspace_id,
             kind,
@@ -179,12 +194,10 @@ pub enum ConnectionMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocumentMessage {
     Sync(SyncMessage),
-    SyncReply(SyncMessage),
     Awareness(Vec<u8>),
     Auth(AuthMessage),
     QueryAwareness,
     Stateless(String),
-    BroadcastStateless(String),
     Close { reason: Option<String> },
     SyncStatus { applied: bool },
 }
@@ -228,6 +241,7 @@ pub enum WireError {
     UnknownSyncStep(u64),
     InvalidVarUint,
     DocumentPingNotAllowed,
+    DocumentPongNotAllowed,
 }
 
 impl fmt::Display for WireError {
@@ -254,6 +268,9 @@ impl fmt::Display for WireError {
             Self::InvalidVarUint => f.write_str("invalid varuint"),
             Self::DocumentPingNotAllowed => {
                 f.write_str("ping must be connection-level (single byte)")
+            }
+            Self::DocumentPongNotAllowed => {
+                f.write_str("pong must be connection-level (writeVarUint 10)")
             }
         }
     }
@@ -303,11 +320,15 @@ impl<'a> Cursor<'a> {
         let mut shift = 0u32;
         for _ in 0..10 {
             let byte = self.read_byte()?;
-            if shift >= 64 {
+            let bits = u64::from(byte & 0x7f);
+            if shift >= 64 || bits > (u64::MAX >> shift) {
                 return Err(WireError::InvalidVarUint);
             }
-            result |= u64::from(byte & 0x7f) << shift;
+            result |= bits << shift;
             if byte & 0x80 == 0 {
+                if result > LIB0_MAX_SAFE_UINT {
+                    return Err(WireError::InvalidVarUint);
+                }
                 return Ok(result);
             }
             shift += 7;
@@ -315,26 +336,34 @@ impl<'a> Cursor<'a> {
         Err(WireError::InvalidVarUint)
     }
 
-    fn read_var_string(&mut self) -> Result<String, WireError> {
-        let len = self.read_var_uint()? as usize;
-        if len > self.limits.max_string_bytes {
-            return Err(WireError::StringTooLong {
-                size: len,
-                max: self.limits.max_string_bytes,
-            });
+    fn bounded_len(len: u64, max: usize) -> Result<usize, usize> {
+        match usize::try_from(len) {
+            Ok(size) if size <= max => Ok(size),
+            Ok(size) => Err(size),
+            Err(_) => Err(usize::MAX),
         }
+    }
+
+    fn read_var_string(&mut self) -> Result<String, WireError> {
+        let len = self.read_var_uint()?;
+        let len = Self::bounded_len(len, self.limits.max_string_bytes).map_err(|size| {
+            WireError::StringTooLong {
+                size,
+                max: self.limits.max_string_bytes,
+            }
+        })?;
         let bytes = self.read_exact(len)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| WireError::Utf8)
     }
 
     fn read_var_bytes(&mut self) -> Result<Vec<u8>, WireError> {
-        let len = self.read_var_uint()? as usize;
-        if len > self.limits.max_binary_payload_bytes {
-            return Err(WireError::BinaryTooLong {
-                size: len,
+        let len = self.read_var_uint()?;
+        let len = Self::bounded_len(len, self.limits.max_binary_payload_bytes).map_err(|size| {
+            WireError::BinaryTooLong {
+                size,
                 max: self.limits.max_binary_payload_bytes,
-            });
-        }
+            }
+        })?;
         Ok(self.read_exact(len)?.to_vec())
     }
 }
@@ -413,17 +442,23 @@ impl Encoder {
     }
 }
 
+/// `@hocuspocus/common` `parseRoutingKey`: documentName is before the first NUL.
 fn routing_key_base(key: &str) -> &str {
-    key.split('\0').next().unwrap_or(key)
+    match key.split_once('\0') {
+        Some((document_name, _)) => document_name,
+        None => key,
+    }
 }
 
 fn decode_sync_payload(cursor: &mut Cursor<'_>) -> Result<SyncMessage, WireError> {
     let start = cursor.pos;
     let step_value = cursor.read_var_uint()?;
     let step = SyncStep::from_u64(step_value).ok_or(WireError::UnknownSyncStep(step_value))?;
-    let y_protocol = cursor.input[start..].to_vec();
-    cursor.pos = cursor.input.len();
-    Ok(SyncMessage { step, y_protocol })
+    let _payload = cursor.read_var_bytes()?;
+    Ok(SyncMessage {
+        step,
+        y_protocol: cursor.input[start..cursor.pos].to_vec(),
+    })
 }
 
 fn decode_auth(cursor: &mut Cursor<'_>) -> Result<AuthMessage, WireError> {
@@ -540,14 +575,8 @@ pub fn decode_with_limits(input: &[u8], limits: Limits) -> Result<WireFrame, Wir
 
     let message = match message_type {
         MessageType::Ping => return Err(WireError::DocumentPingNotAllowed),
-        MessageType::Pong => {
-            if cursor.remaining() != 0 {
-                return Err(WireError::Truncated);
-            }
-            return Ok(WireFrame::Connection(ConnectionMessage::Pong));
-        }
+        MessageType::Pong => return Err(WireError::DocumentPongNotAllowed),
         MessageType::Sync => DocumentMessage::Sync(decode_sync_payload(&mut cursor)?),
-        MessageType::SyncReply => DocumentMessage::SyncReply(decode_sync_payload(&mut cursor)?),
         MessageType::Awareness => DocumentMessage::Awareness(cursor.read_var_bytes()?),
         MessageType::Auth => DocumentMessage::Auth(decode_auth(&mut cursor)?),
         MessageType::QueryAwareness => {
@@ -557,9 +586,6 @@ pub fn decode_with_limits(input: &[u8], limits: Limits) -> Result<WireFrame, Wir
             DocumentMessage::QueryAwareness
         }
         MessageType::Stateless => DocumentMessage::Stateless(cursor.read_var_string()?),
-        MessageType::BroadcastStateless => {
-            DocumentMessage::BroadcastStateless(cursor.read_var_string()?)
-        }
         MessageType::Close => {
             let reason = if cursor.remaining() > 0 {
                 Some(cursor.read_var_string()?)
@@ -618,10 +644,6 @@ pub fn encode_with_limits(frame: &WireFrame, limits: Limits) -> Result<Vec<u8>, 
                     encoder.write_var_uint(MessageType::Sync.as_u64())?;
                     encoder.write_raw(&sync.y_protocol)?;
                 }
-                DocumentMessage::SyncReply(sync) => {
-                    encoder.write_var_uint(MessageType::SyncReply.as_u64())?;
-                    encoder.write_raw(&sync.y_protocol)?;
-                }
                 DocumentMessage::Awareness(payload) => {
                     encoder.write_var_uint(MessageType::Awareness.as_u64())?;
                     encoder.write_var_bytes(payload)?;
@@ -635,10 +657,6 @@ pub fn encode_with_limits(frame: &WireFrame, limits: Limits) -> Result<Vec<u8>, 
                 }
                 DocumentMessage::Stateless(payload) => {
                     encoder.write_var_uint(MessageType::Stateless.as_u64())?;
-                    encoder.write_var_string(payload)?;
-                }
-                DocumentMessage::BroadcastStateless(payload) => {
-                    encoder.write_var_uint(MessageType::BroadcastStateless.as_u64())?;
                     encoder.write_var_string(payload)?;
                 }
                 DocumentMessage::Close { reason } => {
