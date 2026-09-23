@@ -18,6 +18,9 @@ fragment = "prosemirror"
 encoding_v1 = 1
 offset_kind = "utf16"
 skip_gc = true
+# collab-http STATE_OVERSIZE_FACTOR * DOCUMENT_MAX_BODY_BYTES (3937952)
+state_oversize_factor = 8
+document_max_body_bytes = 1048576
 
 [[bin]]
 name = "collab-engine"

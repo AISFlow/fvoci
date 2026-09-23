@@ -253,6 +253,7 @@ fn write_times_out_when_child_stops_reading() {
     limits.timeout_ms = 500;
     limits.max_input_bytes = 256 * 1024;
     limits.max_output_bytes = 256 * 1024;
+    limits.max_load_bytes = 256 * 1024;
     let started = Instant::now();
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),

@@ -98,13 +98,26 @@ pub fn load_total_bytes(snapshot: &[u8], tail: &[Vec<u8>]) -> u64 {
     })
 }
 
+fn cap_blob(what: &str, len: u64, limits: &Limits) -> Result<(), EngineStatus> {
+    if len > limits.max_input_bytes {
+        return Err(EngineStatus::ResourceLimit {
+            kind: LimitKind::Input,
+            detail: format!(
+                "{what} {len} bytes exceeds {}-byte per-blob limit",
+                limits.max_input_bytes
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub fn cap_load_parts(
     load: Option<(&[u8], &[Vec<u8>])>,
     payload_bytes: u64,
     tail_rows: usize,
     limits: &Limits,
 ) -> Result<(), EngineStatus> {
-    if let Some((_, tail)) = load {
+    if let Some((snapshot, tail)) = load {
         if tail.len() > limits.max_tail_updates {
             return Err(EngineStatus::ResourceLimit {
                 kind: LimitKind::Ops,
@@ -115,18 +128,23 @@ pub fn cap_load_parts(
                 ),
             });
         }
+        cap_blob("snapshot", snapshot.len() as u64, limits)?;
+        for (i, upd) in tail.iter().enumerate() {
+            cap_blob(&format!("tail[{i}]"), upd.len() as u64, limits)?;
+        }
+        if payload_bytes > limits.max_load_bytes {
+            return Err(EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                detail: format!(
+                    "load snapshot+tail {payload_bytes} bytes exceeds {}-byte aggregate limit",
+                    limits.max_load_bytes
+                ),
+            });
+        }
+        let _ = tail_rows;
+        return Ok(());
     }
-    if payload_bytes > limits.max_input_bytes {
-        return Err(EngineStatus::ResourceLimit {
-            kind: LimitKind::Input,
-            detail: format!(
-                "payload {payload_bytes} bytes exceeds {}-byte limit",
-                limits.max_input_bytes
-            ),
-        });
-    }
-    let _ = tail_rows;
-    Ok(())
+    cap_blob("payload", payload_bytes, limits)
 }
 
 /// Inspect raw JSON (child) and refuse Load tails before base64 decode copies.
@@ -147,11 +165,11 @@ pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatu
         .get("snapshot_b64")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let empty = Vec::new();
     let tail = obj
         .get("tail_b64")
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+        .unwrap_or(&empty);
     if tail.len() > limits.max_tail_updates {
         return Err(EngineStatus::ResourceLimit {
             kind: LimitKind::Ops,
@@ -162,16 +180,9 @@ pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatu
             ),
         });
     }
-    let mut total = b64::decoded_len_estimate(snap.len());
-    if total > limits.max_input_bytes {
-        return Err(EngineStatus::ResourceLimit {
-            kind: LimitKind::Input,
-            detail: format!(
-                "snapshot estimate {total} exceeds {}-byte limit",
-                limits.max_input_bytes
-            ),
-        });
-    }
+    let snap_n = b64::decoded_len_estimate(snap.len());
+    cap_blob("snapshot", snap_n, limits)?;
+    let mut total = snap_n;
     for (i, item) in tail.iter().enumerate() {
         let Some(s) = item.as_str() else {
             return Err(EngineStatus::Malformed {
@@ -179,13 +190,14 @@ pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatu
             });
         };
         let n = b64::decoded_len_estimate(s.len());
+        cap_blob(&format!("tail[{i}]"), n, limits)?;
         total = total.saturating_add(n);
-        if total > limits.max_input_bytes {
+        if total > limits.max_load_bytes {
             return Err(EngineStatus::ResourceLimit {
                 kind: LimitKind::Input,
                 detail: format!(
-                    "load snapshot+tail estimate {total} exceeds {}-byte limit",
-                    limits.max_input_bytes
+                    "load snapshot+tail estimate {total} exceeds {}-byte aggregate limit",
+                    limits.max_load_bytes
                 ),
             });
         }
@@ -194,15 +206,5 @@ pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatu
 }
 
 fn cap_b64_field(name: &str, s: &str, limits: &Limits) -> Result<(), EngineStatus> {
-    let n = b64::decoded_len_estimate(s.len());
-    if n > limits.max_input_bytes {
-        return Err(EngineStatus::ResourceLimit {
-            kind: LimitKind::Input,
-            detail: format!(
-                "{name} estimate {n} exceeds {}-byte limit",
-                limits.max_input_bytes
-            ),
-        });
-    }
-    Ok(())
+    cap_blob(name, b64::decoded_len_estimate(s.len()), limits)
 }

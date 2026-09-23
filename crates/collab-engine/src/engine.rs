@@ -152,7 +152,10 @@ impl CollabEngine {
         if let Err(st) = self.apply_v1(update) {
             return st;
         }
-        self.ok_applied(None)
+        // Success is admissible only when the authoritative completeV1 (pending +
+        // delete set) still fits a reloadable per-blob/output cap. Oversize is
+        // not applied-ok: the parent must recycle this child before DB admit.
+        self.encode_complete_v1()
     }
 
     pub fn sync(&mut self, state_vector: &[u8]) -> EngineStatus {
@@ -179,6 +182,10 @@ impl CollabEngine {
         if let Err(st) = self.bump_op() {
             return st;
         }
+        self.encode_complete_v1()
+    }
+
+    fn encode_complete_v1(&self) -> EngineStatus {
         let txn = self.doc.transact();
         let bytes = txn.encode_state_as_update_v1(&StateVector::default());
         drop(txn);

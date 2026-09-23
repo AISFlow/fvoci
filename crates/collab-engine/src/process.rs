@@ -464,6 +464,8 @@ fn spawn_child(req: SpawnRequest, slot: SlotGuard) -> Result<EngineSession, Engi
         .arg(req.limits.max_input_bytes.to_string())
         .arg("--max-output")
         .arg(req.limits.max_output_bytes.to_string())
+        .arg("--max-load")
+        .arg(req.limits.max_load_bytes.to_string())
         .arg("--max-frame")
         .arg(req.limits.max_frame_bytes.to_string())
         .arg("--max-tail")

@@ -1,18 +1,25 @@
 //! Resource bounds for untrusted Yjs updateV1 / state-vector bytes.
 //!
-//! These are the native engine caps. Product HTTP / `DOCUMENT_MAX_BODY_BYTES`
-//! (1 MiB JSON) is a separate later parent concern. This crate never talks to
-//! a database or network.
+//! Grounded in original SHA `393795261322b916e588043cf94feca999175843`:
+//! `STATE_OVERSIZE_FACTOR = 8` × default `DOCUMENT_MAX_BODY_BYTES = 1048576`
+//! → 8 MiB per persistable completeV1 / candidate blob. Load may carry a
+//! committed snapshot plus a tail (aggregate 32 MiB). Product HTTP
+//! `DOCUMENT_MAX_BODY_BYTES` (1 MiB JSON) remains a later parent concern.
+//! This crate never talks to a database or network.
 
-/// Maximum accepted CRDT blob (snapshot, tail total, candidate, sync output).
-/// Input and output share this value so a `snapshot` response can be `load`ed.
-pub const MAX_INPUT_BYTES: u64 = 2 * 1024 * 1024;
+/// Per-blob CRDT cap (candidate update, committed snapshot, sync SV, output).
+/// `8 * 1048576` from collab-http `STATE_OVERSIZE_FACTOR`.
+pub const MAX_INPUT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Maximum encoded completeV1 / sync update. Equal to [`MAX_INPUT_BYTES`].
+/// Maximum encoded completeV1 / sync update. Equal to [`MAX_INPUT_BYTES`] so
+/// an accepted snapshot can be `load`ed into a fresh child.
 pub const MAX_OUTPUT_BYTES: u64 = MAX_INPUT_BYTES;
 
-/// JSON frame cap: base64 of a max-size blob plus envelope (~4/3 + keys).
-pub const MAX_FRAME_BYTES: u64 = 4 * 1024 * 1024;
+/// Aggregate decoded `load` snapshot + tail. Each blob still ≤ [`MAX_INPUT_BYTES`].
+pub const MAX_LOAD_BYTES: u64 = 32 * 1024 * 1024;
+
+/// JSON frame cap: base64 of a max-load payload plus envelope (~4/3 + keys).
+pub const MAX_FRAME_BYTES: u64 = 48 * 1024 * 1024;
 
 /// Maximum tail updates applied after a committed snapshot in one `load`.
 pub const MAX_TAIL_UPDATES: usize = 64;
@@ -48,15 +55,19 @@ pub const MAX_TIMEOUT_MS: u64 = 60_000;
 pub const MIN_CHILD_AS_BYTES: u64 = 16 * 1024 * 1024;
 pub const MIN_CHILD_STACK_BYTES: u64 = 128 * 1024;
 
-/// Minimum JSON frame size that can hold a max-input blob as base64.
-pub fn min_frame_bytes_for_input(max_input_bytes: u64) -> u64 {
-    (max_input_bytes.saturating_mul(4).saturating_add(2) / 3).saturating_add(4096)
+/// Minimum JSON frame size that can hold `decoded_bytes` as standard base64.
+pub fn min_frame_bytes_for_input(decoded_bytes: u64) -> u64 {
+    (decoded_bytes.saturating_mul(4).saturating_add(2) / 3).saturating_add(4096)
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    /// Per-blob update / snapshot / state-vector cap.
     pub max_input_bytes: u64,
+    /// Reloadable completeV1 / sync output. Must equal [`Self::max_input_bytes`].
     pub max_output_bytes: u64,
+    /// Aggregate decoded load (snapshot + tail). ≥ [`Self::max_input_bytes`].
+    pub max_load_bytes: u64,
     pub max_frame_bytes: u64,
     pub max_tail_updates: usize,
     pub max_ops: u32,
@@ -73,6 +84,7 @@ impl Default for Limits {
         Self {
             max_input_bytes: MAX_INPUT_BYTES,
             max_output_bytes: MAX_OUTPUT_BYTES,
+            max_load_bytes: MAX_LOAD_BYTES,
             max_frame_bytes: MAX_FRAME_BYTES,
             max_tail_updates: MAX_TAIL_UPDATES,
             max_ops: MAX_OPS,
@@ -111,7 +123,13 @@ impl Limits {
                 self.max_output_bytes, self.max_input_bytes
             ));
         }
-        let min_frame = min_frame_bytes_for_input(self.max_input_bytes);
+        if self.max_load_bytes < self.max_input_bytes || self.max_load_bytes > MAX_LOAD_BYTES {
+            return Err(format!(
+                "max_load_bytes {} outside {}..={}",
+                self.max_load_bytes, self.max_input_bytes, MAX_LOAD_BYTES
+            ));
+        }
+        let min_frame = min_frame_bytes_for_input(self.max_load_bytes);
         if self.max_frame_bytes < min_frame || self.max_frame_bytes > MAX_FRAME_BYTES {
             return Err(format!(
                 "max_frame_bytes {} outside {}..={}",

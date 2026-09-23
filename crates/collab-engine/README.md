@@ -34,12 +34,17 @@ Response `EngineReport.outcome`: `ok` (`applied`, `pending`, **`durable: false`*
 commit. Denied/uncertain → `kill_and_reap` and reload committed bytes. Never
 Yrs-undo as DB rollback.
 
-Caps: `max_input_bytes == max_output_bytes` (default 2 MiB) so snapshots
-reload; load snapshot+tail bytes and tail rows capped **before** base64 copies;
-global live children 8 with immediate `ResourceLimit` (not a wait); per-document
-uniqueness is the future room map. Child `env_clear` / scrub; no inherited
-`DATABASE_APP_URL`. Deadline covers preflight+serialize+write+read. Writer and
-reader run on helper threads; timeout kills, waits, and joins.
+Caps: `max_input_bytes == max_output_bytes` (default 8 MiB =
+`STATE_OVERSIZE_FACTOR * DOCUMENT_MAX_BODY_BYTES`) so snapshots reload;
+`max_load_bytes` (32 MiB) is the decoded snapshot+tail aggregate and is
+checked **together with each blob** before base64 copies; JSON frames 48 MiB;
+tail rows 64; global live children 8 with immediate `ResourceLimit` (not a wait);
+per-document uniqueness is the future room map. Apply succeeds only when the
+authoritative completeV1 (pending + delete set) still fits the 8 MiB reload
+cap; oversize recycles the child before any parent DB admission. Child
+`env_clear` / scrub; no inherited `DATABASE_APP_URL`. Deadline covers
+preflight+serialize+write+read. Writer and reader run on helper threads;
+timeout kills, waits, and joins.
 
 ## Commands
 

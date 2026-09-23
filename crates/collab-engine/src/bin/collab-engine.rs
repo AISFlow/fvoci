@@ -18,6 +18,7 @@ fn main() {
         match arg.as_str() {
             "--max-input" => limits.max_input_bytes = parse_u64(&require_arg(&mut args)),
             "--max-output" => limits.max_output_bytes = parse_u64(&require_arg(&mut args)),
+            "--max-load" => limits.max_load_bytes = parse_u64(&require_arg(&mut args)),
             "--max-frame" => limits.max_frame_bytes = parse_u64(&require_arg(&mut args)),
             "--max-tail" => limits.max_tail_updates = parse_u64(&require_arg(&mut args)) as usize,
             "--max-ops" => limits.max_ops = parse_u64(&require_arg(&mut args)) as u32,
@@ -158,7 +159,7 @@ fn parse_u64(s: &str) -> u64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: collab-engine [--max-input N] [--max-output N] [--max-frame N] [--max-tail N] [--max-ops N] [--timeout-ms N] [--max-as N] [--max-observed-rss N] [--max-stack N]"
+        "usage: collab-engine [--max-input N] [--max-output N] [--max-load N] [--max-frame N] [--max-tail N] [--max-ops N] [--timeout-ms N] [--max-as N] [--max-observed-rss N] [--max-stack N]"
     );
     std::process::exit(2);
 }

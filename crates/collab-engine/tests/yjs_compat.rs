@@ -139,10 +139,37 @@ fn load_caps_cumulative_tail_before_apply() {
     let mut limits = Limits::for_tests();
     limits.max_input_bytes = 64;
     limits.max_output_bytes = 64;
+    limits.max_load_bytes = 64;
     let mut session = spawn(limits);
     let report = session.call(&Request::Load {
         snapshot_b64: Some(vec![1; 40]),
         tail_b64: vec![vec![2; 40]],
+        encoding: 1,
+    });
+    assert!(
+        matches!(
+            report.outcome,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                ..
+            }
+        ),
+        "{:?}",
+        report.outcome
+    );
+}
+
+#[test]
+fn load_caps_each_blob_before_aggregate() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut limits = Limits::for_tests();
+    limits.max_input_bytes = 64;
+    limits.max_output_bytes = 64;
+    limits.max_load_bytes = 256;
+    let mut session = spawn(limits);
+    let report = session.call(&Request::Load {
+        snapshot_b64: Some(vec![1; 80]),
+        tail_b64: Vec::new(),
         encoding: 1,
     });
     assert!(
@@ -363,6 +390,119 @@ fn oversize_candidate_is_resource_not_host_oom() {
         report.outcome
     );
     assert_fully_reaped(pid);
+}
+
+#[test]
+fn apply_complete_v1_reloads_and_oversize_cannot_persist() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let structured = load_bytes("structured.v1");
+    let follow = load_bytes("followup_edit.v1");
+
+    let mut probe = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&probe.handle(&Request::Load {
+        snapshot_b64: Some(structured.clone()),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let loaded_len = match probe.handle(&Request::Snapshot) {
+        EngineStatus::Ok {
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("probe snap").len() as u64,
+        other => panic!("probe snapshot: {other:?}"),
+    };
+    assert!(
+        loaded_len >= structured.len() as u64,
+        "completeV1 {loaded_len} shorter than committed snapshot {}",
+        structured.len()
+    );
+
+    let mut roomy = spawn(Limits::for_tests());
+    assert_ok_applied(
+        &roomy
+            .call(&Request::Load {
+                snapshot_b64: Some(structured.clone()),
+                tail_b64: Vec::new(),
+                encoding: 1,
+            })
+            .outcome,
+    );
+    let applied = roomy.call(&Request::Apply {
+        update_b64: follow.clone(),
+        encoding: 1,
+    });
+    let admitted = match &applied.outcome {
+        EngineStatus::Ok {
+            applied: true,
+            durable: false,
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(s).expect("apply completeV1"),
+        other => panic!("apply must return reloadable completeV1, got {other:?}"),
+    };
+    drop(roomy);
+    let mut reloaded = spawn(Limits::for_tests());
+    assert_ok_applied(
+        &reloaded
+            .call(&Request::Load {
+                snapshot_b64: Some(admitted),
+                tail_b64: Vec::new(),
+                encoding: 1,
+            })
+            .outcome,
+    );
+    let xml = xml_of(&mut reloaded);
+    assert!(xml.contains("후속편집한글✨"), "{xml}");
+    drop(reloaded);
+
+    let mut tight = Limits::for_tests();
+    tight.max_input_bytes = loaded_len.saturating_add(8).max(structured.len() as u64);
+    tight.max_output_bytes = tight.max_input_bytes;
+    tight.max_load_bytes = tight.max_input_bytes.max(64 * 1024);
+    let mut session = spawn(tight);
+    let pid = session.pid().expect("pid");
+    assert_ok_applied(
+        &session
+            .call(&Request::Load {
+                snapshot_b64: Some(structured.clone()),
+                tail_b64: Vec::new(),
+                encoding: 1,
+            })
+            .outcome,
+    );
+    let oversize = session.call(&Request::Apply {
+        update_b64: follow,
+        encoding: 1,
+    });
+    assert!(
+        matches!(
+            oversize.outcome,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Output,
+                ..
+            }
+        ),
+        "oversize candidate must fail output before DB admission, got {:?}",
+        oversize.outcome
+    );
+    assert!(session.pid().is_none(), "oversize apply must recycle child");
+    assert_fully_reaped(pid);
+
+    let mut original = spawn(Limits::for_tests());
+    assert_ok_applied(
+        &original
+            .call(&Request::Load {
+                snapshot_b64: Some(structured),
+                tail_b64: Vec::new(),
+                encoding: 1,
+            })
+            .outcome,
+    );
+    let xml = xml_of(&mut original);
+    assert!(
+        !xml.contains("후속편집한글✨"),
+        "rejected candidate must not persist into a reloaded committed snapshot: {xml}"
+    );
 }
 
 #[test]
