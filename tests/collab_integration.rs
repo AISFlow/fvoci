@@ -692,16 +692,10 @@ async fn migration_004_upgrades_to_005_collab() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let claim = claim_writer_and_load(
-        &app_pool,
-        workspace_id,
-        user_id,
-        session_id,
-        document_id,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let claim = claim_writer_and_load(&app_pool, workspace_id, user_id, session_id, document_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(claim.writer_generation, 1);
 
     let can_update: (bool,) = sqlx::query_as(

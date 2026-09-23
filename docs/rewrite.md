@@ -552,3 +552,34 @@ clippy(test-hang)는7.60초 성공했다. Linux x64/ARM64 별도2job에 실제 n
 검사와 production 테스트제어 거부·부모 no-default-features 컴파일을 연결한다.
 Fable taskc7193b74e436/ctx05cc4dbef3ca는 고정3eb3ded 엔진을 읽기 전용 검토 중.
 Grok 보강 dispatch445b177a1ece는 유효 제출 확인 후 release했고 worktree는 보존했다.
+
+954421b의 native-engine CI35922263737은 x64/ARM64 모두 nested_any 회귀에서
+stdout EOF/자식 종료 관찰 순서에 따른 Protocol 분류 실패로 중단됐다. 재실행으로
+숨기지 않는다. Grok taska20ddcbc6736/ctx785570683988가 고정3eb3ded 이후
+process 경계·회귀만 보강한다. Fable 엔진 검토는 고정3eb3ded에 계속 적용한다.
+
+Fable DB 검토3a08bc4: receipt UPDATE/DELETE grant 결함 확인, CI 누락은
+통합1ba6124에서 해소. hash+length+actor+seq만 남기는 append-only receipt와
+임의100만회 lifetime hardstop 제거 설계를 자문 확인 후 결정했다. 오래된 receipt를
+삭제하면 불명확한 commit 확인/op_id 중복 방지가 깨지므로 나이/cutoff 삭제는 금지한다.
+작은 고정 크기 기록과 이벤트/감사 DB 저장량은 계속 증가하며 quota/자동보존기간
+지원은 아직 주장하지 않는다. 복원 메모리·tail32MiB/64행 제한은 유지한다.
+Fable DB dispatchdafa8d332309는 보고·추가 판단 후 release. Composer 보강은
+c9124c9를 보존하면서 실제 동시 session revoke/크기경계/upgrade 앱권한 검사와
+최종 receipt 설계를 진행 중이다. 검토 차단 해소·최종 CI 전 PR6 Draft 유지.
+
+DB 보강c9124c9/e7c6751을5fdbe9f/c4e9f21으로 통합했다. 워커 보고:
+collab22+순수collab4+기존DB66 성공(~77초), 자원 정리 후 release. 통합의
+format 차이2곳을 정리한 뒤 all-targets clippy1.37초/lib24검사5.33초 성공.
+Fable 고정e7c6751 delta task0e1aeca68e92/ctxbbe9ffa4b746 검토 중이다.
+
+엔진 EOF 수정9a76f00은5e5bf2c로 통합했다. 워커는 CI와 같은 nodebug 조건의
+process_boundary worker8/test-hang10 성공을 보고했다. Fable3eb3ded 검토는
+EOF 분류 및 32MiB load 대비256MiB AS 부족을 차단으로 확인했다. 측정된
+29.5MiB load의 VmPeak413MiB를 근거로 입력계약은 유지하고 AS1GiB/RSS512MiB,
+최대8children의 최대 관찰 RSS예산4GiB로 조정·검증한다. 구조가 더 무거운 입력은
+명시적 resource 실패가 가능하며 모든8MiB 문서 처리 성공을 보장하지 않는다.
+요청별8초 wall deadline은 유지하고 누적CPU예산을 별도로 고친다. Apply의
+복원 가능 크기 검사는 유지하되 매번 전체snapshot 전송은 제거한다.
+Grok 후속 task89714a09237e/ctx987fc1e02c63가 같은engine worktree 단독소유.
+Fable ctx05cc4dbef3ca는 보고 후 release; 후속delta는 다시 검토한다.

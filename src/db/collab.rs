@@ -828,14 +828,14 @@ pub async fn lookup_collab_operation(
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Ok(row.map(|(seq, payload_len, payload_sha256, actor_user_id)| {
-        CollabOperationLookup {
+    Ok(Ok(row.map(
+        |(seq, payload_len, payload_sha256, actor_user_id)| CollabOperationLookup {
             seq,
             payload_len,
             payload_sha256,
             actor_user_id,
-        }
-    })))
+        },
+    )))
 }
 
 pub async fn verify_collab_operation(
