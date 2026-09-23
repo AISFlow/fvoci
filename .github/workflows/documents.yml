@@ -32,5 +32,5 @@ jobs:
       - run: cargo clippy --locked --offline --all-targets --features test-hang -- -D warnings
       - name: Native fixtures and process termination
         run: cargo test --locked --offline --all-targets --features test-hang
-      - name: Production helper without test controls
-        run: cargo build --locked --offline --bin document-extract
+      - name: Production helper rejects test controls
+        run: cargo test --locked --offline --all-targets
