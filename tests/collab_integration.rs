@@ -7,8 +7,8 @@ use fvoci_server::auth::password::Keyring;
 use fvoci_server::db::collab::{
     append_collab_update, claim_writer_and_load, compact_collab_snapshot, load_collab_document,
     lookup_collab_operation, verify_collab_operation, AppendCollabInput, AppendCollabResult,
-    CollabDbError, CompactCollabInput, VerifyCollabInput, MAX_COLLAB_TAIL_UPDATES,
-    MAX_COLLAB_UPDATE_BYTES,
+    CollabDbError, CompactCollabInput, VerifyCollabInput, MAX_COLLAB_SNAPSHOT_BYTES,
+    MAX_COLLAB_TAIL_UPDATES, MAX_COLLAB_UPDATE_BYTES,
 };
 use fvoci_server::db::documents::{empty_document_json, CreateDocumentInput};
 use fvoci_server::db::identity::revoke_session;
@@ -501,6 +501,16 @@ async fn wait_for_document_states_for_update(admin: &PgPool, blocker_pid: i32) -
     wait_for_lock_blocked_by(admin, blocker_pid, "%document_states%", "%FOR UPDATE%").await
 }
 
+async fn wait_for_session_revoke_blocked(admin: &PgPool, blocker_pid: i32) -> i32 {
+    wait_for_lock_blocked_by(
+        admin,
+        blocker_pid,
+        "%UPDATE fvoci.sessions%",
+        "%revoked_at%",
+    )
+    .await
+}
+
 #[tokio::test]
 async fn fresh_migration_005_adds_collab_tables_and_columns() {
     let harness = TestDb::bootstrap().await;
@@ -602,6 +612,114 @@ async fn migration_004_upgrades_to_005_collab() {
     .await
     .unwrap();
     assert!(has_updates.0);
+
+    let role_name = format!("fvoci_app_{}", db_name.replace('-', "_"));
+    let mut password_bytes = [0u8; 24];
+    rand::rng().fill_bytes(&mut password_bytes);
+    let role_password = hex::encode(password_bytes);
+    sqlx::query(&format!(
+        "CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{role_password}' NOSUPERUSER NOBYPASSRLS"
+    ))
+    .execute(&migration_pool)
+    .await
+    .unwrap();
+    apply_grants(&migration_pool, &role_name).await;
+
+    let mut app_url = url::Url::parse(&admin_url).unwrap();
+    app_url.set_username(&role_name).ok();
+    app_url.set_password(Some(&role_password)).ok();
+    let app_pool = pool::connect_app(app_url.as_ref()).await.unwrap();
+
+    let user_id = Uuid::now_v7();
+    let workspace_id = Uuid::now_v7();
+    let document_id = Uuid::now_v7();
+    let session_id = Uuid::now_v7();
+    let hash = fvoci_server::auth::password::hash_password(
+        "supersecret1",
+        &Keyring::parse(PEPPER, "test").unwrap(),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.users (id, email, password_hash, given_name) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user_id)
+    .bind(format!("upgrade-{user_id}@example.com"))
+    .bind(&hash)
+    .bind("Upgrade")
+    .execute(&migration_pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id)
+        .bind(workspace::personal_workspace_slug(user_id))
+        .bind("Upgrade WS")
+        .execute(&migration_pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&migration_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, sort_key, number, status, schema_version,
+            content_json, created_by
+        ) VALUES (
+            $1, $2, 'Upgrade doc', $3, 'V', 1, 'draft', 2, $4::jsonb, $5
+        )
+        "#,
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(document_id.simple().to_string())
+    .bind(empty_document_json())
+    .bind(user_id)
+    .execute(&migration_pool)
+    .await
+    .unwrap();
+
+    let token = fvoci_server::auth::token::new_token();
+    let expires = Utc::now() + ChronoDuration::days(30);
+    let mut tx = app_pool.begin().await.unwrap();
+    fvoci_server::db::identity::create_session(&mut tx, session_id, user_id, &token.hash, expires)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let claim = claim_writer_and_load(
+        &app_pool,
+        workspace_id,
+        user_id,
+        session_id,
+        document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(claim.writer_generation, 1);
+
+    let can_update: (bool,) = sqlx::query_as(
+        "SELECT has_table_privilege(current_user, 'fvoci.document_collab_op_receipts', 'UPDATE')",
+    )
+    .fetch_one(&app_pool)
+    .await
+    .unwrap();
+    let can_delete: (bool,) = sqlx::query_as(
+        "SELECT has_table_privilege(current_user, 'fvoci.document_collab_op_receipts', 'DELETE')",
+    )
+    .fetch_one(&app_pool)
+    .await
+    .unwrap();
+    assert!(!can_update.0);
+    assert!(!can_delete.0);
+
+    app_pool.close().await;
     migration_pool.close().await;
 
     let server = server_db_url(&admin_url);
@@ -616,6 +734,9 @@ async fn migration_004_upgrades_to_005_collab() {
     .execute(&cleanup_pool)
     .await;
     let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
+        .execute(&cleanup_pool)
+        .await;
+    let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{role_name}\""))
         .execute(&cleanup_pool)
         .await;
     cleanup_pool.close().await;
@@ -813,6 +934,52 @@ async fn duplicate_op_id_same_bytes_ack_different_bytes_conflict() {
 }
 
 #[tokio::test]
+async fn compact_rejects_oversized_snapshot() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &fixture.session.pool,
+        append_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            Uuid::now_v7(),
+            b"one",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let huge = vec![1u8; MAX_COLLAB_SNAPSHOT_BYTES + 1];
+    let err = compact_collab_snapshot(
+        &fixture.session.pool,
+        compact_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            1,
+            &huge,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(err, Err(CollabDbError::PayloadTooLarge));
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn append_rejects_oversized_payload() {
     let harness = TestDb::bootstrap().await;
     let fixture = setup_wiki_doc(&harness).await;
@@ -845,7 +1012,7 @@ async fn append_rejects_oversized_payload() {
 }
 
 #[tokio::test]
-async fn collab_append_waits_on_session_revoke_lock_then_forbidden() {
+async fn collab_append_loses_to_session_revoke_barrier() {
     let harness = TestDb::bootstrap().await;
     let fixture = setup_wiki_doc(&harness).await;
     let claim = claim_writer_and_load(
@@ -864,14 +1031,14 @@ async fn collab_append_waits_on_session_revoke_lock_then_forbidden() {
         .await
         .unwrap();
 
-    let mut revoke_barrier = admin.begin().await.unwrap();
+    let mut barrier = admin.begin().await.unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *revoke_barrier)
+        .fetch_one(&mut *barrier)
         .await
         .unwrap();
-    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
-        .bind(fixture.session.user_id)
-        .execute(&mut *revoke_barrier)
+    sqlx::query("SELECT id FROM fvoci.sessions WHERE id = $1 FOR UPDATE")
+        .bind(fixture.session.session_id)
+        .execute(&mut *barrier)
         .await
         .unwrap();
 
@@ -880,31 +1047,56 @@ async fn collab_append_waits_on_session_revoke_lock_then_forbidden() {
         let token_hash = fixture.session.token_hash.clone();
         async move { revoke_session(&pool, &token_hash, None).await }
     });
-    wait_for_users_for_update(&admin, blocker_pid).await;
-    revoke_barrier.commit().await.unwrap();
+    wait_for_session_revoke_blocked(&admin, blocker_pid).await;
+
+    let append = tokio::spawn({
+        let pool = fixture.session.pool.clone();
+        let workspace_id = fixture.session.workspace_id;
+        let actor_user_id = fixture.session.user_id;
+        let session_id = fixture.session.session_id;
+        let document_id = fixture.document_id;
+        let writer_generation = claim.writer_generation;
+        async move {
+            append_collab_update(
+                &pool,
+                AppendCollabInput {
+                    workspace_id,
+                    actor_user_id,
+                    session_id,
+                    document_id,
+                    writer_generation,
+                    op_id: Uuid::now_v7(),
+                    payload: b"after-revoke-wins",
+                    client_ip: None,
+                },
+            )
+            .await
+        }
+    });
+    let append_started = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < append_started {
+        if !append.is_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !append.is_finished(),
+        "append finished before concurrent revoke race began"
+    );
+    barrier.commit().await.unwrap();
 
     tokio::time::timeout(Duration::from_secs(10), revoke)
         .await
         .expect("revoke_session did not finish after barrier release")
         .unwrap()
         .unwrap();
-
-    let result = append_collab_update(
-        &fixture.session.pool,
-        AppendCollabInput {
-            workspace_id: fixture.session.workspace_id,
-            actor_user_id: fixture.session.user_id,
-            session_id: fixture.session.session_id,
-            document_id: fixture.document_id,
-            writer_generation: claim.writer_generation,
-            op_id: Uuid::now_v7(),
-            payload: b"blocked",
-            client_ip: None,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(result, Err(CollabDbError::Forbidden));
+    let append_result = tokio::time::timeout(Duration::from_secs(10), append)
+        .await
+        .expect("append did not finish after revoke")
+        .unwrap()
+        .unwrap();
+    assert_eq!(append_result, Err(CollabDbError::Forbidden));
     let updates: (i64,) =
         sqlx::query_as("SELECT count(*) FROM fvoci.document_collab_updates WHERE document_id = $1")
             .bind(fixture.document_id)
@@ -973,12 +1165,27 @@ async fn collab_append_wins_before_session_revoke_barrier() {
         }
     });
     wait_for_lock_sign_in_blocked(&admin, blocker_pid).await;
+
+    let revoke = tokio::spawn({
+        let pool = fixture.session.pool.clone();
+        let token_hash = fixture.session.token_hash.clone();
+        async move { revoke_session(&pool, &token_hash, None).await }
+    });
+    wait_for_users_for_update(&admin, blocker_pid).await;
     barrier.commit().await.unwrap();
-    let result = append.await.unwrap().unwrap().unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(10), append)
+        .await
+        .expect("append did not finish after barrier release")
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(result, AppendCollabResult::Committed { seq: 1 });
 
-    revoke_session(&fixture.session.pool, &fixture.session.token_hash, None)
+    tokio::time::timeout(Duration::from_secs(10), revoke)
         .await
+        .expect("revoke_session did not finish after append won")
+        .unwrap()
         .unwrap();
     let denied = append_collab_update(
         &fixture.session.pool,

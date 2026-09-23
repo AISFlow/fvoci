@@ -5,7 +5,9 @@
 //! - `MAX_COLLAB_TAIL_UPDATES`: 64 tail rows.
 //! - `MAX_COLLAB_LOAD_BYTES`: snapshot + tail combined 32 MiB (engine reload budget).
 //! - Engine Load framed JSON cap 48 MiB (documented; DB refuses tails engine cannot reload).
-//! - `MAX_COLLAB_OP_RECEIPTS`: 1_000_000 immutable receipts per document (never compacted away).
+//! - Op receipts are append-only identity rows (seq/actor/len/digest); history grows without
+//!   automatic retention or a per-document receipt count cap. Memory/recovery stays bounded by
+//!   the 32 MiB / 64-row tail load budget above.
 //!
 //! ## Public API (room actor consumes later; DB remains ACL/durable/fence authority)
 //! - `claim_writer_and_load(pool, workspace_id, actor_user_id, session_id, document_id)`
@@ -53,8 +55,6 @@ pub const MAX_COLLAB_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COLLAB_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COLLAB_TAIL_UPDATES: i64 = 64;
 pub const MAX_COLLAB_LOAD_BYTES: i64 = 32 * 1024 * 1024;
-/// Immutable op receipts are retained for reconciliation and are not deleted by compaction.
-pub const MAX_COLLAB_OP_RECEIPTS: i64 = 1_000_000;
 
 /// Minimal fixed empty Yjs updateV1 bytes for the canonical empty Tiptap seed only.
 /// This layer does not parse CRDT payloads.
@@ -91,13 +91,6 @@ async fn tail_budget_allows_append(
         return Ok(Err(CollabDbError::StateBudgetExceeded));
     }
     Ok(Ok(()))
-}
-
-fn receipt_budget_allows_append(tail_seq: i64) -> Result<(), CollabDbError> {
-    if tail_seq + 1 > MAX_COLLAB_OP_RECEIPTS {
-        return Err(CollabDbError::StateBudgetExceeded);
-    }
-    Ok(())
 }
 
 fn load_budget_allows(
@@ -727,11 +720,6 @@ pub async fn append_collab_update(
             return Ok(Err(err));
         }
     }
-    if let Err(err) = receipt_budget_allows_append(state.4) {
-        tx.rollback().await?;
-        return Ok(Err(err));
-    }
-
     let next_seq: Option<(i64,)> = sqlx::query_as(
         r#"
         UPDATE fvoci.document_states
@@ -1085,5 +1073,26 @@ mod tests {
     #[test]
     fn empty_yjs_seed_is_fixed_bytes() {
         assert_eq!(EMPTY_YJS_STATE_V1, &[0, 0]);
+    }
+
+    #[test]
+    fn load_budget_allows_within_caps() {
+        assert!(load_budget_allows(16 * 1024 * 1024, 32, 15 * 1024 * 1024).is_ok());
+    }
+
+    #[test]
+    fn load_budget_rejects_tail_row_count_over_cap() {
+        assert_eq!(
+            load_budget_allows(0, MAX_COLLAB_TAIL_UPDATES + 1, 0),
+            Err(CollabDbError::StateBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn load_budget_rejects_snapshot_plus_tail_bytes_over_cap() {
+        assert_eq!(
+            load_budget_allows(MAX_COLLAB_LOAD_BYTES, 1, 1),
+            Err(CollabDbError::StateBudgetExceeded)
+        );
     }
 }
