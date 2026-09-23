@@ -3,7 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+# Freeze relative output paths before changing cwd for frontend/build commands.
+CARGO_TARGET_DIR="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$CARGO_TARGET_DIR")"
+COLLAB_ENGINE_TARGET_DIR="$ROOT/crates/collab-engine/target"
 export CARGO_TARGET_DIR
+export FVOCI_COLLAB_ENGINE="$COLLAB_ENGINE_TARGET_DIR/debug/collab-engine"
 
 require_prepared() {
   local missing=0
@@ -29,6 +33,8 @@ build_current_artifacts() {
   cd "$ROOT"
   cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
   cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
+  CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" cargo build --locked --offline \
+    --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine
 }
 
 require_prepared

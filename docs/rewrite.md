@@ -643,3 +643,17 @@ packages/editor/** 및 apps/web/**(generated API 제외), web manifest/lock 단�
 main post-merge Rust35927307111/Web35927307116 진행 중, native35927307145/35927307100 성공.
 재개: 실제 task/미커밋 대조→Rust room/transport 작업 배정→고정 제출 통합→
 실제 두 UI/인가·철회·삭제·fresh crash 검증 및 Fable 검토.
+
+후속 공통 기준1ad5295: Composer task9c7b5948bb86/ctx62e83afccaab,
+rust-collab-room에서 src/**, tests/**, RUNNING.md 단독소유로 실제 transport/actor/
+현재 인가·durable recovery/persist 경계 구현 중. 원래005까지 migration과
+rootmanifest/CI는 수정하지 않는다. Fable5.1medium taskb5d6a996852f/
+ctx61175969f007가 새 recovery 검증/commit 조건의 좁은 읽기 전용 자문 중이다.
+UI writer ctx259ebcae441c와 함께 쓰기2개, 서버 DB/native 무거운 검사는 Composer
+하나에 배정했다. main ba19932 post-merge8job 모두 성공 확인.
+
+코디네이터는 E2E 준비 단계의 native helper fetch, production worker 빌드 및
+FVOCI_COLLAB_ENGINE 경로를 추가하고 worktree 안 독립 target/cache로 분리했다.
+상대 CARGO_TARGET_DIR은 cwd 변경 전에 절대경로로 고정한다. bash -n과
+기존 actionlint1.7.12 검사 exit0; 제품 UI/WS 통합 검사는 아직 미실행이다.
+이 공통 변경은 새 기능 수락을 의미하지 않는다. scripts/CI는 계속 코디네이터 소유.

@@ -7,6 +7,7 @@ export CARGO_TARGET_DIR
 
 cd "$ROOT"
 cargo fetch --locked
+cargo fetch --locked --manifest-path "$ROOT/crates/collab-engine/Cargo.toml"
 
 cd "$ROOT/apps/web"
 npm ci --no-audit --no-fund
