@@ -1,5 +1,7 @@
 # Running the Rust slice
 
+This slice initializes a new PostgreSQL database. Upgrading or importing an existing FVOCI installation is not supported yet.
+
 ## Toolchain
 
 Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_HOME`, and `PATH` at your toolchain.
@@ -25,13 +27,14 @@ Create the dedicated app LOGIN role first, then run migrations, then apply grant
 
 ```sh
 export DATABASE_URL='postgres://owner@host:5432/fvoci?sslmode=require'
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE fvoci_app_prod LOGIN PASSWORD '***' NOSUPERUSER NOBYPASSRLS"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE fvoci_app_prod LOGIN NOSUPERUSER NOBYPASSRLS"
+psql "$DATABASE_URL" -c '\password fvoci_app_prod'
 cargo run --bin fvoci-migrate
 psql "$DATABASE_URL" -v app_role=fvoci_app_prod -f scripts/grant-app-role.sql
 export DATABASE_APP_URL='postgres://fvoci_app_prod:***@host:5432/fvoci?sslmode=require'
 ```
 
-Never grant the app role before the role exists. Never commit credentials.
+Never grant the app role before the role exists. Keep database credentials and pepper keys in your secret configuration, outside Git. Retain the same pepper keyring across restarts; replacing it prevents verification of existing passwords.
 
 ## Start server
 
@@ -67,3 +70,14 @@ scripts/start-test-postgres.sh cargo test --features db-tests --test db_integrat
 ```
 
 Integration tests always create and drop their own UUID database and app role; they never reuse or drop an externally supplied database.
+
+## HTTP entry points
+
+| Method | URL | Result |
+| --- | --- | --- |
+| GET / POST | `/api/v1/setup` | Setup status / first administrator and workspace, session cookie |
+| POST | `/api/v1/auth/login` | Password login, `fvoci_session` cookie |
+| GET / PATCH | `/api/v1/auth/me` | Current session user / authenticated profile change |
+| POST | `/api/v1/auth/logout` | Revoke current session and clear cookie |
+
+PATCH requires `givenName`; `familyName` omitted preserves the value, null or an empty string clears it. Other optional fields are `locale` (`ko`), `timezone`, `weekStartsOn` (0/1), and `textScale` (16/18/20). Unknown fields are rejected. Use the bound address printed at startup; default port 0 is selected by the listening socket.

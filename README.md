@@ -1,6 +1,6 @@
 # FVOCI Rust backend
 
-FVOCI 백엔드의 단계적 Rust 재작성입니다. 현재 PostgreSQL 기반 초기 설치·로그인·세션·사용자 프로필 변경을 구현하고 수락 검증 중입니다. 전체 FVOCI를 대체하는 릴리스가 아닙니다.
+FVOCI 백엔드의 단계적 Rust 재작성입니다. 현재 PostgreSQL 기반 초기 설치·로그인·세션·인증된 사용자 프로필 변경을 구현하고 실제 HTTP·DB 검증을 마쳤습니다. 전체 FVOCI를 대체하는 릴리스가 아닙니다.
 
 실행 방법과 환경 변수는 [RUNNING.md](RUNNING.md), 고정 원본 기준선·검증 결과·남은 기능은 [docs/rewrite.md](docs/rewrite.md)를 참조하세요.
 
