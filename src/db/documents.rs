@@ -25,6 +25,26 @@ pub enum DocumentDbError {
     Forbidden,
     AffiliationMismatch,
     DepthLimit,
+    InvalidSortKey,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FractionalError {
+    InvalidKey { side: &'static str, key: String },
+    OutOfOrder { a: String, b: String },
+}
+
+impl std::fmt::Display for FractionalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidKey { side, key } => {
+                write!(f, "fractional.between: invalid key {side}={key:?}")
+            }
+            Self::OutOfOrder { a, b } => {
+                write!(f, "fractional.between: a must be < b (a={a:?}, b={b:?})")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -435,7 +455,14 @@ pub async fn create_wiki_document(
     .bind(input.parent_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let sort_key = between(last_sort.as_ref().map(|(k,)| k.as_str()), None);
+    let sort_key = match between(last_sort.as_ref().map(|(k,)| k.as_str()), None) {
+        Ok(key) => key,
+        Err(err) => {
+            tracing::error!("{err}");
+            tx.rollback().await?;
+            return Ok(Err(DocumentDbError::InvalidSortKey));
+        }
+    };
     let path = if input.parent_id.is_some() {
         format!("{}.{}", parent_path, to_path_label(document_id))
     } else {
@@ -845,36 +872,45 @@ fn midpoint(a: &str, b: &str) -> String {
             i += 1;
             continue;
         }
-        if db - da >= 2 {
+        if db.saturating_sub(da) >= 2 {
             digits.push(alphabet_char((da + db) / 2));
             return digits;
         }
         digits.push(alphabet_char(da));
-        digits.push_str(&key_after(&a[i + 1..]));
+        digits.push_str(&key_after(a.get(i + 1..).unwrap_or("")));
         return digits;
     }
 }
 
-pub fn between(a: Option<&str>, b: Option<&str>) -> String {
+pub fn between(a: Option<&str>, b: Option<&str>) -> Result<String, FractionalError> {
     if let Some(a) = a {
         if !is_canonical_key(a) {
-            panic!("fractional.between: invalid key a={a:?}");
+            return Err(FractionalError::InvalidKey {
+                side: "a",
+                key: a.to_string(),
+            });
         }
     }
     if let Some(b) = b {
         if !is_canonical_key(b) {
-            panic!("fractional.between: invalid key b={b:?}");
+            return Err(FractionalError::InvalidKey {
+                side: "b",
+                key: b.to_string(),
+            });
         }
     }
     match (a, b) {
         (Some(a), Some(b)) => {
             if a >= b {
-                panic!("fractional.between: a must be < b (a={a:?}, b={b:?})");
+                return Err(FractionalError::OutOfOrder {
+                    a: a.to_string(),
+                    b: b.to_string(),
+                });
             }
-            midpoint(a, b)
+            Ok(midpoint(a, b))
         }
-        (_, None) => key_after(a.unwrap_or("")),
-        (None, Some(b)) => midpoint("", b),
+        (_, None) => Ok(key_after(a.unwrap_or(""))),
+        (None, Some(b)) => Ok(midpoint("", b)),
     }
 }
 
@@ -884,9 +920,9 @@ mod tests {
 
     #[test]
     fn first_sort_key_matches_source_midpoint() {
-        let first = between(None, None);
-        let before = between(None, Some(&first));
-        let after = between(Some(&first), None);
+        let first = between(None, None).unwrap();
+        let before = between(None, Some(&first)).unwrap();
+        let after = between(Some(&first), None).unwrap();
         assert_eq!(first, "V");
         assert_eq!(before, "F");
         assert_eq!(after, "W");
@@ -895,7 +931,7 @@ mod tests {
         let mut key = first.clone();
         let mut keys = vec![key.clone()];
         for _ in 0..10 {
-            key = between(Some(&key), None);
+            key = between(Some(&key), None).unwrap();
             keys.push(key.clone());
         }
         let mut sorted = keys.clone();
@@ -904,15 +940,41 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn between_rejects_equal_keys() {
-        let _ = between(Some("V"), Some("V"));
+    fn midpoint_matches_source_when_left_is_shorter_than_divergence() {
+        assert_eq!(between(None, Some("1")).unwrap(), "0V");
+        assert_eq!(between(Some("V"), Some("V1")).unwrap(), "V0V");
     }
 
     #[test]
-    #[should_panic]
-    fn between_rejects_trailing_zero() {
-        let _ = between(Some("A0"), None);
+    fn between_returns_error_for_equal_and_noncanonical_keys() {
+        assert_eq!(
+            between(Some("V"), Some("V")),
+            Err(FractionalError::OutOfOrder {
+                a: "V".to_string(),
+                b: "V".to_string(),
+            })
+        );
+        assert_eq!(
+            between(Some("A0"), None),
+            Err(FractionalError::InvalidKey {
+                side: "a",
+                key: "A0".to_string(),
+            })
+        );
+        assert_eq!(
+            between(Some(""), None),
+            Err(FractionalError::InvalidKey {
+                side: "a",
+                key: String::new(),
+            })
+        );
+        assert_eq!(
+            between(Some("A!"), None),
+            Err(FractionalError::InvalidKey {
+                side: "a",
+                key: "A!".to_string(),
+            })
+        );
     }
 
     #[test]

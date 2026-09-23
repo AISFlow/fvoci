@@ -320,7 +320,7 @@ async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str
     .unwrap();
 }
 
-async fn wait_for_users_for_update(admin: &PgPool, blocker_pid: i32) {
+async fn wait_for_users_for_update(admin: &PgPool, blocker_pid: i32) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         let blocked: Option<i32> = sqlx::query_scalar(
@@ -339,12 +339,38 @@ async fn wait_for_users_for_update(admin: &PgPool, blocker_pid: i32) {
         .fetch_optional(admin)
         .await
         .unwrap();
-        if blocked.is_some() {
-            return;
+        if let Some(pid) = blocked {
+            return pid;
         }
         tokio::task::yield_now().await;
     }
     panic!("document write FOR UPDATE did not block on shared user lock");
+}
+
+async fn wait_for_advisory_blocked_by(admin: &PgPool, blocker_pid: i32) -> i32 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let blocked: Option<i32> = sqlx::query_scalar(
+            r"
+            SELECT activity.pid
+            FROM pg_stat_activity AS activity
+            WHERE activity.wait_event_type = 'Lock'
+              AND activity.state = 'active'
+              AND activity.query ILIKE '%pg_advisory_xact_lock%'
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
+            LIMIT 1
+            ",
+        )
+        .bind(blocker_pid)
+        .fetch_optional(admin)
+        .await
+        .unwrap();
+        if let Some(pid) = blocked {
+            return pid;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("operation did not block on shared membership advisory lock held by {blocker_pid}");
 }
 
 fn assert_iso_date(value: &Value) {
@@ -720,6 +746,18 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_found");
 
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{foreign_parent}"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+
     let affiliated = Uuid::now_v7();
     sqlx::query(
         r#"
@@ -871,6 +909,18 @@ async fn invalid_auth_and_input_are_source_errors() {
         app.clone(),
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"title": "Missing parentId"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
         Some(json!({"parentId": null, "title": ""})),
         Some(&cookie),
         &[],
@@ -902,6 +952,295 @@ async fn invalid_auth_and_input_are_source_errors() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_found");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn patch_icon_set_omit_preserves_then_null_clears() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"parentId": null, "title": "Iconed", "icon": "📄"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["icon"], "📄");
+    let doc_id = body["id"].as_str().unwrap().to_string();
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}"),
+        Some(json!({"title": "Still iconed"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["title"], "Still iconed");
+    assert_eq!(body["icon"], "📄");
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}"),
+        Some(json!({"icon": null})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["icon"], Value::Null);
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let stored: (Option<String>,) =
+        sqlx::query_as("SELECT icon FROM fvoci.documents WHERE id = $1")
+            .bind(Uuid::parse_str(&doc_id).unwrap())
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(stored.0, None);
+    let payload: (Value,) = sqlx::query_as(
+        "SELECT payload FROM fvoci.events WHERE verb = 'document.updated' AND target_id = $1 ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(Uuid::parse_str(&doc_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(payload.0["icon"], Value::Null);
+    assert!(payload.0.get("title").is_none());
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn invalid_stored_sort_key_returns_internal_error() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let bad_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, number, status,
+            schema_version, content_json, created_by
+        ) VALUES (
+            $1, $2, 'Corrupt', $3, NULL, 'A0', 1, 'draft', 2, '{"type":"doc"}'::jsonb, $4
+        )
+        "#,
+    )
+    .bind(bad_id)
+    .bind(workspace_id)
+    .bind(bad_id.simple().to_string())
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE fvoci.workspaces SET next_document_number = 1 WHERE id = $1")
+        .bind(workspace_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"parentId": null, "title": "Sibling of corrupt"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["code"], "internal_error");
+    let docs: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM fvoci.documents WHERE workspace_id = $1 AND id <> $2")
+            .bind(workspace_id)
+            .bind(bad_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(docs.0, 0);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn product_membership_revoke_races_document_write_under_lock_barrier() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let (member_a, member_a_cookie) =
+        create_second_user_session(&harness, "writer-a@example.com", "WriterA").await;
+    let (member_b, member_b_cookie) =
+        create_second_user_session(&harness, "writer-b@example.com", "WriterB").await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    for id in [member_a, member_b] {
+        fvoci_server::db::workspace::add_membership_for_test(
+            &app_pool,
+            workspace_id,
+            id,
+            fvoci_server::db::workspace::WorkspaceRole::Member,
+        )
+        .await
+        .unwrap();
+    }
+    app_pool.close().await;
+
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+
+    let mut demote_barrier = admin.begin().await.unwrap();
+    let demote_blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *demote_barrier)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
+        .bind(owner_id)
+        .execute(&mut *demote_barrier)
+        .await
+        .unwrap();
+    let demote = tokio::spawn({
+        let app = app.clone();
+        let owner_cookie = owner_cookie.clone();
+        async move {
+            json_request(
+                app,
+                "PATCH",
+                &format!("/api/v1/workspaces/{workspace_id}/members/{member_a}"),
+                Some(json!({"role": "guest"})),
+                Some(&owner_cookie),
+                &[],
+            )
+            .await
+        }
+    });
+    let demote_pid = wait_for_users_for_update(&admin, demote_blocker_pid).await;
+    let create_denied = tokio::spawn({
+        let app = app.clone();
+        let member_a_cookie = member_a_cookie.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/documents"),
+                Some(json!({"parentId": null, "title": "After product demote"})),
+                Some(&member_a_cookie),
+                &[],
+            )
+            .await
+        }
+    });
+    wait_for_advisory_blocked_by(&admin, demote_pid).await;
+    demote_barrier.commit().await.unwrap();
+    let (demote_status, demote_body, _, _) = demote.await.unwrap();
+    assert_eq!(demote_status, StatusCode::OK);
+    assert_eq!(demote_body["role"], "guest");
+    let (create_status, create_body, _, _) = create_denied.await.unwrap();
+    assert_eq!(create_status, StatusCode::NOT_FOUND);
+    assert_eq!(create_body["code"], "not_found");
+    let docs_a: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.documents WHERE workspace_id = $1 AND created_by = $2",
+    )
+    .bind(workspace_id)
+    .bind(member_a)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(docs_a.0, 0);
+    let role_a: (String,) = sqlx::query_as(
+        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(member_a)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(role_a.0, "guest");
+
+    let mut write_barrier = admin.begin().await.unwrap();
+    let write_blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *write_barrier)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
+        .bind(member_b)
+        .execute(&mut *write_barrier)
+        .await
+        .unwrap();
+    let create_first = tokio::spawn({
+        let app = app.clone();
+        let member_b_cookie = member_b_cookie.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/documents"),
+                Some(json!({"parentId": null, "title": "Before product remove"})),
+                Some(&member_b_cookie),
+                &[],
+            )
+            .await
+        }
+    });
+    let create_pid = wait_for_users_for_update(&admin, write_blocker_pid).await;
+    let remove = tokio::spawn({
+        let app = app.clone();
+        let owner_cookie = owner_cookie.clone();
+        async move {
+            json_request(
+                app,
+                "DELETE",
+                &format!("/api/v1/workspaces/{workspace_id}/members/{member_b}"),
+                None,
+                Some(&owner_cookie),
+                &[],
+            )
+            .await
+        }
+    });
+    wait_for_advisory_blocked_by(&admin, create_pid).await;
+    write_barrier.commit().await.unwrap();
+    let (create_status, create_body, _, _) = create_first.await.unwrap();
+    assert_eq!(create_status, StatusCode::CREATED);
+    assert_eq!(create_body["title"], "Before product remove");
+    let (remove_status, _, _, _) = remove.await.unwrap();
+    assert_eq!(remove_status, StatusCode::OK);
+    let docs_b: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.documents WHERE workspace_id = $1 AND created_by = $2",
+    )
+    .bind(workspace_id)
+    .bind(member_b)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(docs_b.0, 1);
+    let remaining_b: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(member_b)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(remaining_b.0, 0);
+
+    admin.close().await;
     harness.cleanup().await;
 }
 
@@ -1421,7 +1760,7 @@ async fn migration_001_003_upgrades_to_004_documents() {
     let mut app = url::Url::parse(&admin_url).unwrap();
     app.set_username(&role_name).ok();
     app.set_password(Some(&role_password)).ok();
-    let app_pool = pool::connect_app(&app.to_string()).await.unwrap();
+    let app_pool = pool::connect_app(app.as_str()).await.unwrap();
     let mut tx = app_pool.begin().await.unwrap();
     sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
         .bind(workspace_id.to_string())

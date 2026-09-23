@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
+use serde::de::Deserializer;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -45,10 +46,40 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+/// Source `parentId` is `uuid.nullable()`: present and null is allowed, omitted is not.
+/// `#[serde(default)]` plus a third Missing variant is required; a wrapper around
+/// `Option` would treat omitted fields as null because serde's missing-field path
+/// visits `none`.
+#[derive(Debug, Default, PartialEq, Eq)]
+enum RequiredNullable<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for RequiredNullable<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            None => Self::Null,
+            Some(value) => Self::Value(value),
+        })
+    }
+}
+
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateDocumentBody {
-    parent_id: Option<Uuid>,
+    #[serde(default)]
+    parent_id: RequiredNullable<Uuid>,
     title: String,
     icon: Option<Option<String>>,
 }
@@ -57,6 +88,7 @@ struct CreateDocumentBody {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PatchDocumentBody {
     title: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     icon: Option<Option<String>>,
     status: Option<String>,
 }
@@ -204,6 +236,13 @@ async fn create_document(
             return Err(AppError::from_code(ProblemCode::InvalidInput).into());
         }
     }
+    let parent_id = match body.parent_id {
+        RequiredNullable::Missing => {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+        RequiredNullable::Null => None,
+        RequiredNullable::Value(id) => Some(id),
+    };
     let (user, session_id) = require_session(&state, &jar).await?;
     let user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
@@ -213,7 +252,7 @@ async fn create_document(
         user_id,
         session_id,
         CreateDocumentInput {
-            parent_id: body.parent_id,
+            parent_id,
             title,
             icon: body.icon.as_ref().map(|icon| icon.as_deref()),
         },
@@ -449,6 +488,7 @@ fn map_document_error(err: DocumentDbError) -> DocumentApiError {
             title: format!("tree depth would exceed limit ({MAX_TREE_DEPTH})"),
             params: Some(json!({ "limit": MAX_TREE_DEPTH })),
         },
+        DocumentDbError::InvalidSortKey => AppError::internal().into(),
     }
 }
 
@@ -478,4 +518,38 @@ fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
 fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", err);
     AppError::internal()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_parent_id_is_required_nullable() {
+        let omitted: CreateDocumentBody = serde_json::from_str(r#"{"title":"X"}"#).unwrap();
+        assert_eq!(omitted.parent_id, RequiredNullable::Missing);
+        let null_parent: CreateDocumentBody =
+            serde_json::from_str(r#"{"parentId":null,"title":"X"}"#).unwrap();
+        assert_eq!(null_parent.parent_id, RequiredNullable::Null);
+        let with_parent: CreateDocumentBody = serde_json::from_str(
+            r#"{"parentId":"11111111-1111-4111-8111-111111111111","title":"X"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_parent.parent_id,
+            RequiredNullable::Value(
+                Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn patch_icon_distinguishes_omitted_null_and_value() {
+        let omitted: PatchDocumentBody = serde_json::from_str(r#"{"title":"T"}"#).unwrap();
+        assert_eq!(omitted.icon, None);
+        let clear: PatchDocumentBody = serde_json::from_str(r#"{"icon":null}"#).unwrap();
+        assert_eq!(clear.icon, Some(None));
+        let set: PatchDocumentBody = serde_json::from_str(r#"{"icon":"📄"}"#).unwrap();
+        assert_eq!(set.icon, Some(Some("📄".to_string())));
+    }
 }
