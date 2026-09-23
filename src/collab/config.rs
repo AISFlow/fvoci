@@ -82,16 +82,13 @@ pub fn collab_engine_path_for_tests() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    for candidate in [
+    [
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/collab-engine"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("crates/collab-engine/target/debug/collab-engine"),
-    ] {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
 }
 
 pub fn require_collab_engine_for_tests() -> PathBuf {

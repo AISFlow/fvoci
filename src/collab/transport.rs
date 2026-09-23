@@ -167,11 +167,11 @@ async fn handle_socket(
                                     &hub,
                                     conn_id,
                                     &live,
-                                    &routing_key,
+                                    routing_key,
                                     &bytes,
                                     &events_tx,
                                 ).await {
-                                    joined_room = Some((key.clone(), routing_key.clone(), true));
+                                    joined_room = Some((*key, routing_key.clone(), true));
                                 }
                             }
                         } else if let Some((key, routing, auth_ok)) = first_room_from_frame(&bytes, &live, conn_id, &hub, &events_tx).await {

@@ -29,6 +29,7 @@ enum BridgeJob {
 }
 
 impl EngineBridge {
+    #[allow(clippy::result_large_err)]
     pub fn spawn(engine_bin: PathBuf, limits: Limits) -> Result<Self, EngineReport> {
         let (tx, rx) = mpsc::channel();
         let bin = engine_bin.clone();
@@ -69,17 +70,25 @@ impl EngineBridge {
     }
 
     pub async fn stop(mut self) -> Result<(), BridgeError> {
+        let mut stop_err = None;
         if let Some(tx) = self.tx.take() {
             let (reply_tx, reply_rx) = oneshot::channel();
-            let _ = tx.send(BridgeJob::Stop { reply: reply_tx });
-            let _ = reply_rx.await;
+            let stop_ok = tx
+                .send(BridgeJob::Stop { reply: reply_tx })
+                .is_ok()
+                && reply_rx.await.is_ok();
+            if !stop_ok {
+                stop_err = Some(BridgeError::Dead);
+            }
         }
         let join = self.join;
-        tokio::task::spawn_blocking(move || {
-            let _ = join.join();
-        })
-        .await
-        .ok();
+        tokio::task::spawn_blocking(move || join.join())
+            .await
+            .map_err(|_| BridgeError::Dead)?
+            .map_err(|_| BridgeError::Dead)?;
+        if let Some(err) = stop_err {
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -126,6 +135,7 @@ fn worker_loop(rx: mpsc::Receiver<BridgeJob>, engine_bin: PathBuf, limits: Limit
     session.kill_and_reap();
 }
 
+#[allow(clippy::result_large_err)]
 fn spawn_session(engine_bin: &Path, limits: Limits) -> Result<EngineSession, EngineReport> {
     EngineSession::spawn(SpawnRequest {
         engine_bin: engine_bin.to_path_buf(),

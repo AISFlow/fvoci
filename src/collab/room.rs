@@ -26,6 +26,29 @@ use crate::db::collab::{
 };
 use crate::db::identity::LiveSession;
 
+#[cfg(feature = "db-tests")]
+static SPAWN_ROOM_BLOCK: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>> =
+    tokio::sync::Mutex::const_new(None);
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_spawn_room_block() -> tokio::sync::oneshot::Sender<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    *SPAWN_ROOM_BLOCK.lock().await = Some(rx);
+    tx
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_spawn_room_block() {
+    *SPAWN_ROOM_BLOCK.lock().await = None;
+}
+
+async fn wait_spawn_room_block() {
+    #[cfg(feature = "db-tests")]
+    if let Some(rx) = SPAWN_ROOM_BLOCK.lock().await.take() {
+        let _ = rx.await;
+    }
+}
+
 pub type RoomKey = (Uuid, Uuid);
 
 #[derive(Debug, Clone)]
@@ -161,6 +184,7 @@ pub async fn spawn_room(
     pool: PgPool,
     room_guard: RoomGuard,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
+    wait_spawn_room_block().await;
     let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
         .map_err(|_| JoinError::EngineUnavailable)?;
     let (tx, rx) = mpsc::channel(config.max_queued_room_ops);
@@ -457,6 +481,7 @@ impl RoomActor {
         let _ = events.send(RoomClientEvent::Outbound(pong)).await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_document_message(
         &mut self,
         conn_id: Uuid,

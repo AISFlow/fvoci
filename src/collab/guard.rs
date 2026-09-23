@@ -50,10 +50,8 @@ impl RoomGuard {
 impl Drop for RoomGuard {
     fn drop(&mut self) {
         if self.held {
-            let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-                .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
-                .bind(lock_key_from_uuid(self.document_id))
-                .execute(&mut self.conn);
+            // Session advisory locks are released when the dedicated connection closes.
+            // Drop must not spawn an unpolled async unlock future.
             self.held = false;
         }
     }

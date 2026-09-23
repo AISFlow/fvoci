@@ -12,6 +12,12 @@ use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::new_token;
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::config::CollabConfig;
+use fvoci_server::collab::guard::RoomGuard;
+use fvoci_server::collab::hub::RoomLifecyclePhase;
+use fvoci_server::collab::room::{
+    arm_spawn_room_block, disarm_spawn_room_block, AuthenticatedConnection, CollabSession,
+    JoinError, RoomJoin,
+};
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, SyncMessage, SyncStep,
     WireFrame,
@@ -27,6 +33,7 @@ use fvoci_server::http::state::AppState;
 use rand::RngCore;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -34,6 +41,16 @@ use uuid::Uuid;
 const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
 const PUBLIC_ORIGIN: &str = "http://localhost";
+const LIFECYCLE_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn run_lifecycle_test<Fut>(name: &str, case: Fut)
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    tokio::time::timeout(LIFECYCLE_TEST_TIMEOUT, case)
+        .await
+        .unwrap_or_else(|_| panic!("{name} hung (>{LIFECYCLE_TEST_TIMEOUT:?}) including cleanup"));
+}
 
 struct TestDb {
     admin_url: String,
@@ -53,6 +70,21 @@ struct SessionFixture {
 struct WikiDocFixture {
     session: SessionFixture,
     document_id: Uuid,
+}
+
+impl WikiDocFixture {
+    fn clone_fixture(&self) -> Self {
+        Self {
+            session: SessionFixture {
+                pool: self.session.pool.clone(),
+                user_id: self.session.user_id,
+                session_id: self.session.session_id,
+                workspace_id: self.session.workspace_id,
+                session_token: self.session.session_token.clone(),
+            },
+            document_id: self.document_id,
+        }
+    }
 }
 
 fn engine_bin() -> PathBuf {
@@ -219,6 +251,20 @@ async fn setup_owner_session(harness: &TestDb) -> SessionFixture {
     }
 }
 
+fn test_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig {
+    CollabConfig {
+        engine_bin: engine_bin(),
+        limits: collab_engine::Limits::for_tests(),
+        max_rooms,
+        max_connections_per_room: 16,
+        max_queued_room_ops: 128,
+        max_pending_bytes_per_connection: 4 * 1024 * 1024,
+        idle_evict_ms,
+        revoke_poll_ms: 5_000,
+        client_id_ttl_ms: 60_000,
+    }
+}
+
 async fn setup_wiki_doc(harness: &TestDb) -> WikiDocFixture {
     let session = setup_owner_session(harness).await;
     let created = documents::create_wiki_document(
@@ -240,6 +286,93 @@ async fn setup_wiki_doc(harness: &TestDb) -> WikiDocFixture {
         session,
         document_id: created.id,
     }
+}
+
+async fn setup_wiki_doc_batch(harness: &TestDb, count: usize) -> Vec<WikiDocFixture> {
+    let session = setup_owner_session(harness).await;
+    let mut docs = Vec::with_capacity(count);
+    let titles = (0..count)
+        .map(|index| format!("Collab lifecycle doc {index}"))
+        .collect::<Vec<_>>();
+    for title in titles {
+        let created = documents::create_wiki_document(
+            &session.pool,
+            session.workspace_id,
+            session.user_id,
+            session.session_id,
+            CreateDocumentInput {
+                parent_id: None,
+                title: &title,
+                icon: None,
+            },
+            None,
+        )
+        .await
+        .expect("create doc")
+        .expect("created");
+        docs.push(WikiDocFixture {
+            session: SessionFixture {
+                pool: session.pool.clone(),
+                user_id: session.user_id,
+                session_id: session.session_id,
+                workspace_id: session.workspace_id,
+                session_token: session.session_token.clone(),
+            },
+            document_id: created.id,
+        });
+    }
+    docs
+}
+
+async fn hub_join_document(
+    hub: &CollabHub,
+    wiki: &WikiDocFixture,
+    document_id: Uuid,
+    client_id: u32,
+) -> Result<Uuid, JoinError> {
+    let conn_id = Uuid::now_v7();
+    let (events_tx, mut events_rx) = mpsc::channel(8);
+    tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
+    let routing_key = room_key(wiki.session.workspace_id, document_id);
+    let join = RoomJoin {
+        conn: AuthenticatedConnection {
+            conn_id,
+            session: CollabSession {
+                session_id: wiki.session.session_id,
+                user_id: wiki.session.user_id,
+                given_name: "Owner".into(),
+                family_name: None,
+            },
+            client_id,
+            read_only: false,
+            routing_key,
+        },
+        events: events_tx,
+    };
+    hub.join_room((wiki.session.workspace_id, document_id), join)
+        .await?;
+    Ok(conn_id)
+}
+
+async fn hub_join(
+    hub: &CollabHub,
+    wiki: &WikiDocFixture,
+    client_id: u32,
+) -> Result<Uuid, JoinError> {
+    hub_join_document(hub, wiki, wiki.document_id, client_id).await
+}
+
+async fn wait_for_booting(hub: &CollabHub, key: (Uuid, Uuid)) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if hub.room_lifecycle_phase(key).await == RoomLifecyclePhase::Booting {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("room never entered Booting");
 }
 
 async fn collab_app_state(app_url: &str, with_collab: bool) -> AppState {
@@ -374,7 +507,10 @@ async fn collab_requires_native_helper_env() {
     let path = std::env::var("FVOCI_COLLAB_ENGINE")
         .expect("FVOCI_COLLAB_ENGINE must be set for collab product tests");
     let path = PathBuf::from(path.trim());
-    assert!(path.is_file(), "FVOCI_COLLAB_ENGINE must point at built collab-engine binary");
+    assert!(
+        path.is_file(),
+        "FVOCI_COLLAB_ENGINE must point at built collab-engine binary"
+    );
 }
 
 #[tokio::test]
@@ -567,27 +703,265 @@ async fn collab_two_clients_update_persists_and_broadcasts() {
 
 #[tokio::test]
 async fn collab_concurrent_first_joins_both_succeed() {
-    let harness = TestDb::bootstrap().await;
-    let wiki = setup_wiki_doc(&harness).await;
-    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
-    let addr = spawn_server(app).await;
-    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-    let token = wiki.session.session_token.clone();
+    run_lifecycle_test("collab_concurrent_first_joins_both_succeed", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let hub = Arc::new(CollabHub::new(
+            test_collab_config(4, 30_000),
+            wiki.session.pool.clone(),
+        ));
+        let key = (wiki.session.workspace_id, wiki.document_id);
+        let slots_before = hub.available_room_slots();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
-    let (a, b) = tokio::join!(
+        let hub_a = hub.clone();
+        let hub_b = hub.clone();
+        let wiki_a = wiki.clone_fixture();
+        let wiki_b = wiki.clone_fixture();
+        let barrier_a = barrier.clone();
+        let barrier_b = barrier.clone();
+        let (first, second) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(
+                async move {
+                    barrier_a.wait().await;
+                    hub_join(&hub_a, &wiki_a, 1).await
+                },
+                async move {
+                    barrier_b.wait().await;
+                    hub_join(&hub_b, &wiki_b, 2).await
+                }
+            )
+        })
+        .await
+        .expect("concurrent first join hung waiting on room lifecycle notify");
+
+        assert!(first.is_ok(), "first join failed: {:?}", first.err());
+        assert!(second.is_ok(), "second join failed: {:?}", second.err());
+        assert_eq!(hub.available_room_slots(), slots_before - 1);
+        assert!(hub.room_occupies_slot(key).await);
+        hub.shutdown().await;
+        assert_eq!(hub.available_room_slots(), slots_before);
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_failed_start_reuses_slot() {
+    run_lifecycle_test("collab_lifecycle_failed_start_reuses_slot", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let held = RoomGuard::try_acquire(&wiki.session.pool, wiki.document_id)
+            .await
+            .expect("db")
+            .expect("room lock should be free");
+        let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+        assert_eq!(hub.available_room_slots(), 4);
+        let failed = hub_join(&hub, &wiki, 1).await;
+        assert_eq!(failed, Err(JoinError::WriterStale));
+        assert_eq!(hub.available_room_slots(), 4);
+        held.release().await;
+        assert!(hub_join(&hub, &wiki, 2).await.is_ok());
+        assert_eq!(hub.available_room_slots(), 3);
+        hub.shutdown().await;
+        assert_eq!(hub.available_room_slots(), 4);
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_cancelled_start_releases_slot() {
+    run_lifecycle_test("collab_lifecycle_cancelled_start_releases_slot", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let hub = Arc::new(CollabHub::new(
+            test_collab_config(4, 30_000),
+            wiki.session.pool.clone(),
+        ));
+        let join_task = tokio::spawn({
+            let hub = hub.clone();
+            let wiki = wiki.clone_fixture();
+            async move { hub_join(&hub, &wiki, 1).await }
+        });
+        hub.shutdown().await;
+        let result = join_task.await.expect("join task");
+        assert!(
+            result.is_err(),
+            "join during shutdown should fail, got conn_id {:?}",
+            result.ok()
+        );
+        assert_eq!(hub.available_room_slots(), 4);
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_denied_joins_do_not_reserve_slots() {
+    run_lifecycle_test(
+        "collab_lifecycle_denied_joins_do_not_reserve_slots",
         async {
-            let mut ws = connect_member(addr, &token).await;
-            auth_and_join(&mut ws, &routing_key, 1).await;
-            ws
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let outsider = setup_owner_session(&harness).await;
+            let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+            assert_eq!(hub.available_room_slots(), 4);
+
+            for index in 0..4 {
+                let fake_doc = Uuid::now_v7();
+                let denied = hub_join_document(&hub, &wiki, fake_doc, index).await;
+                assert_eq!(denied, Err(JoinError::AdmissionDenied));
+            }
+            let outsider_denied = hub_join_document(
+                &hub,
+                &WikiDocFixture {
+                    session: outsider,
+                    document_id: wiki.document_id,
+                },
+                wiki.document_id,
+                9,
+            )
+            .await;
+            assert_eq!(outsider_denied, Err(JoinError::AdmissionDenied));
+            assert_eq!(hub.available_room_slots(), 4);
+            assert!(hub_join(&hub, &wiki, 1).await.is_ok());
+            assert_eq!(hub.available_room_slots(), 3);
+            hub.shutdown().await;
+            harness.cleanup().await;
         },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_starting_gate_blocks_second_creator() {
+    run_lifecycle_test(
+        "collab_lifecycle_starting_gate_blocks_second_creator",
         async {
-            let mut ws = connect_member(addr, &token).await;
-            auth_and_join(&mut ws, &routing_key, 2).await;
-            ws
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let release = arm_spawn_room_block().await;
+            let hub = Arc::new(CollabHub::new(
+                test_collab_config(4, 30_000),
+                wiki.session.pool.clone(),
+            ));
+            let key = (wiki.session.workspace_id, wiki.document_id);
+            let slots_before = hub.available_room_slots();
+
+            let join_a = tokio::spawn({
+                let hub = hub.clone();
+                let wiki = wiki.clone_fixture();
+                async move { hub_join(&hub, &wiki, 1).await }
+            });
+            wait_for_booting(&hub, key).await;
+            assert_eq!(hub.available_room_slots(), slots_before - 1);
+
+            let join_b = tokio::spawn({
+                let hub = hub.clone();
+                let wiki = wiki.clone_fixture();
+                async move { hub_join(&hub, &wiki, 2).await }
+            });
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                hub.room_lifecycle_phase(key).await,
+                RoomLifecyclePhase::Booting
+            );
+            assert_eq!(hub.available_room_slots(), slots_before - 1);
+
+            let _ = release.send(());
+            assert!(join_a.await.expect("join a task").is_ok());
+            assert!(join_b.await.expect("join b task").is_ok());
+            assert_eq!(hub.available_room_slots(), slots_before - 1);
+            disarm_spawn_room_block().await;
+            hub.shutdown().await;
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_aborted_booting_creator_releases_slot() {
+    run_lifecycle_test(
+        "collab_lifecycle_aborted_booting_creator_releases_slot",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let release = arm_spawn_room_block().await;
+            let hub = Arc::new(CollabHub::new(
+                test_collab_config(4, 30_000),
+                wiki.session.pool.clone(),
+            ));
+            let key = (wiki.session.workspace_id, wiki.document_id);
+            let join_task = tokio::spawn({
+                let hub = hub.clone();
+                let wiki = wiki.clone_fixture();
+                async move { hub_join(&hub, &wiki, 1).await }
+            });
+            wait_for_booting(&hub, key).await;
+            assert_eq!(hub.available_room_slots(), 3);
+            hub.shutdown().await;
+            assert_eq!(hub.available_room_slots(), 4);
+            let _ = release.send(());
+            let result = tokio::time::timeout(Duration::from_secs(5), join_task)
+                .await
+                .expect("aborted booting join hung")
+                .expect("join task");
+            assert!(result.is_err(), "aborted booting join should fail");
+            disarm_spawn_room_block().await;
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
+    run_lifecycle_test("collab_lifecycle_max_rooms_then_reuse_after_leave", async {
+        let harness = TestDb::bootstrap().await;
+        let docs = setup_wiki_doc_batch(&harness, 5).await;
+        let hub = CollabHub::new(test_collab_config(4, 30_000), docs[0].session.pool.clone());
+
+        let mut conn_ids = Vec::new();
+        for doc in docs.iter().take(4) {
+            conn_ids.push(hub_join(&hub, doc, 1).await.expect("join room"));
         }
-    );
-    let _ = (a, b);
-    harness.cleanup().await;
+        assert_eq!(hub.available_room_slots(), 0);
+        let fifth = hub_join(&hub, &docs[4], 1).await;
+        assert_eq!(fifth, Err(JoinError::RoomFull));
+
+        let key = (docs[0].session.workspace_id, docs[0].document_id);
+        hub.leave_room(key, conn_ids[0]).await;
+        hub.shutdown().await;
+        assert_eq!(hub.available_room_slots(), 4);
+
+        let hub = CollabHub::new(test_collab_config(4, 30_000), docs[0].session.pool.clone());
+        assert!(hub_join(&hub, &docs[4], 2).await.is_ok());
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_idle_eviction_allows_rejoin() {
+    run_lifecycle_test("collab_lifecycle_idle_eviction_allows_rejoin", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let hub = CollabHub::new(test_collab_config(4, 200), wiki.session.pool.clone());
+        let key = (wiki.session.workspace_id, wiki.document_id);
+        let conn_id = hub_join(&hub, &wiki, 1).await.expect("join");
+        hub.leave_room(key, conn_id).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(!hub.room_occupies_slot(key).await);
+        assert_eq!(hub.available_room_slots(), 4);
+        assert!(hub_join(&hub, &wiki, 2).await.is_ok());
+        assert_eq!(hub.available_room_slots(), 3);
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
 }
 
 #[tokio::test]

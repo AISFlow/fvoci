@@ -198,6 +198,12 @@ pub struct AwarenessRegistry {
     generation: u64,
 }
 
+impl Default for AwarenessRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AwarenessRegistry {
     pub fn new() -> Self {
         Self {
