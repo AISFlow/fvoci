@@ -1,10 +1,8 @@
 //! Offline tests for the Hocuspocus 4.6.0 wire codec.
 //!
-//! `lib.rs` does not export `collab` yet; include the module directly until the
-//! coordinator registers it after prerequisite slices land.
+//! Exercise the shared codec module; no WebSocket route is enabled.
 
-#[path = "../src/collab/wire.rs"]
-mod wire;
+use fvoci_server::collab::wire;
 
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
