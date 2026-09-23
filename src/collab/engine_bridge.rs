@@ -73,10 +73,8 @@ impl EngineBridge {
         let mut stop_err = None;
         if let Some(tx) = self.tx.take() {
             let (reply_tx, reply_rx) = oneshot::channel();
-            let stop_ok = tx
-                .send(BridgeJob::Stop { reply: reply_tx })
-                .is_ok()
-                && reply_rx.await.is_ok();
+            let stop_ok =
+                tx.send(BridgeJob::Stop { reply: reply_tx }).is_ok() && reply_rx.await.is_ok();
             if !stop_ok {
                 stop_err = Some(BridgeError::Dead);
             }

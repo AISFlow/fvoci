@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sqlx::postgres::PgPool;
-use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -21,22 +21,19 @@ struct LiveRoom {
     permit: OwnedSemaphorePermit,
 }
 
-struct ClosingRoom {
-    finished: tokio::sync::oneshot::Receiver<()>,
-    permit: OwnedSemaphorePermit,
-}
-
 enum RoomPhase {
     Starting,
     Booting(OwnedSemaphorePermit),
     Live(LiveRoom),
-    Closing(ClosingRoom),
+    Closing,
     Failed,
 }
 
 struct RoomSlot {
     phase: Mutex<RoomPhase>,
     ready: Notify,
+    #[cfg(feature = "db-tests")]
+    waiters: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(feature = "db-tests")]
@@ -50,13 +47,17 @@ pub enum RoomLifecyclePhase {
     Absent,
 }
 
+#[derive(Clone)]
 pub struct CollabHub {
     config: CollabConfig,
     pool: PgPool,
     rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
     room_permits: Arc<Semaphore>,
-    shutting_down: AtomicBool,
-    idle_task: Mutex<Option<JoinHandle<()>>>,
+    shutting_down: Arc<AtomicBool>,
+    idle_stop: watch::Sender<bool>,
+    idle_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    starts: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+    shutdown_lock: Arc<Mutex<()>>,
 }
 
 impl CollabHub {
@@ -66,16 +67,20 @@ impl CollabHub {
         let room_permits = Arc::new(Semaphore::new(room_cap));
         let idle_ms = config.idle_evict_ms;
         let idle_rooms = rooms.clone();
+        let (idle_stop, stopped) = watch::channel(false);
         let idle_task = tokio::spawn(async move {
-            idle_eviction_loop(idle_rooms, idle_ms).await;
+            idle_eviction_loop(idle_rooms, idle_ms, stopped).await;
         });
         Self {
             config,
             pool,
             rooms,
             room_permits,
-            shutting_down: AtomicBool::new(false),
-            idle_task: Mutex::new(Some(idle_task)),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            idle_stop,
+            idle_task: Arc::new(Mutex::new(Some(idle_task))),
+            starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            shutdown_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -86,6 +91,13 @@ impl CollabHub {
     #[cfg(feature = "db-tests")]
     pub fn available_room_slots(&self) -> usize {
         self.room_permits.available_permits()
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn room_waiter_count(&self, key: RoomKey) -> usize {
+        self.room_slot(key)
+            .await
+            .map_or(0, |slot| slot.waiters.load(Ordering::Acquire))
     }
 
     #[cfg(feature = "db-tests")]
@@ -110,7 +122,7 @@ impl CollabHub {
             RoomPhase::Starting => RoomLifecyclePhase::Starting,
             RoomPhase::Booting(_) => RoomLifecyclePhase::Booting,
             RoomPhase::Live(_) => RoomLifecyclePhase::Live,
-            RoomPhase::Closing(_) => RoomLifecyclePhase::Closing,
+            RoomPhase::Closing => RoomLifecyclePhase::Closing,
             RoomPhase::Failed => RoomLifecyclePhase::Failed,
         }
     }
@@ -167,10 +179,21 @@ impl CollabHub {
     }
 
     pub async fn shutdown(&self) {
+        let _shutdown = self.shutdown_lock.lock().await;
         self.shutting_down.store(true, Ordering::Release);
+        let _ = self.idle_stop.send(true);
+        // Never abort an eviction while it owns an actor, completion receiver,
+        // and permit. Finish that teardown before closing the remaining rooms.
         if let Some(task) = self.idle_task.lock().await.take() {
-            task.abort();
-            let _ = task.await;
+            if let Err(error) = task.await {
+                tracing::error!(%error, "collaboration eviction task failed");
+            }
+        }
+        let starts = std::mem::take(&mut *self.starts.lock().expect("room start task list"));
+        for task in starts {
+            if let Err(error) = task.await {
+                tracing::error!(%error, "collaboration startup task failed");
+            }
         }
 
         let entries = self
@@ -208,7 +231,32 @@ impl CollabHub {
                         return Ok(live_slot);
                     }
                 }
-                ReserveOutcome::Creator(slot) => return self.start_room(key, slot).await,
+                ReserveOutcome::Creator(slot) => {
+                    // The hub, not a cancellable HTTP/socket caller, owns startup.
+                    // An abandoned caller leaves a normal zero-client room which
+                    // idle eviction reclaims; another caller can join it meanwhile.
+                    let (reply, result) = tokio::sync::oneshot::channel();
+                    let hub = self.clone();
+                    let registered = {
+                        let mut starts = self.starts.lock().expect("room start task list");
+                        if self.shutting_down.load(Ordering::Acquire) {
+                            false
+                        } else {
+                            starts.retain(|task| !task.is_finished());
+                            let startup_slot = slot.clone();
+                            starts.push(tokio::spawn(async move {
+                                let outcome = hub.start_room(key, startup_slot).await;
+                                let _ = reply.send(outcome);
+                            }));
+                            true
+                        }
+                    };
+                    if !registered {
+                        self.cleanup_starting(key, &slot).await;
+                        return Err(JoinError::EngineUnavailable);
+                    }
+                    return result.await.map_err(|_| JoinError::EngineUnavailable)?;
+                }
             }
         }
     }
@@ -218,6 +266,17 @@ impl CollabHub {
         key: RoomKey,
         slot: Arc<RoomSlot>,
     ) -> Result<Option<Arc<RoomSlot>>, JoinError> {
+        #[cfg(feature = "db-tests")]
+        let _waiting = {
+            struct Waiting(Arc<RoomSlot>);
+            impl Drop for Waiting {
+                fn drop(&mut self) {
+                    self.0.waiters.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            slot.waiters.fetch_add(1, Ordering::AcqRel);
+            Waiting(slot.clone())
+        };
         loop {
             if self.shutting_down.load(Ordering::Acquire) {
                 return Err(JoinError::EngineUnavailable);
@@ -229,7 +288,7 @@ impl CollabHub {
                 match &*phase {
                     RoomPhase::Live(_) => return Ok(Some(slot.clone())),
                     RoomPhase::Failed => return Ok(None),
-                    RoomPhase::Starting | RoomPhase::Booting(_) | RoomPhase::Closing(_) => {}
+                    RoomPhase::Starting | RoomPhase::Booting(_) | RoomPhase::Closing => {}
                 }
             }
             notified.await;
@@ -246,18 +305,23 @@ impl CollabHub {
         }
 
         if let Some(existing) = self.room_slot(key).await {
-            let mut phase = existing.phase.lock().await;
+            let phase = existing.phase.lock().await;
             match *phase {
                 RoomPhase::Live(_)
                 | RoomPhase::Starting
                 | RoomPhase::Booting(_)
-                | RoomPhase::Closing(_) => {
+                | RoomPhase::Closing => {
                     return Ok(ReserveOutcome::Existing(existing.clone()));
                 }
                 RoomPhase::Failed => {
-                    *phase = RoomPhase::Starting;
-                    existing.ready.notify_waiters();
-                    return Ok(ReserveOutcome::Creator(existing.clone()));
+                    drop(phase);
+                    let mut rooms = self.rooms.write().await;
+                    if rooms
+                        .get(&key)
+                        .is_some_and(|slot| Arc::ptr_eq(slot, &existing))
+                    {
+                        rooms.remove(&key);
+                    }
                 }
             }
         }
@@ -275,6 +339,8 @@ impl CollabHub {
         let slot = Arc::new(RoomSlot {
             phase: Mutex::new(RoomPhase::Starting),
             ready: Notify::new(),
+            #[cfg(feature = "db-tests")]
+            waiters: std::sync::atomic::AtomicUsize::new(0),
         });
         rooms.insert(key, slot.clone());
         Ok(ReserveOutcome::Creator(slot))
@@ -419,28 +485,23 @@ impl CollabHub {
     async fn force_close_slot(&self, key: RoomKey, slot: Arc<RoomSlot>) {
         let live = {
             let mut phase = slot.phase.lock().await;
-            match std::mem::replace(&mut *phase, RoomPhase::Failed) {
+            match std::mem::replace(&mut *phase, RoomPhase::Closing) {
                 RoomPhase::Live(live) => Some(live),
                 RoomPhase::Booting(permit) => {
                     drop(permit);
                     None
                 }
-                RoomPhase::Closing(closing) => {
-                    *phase = RoomPhase::Closing(closing);
-                    None
-                }
-                RoomPhase::Starting | RoomPhase::Failed => None,
+                RoomPhase::Starting | RoomPhase::Failed | RoomPhase::Closing => None,
             }
         };
-
         if let Some(live) = live {
             live.handle.shutdown().await;
-            let _ = live.finished.await;
+            if live.finished.await.is_err() {
+                tracing::error!(document_id = %key.1, "collaboration actor exited without completion");
+            }
             drop(live.permit);
-        } else {
-            self.await_closing_finished(&slot).await;
         }
-
+        *slot.phase.lock().await = RoomPhase::Failed;
         let mut rooms = self.rooms.write().await;
         if rooms
             .get(&key)
@@ -450,25 +511,6 @@ impl CollabHub {
         }
         slot.ready.notify_waiters();
     }
-
-    async fn await_closing_finished(&self, slot: &Arc<RoomSlot>) {
-        let closing = {
-            let mut phase = slot.phase.lock().await;
-            match *phase {
-                RoomPhase::Closing(_) => {
-                    let RoomPhase::Closing(closing) =
-                        std::mem::replace(&mut *phase, RoomPhase::Failed)
-                    else {
-                        return;
-                    };
-                    closing
-                }
-                _ => return,
-            }
-        };
-        let _ = closing.finished.await;
-        drop(closing.permit);
-    }
 }
 
 enum ReserveOutcome {
@@ -476,31 +518,29 @@ enum ReserveOutcome {
     Creator(Arc<RoomSlot>),
 }
 
-async fn idle_eviction_loop(rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>, idle_ms: u64) {
+async fn idle_eviction_loop(
+    rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
+    idle_ms: u64,
+    mut stopped: watch::Receiver<bool>,
+) {
     let idle = Duration::from_millis(idle_ms);
     let tick = Duration::from_millis(idle_ms.max(1_000) / 2);
     loop {
-        tokio::time::sleep(tick).await;
-        let keys = rooms.read().await.keys().cloned().collect::<Vec<_>>();
-        for key in keys {
-            let slot = rooms.read().await.get(&key).cloned();
-            let Some(slot) = slot else {
-                continue;
-            };
-
-            let should_close = {
-                let phase = slot.phase.lock().await;
-                match &*phase {
-                    RoomPhase::Live(live) => {
-                        live.connection_count == 0 && live.last_activity.elapsed() >= idle
-                    }
-                    _ => false,
-                }
-            };
-            if !should_close {
-                continue;
+        tokio::select! {
+            biased;
+            _ = stopped.changed() => return,
+            _ = tokio::time::sleep(tick) => {}
+        }
+        let entries = rooms
+            .read()
+            .await
+            .iter()
+            .map(|(key, slot)| (*key, slot.clone()))
+            .collect::<Vec<_>>();
+        for (key, slot) in entries {
+            if *stopped.borrow() {
+                return;
             }
-
             let live = {
                 let mut phase = slot.phase.lock().await;
                 let RoomPhase::Live(live) = &*phase else {
@@ -509,33 +549,20 @@ async fn idle_eviction_loop(rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
                 if live.connection_count != 0 || live.last_activity.elapsed() < idle {
                     continue;
                 }
-                let RoomPhase::Live(live) = std::mem::replace(&mut *phase, RoomPhase::Failed)
+                // Publish Closing atomically with the idle observation. Never
+                // expose Failed until this exact actor and guard have finished.
+                let RoomPhase::Live(live) = std::mem::replace(&mut *phase, RoomPhase::Closing)
                 else {
-                    continue;
+                    unreachable!()
                 };
                 live
             };
-
             live.handle.shutdown().await;
-            {
-                let mut phase = slot.phase.lock().await;
-                *phase = RoomPhase::Closing(ClosingRoom {
-                    finished: live.finished,
-                    permit: live.permit,
-                });
+            if live.finished.await.is_err() {
+                tracing::error!(document_id = %key.1, "evicted collaboration actor failed");
             }
-
-            let closing = {
-                let mut phase = slot.phase.lock().await;
-                let RoomPhase::Closing(closing) = std::mem::replace(&mut *phase, RoomPhase::Failed)
-                else {
-                    continue;
-                };
-                closing
-            };
-            let _ = closing.finished.await;
-            drop(closing.permit);
-
+            drop(live.permit);
+            *slot.phase.lock().await = RoomPhase::Failed;
             let mut map = rooms.write().await;
             if map
                 .get(&key)

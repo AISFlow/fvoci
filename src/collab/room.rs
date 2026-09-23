@@ -27,25 +27,33 @@ use crate::db::collab::{
 use crate::db::identity::LiveSession;
 
 #[cfg(feature = "db-tests")]
-static SPAWN_ROOM_BLOCK: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>> =
-    tokio::sync::Mutex::const_new(None);
+static SPAWN_ROOM_BLOCKS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, tokio::sync::oneshot::Receiver<()>>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 #[cfg(feature = "db-tests")]
-pub async fn arm_spawn_room_block() -> tokio::sync::oneshot::Sender<()> {
+pub async fn arm_spawn_room_block(document_id: Uuid) -> tokio::sync::oneshot::Sender<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    *SPAWN_ROOM_BLOCK.lock().await = Some(rx);
+    assert!(SPAWN_ROOM_BLOCKS
+        .lock()
+        .await
+        .insert(document_id, rx)
+        .is_none());
     tx
 }
 
 #[cfg(feature = "db-tests")]
-pub async fn disarm_spawn_room_block() {
-    *SPAWN_ROOM_BLOCK.lock().await = None;
+pub async fn disarm_spawn_room_block(document_id: Uuid) {
+    SPAWN_ROOM_BLOCKS.lock().await.remove(&document_id);
 }
 
-async fn wait_spawn_room_block() {
+async fn wait_spawn_room_block(_document_id: Uuid) {
     #[cfg(feature = "db-tests")]
-    if let Some(rx) = SPAWN_ROOM_BLOCK.lock().await.take() {
-        let _ = rx.await;
+    {
+        let gate = SPAWN_ROOM_BLOCKS.lock().await.remove(&_document_id);
+        if let Some(rx) = gate {
+            let _ = rx.await;
+        }
     }
 }
 
@@ -184,7 +192,7 @@ pub async fn spawn_room(
     pool: PgPool,
     room_guard: RoomGuard,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
-    wait_spawn_room_block().await;
+    wait_spawn_room_block(document_id).await;
     let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
         .map_err(|_| JoinError::EngineUnavailable)?;
     let (tx, rx) = mpsc::channel(config.max_queued_room_ops);

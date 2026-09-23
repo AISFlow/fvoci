@@ -363,16 +363,20 @@ async fn hub_join(
 }
 
 async fn wait_for_booting(hub: &CollabHub, key: (Uuid, Uuid)) {
+    wait_for_phase(hub, key, RoomLifecyclePhase::Booting).await;
+}
+
+async fn wait_for_phase(hub: &CollabHub, key: (Uuid, Uuid), expected: RoomLifecyclePhase) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if hub.room_lifecycle_phase(key).await == RoomLifecyclePhase::Booting {
+            if hub.room_lifecycle_phase(key).await == expected {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("room never entered Booting");
+    .expect("room did not reach expected lifecycle phase");
 }
 
 async fn collab_app_state(app_url: &str, with_collab: bool) -> AppState {
@@ -841,7 +845,7 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
         async {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
-            let release = arm_spawn_room_block().await;
+            let release = arm_spawn_room_block(wiki.document_id).await;
             let hub = Arc::new(CollabHub::new(
                 test_collab_config(4, 30_000),
                 wiki.session.pool.clone(),
@@ -862,7 +866,13 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
                 let wiki = wiki.clone_fixture();
                 async move { hub_join(&hub, &wiki, 2).await }
             });
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while hub.room_waiter_count(key).await == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("second creator never reached the shared slot");
             assert_eq!(
                 hub.room_lifecycle_phase(key).await,
                 RoomLifecyclePhase::Booting
@@ -873,7 +883,7 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
             assert!(join_a.await.expect("join a task").is_ok());
             assert!(join_b.await.expect("join b task").is_ok());
             assert_eq!(hub.available_room_slots(), slots_before - 1);
-            disarm_spawn_room_block().await;
+            disarm_spawn_room_block(wiki.document_id).await;
             hub.shutdown().await;
             harness.cleanup().await;
         },
@@ -888,9 +898,9 @@ async fn collab_lifecycle_aborted_booting_creator_releases_slot() {
         async {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
-            let release = arm_spawn_room_block().await;
+            let release = arm_spawn_room_block(wiki.document_id).await;
             let hub = Arc::new(CollabHub::new(
-                test_collab_config(4, 30_000),
+                test_collab_config(4, 200),
                 wiki.session.pool.clone(),
             ));
             let key = (wiki.session.workspace_id, wiki.document_id);
@@ -901,15 +911,18 @@ async fn collab_lifecycle_aborted_booting_creator_releases_slot() {
             });
             wait_for_booting(&hub, key).await;
             assert_eq!(hub.available_room_slots(), 3);
-            hub.shutdown().await;
+            join_task.abort();
+            assert!(join_task.await.unwrap_err().is_cancelled());
+            release
+                .send(())
+                .expect("hub still owns startup after caller cancellation");
+            // The abandoned caller cannot strand Booting. The same live hub evicts
+            // its zero-client room and can subsequently acquire the database guard.
+            wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
             assert_eq!(hub.available_room_slots(), 4);
-            let _ = release.send(());
-            let result = tokio::time::timeout(Duration::from_secs(5), join_task)
-                .await
-                .expect("aborted booting join hung")
-                .expect("join task");
-            assert!(result.is_err(), "aborted booting join should fail");
-            disarm_spawn_room_block().await;
+            assert!(hub_join(&hub, &wiki, 2).await.is_ok());
+            disarm_spawn_room_block(wiki.document_id).await;
+            hub.shutdown().await;
             harness.cleanup().await;
         },
     )
@@ -921,7 +934,7 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
     run_lifecycle_test("collab_lifecycle_max_rooms_then_reuse_after_leave", async {
         let harness = TestDb::bootstrap().await;
         let docs = setup_wiki_doc_batch(&harness, 5).await;
-        let hub = CollabHub::new(test_collab_config(4, 30_000), docs[0].session.pool.clone());
+        let hub = CollabHub::new(test_collab_config(4, 200), docs[0].session.pool.clone());
 
         let mut conn_ids = Vec::new();
         for doc in docs.iter().take(4) {
@@ -933,10 +946,8 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
 
         let key = (docs[0].session.workspace_id, docs[0].document_id);
         hub.leave_room(key, conn_ids[0]).await;
-        hub.shutdown().await;
-        assert_eq!(hub.available_room_slots(), 4);
-
-        let hub = CollabHub::new(test_collab_config(4, 30_000), docs[0].session.pool.clone());
+        wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
+        assert_eq!(hub.available_room_slots(), 1);
         assert!(hub_join(&hub, &docs[4], 2).await.is_ok());
         hub.shutdown().await;
         harness.cleanup().await;
@@ -953,7 +964,7 @@ async fn collab_lifecycle_idle_eviction_allows_rejoin() {
         let key = (wiki.session.workspace_id, wiki.document_id);
         let conn_id = hub_join(&hub, &wiki, 1).await.expect("join");
         hub.leave_room(key, conn_id).await;
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
         assert!(!hub.room_occupies_slot(key).await);
         assert_eq!(hub.available_room_slots(), 4);
         assert!(hub_join(&hub, &wiki, 2).await.is_ok());
