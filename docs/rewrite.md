@@ -71,3 +71,9 @@ Grok 제출 e94ac2d를 통합한 d154a60에서 코디네이터가 다시 실행�
 네이티브 x86_64, Rust1.98.1, PG18.3; 공유 crate 다운로드 캐시만 재사용하고 통합 target은 새로 빌드했다. `cargo fmt --check` 성공, `cargo check --locked --offline --all-targets --features db-tests` 성공(9.99s). `cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings`는 6개 진단으로 실패. 별도로 `cargo test --locked --offline --lib`: 4개 성공, build10.84s/본문5.62s/전체16.53s. `TEST_DATABASE_URL=<private-file> cargo test --locked --offline --features db-tests --test db_integration`: 13개 성공, build3.05s/본문8.48s/전체11.60s. 이 결과는 원본과 동등 범위의 성능 비교가 아니다.
 
 프로필 감사는 원본 audit:false와 달리 사용자 요구에 맞춰 함께 커밋한다. 첫 버전에서 발견한 세션 철회 중 쓰기, null/누락 구분, 신뢰되지 않은 forwarded IP, 테스트 자원 공유 경로 및 병렬 migration 문제는 후속 Composer task에서 수정 중이다. Fable은 고정 제출 SHA6a77f76을 독립 검토 중이다. CI workflow를 추가했으나 원격 실행은 아직 하지 않았다.
+
+### 독립 검토 결론
+
+Claude Code Fable5.1 medium(task_43a2bfe9a062 / ctx_f447be92fcf1)의 SHA6a77f76 검토 완료: `familyName:null` 보존 버그와 세션 철회 후 프로필 쓰기는 수락 차단. 병렬 migration, 신뢰되지 않은 forwarded IP, per-email 잠금 범위, SIGTERM, 한글 길이/429/JSON 오류 계약, Argon2 취소 시 permit 소유권도 보강 대상으로 확인했다. 실제 검토 완료는 제품 수락을 의미하지 않는다. 검토 terminal은 release했고 후속 Composer task_12716d8c1cc0 / ctx_cf69c321c975가 수정 중이다. Grok task_6678e958475f / ctx_d8b2fe334de7는 고정 SHA775f64d의 비밀번호·HTTP 계약만 읽기 전용 대조 중이다.
+
+다음 시작점: 두 task의 완료를 확인한 뒤 Composer 제출 SHA를 고정해 diff/검사와 Fable 재검토를 수행한다. 독립 검증 전 수락 표를 성공으로 바꾸지 않는다. 현재 통합 branch는 clean; PostgreSQL 시험 컨테이너는 위 Run 소유로 실행 중이며 다른 프로젝트 자원을 정리하지 않는다.
