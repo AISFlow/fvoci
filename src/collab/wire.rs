@@ -21,11 +21,13 @@ pub struct Limits {
 }
 
 impl Limits {
+    // Source collab-http.ts: default 1 MiB body budget × STATE_OVERSIZE_FACTOR 8.
+    // The frame cap includes routing/envelope bytes; inner payload also has a cap.
     pub const DEFAULT: Self = Self {
-        max_frame_bytes: 1_048_576,
+        max_frame_bytes: 8 * 1_048_576,
         max_routing_key_bytes: 512,
         max_string_bytes: 65_536,
-        max_binary_payload_bytes: 1_048_576,
+        max_binary_payload_bytes: 8 * 1_048_576,
     };
 }
 

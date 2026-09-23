@@ -511,3 +511,15 @@ fixture 생성과 네이티브 worker 경계 검증을 수행한다. 미수락�
 PR5 post-merge main421e70b의 Rust35917728923/Web35917728904/
 Native35917728889 전체 success 확인. 다음 협업 기반 통합06e3242에서
 fmt/clippy(all-targets,db-tests), codec11, actionlint 성공; DB/engine 제출은 진행 중.
+
+PR6 https://github.com/AISFlow/fvoci/pull/6 Draft, 첫 HEAD34e1caa의
+Rust35918208792/Web35918208561/Native35918208575 전체 success. 검사 merge ced4ae2
+=34e1caa+main421e70b, codec11/lib20/DB66+13 양 아키텍처 및 기존React13 포함.
+현재 DB/엔진 워커의 미제출 diff는 이 성공 근거에 포함하지 않는다.
+
+원본 collab-http.ts의 STATE_OVERSIZE_FACTOR=8 및 config 본문 기본1048576을
+확인해, 잠정1MiB CRDT 제한을 원본 기본8MiB로 정정했다. 초기 공통 한도는
+update/snapshot8MiB, snapshot+tail 총32MiB/64행, native JSONframe48MiB다.
+한도 초과는 명시적 실패이며 잘린 성공/부분 복원은 금지한다. 원본 환경변수
+COLLAB_MAX_PAYLOAD_BYTES override 연결은 아직 미구현이다. 원본 저장 데이터의
+이전 지원이나 대형 문서 전체 호환성을 이 기본값 확인만으로 수락하지 않는다.
