@@ -1,10 +1,23 @@
-import { t } from "@fvoci/i18n";
+import { t, type I18nKey } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
 import { EmptyState } from "@/components/empty-state";
 import { QueryError, QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { documentPath, wikiDisplayId } from "@/lib/href";
 import type { TreeNode } from "@/lib/queries/documents";
+import { childrenByParent, childrenOf } from "@/features/workspace/wiki-tree";
+
+function roleLabel(role: string): string {
+  const key = (
+    {
+      guest: "role.guest",
+      member: "role.member",
+      admin: "role.admin",
+      owner: "role.owner",
+    } as Record<string, I18nKey>
+  )[role];
+  return key ? t(key) : role;
+}
 
 function statusLabel(status: TreeNode["status"]): string | null {
   if (status === "draft") return t("doc.status.draft");
@@ -12,13 +25,21 @@ function statusLabel(status: TreeNode["status"]): string | null {
   return null;
 }
 
-function WikiDocRow({ slug, node }: { slug: string; node: TreeNode }) {
+function WikiDocRow({
+  slug,
+  node,
+  nested = false,
+}: {
+  slug: string;
+  node: TreeNode;
+  nested?: boolean;
+}) {
   const status = statusLabel(node.status);
   const ref = wikiDisplayId(node.number);
   return (
     <Link
       to={documentPath(slug, ref)}
-      className="wiki-tree__row"
+      className={nested ? "wiki-tree__row wiki-tree__row--nested" : "wiki-tree__row"}
       data-testid={`wiki-doc-${ref}`}
     >
       {node.icon ? (
@@ -31,14 +52,30 @@ function WikiDocRow({ slug, node }: { slug: string; node: TreeNode }) {
   );
 }
 
-function childrenByParent(nodes: readonly TreeNode[]): Map<string | null, TreeNode[]> {
-  const index = new Map<string | null, TreeNode[]>();
-  for (const node of nodes) {
-    const bucket = index.get(node.parentId ?? null);
-    if (bucket) bucket.push(node);
-    else index.set(node.parentId ?? null, [node]);
-  }
-  return index;
+function WikiBranch({
+  slug,
+  node,
+  byParent,
+  nested = false,
+}: {
+  slug: string;
+  node: TreeNode;
+  byParent: ReturnType<typeof childrenByParent<TreeNode>>;
+  nested?: boolean;
+}) {
+  const childNodes = childrenOf(byParent, node.id);
+  return (
+    <li className={nested ? undefined : "wiki-tree__branch"}>
+      <WikiDocRow slug={slug} node={node} nested={nested} />
+      {childNodes.length > 0 ? (
+        <ul className="wiki-tree wiki-tree--nested">
+          {childNodes.map((child) => (
+            <WikiBranch key={child.id} slug={slug} node={child} byParent={byParent} nested />
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
 }
 
 interface WikiHomeViewProps {
@@ -47,6 +84,9 @@ interface WikiHomeViewProps {
   loading: boolean;
   error: string | null;
   creating: boolean;
+  createError: string | null;
+  canCreate: boolean;
+  role: string;
   onRetry: () => void;
   onCreate: () => void;
 }
@@ -57,6 +97,9 @@ export function WikiHomeView({
   loading,
   error,
   creating,
+  createError,
+  canCreate,
+  role,
   onRetry,
   onCreate,
 }: WikiHomeViewProps) {
@@ -67,19 +110,26 @@ export function WikiHomeView({
   return (
     <div className="wiki-home">
       <div className="wiki-home__head">
-        <h1 className="wiki-home__title">{t("nav.wiki")}</h1>
-        {empty ? null : (
+        <div className="wiki-home__intro">
+          <h1 className="wiki-home__title">{t("nav.wiki")}</h1>
+          <p className="wiki-home__role">{t("wiki.role.current", { role: roleLabel(role) })}</p>
+        </div>
+        {canCreate && !empty ? (
           <Button type="button" disabled={creating} onClick={onCreate}>
             {creating ? t("doc.create.pending") : t("nav.newDocument")}
           </Button>
-        )}
+        ) : null}
       </div>
+      {createError ? (
+        <p role="alert" className="wiki-home__error">{createError}</p>
+      ) : null}
       {empty ? (
         <EmptyState
           title={t("doc.empty")}
-          description={t("doc.firstHint")}
-          actionLabel={t("nav.newDocument")}
-          onAction={onCreate}
+          description={canCreate ? t("doc.firstHint") : undefined}
+          actionLabel={canCreate ? t("nav.newDocument") : undefined}
+          onAction={canCreate ? onCreate : undefined}
+          actionDisabled={creating}
         />
       ) : (
         <section className="wiki-home__section">
@@ -90,23 +140,9 @@ export function WikiHomeView({
           ) : null}
           {!loading && !error && wikiRoots.length > 0 ? (
             <ul className="wiki-tree">
-              {wikiRoots.map((node) => {
-                const children = byParent.get(node.id) ?? [];
-                return (
-                  <li key={node.id} className="wiki-tree__branch">
-                    <WikiDocRow slug={slug} node={node} />
-                    {children.length > 0 ? (
-                      <ul className="wiki-tree wiki-tree--nested">
-                        {children.map((child) => (
-                          <li key={child.id}>
-                            <WikiDocRow slug={slug} node={child} />
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </li>
-                );
-              })}
+              {wikiRoots.map((node) => (
+                <WikiBranch key={node.id} slug={slug} node={node} byParent={byParent} />
+              ))}
             </ul>
           ) : null}
         </section>

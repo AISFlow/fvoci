@@ -6,6 +6,7 @@ import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-s
 import { Label } from "@/components/ui/label";
 import { documentPath, wikiDisplayId, wikiPath } from "@/lib/href";
 import { api, ensureOk, ProblemError } from "@/lib/api";
+import type { components } from "@/generated/api";
 import {
   ancestorsQuery,
   documentBodyQuery,
@@ -14,7 +15,11 @@ import {
 } from "@/lib/queries/documents";
 import "./document-shell.css";
 
+type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
+
 const STATUSES = ["draft", "published", "archived"] as const;
+const TITLE_MAX = 300;
+const ICON_MAX = 50;
 
 function isEmptyBody(content: unknown): boolean {
   if (!content || typeof content !== "object") return true;
@@ -54,7 +59,7 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
   }, [metaQuery.data]);
 
   const patchMeta = useMutation({
-    mutationFn: async (body: { title?: string; icon?: string | null; status?: string }) =>
+    mutationFn: async (body: PatchDocumentBody) =>
       ensureOk(
         await api.PATCH("/api/v1/workspaces/{workspace_id}/documents/{document_id}", {
           params: {
@@ -105,23 +110,45 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
   const displayRef = wikiDisplayId(metaQuery.data.number);
   const treeNode = tree.data?.items.find((node) => node.id === documentId);
   const crumbAncestors = ancestors.data?.items ?? [];
+  const meta = metaQuery.data;
+  const saving = patchMeta.isPending;
 
   async function saveTitle() {
     const next = title.trim();
-    if (!next || next === metaQuery.data?.title) return;
-    await patchMeta.mutateAsync({ title: next });
+    if (!next || next === meta.title) return;
+    try {
+      await patchMeta.mutateAsync({ title: next });
+    } catch {
+      setTitle(meta.title);
+    }
   }
 
   async function saveIcon() {
-    const current = metaQuery.data?.icon ?? "";
+    const current = meta.icon ?? "";
     if (icon === current) return;
-    await patchMeta.mutateAsync({ icon: icon.trim() === "" ? null : icon.trim() });
+    const nextIcon = icon.trim() === "" ? null : icon.trim();
+    try {
+      await patchMeta.mutateAsync({ icon: nextIcon });
+    } catch {
+      setIcon(current);
+    }
   }
 
   async function saveStatus(next: string) {
-    if (next === metaQuery.data?.status) return;
-    await patchMeta.mutateAsync({ status: next });
+    if (next === meta.status) return;
+    const previous = meta.status;
+    try {
+      await patchMeta.mutateAsync({ status: next });
+    } catch {
+      setStatus(previous);
+    }
   }
+
+  const bodyNote = bodyQuery.data
+    ? isEmptyBody(bodyQuery.data.contentJson)
+      ? t("doc.empty")
+      : t("doc.body.unavailable")
+    : null;
 
   return (
     <article className="document-page" data-testid={`document-${displayRef}`}>
@@ -142,7 +169,8 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
             className="document-page__title"
             value={title}
             aria-label={t("doc.title")}
-            disabled={patchMeta.isPending}
+            maxLength={TITLE_MAX}
+            disabled={saving}
             onChange={(event) => setTitle(event.target.value)}
             onBlur={() => {
               void saveTitle();
@@ -160,7 +188,8 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
                 id="document-icon"
                 className="document-page__field-input"
                 value={icon}
-                maxLength={8}
+                maxLength={ICON_MAX}
+                disabled={saving}
                 onChange={(event) => setIcon(event.target.value)}
                 onBlur={() => {
                   void saveIcon();
@@ -174,6 +203,7 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
                 className="document-page__field-select"
                 value={status}
                 aria-label={t("doc.status.a11y")}
+                disabled={saving}
                 onChange={(event) => {
                   const next = event.target.value;
                   setStatus(next);
@@ -212,11 +242,7 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
             }}
           />
         ) : null}
-        {bodyQuery.data ? (
-          <p className="document-page__body-note">
-            {isEmptyBody(bodyQuery.data.contentJson) ? t("doc.empty") : t("doc.readOnly")}
-          </p>
-        ) : null}
+        {bodyNote ? <p className="document-page__body-note">{bodyNote}</p> : null}
       </section>
     </article>
   );

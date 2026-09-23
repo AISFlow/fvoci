@@ -1,10 +1,11 @@
 import { t } from "@fvoci/i18n";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { settingsPath, wikiPath } from "@/lib/href";
-import { api } from "@/lib/api";
+import { api, ProblemError, problemMessage } from "@/lib/api";
 import { workspacesQuery } from "@/lib/queries";
 import "@/features/workspace/workspace-aux.css";
 
@@ -26,11 +27,40 @@ export function WorkspaceShell({
   children,
 }: WorkspaceShellProps) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const workspaces = useQuery(workspacesQuery);
   const items = workspaces.data?.items ?? [];
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+
+  async function logout() {
+    setLogoutError(null);
+    let result;
+    try {
+      result = await api.POST("/api/v1/auth/logout");
+    } catch {
+      setLogoutError(t("error.network"));
+      return;
+    }
+    if (!result.response.ok) {
+      setLogoutError(
+        problemMessage(new ProblemError(result.response.status), "error.auth.logout"),
+      );
+      return;
+    }
+    await queryClient.resetQueries();
+    await navigate("/login", { replace: true });
+  }
 
   return (
     <div className="app-shell">
+      {logoutError ? (
+        <div
+          role="alert"
+          className="border-b border-border bg-muted px-4 py-2 text-ui text-muted-foreground"
+        >
+          {logoutError}
+        </div>
+      ) : null}
       <header className="app-shell__header workspace-shell__header">
         <div className="workspace-shell__brand">
           <Link to="/" className="text-ui underline underline-offset-2">
@@ -83,9 +113,8 @@ export function WorkspaceShell({
             type="button"
             size="sm"
             variant="outline"
-            onClick={async () => {
-              await api.POST("/api/v1/auth/logout");
-              window.location.assign("/login");
+            onClick={() => {
+              void logout();
             }}
           >
             {t("nav.logout")}

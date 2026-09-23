@@ -16,6 +16,28 @@
   padding-bottom: 1rem;
 }
 
+.wiki-home__intro {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.wiki-home__role {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-dense-size);
+  line-height: var(--text-dense-leading);
+  word-break: keep-all;
+}
+
+.wiki-home__error {
+  margin: 0;
+  color: var(--destructive);
+  font-size: var(--text-ui-size);
+  line-height: var(--text-ui-leading);
+  word-break: keep-all;
+}
+
 .wiki-home__title {
   margin: 0;
   font-size: var(--text-title-size);
@@ -68,6 +90,10 @@
 
 .wiki-tree__row:hover {
   background: color-mix(in oklab, var(--accent) 55%, transparent);
+}
+
+.wiki-tree__row--nested {
+  padding-left: 1.25rem;
 }
 
 .wiki-tree__icon {

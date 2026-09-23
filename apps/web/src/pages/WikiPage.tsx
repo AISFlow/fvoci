@@ -4,10 +4,15 @@ import { useNavigate } from "react-router-dom";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { WikiHomeView } from "@/features/workspace/wiki-home-view";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
-import { api, ensureOk } from "@/lib/api";
-import { documentPath } from "@/lib/href";
 import { loadErrorMessage } from "@/components/query-status";
+import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
+import { documentPath } from "@/lib/href";
 import { treeQuery } from "@/lib/queries/documents";
+
+function roleAtLeast(role: string, minimum: string): boolean {
+  const order = ["guest", "member", "admin", "owner"];
+  return order.indexOf(role) >= order.indexOf(minimum);
+}
 
 export function WikiPage() {
   const navigate = useNavigate();
@@ -33,6 +38,14 @@ export function WikiPage() {
 
   if (!workspace) return null;
 
+  const canCreate = roleAtLeast(workspace.role, "member");
+  const createError =
+    createDocument.isError
+      ? createDocument.error instanceof ProblemError
+        ? problemMessage(createDocument.error, "doc.create.failed")
+        : t("error.network")
+      : null;
+
   return (
     <WorkspaceShell
       slug={slug}
@@ -46,10 +59,14 @@ export function WikiPage() {
         loading={tree.isLoading}
         error={tree.isError ? loadErrorMessage(tree.error) : null}
         creating={createDocument.isPending}
+        createError={createError}
+        canCreate={canCreate}
+        role={workspace.role}
         onRetry={() => {
           void tree.refetch();
         }}
         onCreate={() => {
+          if (!canCreate || createDocument.isPending) return;
           createDocument.mutate();
         }}
       />

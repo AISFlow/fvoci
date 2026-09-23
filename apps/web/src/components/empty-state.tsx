@@ -9,6 +9,7 @@ interface EmptyStateProps {
   actionTo?: string;
   actionLabel?: string;
   onAction?: () => void;
+  actionDisabled?: boolean;
 }
 
 export function EmptyState({
@@ -18,6 +19,7 @@ export function EmptyState({
   actionTo,
   actionLabel,
   onAction,
+  actionDisabled = false,
 }: EmptyStateProps) {
   return (
     <div className="mx-auto flex w-full max-w-lg flex-1 flex-col items-start justify-center gap-3 px-6 py-12 sm:px-8">
@@ -36,7 +38,13 @@ export function EmptyState({
         </p>
       ) : null}
       {actionLabel && onAction ? (
-        <Button type="button" className="mt-2" size="sm" onClick={onAction}>
+        <Button
+          type="button"
+          className="mt-2"
+          size="sm"
+          disabled={actionDisabled}
+          onClick={onAction}
+        >
           {actionLabel}
         </Button>
       ) : actionTo && actionLabel ? (

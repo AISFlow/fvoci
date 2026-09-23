@@ -139,6 +139,17 @@ test("logout transport failure keeps the current session visible", async ({ page
   expect((await page.request.get("/api/v1/auth/me")).ok()).toBe(true);
 });
 
+test("wiki shell logout transport failure keeps the current session visible", async ({ page }) => {
+  await login(page, admin.email, admin.password);
+  await page.goto("/w/acme/wiki");
+  await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
+  await page.route("**/api/v1/auth/logout", (route) => route.abort("connectionfailed"));
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page).toHaveURL(/\/w\/acme\/wiki$/);
+  expect((await page.request.get("/api/v1/auth/me")).ok()).toBe(true);
+});
+
 
 test("settings with revoked session redirects without a React hook crash", async ({ page }) => {
   await login(page, admin.email, admin.password);
