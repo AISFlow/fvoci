@@ -465,3 +465,11 @@ codec45da379 교차 검증은 11개 성공(가짜4/6 opcode·routingKey·varint�
 입력 수정). 제품 미연결 상태를 유지한다. 협업 설계 자문에서 제안한 후보 Doc
 방식의 decode 메모리 근거는 Yrs update.rs의 untrusted try_reserve 때문에
 코디네이터가 재검토를 요청했다. 자문을 구현/검증 성공으로 기록하지 않는다.
+
+문서 UI 보강5693f65를 f969a94로 통합했다. 워커의 실제 브라우저13/13(48.8초),
+wiki-tree 단위1, build/typecheck 성공; 통합된 공유 DTO 변경은 원격에서 재검사한다.
+통합 로컬 fmt/clippy와 api-schema lib21 성공. PR5 신규 UI/DTO 고정 SHA의
+Fable 검토 및 원격 전체 gate를 통과하기 전 미수락이다. CI에 tree 단위 검사도 연결했다.
+협업 자문은 decoder의 무제한 allocation/unchecked UTF8 문제를 확인했으나,
+rlimit child만으로 UB의 보안 경계가 완성된다는 제안은 수락하지 않았다.
+공식 Yrs 수정 버전/안전한 입력 경계를 확인한 뒤 제품 engine을 연결한다.

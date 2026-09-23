@@ -59,5 +59,7 @@ jobs:
           cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
           cargo test --locked --offline --test static_api
           cargo test --locked --offline --lib --features api-schema api::openapi::tests
+      - name: Wiki tree unit regression
+        run: node --experimental-strip-types --test apps/web/src/features/workspace/wiki-tree.test.ts
       - name: Real React workspace flow with PostgreSQL app role
         run: bash scripts/run-web-e2e.sh
