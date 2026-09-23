@@ -299,3 +299,26 @@ WIKI 번호·tree/get·prosemirror/updateV1/gc:false 계약을 사용한다. 사
 현재 단일 프로세스 범위에서 문서별 task를 소유하게 하되 Redis/다중인스턴스 기능은
 미지원으로 추적한다. 데이터 손실 방지를 위해 공유DB에서 중복 room 소유와 오래된
 snapshot 덮어쓰기를 방지하는 경계까지 다음 보안 설계 검토에 포함한다.
+
+
+### 동시편집 보완 수락 계약 (진행 작업 유지)
+
+사용자 보완을 현재 wiki task `ctx_db38f9d1f96e`와 UI task `ctx_4761880b5c3a`에
+전달했다. 원본3937952 및 설치 provider를 기준으로 다음을 제품 구현에서 검사한다.
+
+| 경계 | 필수 보장·회귀 |
+| --- | --- |
+| 인증/room | fvoci_session + 실제 Origin 정책 + 존재/소속/현재 ACL; token은 String(clientID) awareness 선언일 뿐 인증 아님; 각 논리 room 독립 인가 |
+| clientID/readonly | claim 변경 시 기존 Y.Doc/미전송 이력 보존; struct의 과거 clientID를 socket claim으로 제한 금지; Update·SyncStep2 등 모든 변경 거부, 정상 readonly sync 유지 |
+| 철회 순서 | 실제 공유 DB 잠금/조건으로 update-first와 revoke-first를 barrier 검사; 거부 update가 peer나 후속 정상 저장에 섞이지 않음; 철회 후 새 sync/broadcast/awareness 제한, 이미 전달한 데이터 회수 주장 금지 |
+| 수락/영속화 | 입력 검증→현재 인가→durable bounded batch→공유 상태 반영/broadcast/ack 순서 또는 동등 보장; Yrs rollback/Undo로 DB 실패를 취소한다고 가정 금지; txn/lock guard를 await 넘어 보유 금지; commit 불명은 작업 식별·영속 상태 확인 전 성공 ack 금지 |
+| persist barrier | flush 후 persist:id/persisted:id/persist-failed:id 문자열 유지; 연결·room별 앞선 처리 prefix를 고정해 commit 후 같은id 응답; 뒤 편집으로 무한 대기 금지; 거부/실패 prefix를 성공으로 응답 금지 |
+| 삭제/정본 | state-vector만으로 dirty 판정 금지; delete set/pending update와 updateV1 정본 보존, JSON 재생성 금지; 순수/전체 삭제 및 reconnect/restart 검사 |
+| 소유권 | 문서별 task + 지원하는 모든 쓰기 경로, 동시 최초접속/eviction재접속/늦은저장 검사; 단일프로세스 제한·공유DB 중복실행/stale-writer 거부, 자체 lease 플랫폼 금지 |
+| awareness/구조 | 검증 사용자 정보·허용필드·연결세대별 claim, 오래된close가 새presence 제거 금지; UTF16 offset/API 검증; 중간삽입/삭제/선택/서식 및 실제 Tiptap 표/link/mention/참조/고유ID 보존 |
+| crash | persisted 확인→기존client재전송차단→종료/크래시→freshclient DB복원→구조/삭제/후속편집→기존client복귀; commit후ack전/ack후/삭제only/flush경합/오래된저장 회귀 |
+| 자원/수락 | frame 외 연결·room·큐·송신buffer·pendingCRDT·누적메모리·느린peer·빈도·decode/apply/shutdown 한도; 조용한drop후ack 금지; 합성 한글/composition과 실제 OS IME 검증 구분 |
+
+Fable의 우선 독립 검토는 철회/수락 순서, DB 실패 후 공유 상태 오염,
+persist·삭제-only barrier, fresh-client crash 복원이다. 기반 PR은 제한을 명시해
+수락할 수 있으나 미완성 협업을 기본 활성화하거나 전체 협업 완료로 선언하지 않는다.
