@@ -1,5 +1,6 @@
 pub mod cookie;
 pub mod guard;
+pub mod json_input;
 pub mod rate_limit;
 pub mod routes;
 pub mod state;

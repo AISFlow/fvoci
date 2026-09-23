@@ -52,4 +52,4 @@ export TEST_DATABASE_URL='postgres://admin@host:5432/postgres?sslmode=require'
 cargo test --features db-tests --test db_integration
 ```
 
-Optional: `scripts/provision-test-db.sh` creates a throwaway database and exports `TEST_DATABASE_URL` / `TEST_APP_DATABASE_URL` when `psql` is available.
+Optional: `scripts/start-test-postgres.sh` starts an ephemeral Docker PostgreSQL on loopback with a random password, then exports `TEST_DATABASE_URL`. Integration tests create and drop their own UUID database and app role.

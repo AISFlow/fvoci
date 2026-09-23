@@ -29,20 +29,3 @@ pub fn reject_bearer(headers: &HeaderMap) -> Result<(), AppError> {
     }
     Ok(())
 }
-
-pub fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-        })
-        .unwrap_or("unknown")
-        .to_string()
-}

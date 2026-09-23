@@ -8,7 +8,7 @@ use crate::auth::token::{new_token, SESSION_TTL_SECS};
 use crate::db::identity::{
     authenticate_password, count_users, find_live_session, issue_session, live_to_session_user,
     maybe_slide_session, new_setup_input, revoke_session, setup_first_owner, update_profile,
-    ProfilePatch, SetupFirstOwnerResult,
+    ProfilePatch, SetupFirstOwnerResult, SetupSessionParams,
 };
 use crate::db::Db;
 
@@ -37,20 +37,20 @@ impl AuthService {
 
         let password_hash = hash_password(&password, &self.password_keys)
             .await
-            .map_err(|e| sqlx::Error::Protocol(e.into()))?;
+            .map_err(sqlx::Error::Protocol)?;
 
         let token = new_token();
         let expires_at = Utc::now() + Duration::seconds(SESSION_TTL_SECS);
-        let input = new_setup_input(
+        let input = new_setup_input(SetupSessionParams {
             email,
             password_hash,
             given_name,
             family_name,
             workspace_slug,
             workspace_name,
-            token.hash,
+            token_hash: token.hash,
             expires_at,
-        );
+        });
         let user_id = input.user_id;
         let workspace_id = input.workspace_id;
         let session_token = token.token;
@@ -113,7 +113,7 @@ impl AuthService {
         };
         let user_id = live.user_id;
 
-        let updated = update_profile(&self.db.pool, user_id, patch).await?;
+        let updated = update_profile(&self.db.pool, user_id, &token_hash, patch).await?;
         if !updated {
             return Ok(Err(()));
         }

@@ -1,3 +1,4 @@
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -64,17 +65,31 @@ impl ProblemCode {
 pub struct AppError {
     pub status: StatusCode,
     pub code: ProblemCode,
+    pub source: Option<String>,
 }
 
 impl AppError {
     pub fn problem(status: StatusCode, code: ProblemCode) -> Self {
-        Self { status, code }
+        Self {
+            status,
+            code,
+            source: None,
+        }
     }
 
     pub fn from_code(code: ProblemCode) -> Self {
         Self {
             status: code.status(),
             code,
+            source: None,
+        }
+    }
+
+    pub fn with_source(code: ProblemCode, pointer: impl Into<String>) -> Self {
+        Self {
+            status: code.status(),
+            code,
+            source: Some(pointer.into()),
         }
     }
 }
@@ -86,6 +101,8 @@ struct ProblemBody {
     title: String,
     status: u16,
     code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 impl IntoResponse for AppError {
@@ -95,6 +112,7 @@ impl IntoResponse for AppError {
             title: self.code.title().to_string(),
             status: self.status.as_u16(),
             code: self.code.as_str().to_string(),
+            source: self.source,
         };
         (
             self.status,
@@ -102,5 +120,22 @@ impl IntoResponse for AppError {
             Json(body),
         )
             .into_response()
+    }
+}
+
+impl From<JsonRejection> for AppError {
+    fn from(rejection: JsonRejection) -> Self {
+        match rejection {
+            JsonRejection::JsonDataError(_) => {
+                AppError::with_source(ProblemCode::InvalidInput, "/")
+            }
+            JsonRejection::JsonSyntaxError(_) => {
+                AppError::with_source(ProblemCode::InvalidInput, "/")
+            }
+            JsonRejection::MissingJsonContentType(_) | JsonRejection::BytesRejection(_) => {
+                AppError::from_code(ProblemCode::InvalidInput)
+            }
+            _ => AppError::from_code(ProblemCode::InvalidInput),
+        }
     }
 }

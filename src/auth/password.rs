@@ -24,6 +24,8 @@ static PASSWORD_HASH_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("password hash regex")
 });
+static KEY_ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]{1,32}$").expect("key id regex"));
 
 static ARGON2_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(ARGON2_CONCURRENCY));
 
@@ -48,10 +50,7 @@ impl fmt::Debug for Keyring {
 
 impl Keyring {
     pub fn parse(raw: &str, active_id: &str) -> Result<Self, String> {
-        if !Regex::new(r"^[a-zA-Z0-9_-]{1,32}$")
-            .unwrap()
-            .is_match(active_id)
-        {
+        if !KEY_ID_RE.is_match(active_id) {
             return Err("invalid active key id".into());
         }
         let parsed: HashMap<String, String> = serde_json::from_str(raw)
@@ -61,7 +60,7 @@ impl Keyring {
         }
         let mut keys = HashMap::new();
         for (id, hex) in parsed {
-            if !Regex::new(r"^[a-zA-Z0-9_-]{1,32}$").unwrap().is_match(&id) {
+            if !KEY_ID_RE.is_match(&id) {
                 return Err("invalid key id".into());
             }
             if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -134,14 +133,17 @@ pub async fn verify_password(hash: Option<&str>, password: &str, ring: &Keyring)
     let password = password.to_string();
     let ring = ring.clone();
     let permit = ARGON2_SEM.acquire().await;
-    let result = tokio::task::spawn_blocking(move || {
+    let result = match tokio::task::spawn_blocking(move || {
         verify_password_sync(hash.as_deref(), &password, &ring)
     })
     .await
-    .unwrap_or(VerifyResult {
-        ok: false,
-        needs_pepper_rotation: false,
-    });
+    {
+        Ok(result) => result,
+        Err(_) => VerifyResult {
+            ok: false,
+            needs_pepper_rotation: false,
+        },
+    };
     if let Ok(permit) = permit {
         drop(permit);
     }
@@ -158,10 +160,9 @@ fn verify_password_sync(hash: Option<&str>, password: &str, ring: &Keyring) -> V
     let secret = key.map(Vec::as_slice).unwrap_or(DUMMY_KEY.as_slice());
     let input = sign_hmac(secret, password);
 
-    let candidate = if key.is_some() && phc.is_some() && full_match {
-        phc.unwrap()
-    } else {
-        DUMMY_HASH
+    let candidate = match (key, phc, full_match) {
+        (Some(_), Some(phc), true) => phc,
+        _ => DUMMY_HASH,
     };
 
     let verified = PasswordHash::new(candidate)

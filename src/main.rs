@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::signal;
@@ -23,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool),
+            db: Db::new(pool.clone()),
             password_keys: config.password_keys.clone(),
         }),
         branding_name: config.branding_name.clone(),
@@ -36,14 +37,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = listener.local_addr()?;
     eprintln!("fvoci-server listening on http://{addr}");
 
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
+    pool.close().await;
     Ok(())
 }
 
 async fn shutdown_signal() {
-    let _ = signal::ctrl_c().await;
-    eprintln!("shutdown signal received");
+    let ctrl_c = async {
+        if signal::ctrl_c().await.is_ok() {
+            eprintln!("shutdown signal received (Ctrl+C)");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut stream) = signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            if stream.recv().await.is_some() {
+                eprintln!("shutdown signal received (SIGTERM)");
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
 }

@@ -11,6 +11,7 @@ use fvoci_server::auth::token::hash_token;
 use fvoci_server::auth::AuthService;
 use fvoci_server::db::identity::{
     count_users, find_live_session, new_setup_input, setup_first_owner, SetupFirstOwnerResult,
+    SetupSessionParams,
 };
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
@@ -25,10 +26,15 @@ use uuid::Uuid;
 const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
 
+fn test_peer() -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([203, 0, 113, 10], 42424))
+}
+
 struct TestDb {
     admin_url: String,
     app_url: String,
     db_name: String,
+    role_name: String,
 }
 
 impl TestDb {
@@ -36,21 +42,13 @@ impl TestDb {
         let admin_base = std::env::var("TEST_DATABASE_URL")
             .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
             .expect("TEST_DATABASE_URL missing");
-        if let Ok(app_url) = std::env::var("TEST_APP_DATABASE_URL") {
-            let db_name = admin_base.rsplit('/').next().unwrap_or("test").to_string();
-            return Self {
-                admin_url: admin_base,
-                app_url,
-                db_name,
-            };
-        }
 
         let db_name = format!("fvoci_test_{}", Uuid::now_v7().simple());
         let role_name = format!("fvoci_app_{}", db_name.replace('-', "_"));
         let mut password_bytes = [0u8; 24];
         rand::rng().fill_bytes(&mut password_bytes);
         let role_password = hex::encode(password_bytes);
-        let server_url = trim_db_url(&admin_base);
+        let server_url = server_db_url(&admin_base);
 
         let admin_pool = PgPoolOptions::new()
             .max_connections(2)
@@ -63,7 +61,7 @@ impl TestDb {
             .expect("create database");
         admin_pool.close().await;
 
-        let admin_url = format!("{}/{}", server_url, db_name);
+        let admin_url = join_db_url(&server_url, &db_name);
         migrate::run_migrations(&admin_url).await.expect("migrate");
 
         let migration_pool = PgPoolOptions::new()
@@ -90,25 +88,24 @@ impl TestDb {
         }
         migration_pool.close().await;
 
-        let parsed = url::Url::parse(&admin_url).expect("database url");
-        let app_url = {
-            let mut app = parsed;
-            app.set_username(&role_name).ok();
-            app.set_password(Some(&role_password)).ok();
-            app.to_string()
-        };
+        let mut app = url::Url::parse(&admin_url).expect("database url");
+        app.set_username(&role_name).ok();
+        app.set_password(Some(&role_password)).ok();
+        let app_url = app.to_string();
 
         Self {
             admin_url,
             app_url,
             db_name,
+            role_name,
         }
     }
 
     async fn cleanup(self) {
+        let server_url = server_db_url(&self.admin_url);
         let pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect(&trim_db_url(&self.admin_url))
+            .connect(&server_url)
             .await
             .ok();
         if let Some(pool) = pool {
@@ -121,17 +118,25 @@ impl TestDb {
             let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
                 .execute(&pool)
                 .await;
+            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
+                .execute(&pool)
+                .await;
             pool.close().await;
         }
     }
 }
 
-fn trim_db_url(url: &str) -> String {
-    if let Some(idx) = url.rfind('/') {
-        url[..idx].to_string()
-    } else {
-        url.to_string()
-    }
+fn server_db_url(url: &str) -> String {
+    let parsed = url::Url::parse(url).expect("database url");
+    let mut server = parsed;
+    server.set_path("");
+    server.to_string().trim_end_matches('/').to_string()
+}
+
+fn join_db_url(server_url: &str, db_name: &str) -> String {
+    let mut parsed = url::Url::parse(server_url).expect("server url");
+    parsed.set_path(&format!("/{}", db_name));
+    parsed.to_string()
 }
 
 async fn app_state(app_url: &str) -> AppState {
@@ -155,7 +160,9 @@ async fn json_request(
     body: Option<Value>,
     cookie: Option<&str>,
     extra_headers: &[(&str, &str)],
+    peer: Option<std::net::SocketAddr>,
 ) -> (StatusCode, Value, Option<String>) {
+    let peer = peer.unwrap_or_else(test_peer);
     let mut builder = Request::builder().method(method).uri(path);
     if let Some(cookie) = cookie {
         builder = builder.header("cookie", format!("fvoci_session={}", cookie));
@@ -163,7 +170,7 @@ async fn json_request(
     for (name, value) in extra_headers {
         builder = builder.header(*name, *value);
     }
-    let request = if let Some(body) = body {
+    let mut request = if let Some(body) = body {
         builder
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
@@ -171,6 +178,9 @@ async fn json_request(
     } else {
         builder.body(Body::empty()).unwrap()
     };
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
     let response = app.oneshot(request).await.expect("response");
     let status = response.status();
     let set_cookie = response
@@ -242,6 +252,7 @@ async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid) {
         })),
         None,
         &[],
+        None,
     )
     .await;
     let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
@@ -303,6 +314,7 @@ async fn setup_login_me_patch_logout_flow() {
         None,
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -316,6 +328,7 @@ async fn setup_login_me_patch_logout_flow() {
         Some(json!({"givenName": "Renamed", "familyName": null})),
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -328,6 +341,7 @@ async fn setup_login_me_patch_logout_flow() {
         None,
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -339,6 +353,7 @@ async fn setup_login_me_patch_logout_flow() {
         None,
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -359,26 +374,26 @@ async fn concurrent_setup_has_single_winner() {
     .unwrap();
     let token_a = fvoci_server::auth::token::new_token();
     let token_b = fvoci_server::auth::token::new_token();
-    let input_a = new_setup_input(
-        "a@example.com".into(),
-        hash.clone(),
-        "A".into(),
-        None,
-        "race-a".into(),
-        "Race A".into(),
-        token_a.hash,
-        Utc::now() + ChronoDuration::days(30),
-    );
-    let input_b = new_setup_input(
-        "b@example.com".into(),
-        hash,
-        "B".into(),
-        None,
-        "race-b".into(),
-        "Race B".into(),
-        token_b.hash,
-        Utc::now() + ChronoDuration::days(30),
-    );
+    let input_a = new_setup_input(SetupSessionParams {
+        email: "a@example.com".into(),
+        password_hash: hash.clone(),
+        given_name: "A".into(),
+        family_name: None,
+        workspace_slug: "race-a".into(),
+        workspace_name: "Race A".into(),
+        token_hash: token_a.hash,
+        expires_at: Utc::now() + ChronoDuration::days(30),
+    });
+    let input_b = new_setup_input(SetupSessionParams {
+        email: "b@example.com".into(),
+        password_hash: hash,
+        given_name: "B".into(),
+        family_name: None,
+        workspace_slug: "race-b".into(),
+        workspace_name: "Race B".into(),
+        token_hash: token_b.hash,
+        expires_at: Utc::now() + ChronoDuration::days(30),
+    });
     let (a, b) = tokio::join!(
         setup_first_owner(&pool_a, input_a),
         setup_first_owner(&pool_b, input_b)
@@ -419,6 +434,7 @@ async fn revoked_and_expired_sessions_are_rejected() {
         None,
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -464,16 +480,16 @@ async fn audit_insert_failure_rolls_back_setup() {
     .await
     .unwrap();
     let token = fvoci_server::auth::token::new_token();
-    let input = new_setup_input(
-        "owner@example.com".into(),
-        hash,
-        "Owner".into(),
-        None,
-        "owner".into(),
-        "Owner".into(),
-        token.hash,
-        Utc::now() + ChronoDuration::days(30),
-    );
+    let input = new_setup_input(SetupSessionParams {
+        email: "owner@example.com".into(),
+        password_hash: hash,
+        given_name: "Owner".into(),
+        family_name: None,
+        workspace_slug: "owner".into(),
+        workspace_name: "Owner".into(),
+        token_hash: token.hash,
+        expires_at: Utc::now() + ChronoDuration::days(30),
+    });
     let result = setup_first_owner(&pool, input).await;
     assert!(result.is_err());
     assert_eq!(count_users(&pool).await.unwrap(), 0);
@@ -500,6 +516,7 @@ async fn profile_event_failure_rolls_back_profile_update() {
         Some(json!({"givenName": "Blocked"})),
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -542,6 +559,7 @@ async fn profile_audit_failure_rolls_back_profile_update() {
         Some(json!({"givenName": "Blocked"})),
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -578,6 +596,7 @@ async fn patch_me_rejects_foreign_user_id_in_body() {
         Some(json!({"givenName": "Nope", "userId": other})),
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert!(
@@ -598,6 +617,7 @@ async fn patch_me_rejects_bearer_token_auth() {
         None,
         Some(&cookie),
         &[("authorization", "Bearer deadbeef")],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -622,6 +642,7 @@ async fn patch_profile_waits_on_suspend_lock_then_returns_unauthorized() {
         None,
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -645,6 +666,7 @@ async fn patch_profile_waits_on_suspend_lock_then_returns_unauthorized() {
         None,
         Some(&cookie),
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -661,6 +683,7 @@ async fn patch_profile_waits_on_suspend_lock_then_returns_unauthorized() {
                 Some(json!({"givenName": "Race"})),
                 Some(&cookie),
                 &[],
+                None,
             )
             .await
         }
@@ -719,6 +742,7 @@ async fn stored_password_hash_verifies_on_login() {
         })),
         None,
         &[],
+        None,
     )
     .await;
 
@@ -729,6 +753,7 @@ async fn stored_password_hash_verifies_on_login() {
         Some(json!({"email": "hash@example.com", "password": "supersecret1"})),
         None,
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -741,6 +766,7 @@ async fn stored_password_hash_verifies_on_login() {
         Some(json!({"email": "hash@example.com", "password": "wrong-password"})),
         None,
         &[],
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -789,5 +815,196 @@ async fn assert_app_role_rejects_migration_owner_connection() {
         .expect("app role should pass guard");
     admin.close().await;
     app.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn patch_family_name_omitted_preserves_existing_value() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, user_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE fvoci.users SET family_name = 'Kim' WHERE id = $1")
+        .bind(user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let (status, body, _) = json_request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/auth/me",
+        Some(json!({"givenName": "Renamed"})),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["givenName"], "Renamed");
+    assert_eq!(body["familyName"], "Kim");
+
+    let (status, body, _) = json_request(
+        app,
+        "PATCH",
+        "/api/v1/auth/me",
+        Some(json!({"givenName": "Renamed", "familyName": null})),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["familyName"].is_null());
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn patch_rejects_null_given_name_with_source() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let (status, body, _) = json_request(
+        app,
+        "PATCH",
+        "/api/v1/auth/me",
+        Some(json!({"givenName": null})),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+    assert_eq!(body["source"], "/givenName");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn setup_rejects_unknown_fields() {
+    let harness = TestDb::bootstrap().await;
+    let app = router(app_state(&harness.app_url).await);
+    let (status, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "x@example.com",
+            "password": "supersecret1",
+            "givenName": "X",
+            "workspaceSlug": "xco",
+            "workspaceName": "X Co",
+            "extra": true
+        })),
+        None,
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn patch_profile_waits_on_session_revoke_lock_then_returns_unauthorized() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, user_id) = setup_session(&harness).await;
+    let token_hash = hash_token(&cookie);
+    let admin = PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+
+    let mut admin_tx = admin.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *admin_tx)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM fvoci.sessions WHERE user_id = $1 AND token_hash = $2 FOR UPDATE")
+        .bind(user_id)
+        .bind(&token_hash)
+        .execute(&mut *admin_tx)
+        .await
+        .unwrap();
+
+    let patch = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            json_request(
+                app,
+                "PATCH",
+                "/api/v1/auth/me",
+                Some(json!({"givenName": "Race"})),
+                Some(&cookie),
+                &[],
+                None,
+            )
+            .await
+        }
+    });
+
+    wait_for_profile_patch_blocked(&admin, blocker_pid).await;
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE token_hash = $1")
+        .bind(&token_hash)
+        .execute(&mut *admin_tx)
+        .await
+        .unwrap();
+    admin_tx.commit().await.unwrap();
+
+    let (patch_status, patch_body, _) = patch.await.unwrap();
+    assert_eq!(patch_status, StatusCode::UNAUTHORIZED);
+    assert_eq!(patch_body["code"], "authentication_required");
+
+    let given_name: (String,) = sqlx::query_as("SELECT given_name FROM fvoci.users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(given_name.0, "Admin");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn rate_limit_uses_socket_ip_not_forwarded_for() {
+    let harness = TestDb::bootstrap().await;
+    let app = router(app_state(&harness.app_url).await);
+    let peer_a = std::net::SocketAddr::from(([203, 0, 113, 1], 42424));
+    let peer_b = std::net::SocketAddr::from(([203, 0, 113, 2], 42424));
+
+    for _ in 0..10 {
+        let (status, _, _) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email": "a@example.com", "password": "wrong-password"})),
+            None,
+            &[("x-forwarded-for", "10.0.0.99")],
+            Some(peer_a),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    let (status, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/auth/login",
+        Some(json!({"email": "b@example.com", "password": "wrong-password"})),
+        None,
+        &[("x-forwarded-for", "10.0.0.99")],
+        Some(peer_b),
+    )
+    .await;
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+
     harness.cleanup().await;
 }

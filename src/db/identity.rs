@@ -11,6 +11,38 @@ const SESSION_SLIDE_THRESHOLD_SECS: i64 = 15 * 24 * 60 * 60;
 
 const INSTANCE_ADMIN_LOCK_KEY: i64 = 847_291_003_551;
 
+struct EventAppend {
+    id: Uuid,
+    workspace_id: Option<Uuid>,
+    actor_user_id: Option<Uuid>,
+    verb: String,
+    target_type: Option<String>,
+    target_id: Option<Uuid>,
+    payload: Value,
+}
+
+struct AuditAppend {
+    id: Uuid,
+    workspace_id: Option<Uuid>,
+    actor_user_id: Option<Uuid>,
+    verb: String,
+    target_type: Option<String>,
+    target_id: Option<Uuid>,
+    payload: Value,
+    ip: Option<String>,
+}
+
+pub struct SetupSessionParams {
+    pub email: String,
+    pub password_hash: String,
+    pub given_name: String,
+    pub family_name: Option<String>,
+    pub workspace_slug: String,
+    pub workspace_name: String,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 pub struct LiveSession {
     pub session_id: Uuid,
     pub expires_at: DateTime<Utc>,
@@ -288,26 +320,30 @@ async fn insert_setup_rows(
 
     append_event(
         tx,
-        input.event_id,
-        Some(input.workspace_id),
-        Some(input.user_id),
-        "instance.setup",
-        Some("workspace"),
-        Some(input.workspace_id),
-        payload.clone(),
+        EventAppend {
+            id: input.event_id,
+            workspace_id: Some(input.workspace_id),
+            actor_user_id: Some(input.user_id),
+            verb: "instance.setup".to_string(),
+            target_type: Some("workspace".to_string()),
+            target_id: Some(input.workspace_id),
+            payload: payload.clone(),
+        },
     )
     .await?;
 
     append_audit(
         tx,
-        input.audit_id,
-        Some(input.workspace_id),
-        Some(input.user_id),
-        "instance.setup",
-        Some("workspace"),
-        Some(input.workspace_id),
-        payload,
-        input.ip.as_deref(),
+        AuditAppend {
+            id: input.audit_id,
+            workspace_id: Some(input.workspace_id),
+            actor_user_id: Some(input.user_id),
+            verb: "instance.setup".to_string(),
+            target_type: Some("workspace".to_string()),
+            target_id: Some(input.workspace_id),
+            payload,
+            ip: input.ip.clone(),
+        },
     )
     .await?;
 
@@ -378,13 +414,15 @@ pub async fn append_auth_login_event(
         .await?;
     append_event(
         tx,
-        event_id,
-        None,
-        Some(user_id),
-        "auth.login",
-        Some("user"),
-        Some(user_id),
-        json!({"userId": user_id.to_string(), "method": "password"}),
+        EventAppend {
+            id: event_id,
+            workspace_id: None,
+            actor_user_id: Some(user_id),
+            verb: "auth.login".to_string(),
+            target_type: Some("user".to_string()),
+            target_id: Some(user_id),
+            payload: json!({"userId": user_id.to_string(), "method": "password"}),
+        },
     )
     .await?;
     Ok(())
@@ -427,13 +465,15 @@ pub async fn revoke_session(
     let event_id = Uuid::now_v7();
     append_event(
         &mut tx,
-        event_id,
-        None,
-        actor_user_id,
-        "auth.logout",
-        None,
-        None,
-        json!({}),
+        EventAppend {
+            id: event_id,
+            workspace_id: None,
+            actor_user_id,
+            verb: "auth.logout".to_string(),
+            target_type: None,
+            target_id: None,
+            payload: json!({}),
+        },
     )
     .await?;
 
@@ -441,9 +481,15 @@ pub async fn revoke_session(
     Ok(())
 }
 
+pub enum FamilyNamePatch {
+    Preserve,
+    Clear,
+    Set(String),
+}
+
 pub struct ProfilePatch {
     pub given_name: String,
-    pub family_name: Option<Option<String>>,
+    pub family_name: FamilyNamePatch,
     pub locale: Option<String>,
     pub timezone: Option<String>,
     pub week_starts_on: Option<i32>,
@@ -453,18 +499,38 @@ pub struct ProfilePatch {
 pub async fn update_profile(
     pool: &PgPool,
     user_id: Uuid,
+    token_hash: &str,
     patch: ProfilePatch,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
+    let session = sqlx::query_as::<_, (Uuid,)>(
+        "SELECT id FROM fvoci.app_session_by_token_hash($1)",
+    )
+    .bind(token_hash)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some((session_id,)) = session else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+
     let active = sqlx::query_as::<_, (Uuid,)>(
         r#"
-        SELECT id FROM fvoci.users
-        WHERE id = $1 AND deleted_at IS NULL AND suspended_at IS NULL
-        FOR UPDATE
+        SELECT u.id
+        FROM fvoci.users u
+        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
+        WHERE u.id = $1
+          AND s.revoked_at IS NULL
+          AND s.expires_at > now()
+          AND u.deleted_at IS NULL
+          AND u.suspended_at IS NULL
+        FOR UPDATE OF u, s
         "#,
     )
     .bind(user_id)
+    .bind(session_id)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -474,17 +540,26 @@ pub async fn update_profile(
     }
 
     match &patch.family_name {
-        Some(family_name) => {
+        FamilyNamePatch::Set(family_name) => {
             sqlx::query(
                 "UPDATE fvoci.users SET given_name = $2, family_name = $3, updated_at = now() WHERE id = $1",
             )
             .bind(user_id)
             .bind(&patch.given_name)
-            .bind(family_name.as_ref())
+            .bind(family_name)
             .execute(&mut *tx)
             .await?;
         }
-        None => {
+        FamilyNamePatch::Clear => {
+            sqlx::query(
+                "UPDATE fvoci.users SET given_name = $2, family_name = NULL, updated_at = now() WHERE id = $1",
+            )
+            .bind(user_id)
+            .bind(&patch.given_name)
+            .execute(&mut *tx)
+            .await?;
+        }
+        FamilyNamePatch::Preserve => {
             sqlx::query("UPDATE fvoci.users SET given_name = $2, updated_at = now() WHERE id = $1")
                 .bind(user_id)
                 .bind(&patch.given_name)
@@ -523,34 +598,46 @@ pub async fn update_profile(
         .await?;
 
     let event_id = Uuid::now_v7();
-    let payload = json!({
-        "userId": user_id.to_string(),
-        "givenName": patch.given_name,
-        "familyName": patch.family_name.as_ref().and_then(|v| v.as_ref()),
-    });
+    let mut payload = serde_json::Map::new();
+    payload.insert("userId".to_string(), json!(user_id.to_string()));
+    payload.insert("givenName".to_string(), json!(patch.given_name));
+    match &patch.family_name {
+        FamilyNamePatch::Preserve => {}
+        FamilyNamePatch::Clear => {
+            payload.insert("familyName".to_string(), Value::Null);
+        }
+        FamilyNamePatch::Set(value) => {
+            payload.insert("familyName".to_string(), Value::String(value.clone()));
+        }
+    }
+    let payload = Value::Object(payload);
     append_event(
         &mut tx,
-        event_id,
-        None,
-        Some(user_id),
-        "user.name_updated",
-        Some("user"),
-        Some(user_id),
-        payload.clone(),
+        EventAppend {
+            id: event_id,
+            workspace_id: None,
+            actor_user_id: Some(user_id),
+            verb: "user.name_updated".to_string(),
+            target_type: Some("user".to_string()),
+            target_id: Some(user_id),
+            payload: payload.clone(),
+        },
     )
     .await?;
 
     let audit_id = Uuid::now_v7();
     append_audit(
         &mut tx,
-        audit_id,
-        None,
-        Some(user_id),
-        "user.name_updated",
-        Some("user"),
-        Some(user_id),
-        payload,
-        None,
+        AuditAppend {
+            id: audit_id,
+            workspace_id: None,
+            actor_user_id: Some(user_id),
+            verb: "user.name_updated".to_string(),
+            target_type: Some("user".to_string()),
+            target_id: Some(user_id),
+            payload,
+            ip: None,
+        },
     )
     .await?;
 
@@ -629,13 +716,7 @@ pub async fn authenticate_password(
 
 async fn append_event(
     tx: &mut Transaction<'_, Postgres>,
-    id: Uuid,
-    workspace_id: Option<Uuid>,
-    actor_user_id: Option<Uuid>,
-    verb: &str,
-    target_type: Option<&str>,
-    target_id: Option<Uuid>,
-    payload: Value,
+    row: EventAppend,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -644,13 +725,13 @@ async fn append_event(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'web')
         "#,
     )
-    .bind(id)
-    .bind(workspace_id)
-    .bind(actor_user_id)
-    .bind(verb)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(payload)
+    .bind(row.id)
+    .bind(row.workspace_id)
+    .bind(row.actor_user_id)
+    .bind(&row.verb)
+    .bind(row.target_type.as_deref())
+    .bind(row.target_id)
+    .bind(row.payload)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -658,14 +739,7 @@ async fn append_event(
 
 async fn append_audit(
     tx: &mut Transaction<'_, Postgres>,
-    id: Uuid,
-    workspace_id: Option<Uuid>,
-    actor_user_id: Option<Uuid>,
-    verb: &str,
-    target_type: Option<&str>,
-    target_id: Option<Uuid>,
-    payload: Value,
-    ip: Option<&str>,
+    row: AuditAppend,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -674,47 +748,38 @@ async fn append_audit(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet)
         "#,
     )
-    .bind(id)
-    .bind(workspace_id)
-    .bind(actor_user_id)
-    .bind(verb)
-    .bind(target_type)
-    .bind(target_id)
-    .bind(payload)
-    .bind(ip)
+    .bind(row.id)
+    .bind(row.workspace_id)
+    .bind(row.actor_user_id)
+    .bind(&row.verb)
+    .bind(row.target_type.as_deref())
+    .bind(row.target_id)
+    .bind(row.payload)
+    .bind(row.ip.as_deref())
     .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
-pub fn new_setup_input(
-    email: String,
-    password_hash: String,
-    given_name: String,
-    family_name: Option<String>,
-    workspace_slug: String,
-    workspace_name: String,
-    token_hash: String,
-    expires_at: DateTime<Utc>,
-) -> SetupFirstOwnerInput {
+pub fn new_setup_input(params: SetupSessionParams) -> SetupFirstOwnerInput {
     let user_id = Uuid::now_v7();
     let workspace_id = Uuid::now_v7();
     SetupFirstOwnerInput {
         user_id,
-        email,
-        password_hash,
-        given_name,
-        family_name,
+        email: params.email,
+        password_hash: params.password_hash,
+        given_name: params.given_name,
+        family_name: params.family_name,
         locale: "ko".to_string(),
         timezone: "Asia/Seoul".to_string(),
         week_starts_on: 1,
         text_scale: 16,
         workspace_id,
-        workspace_slug,
-        workspace_name,
+        workspace_slug: params.workspace_slug,
+        workspace_name: params.workspace_name,
         session_id: Uuid::now_v7(),
-        session_token_hash: token_hash,
-        session_expires_at: expires_at,
+        session_token_hash: params.token_hash,
+        session_expires_at: params.expires_at,
         event_id: Uuid::now_v7(),
         audit_id: Uuid::now_v7(),
         ip: None,

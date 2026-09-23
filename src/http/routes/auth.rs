@@ -1,4 +1,7 @@
-use axum::extract::State;
+use std::net::SocketAddr;
+
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -6,13 +9,16 @@ use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::auth::session::SessionUser;
-use crate::db::identity::ProfilePatch;
+use crate::db::identity::FamilyNamePatch;
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::cookie::{clear_session_cookie, set_session_cookie};
-use crate::http::guard::{check_origin, client_ip, reject_bearer};
+use crate::http::guard::{check_origin, reject_bearer};
+use crate::http::json_input::parse_patch_me;
+use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::validate::{
     normalize_email, validate_family_name, validate_given_name, validate_locale,
@@ -27,6 +33,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LoginBody {
     email: String,
     password: String,
@@ -40,11 +47,13 @@ struct LoginResponse {
 
 async fn login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Json(body): Json<LoginBody>,
+    body: Result<Json<LoginBody>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let Json(body) = body.map_err(AppError::from)?;
     check_origin(&headers, &state.public_origin)?;
-    let ip = client_ip(&headers);
+    let ip = peer_ip(peer.ip());
     if !state
         .rate_limiter
         .allow(&format!("login:ip:{ip}"), 30)
@@ -124,23 +133,11 @@ async fn me(
     Ok(Json(user))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MePatchBody {
-    given_name: String,
-    #[serde(default)]
-    family_name: Option<Option<String>>,
-    locale: Option<String>,
-    timezone: Option<String>,
-    week_starts_on: Option<i32>,
-    text_scale: Option<i16>,
-}
-
 async fn patch_me(
     State(state): State<AppState>,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(body): Json<MePatchBody>,
+    Json(body): Json<Value>,
 ) -> Result<Json<SessionUser>, AppError> {
     reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
@@ -150,43 +147,44 @@ async fn patch_me(
         .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
     require_session(&state, &jar).await?;
 
-    validate_given_name(&body.given_name)?;
-    if let Some(locale) = &body.locale {
+    let patch = parse_patch_me(body)?;
+    validate_given_name(&patch.given_name)?;
+    if let Some(locale) = &patch.locale {
         validate_locale(locale)?;
     }
-    if let Some(scale) = body.text_scale {
+    if let Some(scale) = patch.text_scale {
         validate_text_scale(scale)?;
     }
-    if let Some(week) = body.week_starts_on {
+    if let Some(week) = patch.week_starts_on {
         validate_week_starts_on(week)?;
     }
-    if let Some(tz) = &body.timezone {
+    if let Some(tz) = &patch.timezone {
         if tz.trim().is_empty() {
             return Err(AppError::from_code(ProblemCode::InvalidInput));
         }
     }
 
-    let family_name = match body.family_name {
-        None => None,
-        Some(None) => Some(None),
-        Some(Some(value)) => {
+    let family_name = match patch.family_name {
+        FamilyNamePatch::Preserve => FamilyNamePatch::Preserve,
+        FamilyNamePatch::Clear => FamilyNamePatch::Clear,
+        FamilyNamePatch::Set(value) => {
             let trimmed = value.trim();
             if trimmed.is_empty() {
-                Some(None)
+                FamilyNamePatch::Clear
             } else {
                 validate_family_name(trimmed)?;
-                Some(Some(trimmed.to_string()))
+                FamilyNamePatch::Set(trimmed.to_string())
             }
         }
     };
 
-    let patch = ProfilePatch {
-        given_name: body.given_name.trim().to_string(),
+    let patch = crate::db::identity::ProfilePatch {
+        given_name: patch.given_name.trim().to_string(),
         family_name,
-        locale: body.locale,
-        timezone: body.timezone,
-        week_starts_on: body.week_starts_on,
-        text_scale: body.text_scale,
+        locale: patch.locale,
+        timezone: patch.timezone,
+        week_starts_on: patch.week_starts_on,
+        text_scale: patch.text_scale,
     };
 
     let updated = state
@@ -214,6 +212,14 @@ async fn require_session(state: &AppState, jar: &CookieJar) -> Result<SessionUse
     Ok(user)
 }
 
-fn internal(_err: sqlx::Error) -> AppError {
+fn internal(err: sqlx::Error) -> AppError {
+    tracing::error!("database error: {}", sanitize_db_error(&err));
     AppError::problem(StatusCode::INTERNAL_SERVER_ERROR, ProblemCode::InvalidInput)
+}
+
+fn sanitize_db_error(err: &sqlx::Error) -> String {
+    match err {
+        sqlx::Error::Database(db) => db.message().to_string(),
+        _ => "database operation failed".to_string(),
+    }
 }
