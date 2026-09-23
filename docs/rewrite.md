@@ -377,3 +377,14 @@ persist·삭제-only barrier, fresh-client crash 복원이다. 기반 PR은 제�
   Fable task4863a0e3f377 / ctxffd857259342 고정ca3193a 검토 중. 아직 제품
   router 미연결이고004 적용에 맞춘 기존 migration count 검사 갱신이 필요하다.
   workspace/UI 수락 후 최신 main에서 wiki 통합 및 협업 제품 경로로 이어간다.
+
+- PR3 post-merge CI35910871258/35910871128도 실제5job 성공 확인.
+- UI95da0dc의 null 누락·정적 fallback·오류 처리·mtime 기반 gate 및 권한별
+  브라우저 검사 보완은 Composer `task_9799a8e15bca / ctx_54a9dbbcbc45`가
+  rust-workspace-web에서 수행한다. 기존 terminal 재사용 readiness timeout
+  `ctx_4d7ad5d92b50`는 실패로 기록했고, 완료된 이전 dispatch를 공식 release한 뒤
+  같은 task를 지정 Composer2.5 새 terminal로 재시도하여 실제 실행을 확인했다.
+- Fable wiki ca3193a 검토는 인가/원자성 차단0이나 icon:null clearing 결함,
+  fractional 짧은 prefix panic과 실제 product revoke 경합 검사 보완을 발견했다.
+  Grok `task_462531dfba7e / ctx_9a264a3d7793`가 같은8개 소유 경로에서 수정한다.
+  UI E2E가 로컬 heavy slot 소유, wiki DB는 별도 배정 후 실행한다. 검토자는 release.
