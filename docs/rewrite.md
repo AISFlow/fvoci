@@ -596,3 +596,15 @@ PostgreSQL soft-blocker(앞서 대기 중인 append PID)도 포함해 수정했�
 
 1899886 원격 native-engine35923500285 양 아키텍처 성공으로 EOF 수정 검증.
 후속 메모리/누적CPU 한도 변경은 아직 미제출이며 이 성공에 포함하지 않는다.
+
+엔진4b1039d를13812ed로 통합했다. AS1GiB/RSS512MiB, 요청별8초 유지,
+누적CPU 예산 분리, Apply metadata 응답과 별도 Snapshot, Load 재사용 거부,
+이미 전달된 frame/종료 순서 및 SIGABRT stack 분류를 보강했다. 워커 보고:
+worker35검사10.05초/test-hang38검사12.34초, clippy각0.53/0.51초 성공.
+작은96byte 텍스트 약65761개로7.36MiB snapshot을686ms에 생성하고 반복 tail과
+함께 near32MiB 복원을 검사했다. 최초 fixture의 반복전체encode/뒤삽입은
+준비 CPU 병목으로 중단했고, 앞삽입/최대4encode로 수정했다. 제품 timeout을
+늘리거나 실패검사를 skip하지 않았다. 워커ctx987fc1e02c63 제출 후 release,
+worktree/커밋 보존. 통합 fmt 성공. Fable5.1medium 요청/유효 설정의
+읽기 전용 task38dbfeb88a25/ctx68339aebfecd가13812ed delta를 검토 중이다.
+원격8job 최종 결과·독립 검토 전 PR6 Draft/미수락; /collab 제품 연결은 미구현.
