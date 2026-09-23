@@ -2301,7 +2301,7 @@ async fn append_rejects_state_budget_exhaustion() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
-            0,
+            MAX_COLLAB_TAIL_UPDATES,
             Uuid::now_v7(),
             b"x",
         ),
