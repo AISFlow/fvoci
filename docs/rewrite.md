@@ -795,3 +795,37 @@ fixture expected_tail을64로 맞춘 e245122의 실제 PostgreSQL 단일 회귀�
 (`scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test collab_integration append_rejects_state_budget_exhaustion -- --exact`,
 compile4.95s/본문2.63s, 1passed/21filtered/0ignored). 전체 원격 gate는 재실행 필요.
 Web 성공은 현재 등록된 기존 사용자 흐름이며 e2e-pending 협업 수락을 포함하지 않는다.
+
+PR7 HEADdf251639e173b550ee9a7ea579a9b2d0c09db90f의 원격10 jobs 모두 성공.
+Rust35933621809: lib24/wire11, 각 아키텍처 실제 collabDB22+기존DB66+document13,
+product15(본문 x64 19.03s/ARM64 14.01s), skip0. Web35933621783: web46/editor11,
+기존 React13(53.6s). Documents35933621780: 각52/production52,
+Engine35933621789: 각test38/production35. 이 결과는 후속 로컬 코드의 증거가 아니다.
+
+Fable task8dae21bc41e6/ctx7a57eaf493fc는 유효 worker_done 후 release했다.
+/tmp/fvoci-collab-lifecycle-review-d5aec64.md: F1 미가입 leave 인원 감소(High),
+F2 main 종료 연결 누락(High), F3 startup panic 슬롯 유실(Medium), 잠금/종료
+대기와 추가 경합 검사 권고. 코디네이터 b907697은 실제 member HashSet·unknown
+leave/frame 무시, startup unwind 정리, 실제 서버 종료 hub join을 구현했다.
+clippy alltargets/db-tests 성공만 확인했으며 새 runtime 회귀/독립 재검토는 미완료.
+naive timeout으로 shutdown 소유 future를 버리는 조치는 하지 않았다.
+
+Grok UI 803855d/844f36c를 786c7db/8dd30cd로 통합했다. 동일 provider 재접속과
+room/connection 세대별 callback을 분리하고 연결 상실 시 실제 persistNow promise를
+reject/리스너·timer 정리한다. 실제 provider emitter 기반 web56/typecheck는 워커
+성공 보고, 새 통합 원격 검증 전이다. ctx02be004c9563 release 완료.
+
+Composer5737f392a345e30c5385cc8375fef9888d533a57은 제품21검사 성공 보고를
+제출했으나 미통합·미수락이다. 보고의 placeholder full SHA는 버리고 실제 Git SHA를
+확인했다. primary reload 실패를 무시하고 healthy로 표시하여 stale snapshot으로
+새 durable tail을 compact할 위험, 두 번째 readonly Load, malformed empty update,
+불일치 receipt/tail 복구가 남아 동일 작업자 task86f04fca1c51/ctx5e5b80a00614로
+후속 수정·실제 실패 회귀를 배정했다. b907697 소비와 F1/F2/F3 회귀도 명시했다.
+현재 heavy bundle은 이 Composer가 소유한다.
+
+Grok task7324576c22d4/ctxf628dd69a966: 새 Orca task worktree rust-collab-awareness,
+base8dd30cd, 허용 src/collab/awareness.rs와 inline tests만. 원본 provider framing,
+중첩 verified user/allowlist, clock·generation·null tombstone·자원 제한을 구현한다.
+Composer room/제품검사 파일과 겹치지 않는다. 두 쓰기 워커가 진행 중이며 기존
+모든 커밋/worktree/retained 자원을 보존한다. 다음 명령은 해당 두 dispatch의
+`orchestration check` 결과 확인, 제출 SHA 검토 후 하나씩 통합·관련 검사다.
