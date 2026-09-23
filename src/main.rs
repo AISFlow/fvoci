@@ -5,6 +5,7 @@ use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
 use fvoci_server::auth::AuthService;
+use fvoci_server::collab::{CollabConfig, CollabHub};
 use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
@@ -35,6 +36,9 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
     eprintln!("fvoci-server listening on http://{addr}");
 
+    let collab = CollabConfig::from_env().map(|cfg| {
+        Arc::new(CollabHub::new(cfg, pool.clone()))
+    });
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool),
@@ -44,6 +48,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         public_origin,
         cookie_secure: config.cookie_secure,
         rate_limiter: RateLimiter::new(),
+        collab,
     };
 
     axum::serve(

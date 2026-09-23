@@ -1066,6 +1066,121 @@ pub async fn compact_collab_snapshot(
     Ok(Ok(load))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollabAdmission {
+    pub read_only: bool,
+    pub archived: bool,
+}
+
+/// Resolve whether a live session may join a wiki document collab room.
+pub async fn resolve_collab_admission(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    if !wiki_can_edit(role) {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let doc = lock_wiki_document_for_update(&mut tx, workspace_id, document_id).await?;
+    let Some((project_id, status, deleted_at)) = doc else {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    };
+    if deleted_at.is_some() || project_id.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let archived = status == "archived";
+    tx.commit().await?;
+    Ok(Ok(CollabAdmission {
+        read_only: archived,
+        archived,
+    }))
+}
+
+/// Read-only collab load for sync without claiming writer generation.
+pub async fn load_collab_readonly(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    match authorize_wiki_collab_read(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await?
+    {
+        Ok(()) => {}
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    }
+    let content: (Value,) = sqlx::query_as(
+        "SELECT content_json FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    match ensure_collab_state_row(&mut tx, workspace_id, document_id, &content.0).await? {
+        Ok(()) => {}
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    }
+    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let Some(state) = state else {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    };
+    if state.1 != COLLAB_STATE_ENCODING_V1 {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let tail = match load_tail_updates(
+        &mut tx,
+        workspace_id,
+        document_id,
+        state.3,
+        state.0.len() as i64,
+    )
+    .await?
+    {
+        Ok(tail) => tail,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+    let load = state_row_to_load(state, tail);
+    tx.commit().await?;
+    Ok(Ok(load))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
