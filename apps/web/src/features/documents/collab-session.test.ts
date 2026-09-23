@@ -14,7 +14,8 @@ test("collab-session 은 provider-react 를 쓴다", () => {
   assert.equal(src.includes("new HocuspocusProvider"), false);
   assert.equal(src.includes("gc: false"), true);
   assert.equal(src.includes("durableSaved"), true);
-  assert.equal(src.includes("applyPersistAck"), true);
+  assert.equal(src.includes("syncPersistBind"), true);
+  assert.equal(src.includes("scopedPersistObserver"), true);
 });
 
 test("collab-session 에 hex 리터럴이 없다", () => {

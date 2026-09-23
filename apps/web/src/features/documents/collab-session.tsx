@@ -9,9 +9,13 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
 import {
-	applyPersistAck,
+	createConnectionGeneration,
 	createPersistAck,
 	isDurablySaved,
+	reducePersistBind,
+	scopedPersistObserver,
+	syncPersistBind,
+	type PersistBindState,
 } from "./collab-persist-ack";
 import {
 	blockIdOf,
@@ -118,7 +122,6 @@ export function useCollabSession(
 ): CollabSession | null {
 	const provider = useHocuspocusProvider();
 	const connectionStatus = useHocuspocusConnectionStatus();
-	const connectionId = useMemo(() => crypto.randomUUID(), [provider]);
 	const documentId = roomNameOf(provider);
 	// WHY: #653 — provider 가 살아있는 채 리마운트되면 synced 를 다시 미동기화로 접으면 안 된다.
 	const [synced, setSynced] = useState(() => provider.synced);
@@ -126,7 +129,17 @@ export function useCollabSession(
 	const [peers, setPeers] = useState<CollabPeer[]>([]);
 	const [readOnly, setReadOnly] = useState(false);
 	const [unauthorized, setUnauthorized] = useState(false);
-	const [ack, setAck] = useState(() => createPersistAck(documentId, connectionId));
+	const [bind, setBind] = useState<PersistBindState>(() => {
+		const generation = createConnectionGeneration(provider, connectionStatus);
+		return {
+			provider: generation.provider,
+			status: generation.status,
+			ack: createPersistAck(documentId, generation.connectionId),
+		};
+	});
+	const bindRef = useRef(bind);
+	bindRef.current = bind;
+	const ack = bind.ack;
 
 	useHocuspocusEvent("synced", ({ state }) => {
 		if (state) setSynced(true);
@@ -143,15 +156,25 @@ export function useCollabSession(
 	});
 
 	useEffect(() => {
-		setAck((prev) =>
-			applyPersistAck(prev, { type: "bind", documentId, connectionId }),
+		setBind((prev) =>
+			syncPersistBind(prev, { provider, status: connectionStatus, documentId }),
 		);
-	}, [documentId, connectionId]);
+	}, [provider, connectionStatus, documentId]);
+
+	useHocuspocusEvent("disconnect", () => {
+		setBind((prev) =>
+			syncPersistBind(prev, {
+				provider,
+				status: "disconnected",
+				documentId: roomNameOf(provider),
+			}),
+		);
+	});
 
 	useEffect(() => {
 		const doc = provider.document;
 		const onUpdate = () => {
-			setAck((prev) => applyPersistAck(prev, { type: "edit" }));
+			setBind((prev) => reducePersistBind(prev, { type: "edit" }));
 		};
 		doc.on("update", onUpdate);
 		return () => {
@@ -213,17 +236,19 @@ export function useCollabSession(
 			durableSaved: isDurablySaved(ack),
 			peers,
 			readOnly,
-			persistNow: () =>
-				persistNow(provider, {
-					onRequest: (requestId) =>
-						setAck((prev) => applyPersistAck(prev, { type: "request", requestId })),
-					onAck: (requestId) =>
-						setAck((prev) => applyPersistAck(prev, { type: "ack", requestId })),
-					onFail: (requestId) =>
-						setAck((prev) => applyPersistAck(prev, { type: "fail", requestId })),
-					onTimeout: (requestId) =>
-						setAck((prev) => applyPersistAck(prev, { type: "timeout", requestId })),
-				}),
+			persistNow: () => {
+				const scope = bindRef.current.ack;
+				return persistNow(
+					provider,
+					scopedPersistObserver(
+						scope.documentId,
+						scope.connectionId,
+						(event) => {
+							setBind((prev) => reducePersistBind(prev, event));
+						},
+					),
+				);
+			},
 		}),
 		[provider, unauthorized, connectionStatus, synced, unsent, readOnly, peers, ack],
 	);
