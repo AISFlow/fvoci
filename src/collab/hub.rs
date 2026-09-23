@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use sqlx::postgres::PgPool;
 use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinHandle;
@@ -17,7 +18,7 @@ struct LiveRoom {
     handle: RoomHandle,
     finished: tokio::sync::oneshot::Receiver<()>,
     last_activity: Instant,
-    connection_count: usize,
+    members: HashSet<Uuid>,
     permit: OwnedSemaphorePermit,
 }
 
@@ -146,9 +147,10 @@ impl CollabHub {
         let mut phase = slot.phase.lock().await;
         if let RoomPhase::Live(live) = &mut *phase {
             live.last_activity = Instant::now();
+            let conn_id = join.conn.conn_id;
             let result = live.handle.join(join).await;
             if result.is_ok() {
-                live.connection_count += 1;
+                live.members.insert(conn_id);
             }
             return result;
         }
@@ -160,20 +162,26 @@ impl CollabHub {
         if let Some(slot) = slot {
             let mut phase = slot.phase.lock().await;
             if let RoomPhase::Live(live) = &mut *phase {
-                live.handle.leave(conn_id).await;
-                live.connection_count = live.connection_count.saturating_sub(1);
-                live.last_activity = Instant::now();
+                if live.members.remove(&conn_id) {
+                    live.handle.leave(conn_id).await;
+                    live.last_activity = Instant::now();
+                }
             }
         }
     }
 
     pub async fn send_frame(&self, key: RoomKey, conn_id: Uuid, bytes: Vec<u8>) {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let slot = self.room_slot(key).await;
         if let Some(slot) = slot {
             let mut phase = slot.phase.lock().await;
             if let RoomPhase::Live(live) = &mut *phase {
-                live.last_activity = Instant::now();
-                live.handle.frame(conn_id, bytes).await;
+                if live.members.contains(&conn_id) {
+                    live.last_activity = Instant::now();
+                    live.handle.frame(conn_id, bytes).await;
+                }
             }
         }
     }
@@ -245,7 +253,19 @@ impl CollabHub {
                             starts.retain(|task| !task.is_finished());
                             let startup_slot = slot.clone();
                             starts.push(tokio::spawn(async move {
-                                let outcome = hub.start_room(key, startup_slot).await;
+                                let outcome = std::panic::AssertUnwindSafe(
+                                    hub.start_room(key, startup_slot.clone()),
+                                )
+                                .catch_unwind()
+                                .await;
+                                let outcome = match outcome {
+                                    Ok(outcome) => outcome,
+                                    Err(_) => {
+                                        hub.cleanup_starting(key, &startup_slot).await;
+                                        tracing::error!(document_id = %key.1, "collaboration startup panicked");
+                                        Err(JoinError::EngineUnavailable)
+                                    }
+                                };
                                 let _ = reply.send(outcome);
                             }));
                             true
@@ -423,7 +443,7 @@ impl CollabHub {
                     handle,
                     finished,
                     last_activity: Instant::now(),
-                    connection_count: 0,
+                    members: HashSet::new(),
                     permit,
                 });
                 slot.ready.notify_waiters();
@@ -546,7 +566,7 @@ async fn idle_eviction_loop(
                 let RoomPhase::Live(live) = &*phase else {
                     continue;
                 };
-                if live.connection_count != 0 || live.last_activity.elapsed() < idle {
+                if !live.members.is_empty() || live.last_activity.elapsed() < idle {
                     continue;
                 }
                 // Publish Closing atomically with the idle observation. Never

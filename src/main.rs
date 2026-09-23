@@ -46,17 +46,24 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         public_origin,
         cookie_secure: config.cookie_secure,
         rate_limiter: RateLimiter::new(),
-        collab,
+        collab: collab.clone(),
     };
 
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         router(state, config.static_dir.clone())
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .await;
 
+    // Upgraded WebSockets outlive the HTTP graceful-shutdown watcher. Join the
+    // room owners and reap their native helpers before dropping the DB pool.
+    // Also clean up if serving fails; do not return early on that error.
+    if let Some(hub) = collab {
+        hub.shutdown().await;
+    }
+    serve_result?;
     Ok(())
 }
 
