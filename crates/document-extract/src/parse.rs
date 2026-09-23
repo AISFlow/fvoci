@@ -1,4 +1,8 @@
+use rhwp::model::document::Document;
 use rhwp::parse_document;
+use rhwp::parser::hwpx::{
+    content::parse_content_hpf, reader::HwpxReader, section::parse_hwpx_section, HwpxError,
+};
 use rhwp::parser::{detect_format, FileFormat, ParseError};
 
 use crate::classify::{
@@ -89,7 +93,19 @@ fn parse_and_walk(bytes: &[u8], format: DocFormat, limits: &Limits) -> ExtractRe
         });
     }
 
-    let walked = walk_body(&doc, format, limits.max_output_chars);
+    let failed_hwpx = if format == DocFormat::Hwpx {
+        match failed_hwpx_sections(bytes, &doc) {
+            Ok(failed) => failed,
+            Err(error) => {
+                return ExtractReport::new(ExtractStatus::Corrupt {
+                    detail: format!("HWPX section diagnostics: {error}"),
+                })
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let walked = walk_body(&doc, format, limits.max_output_chars, &failed_hwpx);
     warnings.extend(walked.warnings);
 
     if walked.omitted_section && !walked.recovered_section {
@@ -117,6 +133,38 @@ fn parse_and_walk(bytes: &[u8], format: DocFormat, limits: &Limits) -> ExtractRe
         format,
         warnings,
     })
+}
+
+// The document parser replaces failed HWPX sections with defaults. Re-read only
+// ambiguous empty sections through the SAME pinned public parser, in package
+// spine order, to distinguish a valid empty section from a dropped one. Container
+// and expanded-byte limits have already been checked; this stays in the helper.
+fn failed_hwpx_sections(bytes: &[u8], doc: &Document) -> Result<Vec<usize>, HwpxError> {
+    if !doc
+        .sections
+        .iter()
+        .any(|section| section.paragraphs.is_empty())
+    {
+        return Ok(Vec::new());
+    }
+    let mut reader = HwpxReader::open(bytes)?;
+    let package = parse_content_hpf(&reader.read_file("Contents/content.hpf")?)?;
+    let mut failed = Vec::new();
+    for (index, section) in doc.sections.iter().enumerate() {
+        if !section.paragraphs.is_empty() {
+            continue;
+        }
+        let Some(path) = package.section_files.get(index) else {
+            return Err(HwpxError::XmlError(
+                "section count differs from package spine".into(),
+            ));
+        };
+        let xml = reader.read_file(path)?;
+        if parse_hwpx_section(&xml).is_err() {
+            failed.push(index);
+        }
+    }
+    Ok(failed)
 }
 
 fn map_parse_error(err: ParseError, format: DocFormat) -> ExtractReport {

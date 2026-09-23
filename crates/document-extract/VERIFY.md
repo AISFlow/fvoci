@@ -21,7 +21,7 @@ export CARGO_TARGET_DIR="$PWD/target"
 
 Logs: `/tmp/fvoci-extract-test-default.log`, `/tmp/fvoci-extract-test-hang.log`, `/tmp/fvoci-extract-clippy.log`.
 
-B1: HWP5 `raw_stream.is_none()` and HWPX empty paragraph list map parser `Section::default()` drops to `Partial` (recovered body) or `Corrupt` (none). Genuine empty fixtures still `Empty`. HWPX `<hs:sec/>` with zero `<hp:p>` cannot be distinguished from a drop at this pin.
+B1: HWP5 `raw_stream.is_none()` and HWPX empty paragraph list map parser `Section::default()` drops to `Partial` (recovered body) or `Corrupt` (none). Genuine empty fixtures still `Empty`. At this historical worker SHA, zero-paragraph HWPX was classified conservatively. The subsequent coordinator fix rechecks ambiguous sections with public rhwp APIs, distinguishing genuine empty from parse failure; see docs/rewrite.md for final integration evidence.
 
 B2: table/picture captions walked; Top/Left before row-major cells, Bottom/Right after.
 

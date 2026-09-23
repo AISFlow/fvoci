@@ -36,7 +36,12 @@ struct WalkState {
     recovered_section: bool,
 }
 
-pub fn walk_body(doc: &Document, format: DocFormat, max_chars: usize) -> WalkedBody {
+pub fn walk_body(
+    doc: &Document,
+    format: DocFormat,
+    max_chars: usize,
+    failed_hwpx: &[usize],
+) -> WalkedBody {
     let mut state = WalkState {
         max_chars,
         out: String::new(),
@@ -49,7 +54,9 @@ pub fn walk_body(doc: &Document, format: DocFormat, max_chars: usize) -> WalkedB
         recovered_section: false,
     };
     for (i, section) in doc.sections.iter().enumerate() {
-        if section_omitted_by_parser(section, format) {
+        if section_omitted_by_parser(section, format)
+            && (format != DocFormat::Hwpx || failed_hwpx.contains(&i))
+        {
             note(
                 &mut state,
                 "omitted_section",
@@ -88,10 +95,8 @@ pub fn walk_body(doc: &Document, format: DocFormat, max_chars: usize) -> WalkedB
 /// HWP5: `parse_sections_strict` sets `raw_stream` only on a successful
 /// `parse_body_text_section`; `Section::default()` (failed stream) leaves it
 /// `None`. A valid empty BodyText section still stores `Some` (possibly empty
-/// bytes). HWPX never sets `raw_stream`. Hangul and this crate's empty HWPX
-/// fixture always emit ≥1 `<hp:p>`; a successful parse of `<hs:sec/>` with
-/// zero paragraphs is indistinguishable from the drop stub, so it is treated
-/// as omitted rather than silent Empty.
+/// bytes). HWPX empty paragraphs are only a candidate: the caller disambiguates
+/// using the upstream public section parser before this walk.
 pub(crate) fn section_omitted_by_parser(section: &Section, format: DocFormat) -> bool {
     match format {
         DocFormat::Hwp5 => section.raw_stream.is_none(),

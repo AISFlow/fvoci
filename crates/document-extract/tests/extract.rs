@@ -190,11 +190,11 @@ fn hwpx_malformed_section1_is_partial() {
 }
 
 #[test]
-fn hwpx_zero_paragraph_section_is_not_silent_success() {
+fn hwpx_zero_paragraph_section_is_genuine_empty() {
     let report = extract_bytes(&hwpx_zero_paragraph_section(), "bare.hwpx", &limits());
     assert!(
-        matches!(report.outcome, ExtractStatus::Corrupt { .. }),
-        "zero-paragraph HWPX is indistinguishable from a dropped section at this pin; got {:?}",
+        matches!(report.outcome, ExtractStatus::Empty { .. }),
+        "successful public section parse distinguishes genuine empty HWPX; got {:?}",
         report.outcome
     );
 }
@@ -512,4 +512,22 @@ fn user_hancom_hwpx_안녕() {
         other => panic!("expected ok body 안녕, got {other:?}"),
     }
     assert!(!report.used_preview_stream);
+}
+
+#[test]
+fn hwpx_failed_sole_section_remains_corrupt() {
+    let bytes = document_extract::gen::hwpx_only_section_malformed();
+    assert!(matches!(
+        extract_bytes(&bytes, "failed.hwpx", &limits()).outcome,
+        ExtractStatus::Corrupt { .. }
+    ));
+}
+
+#[test]
+fn hwpx_empty_section_does_not_make_valid_body_partial() {
+    let bytes = document_extract::gen::hwpx_empty_then_body();
+    match extract_bytes(&bytes, "mixed.hwpx", &limits()).outcome {
+        ExtractStatus::Ok { text, .. } => assert_eq!(text, HWPX_SEC0_P0),
+        other => panic!("valid empty section is not a parse failure: {other:?}"),
+    }
 }

@@ -354,14 +354,12 @@ fn classify_child_status(
     pid: u32,
     stderr: &Result<Vec<u8>, String>,
 ) -> Option<ExtractReport> {
-    let stderr_snip = stderr
+    let stderr_text = stderr
         .as_ref()
         .ok()
         .and_then(|b| std::str::from_utf8(b).ok())
-        .unwrap_or("")
-        .chars()
-        .take(400)
-        .collect::<String>();
+        .unwrap_or("");
+    let stderr_snip = stderr_text.chars().take(400).collect::<String>();
 
     #[cfg(unix)]
     {
@@ -373,7 +371,7 @@ fn classify_child_status(
                     detail: format!("child pid {pid} CPU/alarm signal {sig}; {stderr_snip}"),
                 }));
             }
-            if sig == 6 && allocation_failure_stderr(&stderr_snip) {
+            if sig == 6 && allocation_failure_stderr(stderr_text) {
                 return Some(ExtractReport::new(ExtractStatus::ResourceLimit {
                     kind: LimitKind::Memory,
                     detail: format!(
@@ -503,7 +501,11 @@ mod child_io_tests {
             status,
             1,
             Ok(Vec::new()),
-            Ok(b"memory allocation of 123 bytes failed".to_vec()),
+            Ok(format!(
+                "{}memory allocation of 123 bytes failed",
+                "warning\n".repeat(100)
+            )
+            .into_bytes()),
         );
         assert!(
             matches!(

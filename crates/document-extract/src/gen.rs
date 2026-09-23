@@ -416,6 +416,20 @@ pub fn hwpx_zero_paragraph_section() -> Vec<u8> {
     )])
 }
 
+pub fn hwpx_only_section_malformed() -> Vec<u8> {
+    pack_hwpx(&[("Contents/section0.xml", "<hs:sec><hp:p bad=\"".to_string())])
+}
+
+pub fn hwpx_empty_then_body() -> Vec<u8> {
+    pack_hwpx(&[
+        (
+            "Contents/section0.xml",
+            r#"<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"/>"#.to_string(),
+        ),
+        ("Contents/section1.xml", hwpx_section(&[HWPX_SEC0_P0], None)),
+    ])
+}
+
 pub fn hwpx_table_caption_top() -> Vec<u8> {
     pack_hwpx(&[(
         "Contents/section0.xml",

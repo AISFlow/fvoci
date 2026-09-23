@@ -93,11 +93,11 @@ decodes, and starts with `PARA_HEADER`; otherwise it uses `BodyText`.
 `PrvText` is never promoted to body. A failed section record stream is replaced
 upstream with `Section::default()` and only a stderr line; this crate maps that
 to `partial` (recovered body remains) or `corrupt` (no recovered section).
-HWP5 detection uses `raw_stream.is_none()`. HWPX detection uses an empty
-paragraph list. A genuine empty HWPX from Hangul (and this crate's empty
-fixture) still has ≥1 `<hp:p>`; a `<hs:sec/>` with zero paragraphs cannot be
-distinguished from a drop stub at this pin and is not reported as silent
-`empty`.
+HWP5 detection uses `raw_stream.is_none()`. For ambiguous HWPX sections with
+no paragraphs, the pinned public `HwpxReader`, `parse_content_hpf` and
+`parse_hwpx_section` APIs recheck the original section in package spine order.
+A successful empty section stays `empty`; a parser error is a failed section.
+This uses no custom XML parser and does not infer success from stderr text.
 
 ## Commands
 
@@ -153,8 +153,9 @@ whole-FVOCI completion.
 - Product upload, search index, thumbnails: not this task.
 - Compiling `rhwp` still typechecks renderer/wasm_api modules and native
   `svg2pdf`. First compile is large even with skia/gpu off.
-- HWPX `<hs:sec/>` with zero `<hp:p>` cannot be distinguished from a parser
-  drop at pin `e8800c8`; it is `corrupt`, not genuine `empty`.
+- HWPX zero-paragraph sections are rechecked using the pinned public section
+  parser in package spine order: valid empty sections remain `empty`; parser
+  failures are `partial` with retained body, or `corrupt` when all sections fail.
 
 ## Fixtures
 
