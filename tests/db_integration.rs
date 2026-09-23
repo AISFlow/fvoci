@@ -793,35 +793,38 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .execute(&mut *blocker)
         .await
         .unwrap();
-    let first_url = harness.admin_url.clone();
-    let second_url = harness.admin_url.clone();
-    let first = tokio::spawn(async move { migrate::run_migrations(&first_url).await });
-    let second = tokio::spawn(async move { migrate::run_migrations(&second_url).await });
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'
-                 AND NOT granted AND database =
-                 (SELECT oid FROM pg_database WHERE datname = current_database())",
-            )
-            .fetch_one(&admin)
-            .await
-            .unwrap();
-            if waiting == 2 {
-                break;
+    let release_after_waiters = async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'
+                     AND NOT granted AND database =
+                     (SELECT oid FROM pg_database WHERE datname = current_database())",
+                )
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+                if waiting == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("both migrations must reach the held lock");
-    blocker.commit().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        first.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
+        })
+        .await
+        .expect("both migrations must reach the held lock");
+        blocker.commit().await.unwrap();
+    };
+    let (first, second, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(
+            migrate::run_migrations(&harness.admin_url),
+            migrate::run_migrations(&harness.admin_url),
+            release_after_waiters,
+        )
     })
     .await
     .expect("both migrations must complete");
+    first.unwrap();
+    second.unwrap();
     let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.schema_migrations")
         .fetch_one(&admin)
         .await
