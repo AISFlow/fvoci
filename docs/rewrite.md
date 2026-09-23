@@ -132,3 +132,44 @@ DB 검사는 원본 앱 역할 제한과 같은 종류의 실제 비특권 역�
 - bea3243은 사용자가 sample.hwp/sample.hwpx를 실제 Hancom 파일로 교체한 커밋이다. 사용자가 직접 파일을 확인하고 `안녕`을 입력했다고 확인하고 계속 진행하도록 승인했다. 기존 파일을 보존했으며 NOTICE/README를 실제 출처·기대 본문으로 수정했다. gen.py는 별도 빈 디렉터리만 받도록 변경하여 원본 fixture 덮어쓰기를 막았다. 임시 디렉터리 생성 성공, 비어 있지 않은/체크인 경로 거부, 기존 fixture SHA256 불변을 실제 검사했다.
 - bea3243 원격 CI35898327395 성공, auth 제품 코드 변화 없음. 관련 로컬 `bash compat/run.sh` exit0/0.76s; 기존 Yrs6사례와 Hocuspocus envelope 차이를 유지했고 HWPX token은 `안녕`이다. HWP probe는 여전히 CFB/FileHeader만 확인하며 native 본문 추출 성공을 뜻하지 않는다.
 - Fable 비차단 권고: 알 수 없는 세션 로그아웃의 불필요한 이벤트 저장은 Composer 소유 identity.rs에서 다음 slice에 회귀 검사와 함께 수정한다. 빈 familyName 정규화, timezone 제한, sliding cookie 갱신, hash 오류 진단, definer search_path 축소·반환 열 명시 및 관련 검사 보강은 추적 중이다. 기존 slice의 제한을 수락하는 것이며 전체 보안 동등성 선언이 아니다.
+
+## Native HWP/HWPX 추출 후보 — PR #1 이후
+
+PR #1은 검증 HEAD79d7b69에서 squash merge되어 main `fe30bd1b7c6f2632c354c4317c73969789de3f23`에 반영됐고 post-merge CI35900278533도 성공했다. 이 후속 브랜치는 해당 main에서 분기했으며 workspace 제품 변경과 독립적이다.
+
+- 구현: `crates/document-extract`, native edwardkim/rhwp revision `e8800c8def63449808a4092798442652ed460552`. 공개 crate 미게시를 확인하여 Cargo metadata의 불변 revision + 준비 스크립트의 origin/HEAD/clean 확인으로 path 의존성을 고정한다. lockfile만으로 path 내용이 고정된다고 주장하지 않는다. 라이선스/fixture 출처는 crate NOTICE에 보존했다.
+- 본문: HWP5 압축/비압축 BodyText와 HWPX section/table 순서, 한글/이모지/빈 문서, 잘린 컨테이너·암호화/배포 문서·형식 불일치·제한 오류를 구분한다. 출력/깊이/지원하지 않는 본문 요소로 내용이 빠지면 Partial이다. 사용자 작성 Hancom HWP/HWPX 모두 실제 CLI에서 `안녕`이 나오며 PrvText를 본문으로 승격하지 않는다.
+- 실행 경계: Linux native child, 검증한 입력/ZIP/출력 한도, exec 전 OS 주소 공간/CPU 제한, wall-clock/RSS 감시, timeout kill+wait 및 helper thread join. 동기 API이며 비동기 HTTP 스레드에서 직접 호출할 수 없다. 외부 요청 취소가 자동으로 child를 중단한다고 주장하지 않는다. Linux 이외 실행/ARM64는 미검증이다.
+- worker: Grok4.6 `task_d8508aa82dc4 / ctx_ecd7e7cf88f4`의222a80b, 보완 `task_e512f2100714 / ctx_2e8a2222db50`의b0c4c82/625d940을 순차 통합했다. 완료 메시지를 확인하고 마지막 terminal release; worktree/커밋은 보존했다.
+- 코디네이터 검증 SHA `7b05c269d06d57f523dc10c8cf5077596d53479b`: `cargo fmt --check`, `cargo test --locked --offline --all-targets --features test-hang -j 2` (32/32, ignored0, 전체4.11s), 같은 default-feature 검사(32/32, ignored0, 3.91s), `cargo clippy --locked --offline --all-targets --features test-hang -j 2 -- -D warnings` (exit0, 새 check 산출물54.54s). 모든 명령 cwd는 이 worktree의 crates/document-extract다. 이전 후보 c656ff3에서 독립 fresh 준비23.95s, 최초 test --no-run 빌드113.98s/최대RSS3126296KB를 별도 측정했다. 빌드 성공을 테스트 성공으로 바꾸어 기록하지 않는다.
+- 자원: 32CPU/load3.34/가용42GB를 관찰한 뒤 이 별도 target의 초기 빌드만 jobs2로 제한해 별도 UUID DB 검증과 병행했다. 기본 Rust 인증 build에는 rhwp를 연결하지 않았다. 별도 Native documents CI는 explicit 준비/fetch 후 offline 검증한다.
+- 현재 **미수락**: 독립 Fable 검토와 최신 원격 CI가 아직 남았다. 첨부 부모 권한·업로드·보존·추출 상태 저장·인가 다운로드와 검색 인덱스, 뷰어/썸네일은 미구현이다. native 추출과 제품 첨부 연결을 혼동하지 않는다. workspace/React는 다른 작업에서 진행 중이며 이 PR에서 완료하지 않는다.
+
+
+### Native PR2 final correction candidate12140a6
+
+- Grok fd6afc0 integrated as4011be3: failed-section handling, caption/form/equation
+  extraction, bounded warnings/stdin and helper error classification. Local50 tests
+  per production/test-hang passed; remote Rust35907475049 and documents35907475180
+  execute at4011be3 (documents success confirmed). Fable fixed4011be3 closed earlier
+  blockers and recommended public-parser empty-section refinement.
+- Coordinator12140a6 uses pinned public HwpxReader/parse_content_hpf/
+  parse_hwpx_section only for ambiguous HWPX empty sections, preserving package
+  order. Valid zero-paragraph Empty, mixed-empty+body Ok, all-failed Corrupt and
+  partial failure Partial are distinguished without custom parser or stderr inference.
+  Allocator failure scans full bounded stderr, with a regression after800chars.
+- Exact12140a6 stamped `/tmp/fvoci-native-final-gates.log`: fmt0.11s,
+  clippy all-targets/test-hang0.62s, test-hang52 passed/0ignored total1.22s,
+  production52 passed/0ignored total3.19s. Commands use `--locked --offline`.
+  Tests comprise7 unit+37extract+8process-boundary; zero-test binary harness is
+  not counted as test evidence. Actual fixtures include user-authored 안녕 plus
+  independent multi-section/table/Korean/emoji/empty/malformed/resource cases.
+- Fable delta task_6f8dcd8866c2 / ctx_faf9d9844108 reviewing12140a6. PR2 stays
+  Draft until this closure and latest remote CI. Native component only: parent
+  document permission/upload/storage/extraction-status/download/search/thumbnail
+  product flow is still absent. No claim of attachment integration or full rewrite.
+- Nonblocking diagnostics: repeated failed-section warnings count occurrences but
+  retain only the first index; the warning-kind cap fallback is unreachable with
+  the current7 kinds and remains a future diagnostic refinement. Neither hides
+  Partial status. No actual Hancom-saved completely empty fixture was provided;
+  independently generated valid empty documents are tested without claiming that provenance.

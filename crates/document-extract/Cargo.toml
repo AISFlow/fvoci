@@ -1,0 +1,39 @@
+[package]
+name = "document-extract"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Native HWP 5.0 / HWPX body extraction using edwardkim/rhwp"
+readme = "README.md"
+
+# Pin authority for the gitignored path checkout. Cargo.lock records resolved
+# crates.io packages for this path graph; it does not pin .vendor-src contents.
+# fetch-rhwp.sh verifies origin + HEAD + a clean tree before any compile.
+[package.metadata.document-extract]
+rhwp_repo = "https://github.com/edwardkim/rhwp"
+rhwp_rev = "e8800c8def63449808a4092798442652ed460552"
+rhwp_license = "MIT"
+rhwp_path = ".vendor-src/rhwp"
+svg2pdf_repo = "https://github.com/edwardkim/svg2pdf"
+svg2pdf_rev = "2caeb0a038f9128b79833d803b94c2667565c4da"
+svg2pdf_note = "Upstream Cargo.lock pins this commit on branch determinism-0.13. rhwp [patch.crates-io] is ignored for a path dep; reproduce this exact rev at this crate root only if native compile requires it."
+
+[[bin]]
+name = "document-extract"
+path = "src/bin/document-extract.rs"
+
+[features]
+default = []
+# Compiles `--test-hang-ms` into the helper binary. Production builds omit it.
+test-hang = []
+
+[dependencies]
+cfb = "0.14"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+libc = { version = "0.2", default-features = false }
+rhwp = { path = ".vendor-src/rhwp", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+zip = { version = "8.5", default-features = false, features = ["deflate"] }
