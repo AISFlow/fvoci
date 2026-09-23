@@ -89,10 +89,20 @@ fn parse_and_walk(bytes: &[u8], format: DocFormat, limits: &Limits) -> ExtractRe
         });
     }
 
-    let walked = walk_body(&doc, limits.max_output_chars);
+    let walked = walk_body(&doc, format, limits.max_output_chars);
     warnings.extend(walked.warnings);
 
-    if walked.truncated || walked.omitted_supported || walked.omitted_shape {
+    if walked.omitted_section && !walked.recovered_section {
+        return ExtractReport::new(ExtractStatus::Corrupt {
+            detail: "parser replaced every section with an empty default; no valid body remains"
+                .to_string(),
+        });
+    }
+    if walked.truncated
+        || walked.omitted_supported
+        || walked.omitted_shape
+        || walked.omitted_section
+    {
         return ExtractReport::new(ExtractStatus::Partial {
             text: walked.text,
             format,

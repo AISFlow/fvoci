@@ -65,16 +65,39 @@ process kill path) and must not treat task cancellation as process termination.
 ## Outcomes
 
 `ok` / `empty` (valid parse, no body) / `partial` (output cap, dropped
-supported-scope table/header/footer/note/depth/out-of-range cell body, **or**
-omitted shape/drawing) / `unsupported` (`encrypted`, `distribution`, `drm`,
+supported-scope table/header/footer/note/depth/out-of-range cell body,
+**omitted failed section** with remaining valid body, **or** omitted
+shape/drawing) / `unsupported` (`encrypted`, `distribution`, `drm`,
 `extension_magic_mismatch`, `hwp3`, `hml`, `unknown_format`, `empty_file`) /
-`corrupt` (document bytes) / `resource_limit` (`input`, `zip_entries`,
+`corrupt` (document bytes, **or** every section dropped by the parser with no
+valid body) / `resource_limit` (`input`, `zip_entries`,
 `zip_uncompressed`, `output`, `time`, `memory`, `decompress`) /
 `worker_failure` (missing executable, spawn/wait, child crash/signal, invalid
 child JSON, rlimit apply, unsupported platform, invalid limits). SIGSEGV is a
-worker crash, not a memory-limit proof. Shape/drawing text is still
+worker crash, not a memory-limit proof. SIGABRT is `resource_limit/memory`
+only when child stderr contains a Rust allocator failure (`memory allocation of
+… failed`); other SIGABRT stays `worker_failure`. Shape/drawing text is still
 unsupported (not walked); the warning plus omitted-shape flag makes the
-outcome `partial`, not silent `ok`.
+outcome `partial`, not silent `ok`. Equation scripts, form caption/text, and
+picture captions are walked. Hidden comments are not.
+
+Walk order: each paragraph's text, then its controls. Table cells are
+row-major. Table/picture **Top** and **Left** captions precede cells; **Bottom**
+and **Right** follow cells (Hangul default caption side is Bottom). An inline
+treat-as-char table is therefore after that paragraph's text, not at its
+character anchor.
+
+Pinned rhwp (`parse_sections_strict`) prefers a decoded `ViewText/Section{N}`
+stream for **non-distribution** tracked-changes HWP5 when that stream exists,
+decodes, and starts with `PARA_HEADER`; otherwise it uses `BodyText`.
+`PrvText` is never promoted to body. A failed section record stream is replaced
+upstream with `Section::default()` and only a stderr line; this crate maps that
+to `partial` (recovered body remains) or `corrupt` (no recovered section).
+HWP5 detection uses `raw_stream.is_none()`. HWPX detection uses an empty
+paragraph list. A genuine empty HWPX from Hangul (and this crate's empty
+fixture) still has ≥1 `<hp:p>`; a `<hs:sec/>` with zero paragraphs cannot be
+distinguished from a drop stub at this pin and is not reported as silent
+`empty`.
 
 ## Commands
 
@@ -126,16 +149,21 @@ whole-FVOCI completion.
 - Passworded documents: `encrypted`, no password API in this slice.
 - Distribution documents: rejected unless a future slice defines ViewText policy.
 - Text boxes inside drawing shapes: not walked; warning plus `partial` (not silent `ok`).
+- Hidden comments (`tcmt`): not walked (not body).
 - Product upload, search index, thumbnails: not this task.
 - Compiling `rhwp` still typechecks renderer/wasm_api modules and native
   `svg2pdf`. First compile is large even with skia/gpu off.
+- HWPX `<hs:sec/>` with zero `<hp:p>` cannot be distinguished from a parser
+  drop at pin `e8800c8`; it is `corrupt`, not genuine `empty`.
 
 ## Fixtures
 
 - `fixtures/user-hancom-12.30-안녕.{hwp,hwpx}`: user-authored Hangul 12.30
   documents whose body is `안녕`. See `fixtures/NOTICE.md`.
 - In-process generators in `src/gen.rs`: multi-section, table, Korean/emoji,
-  empty, truncated, corrupt, extension mismatch, zip bomb CD, path escape,
+  empty, truncated, **Section1 record-header truncation**, **HWPX malformed
+  section**, table caption (Top/Bottom), equation/form/picture caption,
+  corrupt, extension mismatch, zip bomb CD, path escape,
   zip entry-count, nested tables, two-line output-limit, out-of-range cells,
   and shape+body. Expected strings are declared next to the generators, not
   inferred from rhwp.

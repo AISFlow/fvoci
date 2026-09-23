@@ -1,9 +1,14 @@
 use document_extract::gen::{
-    corrupt_cfb, expected_hwp5_body, expected_hwpx_body, hwp5_distribution_flag, hwp5_empty_body,
-    hwp5_encrypted_flag, hwp5_known_body, hwp5_uncompressed_body, hwpx_empty_body,
-    hwpx_encrypted_manifest, hwpx_known_body, hwpx_nested_tables, hwpx_out_of_range_cell,
-    hwpx_shape_and_body, hwpx_two_short_lines, pdf_named_hwp, truncated, zip_with_entry_count,
-    zip_with_forged_uncompressed, zip_with_path_escape, HWP_PRVTEXT_DECOY,
+    corrupt_cfb, expected_hwp5_body, expected_hwpx_body, expected_table_caption_bottom_body,
+    expected_table_caption_top_body, hwp5_distribution_flag, hwp5_empty_body, hwp5_encrypted_flag,
+    hwp5_known_body, hwp5_only_section_truncated_records, hwp5_section1_truncated_records,
+    hwp5_table_caption_top, hwp5_uncompressed_body, hwpx_empty_body, hwpx_encrypted_manifest,
+    hwpx_equation_and_body, hwpx_form_and_body, hwpx_known_body, hwpx_many_shapes,
+    hwpx_nested_tables, hwpx_out_of_range_cell, hwpx_picture_caption_and_body,
+    hwpx_section1_malformed, hwpx_shape_and_body, hwpx_table_caption_bottom,
+    hwpx_table_caption_top, hwpx_two_short_lines, hwpx_zero_paragraph_section, pdf_named_hwp,
+    truncated, zip_with_entry_count, zip_with_forged_uncompressed, zip_with_path_escape,
+    EQUATION_SCRIPT, FORM_CAPTION, HWPX_SEC0_P0, HWP_PRVTEXT_DECOY, HWP_SEC0_P0, PICTURE_CAPTION,
 };
 use document_extract::limits::{Limits, MAX_CHILD_STDOUT_BYTES, MAX_INPUT_BYTES};
 use document_extract::outcome::{ExtractStatus, LimitKind, UnsupportedReason};
@@ -126,6 +131,160 @@ fn truncated_hwp_is_corrupt() {
         "truncated HWP must be Corrupt, got {:?}",
         report.outcome
     );
+}
+
+#[test]
+fn hwp5_section1_record_truncation_is_partial() {
+    let report = extract_bytes(
+        &hwp5_section1_truncated_records(),
+        "sec1-cut.hwp",
+        &limits(),
+    );
+    match report.outcome {
+        ExtractStatus::Partial {
+            ref text,
+            ref warnings,
+            ..
+        } => {
+            assert!(text.contains(HWP_SEC0_P0), "{text:?}");
+            assert!(
+                warnings.iter().any(|w| w.contains("section 1 dropped")),
+                "{warnings:?}"
+            );
+        }
+        other => panic!("Section1 record truncation must be Partial, got {other:?}"),
+    }
+}
+
+#[test]
+fn hwp5_only_truncated_section_is_corrupt() {
+    let report = extract_bytes(
+        &hwp5_only_section_truncated_records(),
+        "all-cut.hwp",
+        &limits(),
+    );
+    assert!(
+        matches!(report.outcome, ExtractStatus::Corrupt { .. }),
+        "no recovered section must be Corrupt, got {:?}",
+        report.outcome
+    );
+}
+
+#[test]
+fn hwpx_malformed_section1_is_partial() {
+    let report = extract_bytes(&hwpx_section1_malformed(), "sec1-bad.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Partial {
+            ref text,
+            ref warnings,
+            ..
+        } => {
+            assert!(text.contains(HWPX_SEC0_P0), "{text:?}");
+            assert!(
+                warnings.iter().any(|w| w.contains("section 1 dropped")),
+                "{warnings:?}"
+            );
+        }
+        other => panic!("malformed HWPX section1 must be Partial, got {other:?}"),
+    }
+}
+
+#[test]
+fn hwpx_zero_paragraph_section_is_not_silent_success() {
+    let report = extract_bytes(&hwpx_zero_paragraph_section(), "bare.hwpx", &limits());
+    assert!(
+        matches!(report.outcome, ExtractStatus::Corrupt { .. }),
+        "zero-paragraph HWPX is indistinguishable from a dropped section at this pin; got {:?}",
+        report.outcome
+    );
+}
+
+#[test]
+fn hwp5_table_caption_top_before_cells() {
+    let report = extract_bytes(&hwp5_table_caption_top(), "caption.hwp", &limits());
+    match report.outcome {
+        ExtractStatus::Ok { ref text, .. } => {
+            assert_eq!(text, &expected_table_caption_top_body());
+        }
+        other => panic!("HWP5 top caption must extract, got {other:?}"),
+    }
+}
+
+#[test]
+fn hwpx_table_caption_top_before_cells() {
+    let report = extract_bytes(&hwpx_table_caption_top(), "caption.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Ok { ref text, .. } => {
+            assert_eq!(text, &expected_table_caption_top_body());
+        }
+        other => panic!("HWPX top caption must extract, got {other:?}"),
+    }
+}
+
+#[test]
+fn hwpx_table_caption_bottom_after_cells() {
+    let report = extract_bytes(&hwpx_table_caption_bottom(), "caption-b.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Ok { ref text, .. } => {
+            assert_eq!(text, &expected_table_caption_bottom_body());
+        }
+        other => panic!("HWPX bottom caption must follow cells, got {other:?}"),
+    }
+}
+
+#[test]
+fn hwpx_equation_script_is_extracted() {
+    let report = extract_bytes(&hwpx_equation_and_body(), "eq.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Ok { ref text, .. } => {
+            assert!(text.contains("보이는문단"), "{text:?}");
+            assert!(text.contains(EQUATION_SCRIPT), "{text:?}");
+        }
+        other => panic!("equation script must extract, got {other:?}"),
+    }
+}
+
+#[test]
+fn hwpx_form_caption_is_extracted() {
+    let report = extract_bytes(&hwpx_form_and_body(), "form.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Ok { ref text, .. } => {
+            assert!(text.contains("보이는문단"), "{text:?}");
+            assert!(text.contains(FORM_CAPTION), "{text:?}");
+        }
+        other => panic!("form caption must extract, got {other:?}"),
+    }
+}
+
+#[test]
+fn hwpx_picture_caption_is_extracted() {
+    let report = extract_bytes(&hwpx_picture_caption_and_body(), "pic.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Ok { ref text, .. } => {
+            assert!(text.contains("보이는문단"), "{text:?}");
+            assert!(text.contains(PICTURE_CAPTION), "{text:?}");
+        }
+        other => panic!("picture caption must extract, got {other:?}"),
+    }
+}
+
+#[test]
+fn many_shapes_dedupe_warnings_and_stay_partial() {
+    let report = extract_bytes(&hwpx_many_shapes(40), "shapes.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Partial {
+            ref text,
+            ref warnings,
+            ..
+        } => {
+            assert!(text.contains("보이는문단"), "{text:?}");
+            assert_eq!(warnings.iter().filter(|w| w.contains("shape")).count(), 1);
+            assert!(warnings.iter().any(|w| w.contains("×40")), "{warnings:?}");
+        }
+        other => {
+            panic!("many omitted shapes must be Partial with one counted warning, got {other:?}")
+        }
+    }
 }
 
 #[test]

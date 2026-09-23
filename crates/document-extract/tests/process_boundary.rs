@@ -231,3 +231,30 @@ fn production_bin_rejects_test_hang_flag() {
         "production build must not honor --test-hang-ms: {stderr}"
     );
 }
+
+#[test]
+fn helper_stdin_is_capped_at_max_input_plus_one() {
+    let _g = SPAWN_TEST.lock().unwrap();
+    let oversized = vec![b'X'; 64];
+    let mut child = Command::new(bin())
+        .args(["--name", "x.hwp", "--max-input", "16"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("stdin");
+        let _ = stdin.write_all(&oversized);
+    }
+    let finished = child.wait_with_output().expect("wait");
+    assert!(
+        finished.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&finished.stdout);
+    assert!(stdout.contains("\"status\":\"resource_limit\""), "{stdout}");
+    assert!(stdout.contains("\"kind\":\"input\""), "{stdout}");
+}

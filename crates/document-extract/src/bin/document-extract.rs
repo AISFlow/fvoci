@@ -71,8 +71,12 @@ fn main() {
         return;
     }
 
+    let cap = limits.max_input_bytes.saturating_add(1);
     let mut bytes = Vec::new();
-    io::stdin().read_to_end(&mut bytes).expect("read stdin");
+    io::stdin()
+        .take(cap)
+        .read_to_end(&mut bytes)
+        .expect("read stdin");
     let report = extract_bytes(&bytes, &name, &limits);
     let json = serde_json::to_vec(&report).expect("serialize report");
     io::stdout().write_all(&json).expect("write stdout");

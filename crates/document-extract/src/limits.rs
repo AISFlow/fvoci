@@ -28,6 +28,9 @@ pub const MAX_CHILD_STDOUT_BYTES: u64 = (MAX_OUTPUT_CHARS as u64) * 6 + 4096;
 /// Table/control walk nesting cap (rhwp `table_extract::MAX_NEST_DEPTH`).
 pub const MAX_WALK_NEST_DEPTH: usize = 8;
 
+/// Distinct walk warning kinds retained on the report (counts collapse per kind).
+pub const MAX_WARNING_ENTRIES: usize = 32;
+
 /// Maximum concurrent extract children. Synchronous parse cannot be cancelled
 /// in-thread, so the parent admits only one child.
 pub const MAX_CHILD_CONCURRENCY: usize = 1;

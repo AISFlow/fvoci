@@ -276,6 +276,25 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
         },
     };
 
+    report_from_child_io(status, pid, stdout_bytes, stderr_bytes)
+}
+
+/// Classify child pipes and status. Stdout overflow is checked before crash
+/// mapping: the helper panics after the parent closes an oversized pipe.
+pub(crate) fn report_from_child_io(
+    status: std::process::ExitStatus,
+    pid: u32,
+    stdout_bytes: Result<Vec<u8>, String>,
+    stderr_bytes: Result<Vec<u8>, String>,
+) -> ExtractReport {
+    if matches!(&stdout_bytes, Err(err) if err == "pipe exceeded bound") {
+        return ExtractReport::new(ExtractStatus::ResourceLimit {
+            kind: LimitKind::Output,
+            detail: format!("child stdout exceeded {MAX_CHILD_STDOUT_BYTES} bytes"),
+        })
+        .with_child_pid(pid);
+    }
+
     if let Some(report) = classify_child_status(status, pid, &stderr_bytes) {
         return report.with_child_pid(pid);
     }
@@ -289,13 +308,6 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
             )
             .with_child_pid(pid),
         },
-        Err(err) if err == "pipe exceeded bound" => {
-            ExtractReport::new(ExtractStatus::ResourceLimit {
-                kind: LimitKind::Output,
-                detail: format!("child stdout exceeded {MAX_CHILD_STDOUT_BYTES} bytes"),
-            })
-            .with_child_pid(pid)
-        }
         Err(err) => worker_fail(WorkerFailureReason::InvalidChildJson, err).with_child_pid(pid),
     }
 }
@@ -361,6 +373,14 @@ fn classify_child_status(
                     detail: format!("child pid {pid} CPU/alarm signal {sig}; {stderr_snip}"),
                 }));
             }
+            if sig == 6 && allocation_failure_stderr(&stderr_snip) {
+                return Some(ExtractReport::new(ExtractStatus::ResourceLimit {
+                    kind: LimitKind::Memory,
+                    detail: format!(
+                        "child pid {pid} SIGABRT after allocator failure; {stderr_snip}"
+                    ),
+                }));
+            }
             return Some(worker_fail(
                 WorkerFailureReason::ChildCrash,
                 format!("child pid {pid} signal {sig}; {stderr_snip}"),
@@ -375,6 +395,11 @@ fn classify_child_status(
         ));
     }
     None
+}
+
+fn allocation_failure_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("memory allocation of") && lower.contains("failed")
 }
 
 fn kill_and_reap(child: &mut Child) {
@@ -439,5 +464,75 @@ pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64) -> std::io::Result<()> {
             std::io::ErrorKind::Unsupported,
             "setrlimit is Linux-only",
         ))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_io_tests {
+    use super::report_from_child_io;
+    use crate::outcome::{ExtractStatus, LimitKind, WorkerFailureReason};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    #[test]
+    fn stdout_overflow_beats_child_crash() {
+        let status = ExitStatus::from_raw(101 << 8);
+        let report = report_from_child_io(
+            status,
+            1,
+            Err("pipe exceeded bound".into()),
+            Ok(b"thread panicked".to_vec()),
+        );
+        assert!(
+            matches!(
+                report.outcome,
+                ExtractStatus::ResourceLimit {
+                    kind: LimitKind::Output,
+                    ..
+                }
+            ),
+            "{:?}",
+            report.outcome
+        );
+    }
+
+    #[test]
+    fn sigabrt_with_allocator_stderr_is_memory_limit() {
+        let status = ExitStatus::from_raw(6);
+        let report = report_from_child_io(
+            status,
+            1,
+            Ok(Vec::new()),
+            Ok(b"memory allocation of 123 bytes failed".to_vec()),
+        );
+        assert!(
+            matches!(
+                report.outcome,
+                ExtractStatus::ResourceLimit {
+                    kind: LimitKind::Memory,
+                    ..
+                }
+            ),
+            "{:?}",
+            report.outcome
+        );
+    }
+
+    #[test]
+    fn sigabrt_without_allocator_stderr_is_crash() {
+        let status = ExitStatus::from_raw(6);
+        let report =
+            report_from_child_io(status, 1, Ok(Vec::new()), Ok(b"assertion failed".to_vec()));
+        assert!(
+            matches!(
+                report.outcome,
+                ExtractStatus::WorkerFailure {
+                    reason: WorkerFailureReason::ChildCrash,
+                    ..
+                }
+            ),
+            "{:?}",
+            report.outcome
+        );
     }
 }
