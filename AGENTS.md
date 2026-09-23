@@ -60,3 +60,16 @@ worktree별 target 디렉터리, 실행별 DB/Redis prefix/검색 index/스토�
 사용자의 2026-09-24 명시적 승인에 따라 코디네이터는 AISFlow/fvoci 작업 브랜치 일반 push, 기존/후속 PR 생성·갱신·Ready 전환 및 수락 후 머지를 반복 승인 없이 수행한다. 최신 HEAD의 필요한 로컬·실제 외부 시스템 검사, 실제 실행된 원격 CI, 필요한 Fable 독립 검토와 저장소 보호 조건을 모두 확인하고 기대 HEAD를 지정해 머지한다. 머지 후 기본 브랜치와 CI를 확인한 뒤 후속 기능 브랜치를 만든다.
 
 원본 원격 쓰기, 기본 브랜치 직접 push, force push, 보호 조건 우회·약화, 운영 배포·DB 변경, 시크릿·권한·공개 범위 변경은 포함하지 않는다. 워커에게 원격 쓰기를 위임하지 않는다. 과거 미실행 이력은 그대로 보존한다.
+
+## 고정 서버 경계와 지속 진행
+
+서버 스택은 Rust stable, Tokio, axum0.8, Tower/tower-http, SQLx/PostgreSQL,
+Serde, tracing, Yrs, rhwp로 고정한다. 실제 구현을 차단하는 검증된 문제가
+없으면 웹 프레임워크를 재비교·교체하지 않는다. axum은 transport/routing/
+extractor/state/middleware/응답 변환을 담당하고, 현재 리소스 인가와 트랜잭션
+불변식은 구체적인 제품 연산·DB에서 재검사한다. 범용 실행 프레임워크는 만들지 않는다.
+
+PR 수락·머지는 전체 작업 종료가 아니다. 기능 대응표에서 의존성이 충족된
+다음 사용자 기능을 선택해 최신 main의 후속 task로 계속한다. workspace 기반
+직후 기존 React 흐름과 문서 권한·저장 기반을 연결하고 Hocuspocus/Yrs 동시편집을
+초기 핵심 기능으로 구현한다. 수락 전에는 probe를 제품 협업 지원으로 표시하지 않는다.

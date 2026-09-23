@@ -192,3 +192,20 @@ DB 검사는 원본 앱 역할 제한과 같은 종류의 실제 비특권 역�
 - Next: finish fixed-SHA delta reviews, accept backend only after closure, assign
   existing React flow and Rust DTO→OpenAPI→TS implementation to Composer; integrate
   native fixes into PR2, re-run relevant native gates and remote CI before merge.
+
+
+### 사용자 추가 결정: 초기 협업 수락
+
+서버 스택은 AGENTS.md의 고정 경계를 따른다. workspace 수락 뒤 기존 React
+사용 흐름 → 최소 문서 권한/저장 → Hocuspocus4.6.0 envelope adapter + Yrs 제품
+slice를 우선한다. adapter와 CRDT engine은 분리하고 document-name, Sync,
+Awareness, Auth, QueryAwareness, Stateless persist/persisted/persist-failed,
+Ping/Pong 및 close/error를 원본 provider에 맞춘다. 새 provider로 우회하지 않는다.
+
+두 실제 React/Tiptap 클라이언트에서 동시입력·한글/이모지/문단, offline/reconnect,
+중복/순서변경, awareness, 기존 연결 권한철회, persist/DB/socket 실패를 검사한다.
+원본 clientId/state-vector/updateV1/gc 계약을 유지하며 새 프로세스에서 저장 CRDT를
+복원하고 추가 편집 convergence까지 확인해야 수락한다. 현재는 모두 미구현이다.
+문서별 task 소유권/idle eviction/flush/cancellation/join을 두고 종료는 새 연결 중단
+→write 중단→flush→persist 확인→awareness/socket 종료→task join 순서다.
+첨부 native 검증은 병행하되 무인가 업로드나 가짜 부모 리소스로 제품 연결을 대신하지 않는다.
