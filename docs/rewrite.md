@@ -473,3 +473,37 @@ Fable 검토 및 원격 전체 gate를 통과하기 전 미수락이다. CI에 t
 협업 자문은 decoder의 무제한 allocation/unchecked UTF8 문제를 확인했으나,
 rlimit child만으로 UB의 보안 경계가 완성된다는 제안은 수락하지 않았다.
 공식 Yrs 수정 버전/안전한 입력 경계를 확인한 뒤 제품 engine을 연결한다.
+
+### PR5 수락 및 협업 구현 재개
+
+PR5 https://github.com/AISFlow/fvoci/pull/5 는 d69fdd9951f1643ec8f63dcb330b26cdcb9fc7e4
+에서 Fable5.1 medium 독립 검토 차단0 및 원격 전체6job 성공 후 머지했다.
+main 머지 SHA421e70b19c5664b0468abc20b6b1616ed4ad4e3d, 상태 merged 확인.
+검사 synthetic merge c70328a = HEADd69fdd9 + base0617e7f. Rust35917137028:
+lib20, 실제 앱역할 DB66+13씩 x64/ARM64(ignored0). Web35917137015:
+static5/schema1/tree1/실제 React13(1.1분). Native35917136993 양 아키텍처 성공.
+Fable 읽기 전용 검토는 backend6e62e9f 및 최종delta d69fdd9의 실제diff를 확인했다.
+비차단: 빈 제목 blur 복원, breadcrumb cache 갱신, tree 오류 직접 표시, 기존slug대소문자.
+본문 편집/협업/첨부/검색은 아직 수락되지 않았다.
+
+collab 통합7647250은 codec11검사를 통과한 c28b5e2에 최신 main421e70b를 merge했다.
+codec 검사는 Hocuspocus framing만 보장하며 제품 /collab은 비활성이다.
+임시 optional yrs0.23.5 의존성은 checkedUTF8 결함 때문에 제거한다. 원본 저장
+형식을 변경하지 않고, 공식 yrs0.28.0 small-client/skip_gc/UTF16 후보의 실제
+Yjs13.6.32 pending/delete/복원 호환성을 별도 native crate에서 검증한다.
+이를 통과하기 전 엔진을 수락하거나 기존 설치 migration 지원을 선언하지 않는다.
+
+Composer task2d8c8f185502/ctx809d0a92afb8: rust-collab-persistence, main421e70b 기준,
+src/db/collab.rs·migration005·등록/앱권한·관련DB검사 단독 소유. 공통파일 중
+위 migration/권한의 해당 범위는 명시적으로 위임했고 root manifest/CI는 코디네이터 소유다.
+현재권한 재검사/철회와 append의 잠금순서, writer generation fence, op_id 조회,
+원자성과 snapshot cutoff를 실제앱역할로 검증한다. 로컬 무거운 DB 슬롯1개 배정.
+Grok 후속 native 엔진 작업은 crates/collab-engine만 단독 소유하며 root/API/DB를
+수정하지 않는다. 두 쓰기 워커, worktree별 target/실행별DB자원 분리 유지.
+다음 통합: 각각 제출SHA 검토 → 새 통합SHA 원격CI/독립검토 → 실제세션/Origin/
+문서인가를 포함한 socket 및 기존 두 React/Tiptap 클라이언트 연결.
+Fable 주간한도 도달 없음; Opus5.5 medium 대체는 아직 실행하지 않았다.
+
+Grok native 엔진 task72f3f1594e9e/ctx2de4ab3cf2f0는 rust-collab-engine에서
+crates/collab-engine(해당 manifest/lock 포함)의 단독 작성자다. 원본 Yjs13.6.32
+fixture 생성과 네이티브 worker 경계 검증을 수행한다. 미수락이며 제품경로 비활성.

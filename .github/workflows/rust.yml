@@ -44,6 +44,7 @@ jobs:
       - run: cargo check --locked --offline --all-targets --features db-tests
       - run: cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings
       - run: cargo test --locked --offline --lib
+      - run: cargo test --locked --offline --test collab_wire
   postgres:
     name: ${{ matrix.check }}
     strategy:
