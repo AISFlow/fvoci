@@ -54,6 +54,8 @@ pub struct SpawnRequest {
     pub test_exit_after_read: Option<i32>,
     /// `--features test-hang` only: close stdout then stay alive for this many ms.
     pub test_close_stdout_hang_ms: Option<u64>,
+    /// `--features test-hang` only: write one response frame then exit with this code.
+    pub test_exit_after_write: Option<i32>,
 }
 
 /// Observation of the last product helper spawned by [`EngineSession::spawn`].
@@ -367,10 +369,7 @@ impl EngineSession {
                         let _ = reader.join();
                         #[cfg(feature = "test-hang")]
                         add_helpers_joined(1);
-                        let stderr = join_pipe(live.stderr_join.take());
-                        #[cfg(feature = "test-hang")]
-                        add_helpers_joined(1);
-                        break Err(classify_child_exit(status, pid, &stderr));
+                        break delivered_frame_or_exit(live, &rx, status, pid);
                     }
                     Ok(None) => {
                         if Instant::now() >= deadline {
@@ -510,11 +509,16 @@ fn spawn_child(req: SpawnRequest, slot: SlotGuard) -> Result<EngineSession, Engi
         cmd.arg("--test-close-stdout-then-hang-ms")
             .arg(ms.to_string());
     }
+    #[cfg(feature = "test-hang")]
+    if let Some(code) = req.test_exit_after_write {
+        cmd.arg("--test-exit-after-write").arg(code.to_string());
+    }
     #[cfg(not(feature = "test-hang"))]
     let _ = (
         req.test_hang_ms,
         req.test_exit_after_read,
         req.test_close_stdout_hang_ms,
+        req.test_exit_after_write,
     );
 
     let mut child = cmd.spawn().map_err(|err| {
@@ -609,6 +613,52 @@ fn join_any<T>(handle: Option<JoinHandle<T>>) {
     }
 }
 
+type FrameRead = (
+    Result<Option<Vec<u8>>, FrameError>,
+    std::process::ChildStdout,
+);
+
+/// If the child already wrote a complete frame, that reply wins over the exit
+/// status. Discarding it used to turn a valid `Frame`/`Ok` into `ChildCrash`.
+fn delivered_frame_or_exit(
+    live: &mut LiveChild,
+    rx: &mpsc::Receiver<FrameRead>,
+    status: std::process::ExitStatus,
+    pid: u32,
+) -> Result<EngineReport, EngineReport> {
+    if let Ok((result, stdout)) = rx.try_recv() {
+        live.stdout = Some(stdout);
+        match result {
+            Ok(Some(buf)) => {
+                if live.stderr_join.is_some() {
+                    join_any(live.stderr_join.take());
+                    #[cfg(feature = "test-hang")]
+                    add_helpers_joined(1);
+                }
+                return parse_child_json(&buf, pid);
+            }
+            Ok(None) => {}
+            Err(FrameError::TooLarge { len, max }) => {
+                if live.stderr_join.is_some() {
+                    join_any(live.stderr_join.take());
+                    #[cfg(feature = "test-hang")]
+                    add_helpers_joined(1);
+                }
+                return Err(EngineReport::new(EngineStatus::ResourceLimit {
+                    kind: LimitKind::Frame,
+                    detail: format!("child stdout frame {len} exceeds {max}"),
+                })
+                .with_child_pid(pid));
+            }
+            Err(FrameError::Io(_)) => {}
+        }
+    }
+    let stderr = join_pipe(live.stderr_join.take());
+    #[cfg(feature = "test-hang")]
+    add_helpers_joined(1);
+    Err(classify_child_exit(status, pid, &stderr))
+}
+
 /// EOF/IO on a child pipe is not itself a protocol verdict. A crashing child
 /// closes stdout as it dies; reporting `Protocol` there races `try_wait`'s
 /// `ChildCrash` / rlimit mapping. Poll for an observed exit only until the
@@ -688,6 +738,13 @@ fn classify_child_exit(
                 })
                 .with_child_pid(pid);
             }
+            if sig == 6 && stack_overflow_stderr(stderr_text) {
+                return EngineReport::new(EngineStatus::ResourceLimit {
+                    kind: LimitKind::Stack,
+                    detail: format!("child pid {pid} SIGABRT after stack overflow; {stderr_snip}"),
+                })
+                .with_child_pid(pid);
+            }
             if sig == 6 && allocation_failure_stderr(stderr_text) {
                 return EngineReport::new(EngineStatus::ResourceLimit {
                     kind: LimitKind::Memory,
@@ -724,6 +781,10 @@ fn allocation_failure_stderr(stderr: &str) -> bool {
     lower.contains("memory allocation of") && lower.contains("failed")
 }
 
+fn stack_overflow_stderr(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("overflowed its stack")
+}
+
 fn worker_fail(reason: WorkerFailureReason, detail: impl Into<String>) -> EngineReport {
     EngineReport::new(EngineStatus::WorkerFailure {
         reason,
@@ -748,7 +809,7 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         use std::os::unix::process::CommandExt;
         let as_bytes = limits.max_child_as_bytes;
         let stack_bytes = limits.max_child_stack_bytes;
-        let cpu_secs = (limits.timeout_ms / 1000).max(1);
+        let cpu_secs = limits.cpu_budget_secs();
         unsafe {
             cmd.pre_exec(move || apply_rlimits_now(as_bytes, cpu_secs, stack_bytes));
         }
@@ -796,5 +857,52 @@ pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64, stack_bytes: u64) -> std:
             std::io::ErrorKind::Unsupported,
             "setrlimit is Linux-only",
         ))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod classify_exit_tests {
+    use super::{classify_child_exit, stack_overflow_stderr};
+    use crate::outcome::{EngineStatus, LimitKind};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    #[test]
+    fn sigabrt_stack_overflow_is_stack_limit() {
+        let status = ExitStatus::from_raw(6);
+        let stderr = Ok(b"thread 'main' has overflowed its stack\n".to_vec());
+        let report = classify_child_exit(status, 42, &stderr);
+        assert!(
+            matches!(
+                report.outcome,
+                EngineStatus::ResourceLimit {
+                    kind: LimitKind::Stack,
+                    ..
+                }
+            ),
+            "{:?}",
+            report.outcome
+        );
+        assert!(stack_overflow_stderr(
+            "thread 'main' has overflowed its stack"
+        ));
+    }
+
+    #[test]
+    fn sigabrt_allocator_failure_is_memory_limit() {
+        let status = ExitStatus::from_raw(6);
+        let stderr = Ok(b"memory allocation of 216 bytes failed\n".to_vec());
+        let report = classify_child_exit(status, 42, &stderr);
+        assert!(
+            matches!(
+                report.outcome,
+                EngineStatus::ResourceLimit {
+                    kind: LimitKind::Memory,
+                    ..
+                }
+            ),
+            "{:?}",
+            report.outcome
+        );
     }
 }

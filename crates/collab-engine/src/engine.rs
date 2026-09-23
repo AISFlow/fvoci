@@ -28,6 +28,7 @@ pub struct CollabEngine {
     doc: Doc,
     limits: Limits,
     ops: u32,
+    mutated: bool,
 }
 
 impl CollabEngine {
@@ -36,6 +37,7 @@ impl CollabEngine {
             doc: new_doc(),
             limits,
             ops: 0,
+            mutated: false,
         }
     }
 
@@ -119,9 +121,15 @@ impl CollabEngine {
     }
 
     pub fn load(&mut self, snapshot: &[u8], tail: &[Vec<u8>]) -> EngineStatus {
+        if self.mutated {
+            return EngineStatus::Malformed {
+                detail: "load allowed once per child session and not after apply; recycle and spawn a fresh session to load another snapshot".into(),
+            };
+        }
         if let Err(st) = self.bump_op() {
             return st;
         }
+        self.mutated = true;
         if let Err(st) = crate::protocol::cap_load_parts(
             Some((snapshot, tail)),
             crate::protocol::load_total_bytes(snapshot, tail),
@@ -137,9 +145,7 @@ impl CollabEngine {
         }
         for (i, upd) in tail.iter().enumerate() {
             if let Err(st) = self.apply_v1(upd) {
-                return EngineStatus::Malformed {
-                    detail: format!("tail[{i}]: {}", status_detail(&st)),
-                };
+                return load_tail_error(i, st);
             }
         }
         self.ok_applied(None)
@@ -152,10 +158,15 @@ impl CollabEngine {
         if let Err(st) = self.apply_v1(update) {
             return st;
         }
+        self.mutated = true;
         // Success is admissible only when the authoritative completeV1 (pending +
         // delete set) still fits a reloadable per-blob/output cap. Oversize is
         // not applied-ok: the parent must recycle this child before DB admit.
-        self.encode_complete_v1()
+        // The bytes themselves are not returned here; `Snapshot` supplies them.
+        if let Err(st) = self.complete_v1_fits() {
+            return st;
+        }
+        self.ok_applied(None)
     }
 
     pub fn sync(&mut self, state_vector: &[u8]) -> EngineStatus {
@@ -193,6 +204,13 @@ impl CollabEngine {
             return st;
         }
         self.ok_applied(Some(bytes))
+    }
+
+    fn complete_v1_fits(&self) -> Result<(), EngineStatus> {
+        let txn = self.doc.transact();
+        let bytes = txn.encode_state_as_update_v1(&StateVector::default());
+        drop(txn);
+        self.cap_output(&bytes, "complete_v1")
     }
 
     pub fn inspect(&mut self) -> EngineStatus {
@@ -315,6 +333,15 @@ fn classify_apply(err: UpdateError) -> EngineStatus {
     }
 }
 
+fn load_tail_error(index: usize, st: EngineStatus) -> EngineStatus {
+    match st {
+        EngineStatus::ResourceLimit { .. } | EngineStatus::Unsupported { .. } => st,
+        other => EngineStatus::Malformed {
+            detail: format!("tail[{index}]: {}", status_detail(&other)),
+        },
+    }
+}
+
 fn status_detail(status: &EngineStatus) -> String {
     match status {
         EngineStatus::Malformed { detail }
@@ -352,6 +379,30 @@ mod classify_tests {
                 }
             ),
             "{status:?}"
+        );
+    }
+
+    #[test]
+    fn load_tail_keeps_resource_limit_status() {
+        let inner = EngineStatus::ResourceLimit {
+            kind: crate::outcome::LimitKind::Memory,
+            detail: "decode_v1: not enough memory".into(),
+        };
+        let out = super::load_tail_error(2, inner.clone());
+        assert_eq!(out, inner);
+    }
+
+    #[test]
+    fn load_tail_wraps_malformed() {
+        let out = super::load_tail_error(
+            1,
+            EngineStatus::Malformed {
+                detail: "empty updateV1".into(),
+            },
+        );
+        assert!(
+            matches!(out, EngineStatus::Malformed { ref detail } if detail.starts_with("tail[1]:")),
+            "{out:?}"
         );
     }
 }

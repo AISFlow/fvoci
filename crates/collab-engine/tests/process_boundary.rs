@@ -23,6 +23,7 @@ fn spawn(limits: Limits) -> EngineSession {
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome))
 }
@@ -56,6 +57,7 @@ fn extract_killable_timeout_reaps_product_helper() {
         test_hang_ms: Some(20_000),
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
     let report = session.call(&Request::Ping);
@@ -142,6 +144,22 @@ fn production_bin_rejects_close_stdout_hang_flag() {
     );
 }
 
+#[cfg(not(feature = "test-hang"))]
+#[test]
+fn production_bin_rejects_test_exit_after_write_flag() {
+    let out = Command::new(bin())
+        .args(["--test-exit-after-write", "0"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown arg"),
+        "production must not honor --test-exit-after-write: {stderr}"
+    );
+}
+
 #[cfg(feature = "test-hang")]
 #[test]
 fn child_applies_forwarded_rlimit_as_and_stack() {
@@ -150,6 +168,8 @@ fn child_applies_forwarded_rlimit_as_and_stack() {
     let out = Command::new(bin())
         .args([
             "--max-as",
+            &rss.to_string(),
+            "--max-observed-rss",
             &rss.to_string(),
             "--max-stack",
             &stack.to_string(),
@@ -174,6 +194,36 @@ fn child_applies_forwarded_rlimit_as_and_stack() {
     );
 }
 
+#[cfg(feature = "test-hang")]
+#[test]
+fn child_applies_cumulative_cpu_budget() {
+    let timeout_ms = 1_001u64;
+    let max_ops = 3u32;
+    let cpu = timeout_ms.div_ceil(1000) * u64::from(max_ops);
+    assert_eq!(cpu, 6);
+    let out = Command::new(bin())
+        .args([
+            "--timeout-ms",
+            &timeout_ms.to_string(),
+            "--max-ops",
+            &max_ops.to_string(),
+            "--dump-rlimits",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("dump rlimits");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("RLIMIT_CPU={cpu}")),
+        "got {stdout:?}"
+    );
+}
+
 #[test]
 fn zero_timeout_is_invalid_limits() {
     let mut limits = Limits::for_tests();
@@ -184,6 +234,7 @@ fn zero_timeout_is_invalid_limits() {
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
     });
     let err = report.err().expect("invalid");
     assert!(
@@ -269,6 +320,7 @@ fn ninth_live_child_is_immediate_resource_limit() {
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
     });
     let err = ninth.err().expect("9th must be refused");
     assert!(
@@ -301,6 +353,7 @@ fn write_times_out_when_child_stops_reading() {
         test_hang_ms: Some(20_000),
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
     let pid = session.pid().expect("pid");
@@ -339,6 +392,7 @@ fn abrupt_child_exit_is_crash_not_protocol() {
         test_hang_ms: None,
         test_exit_after_read: Some(7),
         test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
     let pid = session.pid().expect("pid");
@@ -378,6 +432,7 @@ fn stdout_close_with_live_child_is_protocol() {
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: Some(20_000),
+        test_exit_after_write: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
     let pid = session.pid().expect("pid");
@@ -420,6 +475,64 @@ fn child_scrubs_database_url() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("DATABASE_APP_URL=unset"), "{stdout}");
+}
+
+#[test]
+fn max_ops_exhaustion_is_resource_limit() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut limits = Limits::for_tests();
+    limits.max_ops = 2;
+    let mut session = spawn(limits);
+    let first = session.call(&Request::Inspect);
+    assert!(
+        matches!(first.outcome, EngineStatus::Ok { .. }),
+        "{:?}",
+        first.outcome
+    );
+    let second = session.call(&Request::Inspect);
+    assert!(
+        matches!(second.outcome, EngineStatus::Ok { .. }),
+        "{:?}",
+        second.outcome
+    );
+    let third = session.call(&Request::Inspect);
+    assert!(
+        matches!(
+            third.outcome,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Ops,
+                ..
+            }
+        ),
+        "{:?}",
+        third.outcome
+    );
+}
+
+#[cfg(feature = "test-hang")]
+#[test]
+fn delivered_frame_survives_child_exit() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin: bin(),
+        limits: Limits::for_tests(),
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: Some(0),
+    })
+    .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome));
+    let pid = session.pid().expect("pid");
+    let report = session.call(&Request::Ping);
+    assert!(
+        matches!(report.outcome, EngineStatus::Ok { .. }),
+        "complete ping frame must not be discarded as ChildCrash, got {:?}",
+        report.outcome
+    );
+    if session.pid().is_some() {
+        session.kill_and_reap();
+    }
+    assert_fully_reaped(pid);
 }
 
 fn assert_fully_reaped(pid: u32) {

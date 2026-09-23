@@ -39,12 +39,25 @@ Caps: `max_input_bytes == max_output_bytes` (default 8 MiB =
 `max_load_bytes` (32 MiB) is the decoded snapshot+tail aggregate and is
 checked **together with each blob** before base64 copies; JSON frames 48 MiB;
 tail rows 64; global live children 8 with immediate `ResourceLimit` (not a wait);
-per-document uniqueness is the future room map. Apply succeeds only when the
-authoritative completeV1 (pending + delete set) still fits the 8 MiB reload
-cap; oversize recycles the child before any parent DB admission. Child
-`env_clear` / scrub; no inherited `DATABASE_APP_URL`. Deadline covers
-preflight+serialize+write+read. Writer and reader run on helper threads;
-timeout kills, waits, and joins.
+per-document uniqueness is the future room map. Native `RLIMIT_AS` is 1 GiB
+and parent-observed RSS kill is 512 MiB, so eight live children budget 4 GiB
+RSS. A 32 MiB aggregate load is in range for representative fragmented
+snapshot+tail data; structurally memory-heavy CRDTs still return
+`ResourceLimit` (Memory/Output) and are not a universal decode guarantee.
+Apply succeeds only when the authoritative completeV1 (pending + delete set)
+still fits the 8 MiB reload cap; the apply reply is small `applied`/`pending`
+metadata, and `snapshot` supplies the bytes at persist points. Oversize
+recycles the child before any parent DB admission. `load` is once per child
+session and is refused after a successful `apply` so two documents cannot
+merge; `ping` before the first load is allowed. Direct `apply` onto an empty
+child remains valid. Child
+`env_clear` / scrub; no inherited `DATABASE_APP_URL`. Per-request wall
+deadline stays 8 s. Cumulative child `RLIMIT_CPU` is
+`ceil(timeout_ms/1000) * max_ops` so 256 healthy ops are not killed by an
+8 s process CPU budget. Writer and reader run on helper threads; timeout
+kills, waits, and joins. Pipe EOF/IO waits for an observed exit until that
+same deadline; a complete frame already delivered is kept even if the child
+then exits.
 
 ## Commands
 
@@ -72,6 +85,8 @@ node js/generate.mjs
 
 - Not a Hocuspocus adapter. Not product `/collab`.
 - 0.28.0 still has no decode recursion/remaining-input cap; child rlimits are
-  the bound, not a UB sandbox.
+  the bound, not a UB sandbox. Nested Any / stack overflow may surface as
+  `ResourceLimit{Stack}` (including Rust abort with `overflowed its stack`)
+  or `ChildCrash`; they must not be reported as a protocol EOF.
 - If Yjs snapshot bytes fail `Snapshot::decode_v1`, tests panic with the
   fixture path instead of vendoring a parser.

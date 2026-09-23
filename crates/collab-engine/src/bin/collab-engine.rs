@@ -17,6 +17,8 @@ fn main() {
     let mut test_exit_after_read: Option<i32> = None;
     #[cfg(feature = "test-hang")]
     let mut test_close_stdout_hang_ms: Option<u64> = None;
+    #[cfg(feature = "test-hang")]
+    let mut test_exit_after_write: Option<i32> = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -49,6 +51,10 @@ fn main() {
             "--test-close-stdout-then-hang-ms" => {
                 test_close_stdout_hang_ms = Some(parse_u64(&require_arg(&mut args)));
             }
+            #[cfg(feature = "test-hang")]
+            "--test-exit-after-write" => {
+                test_exit_after_write = Some(parse_i32(&require_arg(&mut args)));
+            }
             "--help" | "-h" => usage(),
             other => {
                 eprintln!("unknown arg {other}");
@@ -61,7 +67,7 @@ fn main() {
         eprintln!("invalid limits: {err}");
         std::process::exit(2);
     }
-    let cpu_secs = (limits.timeout_ms / 1000).max(1);
+    let cpu_secs = limits.cpu_budget_secs();
     if let Err(err) = apply_rlimits_now(
         limits.max_child_as_bytes,
         cpu_secs,
@@ -111,6 +117,10 @@ fn main() {
                     eprintln!("write response: {err}");
                     break;
                 }
+                #[cfg(feature = "test-hang")]
+                if let Some(code) = test_exit_after_write {
+                    std::process::exit(code);
+                }
             }
             Err(err) => {
                 let report = EngineReport::new(err.into_status(&limits));
@@ -154,6 +164,13 @@ fn print_applied_rlimits() {
         };
         if libc::getrlimit(libc::RLIMIT_STACK, &mut st_lim) == 0 {
             println!("RLIMIT_STACK={}", st_lim.rlim_cur);
+        }
+        let mut cpu_lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_CPU, &mut cpu_lim) == 0 {
+            println!("RLIMIT_CPU={}", cpu_lim.rlim_cur);
         }
     }
     match std::env::var("DATABASE_APP_URL") {

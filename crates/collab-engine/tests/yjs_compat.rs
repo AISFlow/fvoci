@@ -36,6 +36,7 @@ fn spawn(limits: Limits) -> EngineSession {
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
     })
     .unwrap_or_else(|r| panic!("spawn: {:?}", r.outcome))
 }
@@ -433,14 +434,27 @@ fn apply_complete_v1_reloads_and_oversize_cannot_persist() {
         update_b64: follow.clone(),
         encoding: 1,
     });
-    let admitted = match &applied.outcome {
+    assert_ok_applied(&applied.outcome);
+    assert!(
+        matches!(
+            applied.outcome,
+            EngineStatus::Ok {
+                update_b64: None,
+                ..
+            }
+        ),
+        "apply must return metadata only, got {:?}",
+        applied.outcome
+    );
+    let snap = roomy.call(&Request::Snapshot);
+    let admitted = match &snap.outcome {
         EngineStatus::Ok {
             applied: true,
             durable: false,
             update_b64: Some(s),
             ..
-        } => collab_engine::b64::decode(s).expect("apply completeV1"),
-        other => panic!("apply must return reloadable completeV1, got {other:?}"),
+        } => collab_engine::b64::decode(s).expect("snapshot completeV1"),
+        other => panic!("snapshot must return reloadable completeV1, got {other:?}"),
     };
     drop(roomy);
     let mut reloaded = spawn(Limits::for_tests());
@@ -536,6 +550,7 @@ fn missing_binary_is_worker_failure() {
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
     });
     let err = report.err().expect("spawn fail");
     assert!(
@@ -549,6 +564,266 @@ fn missing_binary_is_worker_failure() {
         "{:?}",
         err.outcome
     );
+}
+
+#[test]
+fn load_with_tail_then_sync_roundtrip() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let structured = load_bytes("structured.v1");
+    let follow = load_bytes("followup_edit.v1");
+    let mut session = spawn(Limits::for_tests());
+    let load = session.call(&Request::Load {
+        snapshot_b64: Some(structured.clone()),
+        tail_b64: vec![follow.clone()],
+        encoding: 1,
+    });
+    assert_ok_applied(&load.outcome);
+    let xml = xml_of(&mut session);
+    assert!(xml.contains("후속편집한글✨"), "{xml}");
+    let sv = sv_of(&mut session);
+    let sync = session.call(&Request::Sync {
+        state_vector_b64: sv,
+        encoding: 1,
+    });
+    let sync_bytes = match &sync.outcome {
+        EngineStatus::Ok {
+            applied: true,
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(s).expect("sync"),
+        other => panic!("sync must return update bytes, got {other:?}"),
+    };
+    assert!(
+        sync_bytes.len() < 64,
+        "sync against own SV should be tiny, got {}",
+        sync_bytes.len()
+    );
+
+    let second = session.call(&Request::Load {
+        snapshot_b64: Some(structured),
+        tail_b64: vec![follow],
+        encoding: 1,
+    });
+    assert!(
+        matches!(second.outcome, EngineStatus::Malformed { ref detail } if detail.contains("once per child")),
+        "second load must be refused, got {:?}",
+        second.outcome
+    );
+}
+
+#[test]
+fn load_after_apply_is_refused_but_ping_then_load_is_ok() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let structured = load_bytes("structured.v1");
+    let mut after_apply = spawn(Limits::for_tests());
+    assert_ok_applied(
+        &after_apply
+            .call(&Request::Apply {
+                update_b64: structured.clone(),
+                encoding: 1,
+            })
+            .outcome,
+    );
+    let refused = after_apply.call(&Request::Load {
+        snapshot_b64: Some(structured.clone()),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    });
+    assert!(
+        matches!(refused.outcome, EngineStatus::Malformed { ref detail } if detail.contains("not after apply")),
+        "load after apply must be refused, got {:?}",
+        refused.outcome
+    );
+    drop(after_apply);
+
+    let mut ping_first = spawn(Limits::for_tests());
+    let ping = ping_first.call(&Request::Ping);
+    assert!(
+        matches!(ping.outcome, EngineStatus::Ok { .. }),
+        "{:?}",
+        ping.outcome
+    );
+    assert_ok_applied(
+        &ping_first
+            .call(&Request::Load {
+                snapshot_b64: Some(structured),
+                tail_b64: Vec::new(),
+                encoding: 1,
+            })
+            .outcome,
+    );
+}
+
+#[test]
+fn near_max_load_duplicate_and_distinct_tails() {
+    use std::time::Instant;
+    let target = 7 * 1024 * 1024 + 512 * 1024;
+    let snap_started = Instant::now();
+    // One many-small-node snapshot is reused for the near-32MiB duplicate load.
+    let snapshot = fragmented_paragraph_update(1, target, "dup-para");
+    let snap_ms = snap_started.elapsed().as_millis();
+    let heavy_started = Instant::now();
+    // Distinct-tail output-limit case uses few large chunks, not 4 more small-node gens.
+    let heavy = [
+        coarse_chunk_update(11, 2 * 1024 * 1024 + 512 * 1024, "heavy-a"),
+        coarse_chunk_update(12, 2 * 1024 * 1024 + 512 * 1024, "heavy-b"),
+        coarse_chunk_update(13, 2 * 1024 * 1024 + 512 * 1024, "heavy-c"),
+        coarse_chunk_update(14, 2 * 1024 * 1024 + 512 * 1024, "heavy-d"),
+    ];
+    eprintln!(
+        "near_max_load fixture snapshot {}ms {}B; heavy {}ms {:?}",
+        snap_ms,
+        snapshot.len(),
+        heavy_started.elapsed().as_millis(),
+        heavy.iter().map(Vec::len).collect::<Vec<_>>()
+    );
+    assert!(
+        snapshot.len() as u64 <= collab_engine::limits::MAX_INPUT_BYTES,
+        "snapshot {} exceeds blob cap",
+        snapshot.len()
+    );
+    let aggregate = snapshot.len() * 4;
+    assert!(
+        aggregate as u64 > 28 * 1024 * 1024
+            && aggregate as u64 <= collab_engine::limits::MAX_LOAD_BYTES,
+        "need near-32MiB aggregate, got {aggregate}"
+    );
+
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let child_started = Instant::now();
+    let mut dup = spawn(Limits::default());
+    let load = dup.call(&Request::Load {
+        snapshot_b64: Some(snapshot.clone()),
+        tail_b64: vec![snapshot.clone(), snapshot.clone(), snapshot.clone()],
+        encoding: 1,
+    });
+    assert_ok_applied(&load.outcome);
+    let snap = dup.call(&Request::Snapshot);
+    let restored = match snap.outcome {
+        EngineStatus::Ok {
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("dup snap"),
+        other => panic!("duplicate tails should restore within blob cap, got {other:?}"),
+    };
+    assert!(
+        restored.len() as u64 <= collab_engine::limits::MAX_INPUT_BYTES,
+        "duplicate-tail completeV1 {} must fit 8MiB",
+        restored.len()
+    );
+    drop(dup);
+    let mut reloaded = spawn(Limits::default());
+    assert_ok_applied(
+        &reloaded
+            .call(&Request::Load {
+                snapshot_b64: Some(restored),
+                tail_b64: Vec::new(),
+                encoding: 1,
+            })
+            .outcome,
+    );
+    drop(reloaded);
+
+    let mut heavy_session = spawn(Limits::default());
+    let [a, b, c, d] = heavy;
+    let heavy_load = heavy_session.call(&Request::Load {
+        snapshot_b64: Some(a),
+        tail_b64: vec![b, c, d],
+        encoding: 1,
+    });
+    match heavy_load.outcome {
+        EngineStatus::Ok { .. } => {
+            let heavy_snap = heavy_session.call(&Request::Snapshot);
+            assert!(
+                matches!(
+                    heavy_snap.outcome,
+                    EngineStatus::ResourceLimit {
+                        kind: LimitKind::Output | LimitKind::Memory,
+                        ..
+                    }
+                ),
+                "structurally heavy merge must not claim a reloadable 8MiB snapshot, got {:?}",
+                heavy_snap.outcome
+            );
+        }
+        EngineStatus::ResourceLimit {
+            kind: LimitKind::Memory | LimitKind::Output | LimitKind::Time,
+            ..
+        } => {}
+        other => panic!("structurally heavy input must expose resource failure, got {other:?}"),
+    }
+    eprintln!(
+        "near_max_load child path {}ms",
+        child_started.elapsed().as_millis()
+    );
+}
+
+fn fragmented_paragraph_update(client_id: u64, target: usize, token: &str) -> Vec<u8> {
+    // 96-byte XmlText nodes (64–128) reproduce small-paragraph memory amplification.
+    xml_fragment_update(client_id, target, token, 96)
+}
+
+fn coarse_chunk_update(client_id: u64, target: usize, token: &str) -> Vec<u8> {
+    xml_fragment_update(client_id, target, token, 16 * 1024)
+}
+
+fn xml_fragment_update(client_id: u64, target: usize, token: &str, payload_len: usize) -> Vec<u8> {
+    use yrs::{ClientID, Options, XmlFragment, XmlTextPrelim};
+    let doc = yrs::Doc::with_options(Options {
+        skip_gc: true,
+        offset_kind: yrs::OffsetKind::Utf16,
+        client_id: ClientID::new(client_id),
+        ..Options::default()
+    });
+    let xml = doc.get_or_insert_xml_fragment(collab_engine::FRAGMENT);
+    let mut payload = String::with_capacity(payload_len);
+    payload.push_str(token);
+    payload.push('-');
+    while payload.len() < payload_len {
+        payload.push('x');
+    }
+    // Item metadata is larger than the payload; overestimate then top up.
+    let encoded_per = payload_len.saturating_add(64).max(80);
+    let mut next_i = 0u32;
+    let mut insert_count = (target / encoded_per).max(1);
+    let mut encodes = 0u8;
+    const MAX_ENCODES: u8 = 4;
+    let mut encoded = Vec::new();
+    while encodes < MAX_ENCODES {
+        {
+            let mut txn = doc.transact_mut();
+            // push_front(0) avoids XmlFragment insert(len) sibling walks.
+            for k in (next_i..next_i + insert_count as u32).rev() {
+                xml.push_front(&mut txn, XmlTextPrelim::new(format!("{k:06}-{payload}")));
+            }
+        }
+        next_i += insert_count as u32;
+        encoded = {
+            let txn = doc.transact();
+            txn.encode_state_as_update_v1(&yrs::StateVector::default())
+        };
+        encodes += 1;
+        assert!(
+            encoded.len() as u64 <= collab_engine::limits::MAX_INPUT_BYTES,
+            "fragmented update {} exceeded blob cap after {encodes} encodes / {next_i} nodes",
+            encoded.len()
+        );
+        if encoded.len() + 256 * 1024 >= target {
+            break;
+        }
+        let missing = target.saturating_sub(encoded.len());
+        insert_count = (missing / encoded_per).max(1);
+    }
+    assert!(
+        encoded.len() + 1024 * 1024 >= target,
+        "encode {} far below target {target} after {encodes} encodes / {next_i} nodes",
+        encoded.len()
+    );
+    eprintln!(
+        "xml_fragment_update token={token} payload={payload_len} nodes={next_i} encodes={encodes} bytes={}",
+        encoded.len()
+    );
+    encoded
 }
 
 fn assert_fully_reaped(pid: u32) {
