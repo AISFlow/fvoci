@@ -84,7 +84,13 @@ export function WorkspaceSettingsPage() {
           variant="outline"
           onClick={async () => {
             setLogoutError(null);
-            const result = await api.POST("/api/v1/auth/logout");
+            let result;
+            try {
+              result = await api.POST("/api/v1/auth/logout");
+            } catch {
+              setLogoutError(t("error.network"));
+              return;
+            }
             if (!result.response.ok) {
               setLogoutError(
                 problemMessage(new ProblemError(result.response.status), "error.auth.logout"),

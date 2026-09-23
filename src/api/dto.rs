@@ -60,9 +60,11 @@ pub struct SessionUserOutput {
     pub user_id: String,
     pub email: String,
     pub given_name: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub family_name: Option<String>,
     pub text_scale: i16,
     pub session_id: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub email_verified_at: Option<DateTime<Utc>>,
     pub has_password: bool,
     pub is_instance_admin: bool,
@@ -81,9 +83,13 @@ pub struct PatchMeBody {
     /// Omitted preserves the current value; JSON `null` clears it.
     #[cfg_attr(feature = "api-schema", schema(nullable))]
     pub family_name: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub locale: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub timezone: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub week_starts_on: Option<i32>,
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub text_scale: Option<i16>,
 }
 
@@ -130,6 +136,7 @@ pub struct MemberResponse {
     pub user_id: String,
     pub email: String,
     pub given_name: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub family_name: Option<String>,
     pub role: String,
 }
@@ -167,6 +174,25 @@ pub struct ProblemResponse {
     pub params: Option<serde_json::Value>,
 }
 
+impl From<crate::auth::session::SessionUser> for SessionUserOutput {
+    fn from(user: crate::auth::session::SessionUser) -> Self {
+        Self {
+            user_id: user.user_id,
+            email: user.email,
+            given_name: user.given_name,
+            family_name: user.family_name,
+            text_scale: user.text_scale,
+            session_id: user.session_id,
+            email_verified_at: user.email_verified_at,
+            has_password: user.has_password,
+            is_instance_admin: user.is_instance_admin,
+            locale: user.locale,
+            timezone: user.timezone,
+            week_starts_on: user.week_starts_on,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,26 +215,10 @@ mod tests {
         };
         let body = serde_json::to_value(output).expect("serialize session user");
         let object = body.as_object().expect("session user object");
-        assert!(object.contains_key("familyName"), "familyName must be present");
+        assert!(
+            object.contains_key("familyName"),
+            "familyName must be present"
+        );
         assert!(object["familyName"].is_null(), "familyName must be null");
-    }
-}
-
-impl From<crate::auth::session::SessionUser> for SessionUserOutput {
-    fn from(user: crate::auth::session::SessionUser) -> Self {
-        Self {
-            user_id: user.user_id,
-            email: user.email,
-            given_name: user.given_name,
-            family_name: user.family_name,
-            text_scale: user.text_scale,
-            session_id: user.session_id,
-            email_verified_at: user.email_verified_at,
-            has_password: user.has_password,
-            is_instance_admin: user.is_instance_admin,
-            locale: user.locale,
-            timezone: user.timezone,
-            week_starts_on: user.week_starts_on,
-        }
     }
 }

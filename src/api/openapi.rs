@@ -269,3 +269,47 @@ fn remove_member() {}
 pub fn spec_json() -> String {
     ApiDoc::openapi().to_pretty_json().expect("openapi json")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn generated_nullability_matches_runtime_contract() {
+        let spec: Value = serde_json::from_str(&spec_json()).unwrap();
+        let schemas = &spec["components"]["schemas"];
+        for (name, fields) in [
+            ("SessionUserOutput", &["familyName", "emailVerifiedAt"][..]),
+            ("MemberResponse", &["familyName"][..]),
+        ] {
+            for field in fields {
+                assert!(schemas[name]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field)));
+                assert!(schemas[name]["properties"][field]["type"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("null")));
+            }
+        }
+        let patch = &schemas["PatchMeBody"];
+        assert_eq!(patch["required"], json!(["givenName"]));
+        assert!(patch["properties"]["familyName"]["type"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("null")));
+        for field in ["locale", "timezone", "weekStartsOn", "textScale"] {
+            assert!(patch["properties"][field]["type"].is_string());
+            let mut body = json!({"givenName":"A"});
+            body.as_object_mut()
+                .unwrap()
+                .insert(field.into(), Value::Null);
+            let error = crate::http::json_input::parse_patch_me(body)
+                .err()
+                .expect("null rejected");
+            assert_eq!(error.source, Some(format!("/{field}")));
+        }
+    }
+}

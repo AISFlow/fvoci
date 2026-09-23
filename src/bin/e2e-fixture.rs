@@ -12,8 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let given_name = std::env::var("E2E_USER_GIVEN_NAME").unwrap_or_else(|_| "멤버".into());
     let family_name = std::env::var("E2E_USER_FAMILY_NAME").ok();
     let workspace_slug = std::env::var("E2E_WORKSPACE_SLUG").ok();
-    let membership_role =
-        std::env::var("E2E_MEMBERSHIP_ROLE").unwrap_or_else(|_| "member".into());
+    let membership_role = std::env::var("E2E_MEMBERSHIP_ROLE").unwrap_or_else(|_| "member".into());
     let pepper = std::env::var("PASSWORD_PEPPER_KEYS")?;
     let active = std::env::var("PASSWORD_PEPPER_ACTIVE_KEY_ID")?;
     let keys = Keyring::parse(&pepper, &active)?;
@@ -35,12 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     if let Some(slug) = workspace_slug {
-        let workspace_id = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM fvoci.workspaces WHERE slug = $1",
-        )
-        .bind(&slug)
-        .fetch_optional(&pool)
-        .await?;
+        let workspace_id =
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM fvoci.workspaces WHERE slug = $1")
+                .bind(&slug)
+                .fetch_optional(&pool)
+                .await?;
         if let Some(workspace_id) = workspace_id {
             sqlx::query(
                 "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, $3)",

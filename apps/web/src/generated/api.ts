@@ -168,7 +168,7 @@ export interface components {
         };
         MemberResponse: {
             email: string;
-            familyName?: string | null;
+            familyName: string | null;
             givenName: string;
             role: string;
             userId: string;
@@ -187,12 +187,12 @@ export interface components {
             /** @description Omitted preserves the current value; JSON `null` clears it. */
             familyName?: string | null;
             givenName: string;
-            locale?: string | null;
+            locale?: string;
             /** Format: int32 */
-            textScale?: number | null;
-            timezone?: string | null;
+            textScale?: number;
+            timezone?: string;
             /** Format: int32 */
-            weekStartsOn?: number | null;
+            weekStartsOn?: number;
         };
         PatchWorkspaceBody: {
             name?: string | null;
@@ -206,8 +206,8 @@ export interface components {
         SessionUserOutput: {
             email: string;
             /** Format: date-time */
-            emailVerifiedAt?: string | null;
-            familyName?: string | null;
+            emailVerifiedAt: string | null;
+            familyName: string | null;
             givenName: string;
             hasPassword: boolean;
             isInstanceAdmin: boolean;

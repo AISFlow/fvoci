@@ -120,3 +120,17 @@ test("readonly member sees read-only settings and refreshed name after admin edi
   await expect(page.getByText(memberVisibleName)).toBeVisible();
   await expect(page.getByText("설정을 변경하려면 관리자 권한이 필요합니다")).toBeVisible();
 });
+
+
+test("logout transport failure keeps the current session visible", async ({ page }) => {
+  await page.goto("/login");
+  await page.getByLabel("이메일").fill(admin.email);
+  await page.getByLabel("비밀번호").fill(admin.password);
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await page.route("**/api/v1/auth/logout", (route) => route.abort("connectionfailed"));
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page).toHaveURL(/\/$/);
+  expect((await page.request.get("/api/v1/auth/me")).ok()).toBe(true);
+});

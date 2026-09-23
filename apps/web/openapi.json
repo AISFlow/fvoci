@@ -649,6 +649,7 @@
           "userId",
           "email",
           "givenName",
+          "familyName",
           "role"
         ],
         "properties": {
@@ -713,29 +714,17 @@
             "type": "string"
           },
           "locale": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "textScale": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int32"
           },
           "timezone": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "weekStartsOn": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int32"
           }
         }
@@ -780,8 +769,10 @@
           "userId",
           "email",
           "givenName",
+          "familyName",
           "textScale",
           "sessionId",
+          "emailVerifiedAt",
           "hasPassword",
           "isInstanceAdmin",
           "locale",

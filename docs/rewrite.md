@@ -388,3 +388,17 @@ persist·삭제-only barrier, fresh-client crash 복원이다. 기반 PR은 제�
   fractional 짧은 prefix panic과 실제 product revoke 경합 검사 보완을 발견했다.
   Grok `task_462531dfba7e / ctx_9a264a3d7793`가 같은8개 소유 경로에서 수정한다.
   UI E2E가 로컬 heavy slot 소유, wiki DB는 별도 배정 후 실행한다. 검토자는 release.
+
+### Workspace/React 통합 수락 후보
+
+Composer c8d438e를7905973에 통합했다. 해당 worker 기록은 lib11, static5,
+실제 앱 역할/port0 Playwright4 성공(브라우저 약20.6초), clean/release다.
+코디네이터는 누락/nullable 생성 계약을 추가 수정하여 응답 familyName과
+emailVerifiedAt 필수키/null, PATCH 나머지 optional-but-not-null을 실제 parser와
+대조하는 schema 검사를 추가했다. logout 네트워크 실패도 화면에 표시하고
+세션 성공으로 오인하지 않는5번째 브라우저 검사를 추가했다.
+
+통합 로컬 fmt/check/clippy(db-tests,api-schema), schema1, static5, TypeScript
+검사를 수행한다. 새5번째 브라우저 및 기존66 DB 회귀는 독립 Web/Rust 원격 CI에서
+이 통합 HEAD로 실행한 뒤 수락한다. 수정 후 예전 E2E4 성공을 새HEAD 성공으로
+사용하지 않는다. 전체 원본 UI/인증·문서·협업 지원으로 확대하지 않는다.

@@ -58,5 +58,6 @@ jobs:
         run: |
           cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
           cargo test --locked --offline --test static_api
+          cargo test --locked --offline --lib --features api-schema api::openapi::tests
       - name: Real React workspace flow with PostgreSQL app role
         run: bash scripts/run-web-e2e.sh

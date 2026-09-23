@@ -124,7 +124,7 @@ async fn static_router_rejects_outside_root_symlink_and_index_escape() {
     std::fs::create_dir_all(dir.join("assets")).expect("assets dir");
     std::fs::write(outside.join("secret.txt"), "secret").unwrap();
     std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
-    std::os::unix::fs::symlink(&outside.join("secret.txt"), dir.join("assets/escape.txt")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("assets/escape.txt")).unwrap();
 
     let app: Router = static_router(dir.clone());
     let response = app
