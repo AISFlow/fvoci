@@ -28,7 +28,9 @@ jobs:
         with:
           node-version: '24.21.0'
           cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            packages/editor/package-lock.json
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -54,6 +56,7 @@ jobs:
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           npm ci --prefix apps/web --no-audit --no-fund
+          npm ci --prefix packages/editor --ignore-scripts --no-audit --no-fund
       - name: Prepare Chromium and system libraries
         working-directory: apps/web
         run: npm exec --no -- playwright install --with-deps chromium
@@ -66,7 +69,10 @@ jobs:
           cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
           cargo test --locked --offline --test static_api
           cargo test --locked --offline --lib --features api-schema api::openapi::tests
-      - name: Wiki tree unit regression
-        run: node --experimental-strip-types --test apps/web/src/features/workspace/wiki-tree.test.ts
+      - name: Web and editor unit regressions
+        run: |
+          npm test --prefix apps/web
+          npm run typecheck --prefix packages/editor
+          npm test --prefix packages/editor
       - name: Real React workspace flow with PostgreSQL app role
         run: bash scripts/run-web-e2e.sh

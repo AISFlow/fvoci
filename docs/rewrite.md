@@ -689,3 +689,53 @@ UI ctx259ebcae441c는 독립 구현을 계속하고 전체 E2E는 backend 보완
 worker만 별도 target/cache에서 빌드하고 정확한 FVOCI_COLLAB_ENGINE을 전달한다.
 architecture/toolchain/lock/features/source를 캐시 키에 포함했다. actionlint1.7.12
 exit0; 아직 push 전이므로 새 job의 원격 실행·제품 수락은 미완료다.
+
+추가 미수락 통합 a2ccfb8: Composer e826aa7의 정확한 bundle Load/Snapshot 사전
+검사와 expected_tail_seq를 보존했다. 보고된 PG/helper8검사는 부분 증거이며
+room 슬롯/Starting/eviction 및 수신자 인가 결함, 필수 실패 검사가 남아 있다.
+기존 Composer 재사용은 agent_readiness timeout(ctx4234b6e6b44a, 입력 미전달)로
+실패했다. 완료된 이전 터미널을 공식 release한 뒤 동일 task47d50ab67905를
+새 검증 Composer2.5 ctx5e765b78857a로 재시도했다. room lifecycle 수정·결정적
+검사만 좁혀 소유권을 배정했고 원래 worktree/커밋을 보존했다.
+Fable5.1medium taskbe94f25835c0/ctx6123a6f89afe는 고정 a2ccfb8의 durability
+읽기 전용 검토 중; 요청·유효 모델과 turn 시작 확인. quota/Opus 전환 없음.
+React Grok ctx259ebcae441c는 동일 소유권으로 진행 중. 새 통합 원격 PR/CI는
+아직 시작하지 않았고 b706668의 Actions 문법 검사만 성공했다.
+
+React 제출647a99b를 efd0005로 통합했다. 실제 원본 FvociEditor/schema/session
+재사용, worker의 fresh npm ci 후 typecheck/web33/editor11/build 성공 보고.
+전체 실제 협업 E2E는 e2e-pending에 있으며 미실행이다. postinstall의 재귀 설치와
+React 모듈 삭제를 없애는 정상 패키지 해석 보완을 Grok task97ca3bc92c7d/
+ctx602809de1bf8에 배정했다(동일 UI/editor 파일 소유권). 이후 UI 수락 전에는
+connected/unsyncedChanges 기반 「저장됨」 배지를 durable persist ack와 분리하고,
+기존 pending E2E의 순차 입력/약한 삭제 assertion을 실제 동시성·fresh crash
+검사로 보완해야 한다. 이 제출은 동시편집 제품 수락을 뜻하지 않는다.
+
+고정 a2ccfb8의 Fable 정적 검토 파일은 /tmp/fvoci-collab-live-durability-review-a2ccfb8.md.
+SyncStep1 누락, primary256-op cap, readonly-first→writer Load 재사용, sticky persist
+실패, 불명확 commit 뒤 stale state, commit 후 Apply 실패 시 peer 누락을 지적했다.
+실제 Fable5.1medium 검토였으나 완료 전송에 빈 `orca`를 써 유효 worker_done이
+없었다. 최종 transcript·빈 tool 출력을 확인하고 공식 worker-stop으로 종료했다.
+Orca dispatch ctx6123a6f89afe는 stopped이며 검토 수락/성공 settlement로 표시하지 않는다.
+quota/Opus 전환은 없었다. 지적은 후속 수정 입력으로 보존하고 수정 SHA를 다시 검토한다.
+
+코디네이터 판단: poll 간격의 권한 cache로 철회 보장을 약화하지 않는다. 매 admission은
+전체 현재 tail+candidate를 검사하므로 마지막 검증이 전체 당시 bundle을 포함한다.
+시간 보장은 그 host/load 시점에 한정한다. persist 성공에 compaction/tail 비우기는
+필수 조건이 아니며 이미 durable한 prefix와 compaction 건강 상태를 분리할 수 있다.
+추가 결함: validate_snapshot_only가 빈 candidate를 tail에 넣어 항상 malformed가 된다.
+기존 production helper(SHA256 686dd31f75452dfb51d1d5dee626e5077e3222ac3a8c2d59716df545fa99a96d)에
+u32LE JSON frame으로 Load(snapshot_b64=AAA=,tail_b64=[])→ok(2ms),
+동일 Load tail_b64=[""]→malformed tail[0]:empty updateV1(1ms)를 재현했다.
+두 작은 child는 EOF 종료/회수; DB·전체 제품 검사 성공으로 확대하지 않는다.
+통합 efd0005 cargo fmt --check exit1(0.29s): hub 빈 줄과 product assert 서식,
+현재 worker 범위에 수정 요청했다. source/RLS·UI 제품 수락은 계속 보류다.
+
+Grok packaging 제출2fa4a75를 d732c80로 통합: npm install-links=true/lock으로
+재귀 postinstall·React 삭제를 제거했다. clean snapshot 설치 web5.55s/editor3.29s,
+web typecheck3.23s/build4.19s, 네트워크 차단 unshare --net에서 web34/editor11
+검사1.67s 성공 보고. React/Yjs 동일성 회귀 포함; 원격 검증은 아직 미실행.
+ctx602809de1bf8 release 후 새 Grok taskba64ce66469d/ctxd56261e6dc69에
+동기화와 durable persist ack를 구분하는 UI·삭제-only/늦은 ack 회귀를 배정했다.
+coordinator Web CI/prepare는 명시적 editor npm ci 및 web/editor 단위 검사를
+연결했고 bash -n/actionlint/diff --check exit0. 전체 협업 E2E와 수락은 미완료다.
