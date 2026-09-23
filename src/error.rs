@@ -1,0 +1,176 @@
+use axum::extract::rejection::JsonRejection;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Serialize;
+use serde_json::{json, Value};
+
+pub const SESSION_COOKIE: &str = "fvoci_session";
+pub const API_PREFIX: &str = "/api/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemCode {
+    AuthenticationRequired,
+    InvalidEmailOrPassword,
+    InvalidInput,
+    InstanceSetupAlreadyCompleted,
+    PasswordInvalid,
+    SlugTaken,
+    OriginMismatch,
+    NotFound,
+    RateLimitExceeded,
+    InternalError,
+}
+
+impl ProblemCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthenticationRequired => "authentication_required",
+            Self::InvalidEmailOrPassword => "invalid_email_or_password",
+            Self::InvalidInput => "invalid_input",
+            Self::InstanceSetupAlreadyCompleted => "instance_setup_already_completed",
+            Self::PasswordInvalid => "password_invalid",
+            Self::SlugTaken => "slug_taken",
+            Self::OriginMismatch => "origin_mismatch",
+            Self::NotFound => "not_found",
+            Self::RateLimitExceeded => "rate_limit_exceeded",
+            Self::InternalError => "internal_error",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::AuthenticationRequired => "authentication required",
+            Self::InvalidEmailOrPassword => "invalid email or password",
+            Self::InvalidInput => "invalid input",
+            Self::InstanceSetupAlreadyCompleted => "instance setup already completed",
+            Self::PasswordInvalid => "password_invalid",
+            Self::SlugTaken => "slug taken",
+            Self::OriginMismatch => "origin mismatch",
+            Self::NotFound => "not found",
+            Self::RateLimitExceeded => "rate limit exceeded",
+            Self::InternalError => "internal error",
+        }
+    }
+
+    pub fn status(self) -> StatusCode {
+        match self {
+            Self::AuthenticationRequired | Self::InvalidEmailOrPassword => StatusCode::UNAUTHORIZED,
+            Self::InvalidInput | Self::PasswordInvalid => StatusCode::BAD_REQUEST,
+            Self::InstanceSetupAlreadyCompleted | Self::NotFound => StatusCode::NOT_FOUND,
+            Self::SlugTaken => StatusCode::CONFLICT,
+            Self::OriginMismatch => StatusCode::FORBIDDEN,
+            Self::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
+            Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AppError {
+    pub status: StatusCode,
+    pub code: ProblemCode,
+    pub source: Option<String>,
+    pub params: Option<Value>,
+    pub retry_after: Option<u32>,
+}
+
+impl AppError {
+    pub fn problem(status: StatusCode, code: ProblemCode) -> Self {
+        Self {
+            status,
+            code,
+            source: None,
+            params: None,
+            retry_after: None,
+        }
+    }
+
+    pub fn from_code(code: ProblemCode) -> Self {
+        Self {
+            status: code.status(),
+            code,
+            source: None,
+            params: None,
+            retry_after: None,
+        }
+    }
+
+    pub fn with_source(code: ProblemCode, pointer: impl Into<String>) -> Self {
+        Self {
+            status: code.status(),
+            code,
+            source: Some(pointer.into()),
+            params: None,
+            retry_after: None,
+        }
+    }
+
+    pub fn rate_limited(retry_after: u32) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: ProblemCode::RateLimitExceeded,
+            source: None,
+            params: Some(json!({ "retryAfter": retry_after })),
+            retry_after: Some(retry_after),
+        }
+    }
+
+    pub fn internal() -> Self {
+        Self::from_code(ProblemCode::InternalError)
+    }
+}
+
+#[derive(Serialize)]
+struct ProblemBody {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    title: String,
+    status: u16,
+    code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<Value>,
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let body = ProblemBody {
+            kind: "about:blank",
+            title: self.code.title().to_string(),
+            status: self.status.as_u16(),
+            code: self.code.as_str().to_string(),
+            source: self.source,
+            params: self.params,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/problem+json"),
+        );
+        if let Some(retry_after) = self.retry_after {
+            if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+                headers.insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+        (self.status, headers, Json(body)).into_response()
+    }
+}
+
+impl From<JsonRejection> for AppError {
+    fn from(rejection: JsonRejection) -> Self {
+        match rejection {
+            JsonRejection::JsonDataError(_) => {
+                AppError::with_source(ProblemCode::InvalidInput, "/")
+            }
+            JsonRejection::JsonSyntaxError(_) => {
+                AppError::with_source(ProblemCode::InvalidInput, "/")
+            }
+            JsonRejection::MissingJsonContentType(_) | JsonRejection::BytesRejection(_) => {
+                AppError::from_code(ProblemCode::InvalidInput)
+            }
+            _ => AppError::from_code(ProblemCode::InvalidInput),
+        }
+    }
+}

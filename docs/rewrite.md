@@ -1,0 +1,134 @@
+# FVOCI Rust 재작성
+
+## 기준선 (2026-09-24)
+
+- 대상 AISFlow/fvoci: 초기 `97a3fe61ede69390b78beaf2de8dd394ad49eed1`, 통합 브랜치 `fvoci/daggertooth`. 기존 미추적 starter 파일을 검토·보존하며 시작.
+- 원본 fvoci/FVOCI main: `e95b81a74f175e37d0bbe5b8494481d7a4be2a5f`.
+- 열린 PR #999: base `e95b81a74f175e37d0bbe5b8494481d7a4be2a5f`, head `393795261322b916e588043cf94feca999175843`, 미병합. 기능 조사 기준은 이 HEAD; main과 차이는 별도 검토.
+- 원본은 비공개 별도 참조 clone. 공개 문서 서비스에 소스 전송 금지. 기존 원본 개발 checkout은 수정하지 않음.
+
+## 현재 수락 지점
+
+**첫 수직 기능 수락**: 코드 `195a58f0a3a9bc77c980279cd7960b1d1ec4f069` (2026-09-24). 실제 설치·비밀번호 로그인·세션 조회/폐기·인증된 프로필 변경을 Rust HTTP → PostgreSQL 앱 역할 → 트랜잭션/이벤트/감사 → 응답까지 검증했다. 이후 문서 커밋은 제품 코드를 바꾸지 않는다. 전체 재작성은 **부분 구현**이며 아래 미착수 범위를 유지한다. Run `run_b01d432a9dee`.
+
+| 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
+| --- | --- | --- | --- | --- | --- |
+| 설치·세션·인증된 프로필 변경 | identity/routes.ts, core/auth.ts, pg/identity-access.ts, contracts/identity.ts | 활성 사용자, 정지 경합, 프로필/이벤트/감사 원자성 | 첫 수직 기능 검증 완료: src/auth, src/db, src/http | 최종 순수6/DB24 + 실제 두 서버 HTTP·재시작 성공 | 확장 인증·정책/프론트 연결은 아래 미착수 |
+| 협업·문서 처리 | editor/package.json 및 서버 구현 | 저장 문서, 실제 provider, 한글/이모지, 철회·복원 | 제품 미착수, compat 조사 코드 | 좁은 probe 성공·불일치 확인 (아래) | 전체 UI/철회/복원 및 HWP 본문 미구현 |
+| 나머지 제품 기능 | 실제 라우트·UI 목록 조사 예정 | 원본 기능·보안·데이터 계약 | 미착수 | 미실행 | 인증 확장, 워크스페이스/프로젝트/태스크/문서, 첨부/검색/알림/연동, MCP/CLI/운영/백업 |
+
+## 설계·자원 결정
+
+작은 단일 Rust 서버 + PostgreSQL로 시작한다. worktree별 target, 실행별 DB/역할/스토리지, port 0 사용. 빠른 순수 정책 검사와 실제 DB 검사를 분리한다. 동시 쓰기 워커 최대 2개, 무거운 검증 한 묶음. 원본 다중 DB 미완료 범위와 재작성 미구현을 구분하며 첫 단계 성공을 전체 완료로 표현하지 않는다.
+
+## 재개
+
+AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → git status/worktree와 실제 프로세스를 대조한다. 진행 중인 작업을 중복 배정하지 않는다.
+
+## 초기 착수 기록 (현재 수락과 구분)
+
+공통 기반 d692134에서 Composer task_3377f29385d5 / ctx_6f56b812c5f0이 독립 rust-profile-slice worktree에 첫 기능을 구현 중이다. 원본 프로필은 PATCH /api/v1/auth/me, 엄격한 givenName/familyName/locale/timezone/weekStartsOn/textScale 입력, fvoci_session 쿠키, sessionUserOutput 반환. 정지 경합은 401 authentication_required이며 본문과 이벤트가 남지 않아야 한다. 원본 이벤트는 user.name_updated (감사 비활성); 이번 요구에 따라 감사도 함께 원자 기록하는 의도적 차이를 둔다. 프론트 계약 정본은 Rust DTO로 두고 클라이언트 생성 여부는 통합 시 확인한다.
+
+## 범위 보존 목록
+
+아래 원본 근거는 모두 고정 PR HEAD 기준이다. 목록은 지원 선언이 아니다.
+
+| 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
+| --- | --- | --- | --- | --- | --- |
+| 인증 확장·PAT·OIDC·MFA·사용자 생명주기 | packages/contracts/src/routes.ts auth/me/admin, core/auth.ts | 세션 폐기, 범위, 마지막 관리자, 탈퇴/복구 | 재작성 미착수 | 미실행 | 첫 로그인 외 전체 |
+| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 재작성 미착수 | 미실행 | 첫 workspace slice에서 실제 앱 역할 RLS 수락 |
+| 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
+| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | 재작성 미착수 | 미실행 | 전체 |
+| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | 재작성 미착수 | 조사 중 | CRDT 호환과 provider 호환을 별도로 검증 |
+| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | 재작성 미착수 | 조사 중 | native 대체 실증 필요 |
+| 검색·색인·AI | server domains/search, packages/search, routes.ts ai | 검색에서도 인가·철회·색인 복구 | 재작성 미착수 | 미실행 | 전체 |
+| 알림·메일·webhook·연동 | server domains/notifications, packages/jobs, routes.ts github/webhooks | outbox·커밋 후 전달·중복/재시도 | 재작성 미착수 | 미실행 | 전체 |
+| 동의·감사·사용권 | routes.ts legal/auth.consents/admin.audit, packages/ee | 동의 gate·증거·서명·권한 | 재작성 미착수 | 미실행 | 프로필 감사 강화 외 전체 |
+| MCP·CLI·설치·백업·복구 | server src/init.ts/backup.ts/doctor.ts, 제품 MCP | 프로토콜·오류·복원·운영 취소 | 재작성 미착수 | 미실행 | 첫 설치 외 전체 |
+| SQLite/libSQL/Turso 및 이관 | PR999 packages/db | 원본 제공 범위와 목표 구분 | 재작성 미착수 | 미실행 | PG 우선; 원본 전체 다중 DB 완료로 간주하지 않음 |
+| 프론트엔드·배포·ARM64 | apps/web, packages/editor, 배포 리소스 | 한국어·접근성·편집 흐름·정적 자산 | 재작성 미착수 | 미실행 | 최초 실제 HTTP slice 이후 연결; 이관/운영/ARM64 지원 미선언 |
+
+## PR 및 원본 회귀 확인
+
+- 사용자가 대상 PR #1 (`fvoci/daggertooth` → main)을 직접 열었다. 같은 범위의 중복 PR은 만들지 않는다. 2026-09-24 추가 승인 이후 독립 기능의 후속 PR 생성과 수락 후 머지는 허용된다.
+- PR999 현재 CI35877360079: PG16/17/18 database-contract, image-tests, native standalone-arm64 성공; test의 `bun run test:pkg --affected`와 집계 report 실패. 원본 문서의 이전 성공 수치를 이 CI의 성공으로 대체하지 않는다.
+- 원본 확인: 설치 GET/POST /api/v1/setup, 성공201 {userId,workspaceId}, 재설치404 instance_setup_already_completed. 로그인 POST /api/v1/auth/login, 성공200 {userId}, 누락/오류/정지401 invalid_email_or_password. 설치는 실제 첫 workspace/owner도 원자 생성해야 한다.
+- 협업 위험 probe: Grok task_1532bb645f74 / ctx_00b1baf38504, rust-compat-probe worktree, base31b6790, 단독 소유 compat/**. 저장 updateV1과 Hocuspocus 프레임 호환을 따로 확인하며 실제 UI/권한 검증 미실행을 감추지 않는다.
+- 의존성 공식 확인: docs.rs axum0.8.9/SQLx 및 crates.io 버전 메타데이터(axum0.8.9 MIT/Rust1.80, SQLx0.8.6 MIT OR Apache-2.0, Tokio1.47.1 MIT/Rust1.70, Serde1.0.228 MIT OR Apache-2.0). 선택 실제 버전은 Cargo.lock에서 고정·검증한다. 이 조회는 벤치마크가 아니다.
+
+원본 CI 실패 로그 확인: apps/server/test/init.test.ts:119의 `usage 문자열에 init` 정규식 검사가 중첩 CLI usage의 `>`에서 실패했다. Rust에서는 이 소스 텍스트 정규식 하네스를 복제하지 않고 실제 CLI 호출을 검사한다. 이 원본 실패를 수정하거나 원본 PR에 쓰지는 않았다.
+
+## 협업·문서 초기 위험 검증 — 통합 d154a60
+
+Grok 제출 e94ac2d를 통합한 d154a60에서 코디네이터가 다시 실행했다. `npm --prefix compat/js ci --ignore-scripts --no-audit --no-fund` 성공(51 packages, 0.9s), `cargo build --locked --offline --manifest-path compat/Cargo.toml --bins` 성공(별도 비어 있던 target, 캐시된 crate, 6.25s). `YRS_BRIDGE=.../compat/target/debug/yrs-bridge node compat/js/probe.mjs` 6개 성공(0.141s), `node compat/js/hocuspocus-handshake.mjs` 실행 성공(0.472s) 및 프레임 불일치 재현. `compat/target/debug/extract-probe compat/fixtures/sample.{pdf,docx,hwpx,hwp}` 실행 성공(0.002s): 생성한 유효 형식 fixture의 PDF literal/DOCX·HWPX XML 토큰만 확인, HWP 본문 parser 없음.
+
+이 결과는 제품 협업/추출 지원 수락이 아니다. Yrs0.23.5와 Yjs13.6.32의 gc:false updateV1 왕복·상태벡터·후속 편집은 확인했지만 전체 Tiptap 확장, 실제 FVOCI 두 UI, awareness 동작, 인가/철회, WebSocket 종료·재시작은 미실행. Hocuspocus4.6.0의 document-name/type/Auth/Stateless 프레임 어댑터와 HWP 본문/운영 수준 추출·썸네일 구현이 남았다. 제품 런타임에서 compat JS를 호출하지 않는다. 상세 범위·fixture 출처는 compat/README.md와 fixtures/NOTICE.md.
+
+통합 후 probe runner는 호스트 전용 기본 경로를 제거하고 locked/offline 빌드 및 Node 검사별 30초 상한으로 정리했다. `bash compat/run.sh` 재실행 exit0, warm0.704s. 라이브러리 코드는 변경하지 않았다.
+
+## 중간 독립 검사 (775f64d, 아래 최종 검사로 대체)
+
+네이티브 x86_64, Rust1.98.1, PG18.3; 공유 crate 다운로드 캐시만 재사용하고 통합 target은 새로 빌드했다. `cargo fmt --check` 성공, `cargo check --locked --offline --all-targets --features db-tests` 성공(9.99s). `cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings`는 6개 진단으로 실패. 별도로 `cargo test --locked --offline --lib`: 4개 성공, build10.84s/본문5.62s/전체16.53s. `TEST_DATABASE_URL=<private-file> cargo test --locked --offline --features db-tests --test db_integration`: 13개 성공, build3.05s/본문8.48s/전체11.60s. 이 결과는 원본과 동등 범위의 성능 비교가 아니다.
+
+프로필 감사는 원본 audit:false와 달리 사용자 요구에 맞춰 함께 커밋한다. 첫 버전에서 발견한 세션 철회 중 쓰기, null/누락 구분, 신뢰되지 않은 forwarded IP, 테스트 자원 공유 경로 및 병렬 migration 문제는 후속 Composer task에서 수정 중이다. Fable은 고정 제출 SHA6a77f76을 독립 검토 중이다. CI workflow를 추가했으나 원격 실행은 아직 하지 않았다.
+
+### 독립 검토 결론
+
+Claude Code Fable5.1 medium(task_43a2bfe9a062 / ctx_f447be92fcf1)의 SHA6a77f76 검토 완료: `familyName:null` 보존 버그와 세션 철회 후 프로필 쓰기는 수락 차단. 병렬 migration, 신뢰되지 않은 forwarded IP, per-email 잠금 범위, SIGTERM, 한글 길이/429/JSON 오류 계약, Argon2 취소 시 permit 소유권도 보강 대상으로 확인했다. 실제 검토 완료는 제품 수락을 의미하지 않는다. 검토 terminal은 release했고 후속 Composer task_12716d8c1cc0 / ctx_cf69c321c975가 수정 중이다. Grok task_6678e958475f / ctx_d8b2fe334de7는 고정 SHA775f64d의 비밀번호·HTTP 계약만 읽기 전용 대조 중이다.
+
+위 내용은 당시 보류 기록이다. 후속 완료·검증과 다음 시작점은 아래 최종 수락 기록을 따른다.
+
+## 최종 수락·검증 (195a58f)
+
+Composer 후속 e2a7380/31dda85/a240805를 순차 통합했다. Fable `task_4aced35f7177 / ctx_ee0d5cd5054f`는 Claude Code `claude-fable-5-1`, medium으로 고정 a240805 + 공유 자원 수정25235f3을 읽기 전용 검토했고 첫 프로필 slice의 차단 결함 해소를 확인했다. 코디네이터는 이후 195a58f에서 malformed JSON의 problem 응답과 실제 IP 제한 회귀 검사를 보완했다. 해당 마지막 작은 diff는 코디네이터 검토·실행 증거이며 Fable이 그 SHA를 검토했다고 표시하지 않는다. Grok `task_6678e958475f`는 고정775f64d의 비밀번호/토큰·주요 HTTP 응답을 원본과 대조했고, 429 계약 차이는 수정했다.
+
+환경: 네이티브 Linux x86_64, Rust1.98.1, PostgreSQL18.3. 최종 검사는 캐시가 있는 통합 worktree 전용 target에서 수행했다. 모든 아래 성공 명령은 exit0이다.
+
+| 명령 / 검증 | 결과 | 시간 |
+| --- | --- | --- |
+| `cargo fmt --check` | 성공 | 0.113s |
+| `cargo check --locked --offline --all-targets --features db-tests` | 성공 | 0.702s |
+| `cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings` | 성공 | 0.846s |
+| `cargo test --locked --offline --lib` | 6개 성공 | build0.76s / 본문5.64s / 전체6.467s |
+| `cargo test --locked --offline --features db-tests --test db_integration` (`TEST_DATABASE_URL` 비공개 환경) | 24개 성공 | build1.95s / 본문26.41s / 전체28.416s |
+| `cargo build --locked --offline --bins` | 서버·migration CLI 성공 | 1.753s |
+| 실제 `fvoci-migrate`/`fvoci-server` + Python HTTP 클라이언트 | 두 UUID DB/앱 역할·동적 포트, 설치/로그인/프로필/null/인가 거부/로그아웃, SIGTERM exit0·재시작 후 세션/한글·이모지 프로필 보존 | 전체6.582s |
+
+DB 검사는 원본 앱 역할 제한과 같은 종류의 실제 비특권 역할로 실행했다. 정지·세션 철회 후 쓰기 거부, 프로필 이벤트/감사 실패 rollback, 설치 감사 실패 rollback, 동시 첫 관리자 단일 승자, 누락/null/외부 사용자 ID, 비밀 컬럼·migration 메타데이터 접근 거부를 포함한다. 추가 동시 migration 검사는 두 연결이 advisory lock에서 대기함을 `pg_locks`로 관찰한 후 해제하여 최초 스키마가 한 번만 생성됨을 확인한다. 사용자·테넌트 컨텍스트 누출/RLS의 전체 수락은 아직 없는 첫 workspace API에서 수행해야 한다.
+
+`bash scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test db_integration`을25235f3에서 실제 호출: 23개 성공, 환경/빌드/본문/정리 전체32.908s. 명령 실패(exit23)에서도 해당 컨테이너와 credential 파일이 정리됨을 별도 확인(2.643s). 최종195a58f에서 DB URL을 제거하고 `cargo test ... --test db_integration db_tests_require_database_url -- --exact` 호출은 의도대로 exit101/1개 실패/skip0이었다. 실제 HTTP 진단 스크립트는 이 실행의 로컬 임시 증거이며 제품/CI 의존성이 아니다.
+
+중간 실패는 숨기지 않았다: 최초 clippy6건, helper의 없는 uuidgen(exit127) 및 exec에 의한 EXIT 정리 누락, 새 병렬 migration 테스트의 SQLx Send 컴파일 오류와 fixture의 public 함수 초기화 누락을 수정했다. 마지막 전체 gate에는 실패가 없다. timeout 증가·전체 재시도로 덮지 않았다.
+
+피드백 예산은 현재 slice 기준 warm 빠른 gate10s, DB gate35s로 시작한다(최종 각각 약8.1s,28.4s). DB 후반의 로그인 제한 검사는 실제 Argon2 검증을 반복해 시간을 사용한다. 원본과 동일 범위·조건의 비교 벤치마크는 미실행이므로 속도 개선을 주장하지 않는다. CI YAML 파싱은 확인했으나 원격 Actions 실행·ARM64·이미지 배포·기존 데이터 이관/복구·브라우저 E2E는 미실행이다.
+
+### 남은 차이와 다음 구현 지점
+
+- 사용자 요구에 따라 프로필 감사 원자성을 추가했다(원본 audit:false). 세션 철회 중 쓰기 차단도 원본의 경합 공백을 강화했다.
+- 초기 새 DB 전용이다. 기존 설치 업그레이드/이관은 지원하지 않는다. MFA/OIDC/PAT/동의 gate/설정 기반 비밀번호 정책·좌석 제한·계정 생명주기는 미구현이다.
+- 제한기는 프로세스 로컬·직접 socket IP 기준이다. 신뢰 프록시·분산 제한은 미구현이며 프록시 뒤에서는 IP 버킷을 공유한다. 장기 프로세스의 한도 초과 시 제한기 키 교체 같은 잔여 정책은 후속 보강 대상이다.
+- 이벤트는 DB에 원자 저장하지만 outbox 외부 전달/재시도 작업은 미구현이다. Rust DTO 기반 OpenAPI/TS 생성 및 기존 UI 연결도 남았다.
+- 협업 adapter/awareness/권한 철회/재시작 복원, 실제 HWP 본문·운영 추출/썸네일은 초기 probe를 넘어 검증하지 않았다. 나머지 기능은 위 범위 보존 표를 따른다.
+
+다음은 인증 기반 위 첫 workspace 연산: 현재 멤버십 인가, 실제 앱 역할 RLS·철회 경합·풀 컨텍스트 재사용 검증, 기존 React 호출 연결이다. 먼저 AGENTS → environment → 이 수락 SHA와 Orca task → git status/worktree를 확인한다. 재현 명령은 `cargo fetch --locked`, 빠른 gate, `scripts/start-test-postgres.sh`이며, 컨테이너/DB는 매 실행 새로 생성한다. 대상 PR #1은 사용자가 만들었고 이 작업에서는 push/PR 생성/원본 원격 쓰기를 하지 않았다.
+
+
+## 2026-09-24 후속 기능 재개 (진행 중)
+
+- PR #1 실제 재개 상태: Ready/open, HEAD `f5faf89fa38e00ae4772f61db912b826c8a68818`; 사용자 관찰의 Draft와 달랐다. 미커밋 변경 없음. 과거 push 미실행 기록 이후 사용자 요청으로 해당 HEAD가 push된 상태였다.
+- CI 수정 코드 `864a41e4e4da9988390e695655946318dbf8c22d`: job context를 사용할 수 없는 postgres job env에서 DB 검사 step env로 동적 포트 URL 이동. 실패한 push 실행35894918085/checksuite97197656447은 check-run/job0개여서 API annotation 목록이 없었고, gh는 workflow issue로 표시했다. 일반 YAML 파싱을 Actions 검증으로 간주하지 않았다.
+- 원격 [Actions35898070365](https://github.com/AISFlow/fvoci/actions/runs/35898070365), 동일 HEAD PR 이벤트: fast/postgres 모두 성공. 실제 lib6/DB24, ignored0. 원격 cold DB compile41.48s+본문55.21s, lib compile31.79s+본문8.67s. 고정 Actions 두 SHA 조회 성공, Rust1.98.1 공식 manifest200 및 CI설치 성공, PG고정 이미지 CI초기화·실행 성공. 로컬 warm과 다른 장비/조건이므로 단순 속도비교하지 않는다.
+- 동일 SHA 로컬: fmt0.31s/check0.51s/clippy0.51s, lib6본문5.61s/전체5.88s, `scripts/start-test-postgres.sh` DB24본문27.63s/준비·정리포함30.38s, 모두0failed/0ignored. 기존 fast10s/DB35s 로컬 예산 이내. 테스트 소유 컨테이너 정리됨.
+- PR1 제목/본문을 실제 인증 제품 코드·검증·미구현 범위로 수정했다. `gh pr edit`는 deprecated projectCards GraphQL 오류로 실패하여 승인된 GitHub REST PATCH로 갱신했다. rulesets없음/main보호API는 Branch not protected404; 이를 검사 면제로 사용하지 않는다.
+- 독립 PR1 검토: Claude Code Fable5.1 medium task `task_f82e7dfa064b` / dispatch `ctx_655c9221016b`, 고정864a41e, `rust-pr1-final-review`; 아직 결과 대기. PR1 머지 미실행.
+- Workspace: Composer2.5 task `task_d6e1a47da19a` / dispatch `ctx_8acea26b1479`, base864a41e, `rust-workspace-slice`; 소유 src/**, tests/**, 신규003_workspace.sql, grant-app-role.sql. 원본 계약·RLS·철회 경합 구현 중, 미수락. 공통 manifest/lock/CI는 코디네이터 소유.
+- Native rhwp: Grok4.6 task `task_d8508aa82dc4` / dispatch `ctx_ecd7e7cf88f4`, base864a41e, `rust-rhwp-extract`; 소유 crates/document-extract/**와 독립 manifest/lock/fixtures. native검증/제품첨부연결 모두 아직 미수락. 무거운 검증 슬롯은 rhwp에 배정, workspace DB는 조정 후 실행.
+- 두 Cursor 실행 receipt의 요청/유효 모델 일치 및 실제 TUI 작업/프로젝트스킬 읽기 확인. Fable 요청/유효 claude-fable-5-1 medium 일치, turnStart observed. 기존 Run 유지, retained/user_takeover와 소유 불명 fvoci-rust-test-pg-kinesis 및 다른 runner 컨테이너 보존.
+- 다음: Orca `orchestration check`의 전체 delivery 처리 → 고정HEAD Fable지적 해결 → PR1 조건 충족 시 기대HEAD로 squash merge → 최신 main에서 후속통합 worktree/PR. Workspace backend 수락 후 기존 React/DTO생성 연결, rhwp native 수락 후 실제 부모권한·첨부 연결. 현재 Hocuspocus probe의 미지원 상태는 그대로다.
+
+### PR1 독립 검토와 사용자 fixture 추가
+
+- Fable `ctx_655c9221016b`는 864a41e 제품 전체 및 이후 `bea324300d133d0fa5b81880fef9ea50c132e451` fixture-only diff를 검토했다. 인증 slice의 차단 지적 없음. 보고서 `/tmp/fvoci-pr1-review-864a41e.md`, worker_done 수신 후 release 완료. source와 다른 새 workspace 제품 코드는 아직 검토·수락하지 않았다.
+- bea3243은 사용자가 sample.hwp/sample.hwpx를 실제 Hancom 파일로 교체한 커밋이다. 사용자가 직접 파일을 확인하고 `안녕`을 입력했다고 확인하고 계속 진행하도록 승인했다. 기존 파일을 보존했으며 NOTICE/README를 실제 출처·기대 본문으로 수정했다. gen.py는 별도 빈 디렉터리만 받도록 변경하여 원본 fixture 덮어쓰기를 막았다. 임시 디렉터리 생성 성공, 비어 있지 않은/체크인 경로 거부, 기존 fixture SHA256 불변을 실제 검사했다.
+- bea3243 원격 CI35898327395 성공, auth 제품 코드 변화 없음. 관련 로컬 `bash compat/run.sh` exit0/0.76s; 기존 Yrs6사례와 Hocuspocus envelope 차이를 유지했고 HWPX token은 `안녕`이다. HWP probe는 여전히 CFB/FileHeader만 확인하며 native 본문 추출 성공을 뜻하지 않는다.
+- Fable 비차단 권고: 알 수 없는 세션 로그아웃의 불필요한 이벤트 저장은 Composer 소유 identity.rs에서 다음 slice에 회귀 검사와 함께 수정한다. 빈 familyName 정규화, timezone 제한, sliding cookie 갱신, hash 오류 진단, definer search_path 축소·반환 열 명시 및 관련 검사 보강은 추적 중이다. 기존 slice의 제한을 수락하는 것이며 전체 보안 동등성 선언이 아니다.

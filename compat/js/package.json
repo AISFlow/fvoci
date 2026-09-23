@@ -1,0 +1,21 @@
+{
+  "name": "fvoci-compat-probe-js",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Dev-only pinned Yjs/Hocuspocus/Tiptap harness. Product must never import this package.",
+  "scripts": {
+    "probe": "node probe.mjs"
+  },
+  "dependencies": {
+    "@hocuspocus/common": "4.6.0",
+    "@hocuspocus/provider": "4.6.0",
+    "@tiptap/core": "3.31.3",
+    "@tiptap/pm": "3.31.3",
+    "@tiptap/starter-kit": "3.31.3",
+    "@tiptap/y-tiptap": "3.0.9",
+    "ws": "8.18.3",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.32"
+  }
+}
