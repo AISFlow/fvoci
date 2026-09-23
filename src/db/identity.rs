@@ -499,33 +499,17 @@ pub struct ProfilePatch {
 pub async fn update_profile(
     pool: &PgPool,
     user_id: Uuid,
-    token_hash: &str,
+    session_id: Uuid,
     patch: ProfilePatch,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let session = sqlx::query_as::<_, (Uuid,)>(
-        "SELECT id FROM fvoci.app_session_by_token_hash($1)",
-    )
-    .bind(token_hash)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some((session_id,)) = session else {
-        tx.rollback().await?;
-        return Ok(false);
-    };
-
-    let active = sqlx::query_as::<_, (Uuid,)>(
+    let locked = sqlx::query_as::<_, (Uuid,)>(
         r#"
         SELECT u.id
         FROM fvoci.users u
         INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
         WHERE u.id = $1
-          AND s.revoked_at IS NULL
-          AND s.expires_at > now()
-          AND u.deleted_at IS NULL
-          AND u.suspended_at IS NULL
         FOR UPDATE OF u, s
         "#,
     )
@@ -534,7 +518,30 @@ pub async fn update_profile(
     .fetch_optional(&mut *tx)
     .await?;
 
-    if active.is_none() {
+    if locked.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    let still_live: Option<(bool,)> = sqlx::query_as(
+        r#"
+        SELECT (
+            s.revoked_at IS NULL
+            AND s.expires_at > now()
+            AND u.deleted_at IS NULL
+            AND u.suspended_at IS NULL
+        )
+        FROM fvoci.users u
+        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
+        WHERE u.id = $1
+        "#,
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if !still_live.map(|(live,)| live).unwrap_or(false) {
         tx.rollback().await?;
         return Ok(false);
     }

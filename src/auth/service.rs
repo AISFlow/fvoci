@@ -113,7 +113,7 @@ impl AuthService {
         };
         let user_id = live.user_id;
 
-        let updated = update_profile(&self.db.pool, user_id, &token_hash, patch).await?;
+        let updated = update_profile(&self.db.pool, user_id, live.session_id, patch).await?;
         if !updated {
             return Ok(Err(()));
         }
