@@ -739,3 +739,28 @@ ctx602809de1bf8 release 후 새 Grok taskba64ce66469d/ctxd56261e6dc69에
 동기화와 durable persist ack를 구분하는 UI·삭제-only/늦은 ack 회귀를 배정했다.
 coordinator Web CI/prepare는 명시적 editor npm ci 및 web/editor 단위 검사를
 연결했고 bash -n/actionlint/diff --check exit0. 전체 협업 E2E와 수락은 미완료다.
+
+미수락 협업 통합 d5aec64 (main ba19932 기반): Composer a2ce88b를 e569a8a로
+통합한 뒤 코디네이터가 caller 취소와 독립적인 startup 소유권, eviction의 Closing
+유지, shutdown 시 eviction/start task join을 보완했다. 테스트 hook은 문서별로
+격리하고, 취소·최대 room 회수는 새 hub 생성 없이 같은 hub에서 검증한다.
+production helper 별도 target build 9.35s; 실제 격리 PostgreSQL에서
+`FVOCI_COLLAB_ENGINE=$PWD/crates/collab-engine/target/debug/collab-engine scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test collab_product -- --test-threads=4`
+15/15, skip0, cold root compile41.28s/본문10.83s. fmt/check/clippy(all-targets,
+db-tests, locked/offline) 및 lib24(본문5.59s) 성공. 최초 check는 std MutexGuard의
+await 경계에서 Send 오류, 최초 fmt는 제출 engine_bridge 서식 오류였고 수정했다.
+이는 lifecycle·기존 smoke 범위이며 persist/crash/실제 React 협업 수락이 아니다.
+
+Grok bc321fe를 f9cc7cd로 통합: durable ack 기반 badge·회귀 web46/editor11,
+typecheck/build는 워커 성공 보고. 검토에서 같은 provider 재접속이 실제 connection
+세대를 바꾸지 않는 빈틈을 확인하여 task602cc4bdbbc3/ctx35da0fcbd36e에 후속 수정
+배정했다. 소유권은 UI session/ack/tests에 한정한다. 서버 lifecycle 소유권은
+코디네이터에서 다음 Composer durable persist/reconnect task로 넘긴다.
+Fable의 실제 주간 한도 시에만 검증된 Claude Code Opus5.5 medium 대체를 적용하며,
+현재까지 quota 오류나 Opus 실행은 없다. 독립 검토의 기존 차단 지적은 미해결이다.
+
+다음: 검증한 코드 묶음을 Draft PR로 원격 CI에 제출하고(수락/머지 아님),
+서버 snapshot-only/persist barrier/helper 수명/reconnect 및 UI generation 수정을
+통합한다. 수신자 현재 인가·backpressure·실제 두 React 클라이언트·fresh-client
+crash 복원 검증은 남아 있다. /collab은 명시적 FVOCI_COLLAB_ENGINE 설정이 없으면
+활성화되지 않는다. 협업 지원 완료나 OS IME 검증 완료로 표시하지 않는다.
