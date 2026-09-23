@@ -20,11 +20,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     migrate::run_migrations(&config.migration_url).await?;
 
     let pool = pool::connect_app(&config.app_database_url).await?;
+    let run_result = run_server(config, pool.clone()).await;
+    pool.close().await;
+    run_result?;
+    Ok(())
+}
+
+async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     migrate::assert_app_role(&pool).await?;
 
     let state = AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool.clone()),
+            db: Db::new(pool),
             password_keys: config.password_keys.clone(),
         }),
         branding_name: config.branding_name.clone(),
@@ -44,7 +51,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
-    pool.close().await;
     Ok(())
 }
 

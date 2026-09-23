@@ -18,7 +18,7 @@ impl RateLimiter {
         Self::default()
     }
 
-    pub async fn allow(&self, key: &str, limit: u32) -> bool {
+    pub async fn allow(&self, key: &str, limit: u32) -> Result<(), u32> {
         let now = Instant::now();
         let mut map = self.inner.lock().await;
         if !map.contains_key(key) && map.len() >= MAX_KEYS {
@@ -30,10 +30,17 @@ impl RateLimiter {
         let entries = map.entry(key.to_string()).or_default();
         entries.retain(|t| now.duration_since(*t) < WINDOW);
         if entries.len() >= limit as usize {
-            return false;
+            let retry_after = entries
+                .first()
+                .map(|oldest| {
+                    let remaining = WINDOW.saturating_sub(now.duration_since(*oldest));
+                    remaining.as_secs().max(1) as u32
+                })
+                .unwrap_or(1);
+            return Err(retry_after);
         }
         entries.push(now);
-        true
+        Ok(())
     }
 }
 

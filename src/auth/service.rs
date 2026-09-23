@@ -17,6 +17,15 @@ pub struct AuthService {
     pub password_keys: Keyring,
 }
 
+pub struct SetupInstanceInput {
+    pub email: String,
+    pub given_name: String,
+    pub family_name: Option<String>,
+    pub workspace_slug: String,
+    pub workspace_name: String,
+    pub client_ip: Option<String>,
+}
+
 impl AuthService {
     pub async fn setup_needed(&self) -> Result<bool, sqlx::Error> {
         Ok(count_users(&self.db.pool).await? == 0)
@@ -24,12 +33,8 @@ impl AuthService {
 
     pub async fn setup_instance(
         &self,
-        email: String,
         password: String,
-        given_name: String,
-        family_name: Option<String>,
-        workspace_slug: String,
-        workspace_name: String,
+        input: SetupInstanceInput,
     ) -> Result<Result<(Uuid, Uuid, String), SetupError>, sqlx::Error> {
         if count_users(&self.db.pool).await? > 0 {
             return Ok(Err(SetupError::Closed));
@@ -42,14 +47,15 @@ impl AuthService {
         let token = new_token();
         let expires_at = Utc::now() + Duration::seconds(SESSION_TTL_SECS);
         let input = new_setup_input(SetupSessionParams {
-            email,
+            email: input.email,
             password_hash,
-            given_name,
-            family_name,
-            workspace_slug,
-            workspace_name,
+            given_name: input.given_name,
+            family_name: input.family_name,
+            workspace_slug: input.workspace_slug,
+            workspace_name: input.workspace_name,
             token_hash: token.hash,
             expires_at,
+            client_ip: input.client_ip,
         });
         let user_id = input.user_id;
         let workspace_id = input.workspace_id;

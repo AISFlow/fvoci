@@ -41,6 +41,7 @@ pub struct SetupSessionParams {
     pub workspace_name: String,
     pub token_hash: String,
     pub expires_at: DateTime<Utc>,
+    pub client_ip: Option<String>,
 }
 
 pub struct LiveSession {
@@ -527,7 +528,7 @@ pub async fn update_profile(
         r#"
         SELECT (
             s.revoked_at IS NULL
-            AND s.expires_at > now()
+            AND s.expires_at > clock_timestamp()
             AND u.deleted_at IS NULL
             AND u.suspended_at IS NULL
         )
@@ -789,6 +790,6 @@ pub fn new_setup_input(params: SetupSessionParams) -> SetupFirstOwnerInput {
         session_expires_at: params.expires_at,
         event_id: Uuid::now_v7(),
         audit_id: Uuid::now_v7(),
-        ip: None,
+        ip: params.client_ip,
     }
 }

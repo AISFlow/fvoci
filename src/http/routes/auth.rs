@@ -54,23 +54,23 @@ async fn login(
     let Json(body) = body.map_err(AppError::from)?;
     check_origin(&headers, &state.public_origin)?;
     let ip = peer_ip(peer.ip());
-    if !state
+    if let Err(retry_after) = state
         .rate_limiter
         .allow(&format!("login:ip:{ip}"), 30)
         .await
     {
-        return Err(AppError::from_code(ProblemCode::RateLimited));
+        return Err(AppError::rate_limited(retry_after));
     }
     if body.password.is_empty() {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     let email = normalize_email(&body.email)?;
-    if !state
+    if let Err(retry_after) = state
         .rate_limiter
-        .allow(&format!("login:email:{email}"), 10)
+        .allow(&format!("login:email:{ip}:{email}"), 10)
         .await
     {
-        return Err(AppError::from_code(ProblemCode::RateLimited));
+        return Err(AppError::rate_limited(retry_after));
     }
     let result = state
         .auth
@@ -214,7 +214,7 @@ async fn require_session(state: &AppState, jar: &CookieJar) -> Result<SessionUse
 
 fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", sanitize_db_error(&err));
-    AppError::problem(StatusCode::INTERNAL_SERVER_ERROR, ProblemCode::InvalidInput)
+    AppError::internal()
 }
 
 fn sanitize_db_error(err: &sqlx::Error) -> String {

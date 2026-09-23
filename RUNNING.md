@@ -13,7 +13,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `PASSWORD_PEPPER_KEYS` | JSON map of pepper key id → 64-char hex. |
 | `PASSWORD_PEPPER_ACTIVE_KEY_ID` | Active pepper id. |
 | `FVOCI_BIND` | Listen address (default `127.0.0.1:0`). |
-| `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). |
+| `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. |
 | `FVOCI_COOKIE_SECURE` | `true`/`1` to set `Secure` on session cookies; defaults from `FVOCI_PUBLIC_ORIGIN` scheme. |
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
 
@@ -21,13 +21,17 @@ Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. Th
 
 ## Provision app role (after migrate)
 
+Create the dedicated app LOGIN role first, then run migrations, then apply grants:
+
 ```sh
 export DATABASE_URL='postgres://owner@host:5432/fvoci?sslmode=require'
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE fvoci_app_prod LOGIN PASSWORD '***' NOSUPERUSER NOBYPASSRLS"
 cargo run --bin fvoci-migrate
 psql "$DATABASE_URL" -v app_role=fvoci_app_prod -f scripts/grant-app-role.sql
-# create LOGIN role separately with a unique password; never commit credentials
 export DATABASE_APP_URL='postgres://fvoci_app_prod:***@host:5432/fvoci?sslmode=require'
 ```
+
+Never grant the app role before the role exists. Never commit credentials.
 
 ## Start server
 
@@ -35,7 +39,7 @@ export DATABASE_APP_URL='postgres://fvoci_app_prod:***@host:5432/fvoci?sslmode=r
 cargo run --bin fvoci-server
 ```
 
-Migrations run once at startup via the owner URL; the server connects only through `DATABASE_APP_URL`.
+Migrations run once at startup via the owner URL; the server connects only through `DATABASE_APP_URL`. The app pool is closed explicitly on shutdown and startup failures.
 
 ## Tests
 
@@ -52,4 +56,12 @@ export TEST_DATABASE_URL='postgres://admin@host:5432/postgres?sslmode=require'
 cargo test --features db-tests --test db_integration
 ```
 
-Optional: `scripts/start-test-postgres.sh` starts an ephemeral Docker PostgreSQL on loopback with a random password, then exports `TEST_DATABASE_URL`. Integration tests create and drop their own UUID database and app role.
+Optional local PostgreSQL via Docker (loopback only, random password). The helper starts an ephemeral container, waits for readiness, runs the given command with `TEST_DATABASE_URL` set for that command only, then removes the container:
+
+```sh
+scripts/start-test-postgres.sh
+# or
+scripts/start-test-postgres.sh cargo test --features db-tests --test db_integration
+```
+
+Integration tests always create and drop their own UUID database and app role; they never reuse or drop an externally supplied database.

@@ -79,8 +79,9 @@ impl Config {
         let password_keys = Keyring::parse(&pepper_keys, &pepper_active)?;
 
         let branding_name = env::var("FVOCI_BRANDING_NAME").unwrap_or_else(|_| "FVOCI".to_string());
-        let public_origin =
+        let public_origin_raw =
             env::var("FVOCI_PUBLIC_ORIGIN").unwrap_or_else(|_| "http://localhost:5173".to_string());
+        let public_origin = crate::http::guard::normalize_public_origin(&public_origin_raw)?;
         let cookie_secure = env::var("FVOCI_COOKIE_SECURE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(public_origin.starts_with("https://"));

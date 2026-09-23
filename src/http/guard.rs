@@ -2,6 +2,17 @@ use axum::http::HeaderMap;
 
 use crate::error::{AppError, ProblemCode};
 
+pub fn normalize_public_origin(origin: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(origin).map_err(|e| format!("invalid public origin: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("public origin must use http or https".into());
+    }
+    if parsed.host_str().is_none() {
+        return Err("public origin must include a host".into());
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
 pub fn check_origin(headers: &HeaderMap, public_origin: &str) -> Result<(), AppError> {
     let origin = headers
         .get("origin")
@@ -10,7 +21,11 @@ pub fn check_origin(headers: &HeaderMap, public_origin: &str) -> Result<(), AppE
     if origin.is_none() {
         return Ok(());
     }
-    if origin == Some(public_origin) {
+    let expected = normalize_public_origin(public_origin)
+        .map_err(|_| AppError::from_code(ProblemCode::InternalError))?;
+    let actual = normalize_public_origin(origin.unwrap())
+        .map_err(|_| AppError::from_code(ProblemCode::OriginMismatch))?;
+    if actual == expected {
         Ok(())
     } else {
         Err(AppError::from_code(ProblemCode::OriginMismatch))

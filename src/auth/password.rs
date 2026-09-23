@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -27,7 +27,8 @@ static PASSWORD_HASH_RE: LazyLock<Regex> = LazyLock::new(|| {
 static KEY_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]{1,32}$").expect("key id regex"));
 
-static ARGON2_SEM: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(ARGON2_CONCURRENCY));
+static ARGON2_SEM: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(ARGON2_CONCURRENCY)));
 
 const DUMMY_HASH: &str =
     "$argon2id$v=19$m=65536,t=3,p=1$HoET2F3LFcs9mMRSrvzJC2vtvTGCguNTN54dC+hTezE$hUFyPgDPDMXY9wGP3BcOWc0INEgtonfZetdGtmPAqO8";
@@ -64,7 +65,7 @@ impl Keyring {
                 return Err("invalid key id".into());
             }
             if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err("keys must be 64-char hex".into());
+                return Err("keys must be 64-char hex".to_string());
             }
             keys.insert(
                 id,
@@ -108,8 +109,13 @@ pub async fn hash_password(password: &str, ring: &Keyring) -> Result<String, Str
         .clone();
     let active_id = ring.active_id.clone();
     let password = password.to_string();
-    let permit = ARGON2_SEM.acquire().await.map_err(|e| e.to_string())?;
-    let result = tokio::task::spawn_blocking(move || {
+    let permit = ARGON2_SEM
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let input = sign_hmac(&key, &password);
         let salt = generate_salt()?;
         let hash = argon2()
@@ -118,9 +124,7 @@ pub async fn hash_password(password: &str, ring: &Keyring) -> Result<String, Str
         Ok(format!("$fvoci-pepper={}{}", active_id, hash))
     })
     .await
-    .map_err(|e| e.to_string())?;
-    drop(permit);
-    result
+    .map_err(|e| e.to_string())?
 }
 
 pub struct VerifyResult {
@@ -132,8 +136,17 @@ pub async fn verify_password(hash: Option<&str>, password: &str, ring: &Keyring)
     let hash = hash.map(str::to_string);
     let password = password.to_string();
     let ring = ring.clone();
-    let permit = ARGON2_SEM.acquire().await;
-    let result = match tokio::task::spawn_blocking(move || {
+    let permit = match ARGON2_SEM.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return VerifyResult {
+                ok: false,
+                needs_pepper_rotation: false,
+            };
+        }
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         verify_password_sync(hash.as_deref(), &password, &ring)
     })
     .await
@@ -143,11 +156,7 @@ pub async fn verify_password(hash: Option<&str>, password: &str, ring: &Keyring)
             ok: false,
             needs_pepper_rotation: false,
         },
-    };
-    if let Ok(permit) = permit {
-        drop(permit);
     }
-    result
 }
 
 fn verify_password_sync(hash: Option<&str>, password: &str, ring: &Keyring) -> VerifyResult {

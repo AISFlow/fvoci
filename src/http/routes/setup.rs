@@ -9,13 +9,16 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::auth::service::SetupError;
+use crate::auth::service::{SetupError, SetupInstanceInput};
 use crate::error::{AppError, ProblemCode};
 use crate::http::cookie::set_session_cookie;
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
-use crate::validate::{normalize_email, normalize_slug, validate_family_name, validate_given_name};
+use crate::validate::{
+    normalize_email, normalize_slug, utf16_len, validate_family_name, validate_given_name,
+    validate_password_length,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/v1/setup", get(setup_status).post(setup_run))
@@ -71,20 +74,15 @@ async fn setup_run(
     let Json(body) = body.map_err(AppError::from)?;
     check_origin(&headers, &state.public_origin)?;
     let ip = peer_ip(peer.ip());
-    if !state
+    if let Err(retry_after) = state
         .rate_limiter
         .allow(&format!("setup:ip:{ip}"), 10)
         .await
     {
-        return Err(AppError::from_code(ProblemCode::RateLimited));
+        return Err(AppError::rate_limited(retry_after));
     }
 
-    if body.password.len() < 10 {
-        return Err(AppError::problem(
-            StatusCode::BAD_REQUEST,
-            ProblemCode::PasswordInvalid,
-        ));
-    }
+    validate_password_length(&body.password)?;
 
     let email = normalize_email(&body.email)?;
     let workspace_slug = normalize_slug(&body.workspace_slug)?;
@@ -93,7 +91,7 @@ async fn setup_run(
         validate_family_name(family_name)?;
     }
     let workspace_name = body.workspace_name.trim();
-    if workspace_name.is_empty() || workspace_name.len() > 100 {
+    if workspace_name.is_empty() || utf16_len(workspace_name) > 100 {
         return Err(AppError::problem(
             StatusCode::BAD_REQUEST,
             ProblemCode::InvalidInput,
@@ -103,12 +101,15 @@ async fn setup_run(
     let result = state
         .auth
         .setup_instance(
-            email,
             body.password,
-            body.given_name.trim().to_string(),
-            body.family_name.map(|s| s.trim().to_string()),
-            workspace_slug,
-            workspace_name.to_string(),
+            SetupInstanceInput {
+                email,
+                given_name: body.given_name.trim().to_string(),
+                family_name: body.family_name.map(|s| s.trim().to_string()),
+                workspace_slug,
+                workspace_name: workspace_name.to_string(),
+                client_ip: Some(ip),
+            },
         )
         .await
         .map_err(internal)?;
@@ -138,7 +139,7 @@ async fn setup_run(
 
 fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", sanitize_db_error(&err));
-    AppError::problem(StatusCode::INTERNAL_SERVER_ERROR, ProblemCode::InvalidInput)
+    AppError::internal()
 }
 
 fn sanitize_db_error(err: &sqlx::Error) -> String {

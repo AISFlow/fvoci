@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::hash_token;
@@ -161,7 +161,7 @@ async fn json_request(
     cookie: Option<&str>,
     extra_headers: &[(&str, &str)],
     peer: Option<std::net::SocketAddr>,
-) -> (StatusCode, Value, Option<String>) {
+) -> (StatusCode, Value, Option<String>, HeaderMap) {
     let peer = peer.unwrap_or_else(test_peer);
     let mut builder = Request::builder().method(method).uri(path);
     if let Some(cookie) = cookie {
@@ -183,6 +183,7 @@ async fn json_request(
         .insert(axum::extract::ConnectInfo(peer));
     let response = app.oneshot(request).await.expect("response");
     let status = response.status();
+    let headers = response.headers().clone();
     let set_cookie = response
         .headers()
         .get("set-cookie")
@@ -196,7 +197,7 @@ async fn json_request(
     } else {
         serde_json::from_slice(&bytes).unwrap_or(json!({}))
     };
-    (status, json, set_cookie)
+    (status, json, set_cookie, headers)
 }
 
 async fn wait_for_profile_patch_blocked(admin: &PgPool, blocker_pid: i32) {
@@ -239,7 +240,7 @@ fn extract_session_cookie(set_cookie: &str) -> String {
 
 async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid) {
     let app = router(app_state(&harness.app_url).await);
-    let (_, _, cookie_hdr) = json_request(
+    let (_, _, cookie_hdr, _) = json_request(
         app.clone(),
         "POST",
         "/api/v1/setup",
@@ -307,7 +308,7 @@ async fn setup_login_me_patch_logout_flow() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _) = setup_session(&harness).await;
 
-    let (status, body, _) = json_request(
+    let (status, body, _, _) = json_request(
         app.clone(),
         "GET",
         "/api/v1/auth/me",
@@ -321,7 +322,7 @@ async fn setup_login_me_patch_logout_flow() {
     assert_eq!(body["email"], "admin@example.com");
     assert_eq!(body["locale"], "ko");
 
-    let (status, body, _) = json_request(
+    let (status, body, _, _) = json_request(
         app.clone(),
         "PATCH",
         "/api/v1/auth/me",
@@ -334,7 +335,7 @@ async fn setup_login_me_patch_logout_flow() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["givenName"], "Renamed");
 
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app.clone(),
         "POST",
         "/api/v1/auth/logout",
@@ -346,7 +347,7 @@ async fn setup_login_me_patch_logout_flow() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app.clone(),
         "GET",
         "/api/v1/auth/me",
@@ -383,6 +384,7 @@ async fn concurrent_setup_has_single_winner() {
         workspace_name: "Race A".into(),
         token_hash: token_a.hash,
         expires_at: Utc::now() + ChronoDuration::days(30),
+        client_ip: None,
     });
     let input_b = new_setup_input(SetupSessionParams {
         email: "b@example.com".into(),
@@ -393,6 +395,7 @@ async fn concurrent_setup_has_single_winner() {
         workspace_name: "Race B".into(),
         token_hash: token_b.hash,
         expires_at: Utc::now() + ChronoDuration::days(30),
+        client_ip: None,
     });
     let (a, b) = tokio::join!(
         setup_first_owner(&pool_a, input_a),
@@ -427,7 +430,7 @@ async fn revoked_and_expired_sessions_are_rejected() {
         .execute(&admin)
         .await
         .unwrap();
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app.clone(),
         "GET",
         "/api/v1/auth/me",
@@ -489,6 +492,7 @@ async fn audit_insert_failure_rolls_back_setup() {
         workspace_name: "Owner".into(),
         token_hash: token.hash,
         expires_at: Utc::now() + ChronoDuration::days(30),
+        client_ip: None,
     });
     let result = setup_first_owner(&pool, input).await;
     assert!(result.is_err());
@@ -509,7 +513,7 @@ async fn profile_event_failure_rolls_back_profile_update() {
         .unwrap();
     install_insert_fail_trigger(&admin, "events", "test_event_fail").await;
 
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app.clone(),
         "PATCH",
         "/api/v1/auth/me",
@@ -552,7 +556,7 @@ async fn profile_audit_failure_rolls_back_profile_update() {
         .unwrap();
     install_insert_fail_trigger(&admin, "audit_log", "test_profile_audit_fail").await;
 
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app.clone(),
         "PATCH",
         "/api/v1/auth/me",
@@ -589,7 +593,7 @@ async fn patch_me_rejects_foreign_user_id_in_body() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _) = setup_session(&harness).await;
     let other = Uuid::now_v7().to_string();
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app,
         "PATCH",
         "/api/v1/auth/me",
@@ -599,10 +603,7 @@ async fn patch_me_rejects_foreign_user_id_in_body() {
         None,
     )
     .await;
-    assert!(
-        status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
-        "unexpected status {status}"
-    );
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     harness.cleanup().await;
 }
 
@@ -610,7 +611,7 @@ async fn patch_me_rejects_foreign_user_id_in_body() {
 async fn patch_me_rejects_bearer_token_auth() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _) = setup_session(&harness).await;
-    let (status, body, _) = json_request(
+    let (status, body, _, _) = json_request(
         app,
         "GET",
         "/api/v1/auth/me",
@@ -635,7 +636,7 @@ async fn patch_profile_waits_on_suspend_lock_then_returns_unauthorized() {
         .await
         .unwrap();
 
-    let (status, body, _) = json_request(
+    let (status, body, _, _) = json_request(
         app.clone(),
         "GET",
         "/api/v1/auth/me",
@@ -659,7 +660,7 @@ async fn patch_profile_waits_on_suspend_lock_then_returns_unauthorized() {
         .await
         .unwrap();
 
-    let (status, live_body, _) = json_request(
+    let (status, live_body, _, _) = json_request(
         app.clone(),
         "GET",
         "/api/v1/auth/me",
@@ -692,7 +693,7 @@ async fn patch_profile_waits_on_suspend_lock_then_returns_unauthorized() {
     wait_for_profile_patch_blocked(&admin, blocker_pid).await;
     admin_tx.commit().await.unwrap();
 
-    let (patch_status, patch_body, _) = patch.await.unwrap();
+    let (patch_status, patch_body, _, _) = patch.await.unwrap();
     assert_eq!(patch_status, StatusCode::UNAUTHORIZED);
     assert_eq!(patch_body["code"], "authentication_required");
 
@@ -746,7 +747,7 @@ async fn stored_password_hash_verifies_on_login() {
     )
     .await;
 
-    let (status, body, _) = json_request(
+    let (status, body, _, _) = json_request(
         app.clone(),
         "POST",
         "/api/v1/auth/login",
@@ -759,7 +760,7 @@ async fn stored_password_hash_verifies_on_login() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.get("userId").is_some());
 
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app,
         "POST",
         "/api/v1/auth/login",
@@ -834,7 +835,7 @@ async fn patch_family_name_omitted_preserves_existing_value() {
         .await
         .unwrap();
 
-    let (status, body, _) = json_request(
+    let (status, body, _, _) = json_request(
         app.clone(),
         "PATCH",
         "/api/v1/auth/me",
@@ -848,7 +849,7 @@ async fn patch_family_name_omitted_preserves_existing_value() {
     assert_eq!(body["givenName"], "Renamed");
     assert_eq!(body["familyName"], "Kim");
 
-    let (status, body, _) = json_request(
+    let (status, body, _, _) = json_request(
         app,
         "PATCH",
         "/api/v1/auth/me",
@@ -869,7 +870,7 @@ async fn patch_family_name_omitted_preserves_existing_value() {
 async fn patch_rejects_null_given_name_with_source() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _) = setup_session(&harness).await;
-    let (status, body, _) = json_request(
+    let (status, body, _, _) = json_request(
         app,
         "PATCH",
         "/api/v1/auth/me",
@@ -889,7 +890,7 @@ async fn patch_rejects_null_given_name_with_source() {
 async fn setup_rejects_unknown_fields() {
     let harness = TestDb::bootstrap().await;
     let app = router(app_state(&harness.app_url).await);
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app,
         "POST",
         "/api/v1/setup",
@@ -958,7 +959,7 @@ async fn patch_profile_waits_on_session_revoke_lock_then_returns_unauthorized() 
         .unwrap();
     admin_tx.commit().await.unwrap();
 
-    let (patch_status, patch_body, _) = patch.await.unwrap();
+    let (patch_status, patch_body, _, _) = patch.await.unwrap();
     assert_eq!(patch_status, StatusCode::UNAUTHORIZED);
     assert_eq!(patch_body["code"], "authentication_required");
 
@@ -981,7 +982,7 @@ async fn rate_limit_uses_socket_ip_not_forwarded_for() {
     let peer_b = std::net::SocketAddr::from(([203, 0, 113, 2], 42424));
 
     for _ in 0..10 {
-        let (status, _, _) = json_request(
+        let (status, _, _, _) = json_request(
             app.clone(),
             "POST",
             "/api/v1/auth/login",
@@ -994,7 +995,7 @@ async fn rate_limit_uses_socket_ip_not_forwarded_for() {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
-    let (status, _, _) = json_request(
+    let (status, _, _, _) = json_request(
         app,
         "POST",
         "/api/v1/auth/login",
@@ -1006,5 +1007,143 @@ async fn rate_limit_uses_socket_ip_not_forwarded_for() {
     .await;
     assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
 
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn setup_rejects_short_password_by_utf16_length() {
+    let harness = TestDb::bootstrap().await;
+    let app = router(app_state(&harness.app_url).await);
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "short@example.com",
+            "password": "가나다라",
+            "givenName": "Short",
+            "workspaceSlug": "short",
+            "workspaceName": "Short"
+        })),
+        None,
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "password_invalid");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn login_rate_limit_returns_contract_fields() {
+    let harness = TestDb::bootstrap().await;
+    let app = router(app_state(&harness.app_url).await);
+    let peer = std::net::SocketAddr::from(([203, 0, 113, 99], 42424));
+    for _ in 0..10 {
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"email": "victim@example.com", "password": "wrong-password"})),
+            None,
+            &[],
+            Some(peer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, body, _, headers) = json_request(
+        app,
+        "POST",
+        "/api/v1/auth/login",
+        Some(json!({"email": "victim@example.com", "password": "wrong-password"})),
+        None,
+        &[],
+        Some(peer),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["code"], "rate_limit_exceeded");
+    assert!(body["params"]["retryAfter"].is_number());
+    let retry_after = headers.get("retry-after").unwrap().to_str().unwrap();
+    assert_eq!(
+        body["params"]["retryAfter"].as_u64().unwrap().to_string(),
+        retry_after
+    );
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn origin_mismatch_returns_forbidden_problem() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/auth/logout",
+        None,
+        Some(&cookie),
+        &[("origin", "http://evil.example.com")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "origin_mismatch");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn setup_records_client_ip_in_audit_log() {
+    let harness = TestDb::bootstrap().await;
+    let app = router(app_state(&harness.app_url).await);
+    let peer = std::net::SocketAddr::from(([203, 0, 113, 50], 42424));
+    let (_, _, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "audit@example.com",
+            "password": "supersecret1",
+            "givenName": "Audit",
+            "workspaceSlug": "auditco",
+            "workspaceName": "Audit Co"
+        })),
+        None,
+        &[],
+        Some(peer),
+    )
+    .await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let ip: (Option<String>,) = sqlx::query_as(
+        "SELECT host(ip) FROM fvoci.audit_log WHERE verb = 'instance.setup' LIMIT 1",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(ip.0.as_deref(), Some("203.0.113.50"));
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn app_role_cannot_read_secret_columns_or_migrations() {
+    let harness = TestDb::bootstrap().await;
+    let app = pool::connect_app(&harness.app_url).await.unwrap();
+    let denied_password =
+        sqlx::query_scalar::<_, String>("SELECT password_hash FROM fvoci.users LIMIT 1")
+            .fetch_optional(&app)
+            .await;
+    assert!(denied_password.is_err());
+    let denied_migrations =
+        sqlx::query_scalar::<_, i32>("SELECT version FROM fvoci.schema_migrations LIMIT 1")
+            .fetch_optional(&app)
+            .await;
+    assert!(denied_migrations.is_err());
+    app.close().await;
     harness.cleanup().await;
 }
