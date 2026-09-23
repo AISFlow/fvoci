@@ -1,0 +1,48 @@
+[package]
+name = "collab-engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Isolated native Yrs child for FVOCI collab updateV1. Not the product WebSocket."
+readme = "README.md"
+
+# Pin authority for this crate's lockfile. Root Cargo.toml is not this crate.
+[package.metadata.collab-engine]
+yrs = "0.28.0"
+yrs_checksum = "52c70dc8beca8666c77612a96889106ca3cd65318609721f464624ff79685da9"
+yrs_git_rev = "23b7f5693bbf9e7d26340c521ee8647f79bdfba2"
+yrs_features = ["small-client"]
+yjs = "13.6.32"
+fragment = "prosemirror"
+encoding_v1 = 1
+offset_kind = "utf16"
+skip_gc = true
+
+[[bin]]
+name = "collab-engine"
+path = "src/bin/collab-engine.rs"
+required-features = ["worker"]
+
+[[test]]
+name = "yjs_compat"
+required-features = ["worker"]
+
+[[test]]
+name = "process_boundary"
+required-features = ["worker"]
+
+[features]
+default = []
+# Yrs Doc + child binary. Parent pathdep uses default-features=false.
+worker = ["dep:yrs"]
+# Compiles `--test-hang-ms` / `--dump-rlimits` into the helper. Production omits them.
+test-hang = ["worker"]
+
+[dependencies]
+base64 = "0.22"
+libc = { version = "0.2", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+yrs = { version = "=0.28.0", default-features = false, features = ["small-client"], optional = true }

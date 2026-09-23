@@ -1,0 +1,63 @@
+{
+  "yjs": "13.6.32",
+  "fragment": "prosemirror",
+  "encoding": 1,
+  "gc": false,
+  "generator": "crates/collab-engine/js/generate.mjs",
+  "source_contract_sha": "393795261322b916e588043cf94feca999175843",
+  "structured": {
+    "must_include": [
+      "안녕 본문",
+      "링크",
+      "🚀",
+      "영희",
+      "한글셀",
+      "✨"
+    ],
+    "attrs": {
+      "paragraph_id": "p-alpha-001",
+      "table_id": "tbl-001",
+      "mention_id": "user-42",
+      "mention_entity": "user",
+      "href": "https://example.invalid/wiki/안녕"
+    },
+    "prosemirror_type": "doc"
+  },
+  "korean_emoji": {
+    "after_mid_and_delete_includes": [
+      "가",
+      "중",
+      "🚀",
+      "마바사"
+    ],
+    "after_mid_and_delete_excludes": [
+      "나다"
+    ],
+    "prosemirror_text": "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"attrs\":{\"id\":\"p-ko-001\"},\"content\":[{\"type\":\"text\",\"text\":\"가중🚀마바사\"}]}]}"
+  },
+  "delete_only": {
+    "state_vector_unchanged": true,
+    "sv_before_b64": "AR8K",
+    "sv_after_b64": "AR8K"
+  },
+  "pending": {
+    "u1_has": "one",
+    "u2_has": "two한글"
+  },
+  "revision": {
+    "before": [
+      "스냅샷-본문"
+    ],
+    "after": [
+      "compact-이후"
+    ]
+  },
+  "followup": {
+    "must_include": [
+      "후속편집한글✨",
+      "안녕 본문"
+    ],
+    "prosemirror_type": "doc"
+  },
+  "utf8_marker": "안녕"
+}

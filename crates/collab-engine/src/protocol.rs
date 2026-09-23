@@ -1,0 +1,208 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::b64;
+use crate::limits::Limits;
+use crate::outcome::{EngineStatus, LimitKind};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    Ping,
+    /// Load last committed completeV1 snapshot, then apply tail updates in order.
+    Load {
+        #[serde(default, with = "b64::option")]
+        snapshot_b64: Option<Vec<u8>>,
+        #[serde(default, with = "b64::vec_of")]
+        tail_b64: Vec<Vec<u8>>,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
+    /// Apply a candidate updateV1. Parent must not treat success as durable.
+    Apply {
+        #[serde(with = "b64")]
+        update_b64: Vec<u8>,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
+    /// Sync update from a remote state vector (`encode_state_as_update_v1`).
+    Sync {
+        #[serde(with = "b64")]
+        state_vector_b64: Vec<u8>,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
+    /// Complete V1 snapshot including pending updates and the delete set.
+    Snapshot,
+    Inspect,
+}
+
+fn encoding_v1() -> u8 {
+    1
+}
+
+impl Request {
+    pub fn encoding(&self) -> u8 {
+        match self {
+            Self::Load { encoding, .. }
+            | Self::Apply { encoding, .. }
+            | Self::Sync { encoding, .. } => *encoding,
+            Self::Ping | Self::Snapshot | Self::Inspect => 1,
+        }
+    }
+
+    /// Binary payload size before JSON/base64 expansion.
+    pub fn payload_bytes(&self) -> u64 {
+        match self {
+            Self::Ping | Self::Snapshot | Self::Inspect => 0,
+            Self::Apply { update_b64, .. } => update_b64.len() as u64,
+            Self::Sync {
+                state_vector_b64, ..
+            } => state_vector_b64.len() as u64,
+            Self::Load {
+                snapshot_b64,
+                tail_b64,
+                ..
+            } => load_total_bytes(snapshot_b64.as_deref().unwrap_or(&[]), tail_b64),
+        }
+    }
+
+    pub fn tail_rows(&self) -> usize {
+        match self {
+            Self::Load { tail_b64, .. } => tail_b64.len(),
+            _ => 0,
+        }
+    }
+
+    /// Cap blobs/rows before `serde_json::to_vec` allocates a base64 copy.
+    pub fn preflight(&self, limits: &Limits) -> Result<(), EngineStatus> {
+        cap_load_parts(
+            match self {
+                Self::Load {
+                    snapshot_b64,
+                    tail_b64,
+                    ..
+                } => Some((snapshot_b64.as_deref().unwrap_or(&[]), tail_b64.as_slice())),
+                _ => None,
+            },
+            self.payload_bytes(),
+            self.tail_rows(),
+            limits,
+        )
+    }
+}
+
+pub fn load_total_bytes(snapshot: &[u8], tail: &[Vec<u8>]) -> u64 {
+    tail.iter().fold(snapshot.len() as u64, |acc, u| {
+        acc.saturating_add(u.len() as u64)
+    })
+}
+
+pub fn cap_load_parts(
+    load: Option<(&[u8], &[Vec<u8>])>,
+    payload_bytes: u64,
+    tail_rows: usize,
+    limits: &Limits,
+) -> Result<(), EngineStatus> {
+    if let Some((_, tail)) = load {
+        if tail.len() > limits.max_tail_updates {
+            return Err(EngineStatus::ResourceLimit {
+                kind: LimitKind::Ops,
+                detail: format!(
+                    "tail {} exceeds max {}",
+                    tail.len(),
+                    limits.max_tail_updates
+                ),
+            });
+        }
+    }
+    if payload_bytes > limits.max_input_bytes {
+        return Err(EngineStatus::ResourceLimit {
+            kind: LimitKind::Input,
+            detail: format!(
+                "payload {payload_bytes} bytes exceeds {}-byte limit",
+                limits.max_input_bytes
+            ),
+        });
+    }
+    let _ = tail_rows;
+    Ok(())
+}
+
+/// Inspect raw JSON (child) and refuse Load tails before base64 decode copies.
+pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatus> {
+    let Some(obj) = v.as_object() else {
+        return Ok(());
+    };
+    if obj.get("op").and_then(Value::as_str) != Some("load") {
+        if let Some(s) = obj.get("update_b64").and_then(Value::as_str) {
+            cap_b64_field("update_b64", s, limits)?;
+        }
+        if let Some(s) = obj.get("state_vector_b64").and_then(Value::as_str) {
+            cap_b64_field("state_vector_b64", s, limits)?;
+        }
+        return Ok(());
+    }
+    let snap = obj
+        .get("snapshot_b64")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let tail = obj
+        .get("tail_b64")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if tail.len() > limits.max_tail_updates {
+        return Err(EngineStatus::ResourceLimit {
+            kind: LimitKind::Ops,
+            detail: format!(
+                "tail {} exceeds max {}",
+                tail.len(),
+                limits.max_tail_updates
+            ),
+        });
+    }
+    let mut total = b64::decoded_len_estimate(snap.len());
+    if total > limits.max_input_bytes {
+        return Err(EngineStatus::ResourceLimit {
+            kind: LimitKind::Input,
+            detail: format!(
+                "snapshot estimate {total} exceeds {}-byte limit",
+                limits.max_input_bytes
+            ),
+        });
+    }
+    for (i, item) in tail.iter().enumerate() {
+        let Some(s) = item.as_str() else {
+            return Err(EngineStatus::Malformed {
+                detail: format!("tail_b64[{i}] is not a string"),
+            });
+        };
+        let n = b64::decoded_len_estimate(s.len());
+        total = total.saturating_add(n);
+        if total > limits.max_input_bytes {
+            return Err(EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                detail: format!(
+                    "load snapshot+tail estimate {total} exceeds {}-byte limit",
+                    limits.max_input_bytes
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn cap_b64_field(name: &str, s: &str, limits: &Limits) -> Result<(), EngineStatus> {
+    let n = b64::decoded_len_estimate(s.len());
+    if n > limits.max_input_bytes {
+        return Err(EngineStatus::ResourceLimit {
+            kind: LimitKind::Input,
+            detail: format!(
+                "{name} estimate {n} exceeds {}-byte limit",
+                limits.max_input_bytes
+            ),
+        });
+    }
+    Ok(())
+}

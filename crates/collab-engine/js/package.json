@@ -1,0 +1,19 @@
+{
+  "name": "collab-engine-fixtures",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Dev-only pinned Yjs 13.6.32 fixture generator. Product must never import this package.",
+  "scripts": {
+    "generate": "node generate.mjs"
+  },
+  "dependencies": {
+    "@tiptap/core": "3.31.3",
+    "@tiptap/extension-table": "3.31.3",
+    "@tiptap/extension-unique-id": "3.31.3",
+    "@tiptap/pm": "3.31.3",
+    "@tiptap/starter-kit": "3.31.3",
+    "@tiptap/y-tiptap": "3.0.9",
+    "yjs": "13.6.32"
+  }
+}
