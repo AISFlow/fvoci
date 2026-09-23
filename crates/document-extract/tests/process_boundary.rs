@@ -1,10 +1,14 @@
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
+#[cfg(feature = "test-hang")]
 use std::time::Instant;
 
-use document_extract::gen::hwp5_known_body;
-use document_extract::limits::Limits;
-use document_extract::outcome::ExtractStatus;
+use document_extract::gen::{hwp5_known_body, zip_with_entry_count};
+use document_extract::limits::{Limits, MIN_CHILD_RSS_BYTES};
+use document_extract::outcome::{ExtractStatus, LimitKind};
 use document_extract::process::{extract_killable, ExtractRequest};
+
+static SPAWN_TEST: Mutex<()> = Mutex::new(());
 
 fn bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_document-extract"))
@@ -20,8 +24,21 @@ fn request(bytes: Vec<u8>, name: &str, limits: Limits) -> ExtractRequest {
     }
 }
 
+fn assert_fully_reaped(pid: u32) {
+    let path = format!("/proc/{pid}");
+    if !std::path::Path::new(&path).exists() {
+        return;
+    }
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+    if status.contains("State:\tZ") || status.to_ascii_lowercase().contains("zombie") {
+        panic!("pid {pid} is a zombie; kill+reap failed");
+    }
+    panic!("pid {pid} still exists after extract_killable returned:\n{status}");
+}
+
 #[test]
 fn child_process_extracts_hwp5() {
+    let _g = SPAWN_TEST.lock().expect("spawn test lock");
     let report = extract_killable(request(
         hwp5_known_body(),
         "품의서.hwp",
@@ -32,38 +49,19 @@ fn child_process_extracts_hwp5() {
         "{:?}",
         report.outcome
     );
-}
-
-#[test]
-fn timeout_kills_and_reaps_sleep_child() {
-    let started = Instant::now();
-    let mut child = Command::new("/bin/sleep")
-        .arg("20")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn sleep");
-    let pid = child.id();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let _ = child.kill();
-    let _ = child.wait().expect("reap");
-    assert!(
-        !std::path::Path::new(&format!("/proc/{pid}")).exists()
-            || std::fs::read_to_string(format!("/proc/{pid}/status"))
-                .map(|s| s.contains("Zombie") || s.contains("State:\tZ"))
-                .unwrap_or(true),
-        "pid {pid} was not reaped"
-    );
-    assert!(started.elapsed().as_secs() < 5, "kill took too long");
+    if let Some(pid) = report.child_pid {
+        assert_fully_reaped(pid);
+    }
 }
 
 #[cfg(feature = "test-hang")]
 #[test]
-fn killable_api_timeout() {
-    use document_extract::outcome::LimitKind;
+fn extract_killable_timeout_reaps_product_helper() {
+    use document_extract::{take_last_spawn, SpawnTrace};
+    let _g = SPAWN_TEST.lock().expect("spawn test lock");
     let mut limits = Limits::for_tests();
     limits.timeout_ms = 500;
+    let started = Instant::now();
     let report = extract_killable(ExtractRequest {
         bytes: hwp5_known_body(),
         name: "hang.hwp".into(),
@@ -82,6 +80,17 @@ fn killable_api_timeout() {
         "{:?}",
         report.outcome
     );
+    let pid = report.child_pid.expect("product helper pid");
+    let trace = take_last_spawn().expect("spawn trace");
+    assert_eq!(
+        trace,
+        SpawnTrace {
+            pid,
+            helpers_joined: 3
+        }
+    );
+    assert_fully_reaped(pid);
+    assert!(started.elapsed().as_secs() < 5, "kill took too long");
 }
 
 #[test]
@@ -124,38 +133,101 @@ fn zero_timeout_is_invalid_limits() {
     );
 }
 
-#[cfg(feature = "test-hang")]
 #[test]
-fn killable_timeout_joins_helper_threads() {
-    use document_extract::outcome::LimitKind;
-    let before = std::fs::read_dir("/proc/self/task")
-        .map(|d| d.count())
-        .unwrap_or(0);
+fn killable_forwards_zip_entry_limit() {
+    let _g = SPAWN_TEST.lock().expect("spawn test lock");
     let mut limits = Limits::for_tests();
-    limits.timeout_ms = 500;
-    let report = extract_killable(ExtractRequest {
-        bytes: hwp5_known_body(),
-        name: "hang.hwp".into(),
-        limits,
-        extractor_bin: bin(),
-        test_hang_ms: Some(20_000),
-    });
+    limits.max_zip_entries = 2;
+    let report = extract_killable(request(zip_with_entry_count(4), "many.hwpx", limits));
     assert!(
         matches!(
             report.outcome,
             ExtractStatus::ResourceLimit {
-                kind: LimitKind::Time,
+                kind: LimitKind::ZipEntries,
                 ..
             }
         ),
         "{:?}",
         report.outcome
     );
-    let after = std::fs::read_dir("/proc/self/task")
-        .map(|d| d.count())
-        .unwrap_or(0);
+    if let Some(pid) = report.child_pid {
+        assert_fully_reaped(pid);
+    }
+}
+
+#[test]
+fn undersize_memory_ceiling_is_invalid_limits() {
+    let mut limits = Limits::for_tests();
+    limits.max_child_rss_bytes = MIN_CHILD_RSS_BYTES - 1;
+    let report = extract_killable(request(hwp5_known_body(), "x.hwp", limits));
     assert!(
-        after <= before + 2,
-        "helper threads leaked: before={before} after={after}"
+        matches!(
+            report.outcome,
+            ExtractStatus::WorkerFailure {
+                reason: document_extract::WorkerFailureReason::InvalidLimits,
+                ..
+            }
+        ),
+        "{:?}",
+        report.outcome
+    );
+}
+
+#[cfg(feature = "test-hang")]
+#[test]
+fn child_applies_forwarded_rlimit_as() {
+    let rss = 64 * 1024 * 1024;
+    let out = Command::new(bin())
+        .args([
+            "--name",
+            "x.hwp",
+            "--max-rss",
+            &rss.to_string(),
+            "--dump-rlimits",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("dump rlimits");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("RLIMIT_AS={rss}")),
+        "got {stdout:?}"
+    );
+}
+
+#[cfg(not(feature = "test-hang"))]
+#[test]
+fn production_bin_rejects_dump_rlimits_flag() {
+    let out = Command::new(bin())
+        .args(["--dump-rlimits", "--name", "x.hwp"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run production bin");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown arg"),
+        "production build must not honor --dump-rlimits: {stderr}"
+    );
+}
+
+#[cfg(not(feature = "test-hang"))]
+#[test]
+fn production_bin_rejects_test_hang_flag() {
+    let out = Command::new(bin())
+        .args(["--test-hang-ms", "1", "--name", "x.hwp"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run production bin");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown arg"),
+        "production build must not honor --test-hang-ms: {stderr}"
     );
 }

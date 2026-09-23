@@ -22,3 +22,5 @@ pub use outcome::{
 };
 pub use parse::extract_bytes;
 pub use process::{extract_in_process, extract_killable, ExtractRequest};
+#[cfg(feature = "test-hang")]
+pub use process::{take_last_spawn, SpawnTrace};

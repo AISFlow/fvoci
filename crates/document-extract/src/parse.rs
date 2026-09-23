@@ -92,7 +92,7 @@ fn parse_and_walk(bytes: &[u8], format: DocFormat, limits: &Limits) -> ExtractRe
     let walked = walk_body(&doc, limits.max_output_chars);
     warnings.extend(walked.warnings);
 
-    if walked.truncated {
+    if walked.truncated || walked.omitted_supported || walked.omitted_shape {
         return ExtractReport::new(ExtractStatus::Partial {
             text: walked.text,
             format,

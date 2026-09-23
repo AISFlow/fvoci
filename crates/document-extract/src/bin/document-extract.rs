@@ -8,6 +8,8 @@ use document_extract::process::apply_rlimits_now;
 fn main() {
     let mut name = String::from("document.hwp");
     let mut limits = Limits::default();
+    #[cfg(feature = "test-hang")]
+    let mut dump_rlimits = false;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -42,6 +44,10 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_millis(ms));
                 }
             }
+            #[cfg(feature = "test-hang")]
+            "--dump-rlimits" => {
+                dump_rlimits = true;
+            }
             "--help" | "-h" => usage(),
             other => {
                 eprintln!("unknown arg {other}");
@@ -59,6 +65,11 @@ fn main() {
         eprintln!("setrlimit failed: {err}");
         std::process::exit(2);
     }
+    #[cfg(feature = "test-hang")]
+    if dump_rlimits {
+        print_applied_rlimits();
+        return;
+    }
 
     let mut bytes = Vec::new();
     io::stdin().read_to_end(&mut bytes).expect("read stdin");
@@ -66,6 +77,20 @@ fn main() {
     let json = serde_json::to_vec(&report).expect("serialize report");
     io::stdout().write_all(&json).expect("write stdout");
     io::stdout().write_all(b"\n").ok();
+}
+
+#[cfg(feature = "test-hang")]
+fn print_applied_rlimits() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let mut as_lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_AS, &mut as_lim) == 0 {
+            println!("RLIMIT_AS={}", as_lim.rlim_cur);
+        }
+    }
 }
 
 fn parse_u64(s: &str) -> u64 {

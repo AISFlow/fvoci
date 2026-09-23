@@ -22,7 +22,8 @@ pub const MAX_ZIP_ENTRIES: usize = 10_000;
 pub const MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Maximum stdout JSON bytes accepted from the child.
-pub const MAX_CHILD_STDOUT_BYTES: u64 = 2 * 1024 * 1024;
+/// 500_000 output scalars may JSON-escape as `\uXXXX` (6 bytes) plus wrapper.
+pub const MAX_CHILD_STDOUT_BYTES: u64 = (MAX_OUTPUT_CHARS as u64) * 6 + 4096;
 
 /// Table/control walk nesting cap (rhwp `table_extract::MAX_NEST_DEPTH`).
 pub const MAX_WALK_NEST_DEPTH: usize = 8;

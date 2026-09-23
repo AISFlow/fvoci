@@ -1,10 +1,11 @@
 use document_extract::gen::{
     corrupt_cfb, expected_hwp5_body, expected_hwpx_body, hwp5_distribution_flag, hwp5_empty_body,
     hwp5_encrypted_flag, hwp5_known_body, hwp5_uncompressed_body, hwpx_empty_body,
-    hwpx_encrypted_manifest, hwpx_known_body, pdf_named_hwp, truncated,
+    hwpx_encrypted_manifest, hwpx_known_body, hwpx_nested_tables, hwpx_out_of_range_cell,
+    hwpx_shape_and_body, hwpx_two_short_lines, pdf_named_hwp, truncated, zip_with_entry_count,
     zip_with_forged_uncompressed, zip_with_path_escape, HWP_PRVTEXT_DECOY,
 };
-use document_extract::limits::{Limits, MAX_INPUT_BYTES};
+use document_extract::limits::{Limits, MAX_CHILD_STDOUT_BYTES, MAX_INPUT_BYTES};
 use document_extract::outcome::{ExtractStatus, LimitKind, UnsupportedReason};
 use document_extract::parse::extract_bytes;
 
@@ -200,6 +201,80 @@ fn input_oversize() {
 #[test]
 fn declared_max_input_constant() {
     assert_eq!(MAX_INPUT_BYTES, 20 * 1024 * 1024);
+    const { assert!(MAX_CHILD_STDOUT_BYTES >= 500_000 * 6) };
+}
+
+#[test]
+fn zip_entry_count_guard() {
+    let mut limits = limits();
+    limits.max_zip_entries = 2;
+    let report = extract_bytes(&zip_with_entry_count(4), "many.hwpx", &limits);
+    assert!(
+        matches!(
+            report.outcome,
+            ExtractStatus::ResourceLimit {
+                kind: LimitKind::ZipEntries,
+                ..
+            }
+        ),
+        "{:?}",
+        report.outcome
+    );
+}
+
+#[test]
+fn newline_separator_counts_in_output_limit() {
+    let mut limits = limits();
+    limits.max_output_chars = 3;
+    let report = extract_bytes(&hwpx_two_short_lines(), "ab-c.hwpx", &limits);
+    match report.outcome {
+        ExtractStatus::Partial { ref text, .. } => {
+            assert!(text.chars().count() <= 3, "{text:?}");
+            assert!(!text.contains('\n') || text.chars().count() < 4);
+        }
+        other => panic!("separator overflow must be Partial, got {other:?}"),
+    }
+}
+
+#[test]
+fn out_of_range_table_cell_is_partial() {
+    let report = extract_bytes(&hwpx_out_of_range_cell(), "grid.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Partial { ref warnings, .. } => {
+            assert!(
+                warnings.iter().any(|w| w.contains("outside")),
+                "{warnings:?}"
+            );
+        }
+        other => panic!("dropped out-of-range cell must be Partial, got {other:?}"),
+    }
+}
+
+#[test]
+fn omitted_shape_is_partial_not_ok() {
+    let report = extract_bytes(&hwpx_shape_and_body(), "shape.hwpx", &limits());
+    match report.outcome {
+        ExtractStatus::Partial {
+            ref text,
+            ref warnings,
+            ..
+        } => {
+            assert!(text.contains("보이는문단"), "{text:?}");
+            assert!(!text.contains("도형안텍스트"), "{text:?}");
+            assert!(warnings.iter().any(|w| w.contains("shape")), "{warnings:?}");
+        }
+        other => panic!("omitted shape must be Partial, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_supported_table_drop_is_partial() {
+    let report = extract_bytes(&hwpx_nested_tables(10), "deep.hwpx", &limits());
+    assert!(
+        matches!(report.outcome, ExtractStatus::Partial { .. }),
+        "omitted nested table body must be Partial, got {:?}",
+        report.outcome
+    );
 }
 
 #[test]

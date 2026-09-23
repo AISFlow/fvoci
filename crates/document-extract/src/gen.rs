@@ -405,6 +405,81 @@ pub fn zip_with_forged_uncompressed() -> Vec<u8> {
     bytes
 }
 
+pub fn zip_with_entry_count(n: usize) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for i in 0..n {
+            zip.start_file(format!("e{i}.xml"), opts).unwrap();
+            zip.write_all(b"<x/>").unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+pub fn hwpx_two_short_lines() -> Vec<u8> {
+    pack_hwpx(&[("Contents/section0.xml", hwpx_section(&["ab", "c"], None))])
+}
+
+pub fn hwpx_out_of_range_cell() -> Vec<u8> {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">
+  <hp:p><hp:run><hp:t>보이는문단</hp:t></hp:run></hp:p>
+  <hp:p><hp:run><hp:tbl rowCnt="1" colCnt="1">
+    <hp:tr><hp:tc><hp:cellAddr rowAddr="5" colAddr="5"/><hp:subList><hp:p><hp:run><hp:t>숨은셀</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr>
+  </hp:tbl></hp:run></hp:p>
+</hs:sec>
+"#
+    .to_string();
+    pack_hwpx(&[("Contents/section0.xml", xml)])
+}
+
+pub fn hwpx_shape_and_body() -> Vec<u8> {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">
+  <hp:p><hp:run><hp:t>보이는문단</hp:t></hp:run></hp:p>
+  <hp:p>
+    <hp:run>
+      <hp:rect id="1" zOrder="0" numberingType="PICTURE">
+        <hp:drawText>
+          <hp:subList vertAlign="CENTER">
+            <hp:p><hp:run><hp:t>도형안텍스트</hp:t></hp:run></hp:p>
+          </hp:subList>
+        </hp:drawText>
+        <hp:sz width="100" height="50"/>
+        <hp:pos treatAsChar="0" vertRelTo="PARA" horzRelTo="PARA"/>
+      </hp:rect>
+    </hp:run>
+  </hp:p>
+</hs:sec>
+"#
+    .to_string();
+    pack_hwpx(&[("Contents/section0.xml", xml)])
+}
+
+pub fn hwpx_nested_tables(depth: usize) -> Vec<u8> {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<hs:sec xmlns:hs=\"http://www.hancom.co.kr/hwpml/2011/section\" xmlns:hp=\"http://www.hancom.co.kr/hwpml/2011/paragraph\">\n{}\n</hs:sec>\n",
+        nested_table_xml(depth, "깊은표셀")
+    );
+    pack_hwpx(&[("Contents/section0.xml", xml)])
+}
+
+fn nested_table_xml(depth: usize, leaf: &str) -> String {
+    if depth == 0 {
+        return format!(
+            "  <hp:p><hp:run><hp:t>{}</hp:t></hp:run></hp:p>\n",
+            xml_escape(leaf)
+        );
+    }
+    format!(
+        "  <hp:p><hp:run><hp:tbl rowCnt=\"1\" colCnt=\"1\"><hp:tr><hp:tc><hp:cellAddr rowAddr=\"0\" colAddr=\"0\"/><hp:subList>\n{}  </hp:subList></hp:tc></hp:tr></hp:tbl></hp:run></hp:p>\n",
+        nested_table_xml(depth - 1, leaf)
+    )
+}
+
 pub fn zip_with_path_escape() -> Vec<u8> {
     let mut buf = Cursor::new(Vec::new());
     {

@@ -57,10 +57,54 @@ pub struct ExtractRequest {
     pub test_hang_ms: Option<u64>,
 }
 
+/// Observation of the last product helper spawned by [`extract_killable`].
+/// Available only with `--features test-hang`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnTrace {
+    pub pid: u32,
+    pub helpers_joined: u8,
+}
+
+#[cfg(feature = "test-hang")]
+static LAST_SPAWN: OnceLock<Mutex<Option<SpawnTrace>>> = OnceLock::new();
+
+#[cfg(feature = "test-hang")]
+fn last_spawn_lock() -> &'static Mutex<Option<SpawnTrace>> {
+    LAST_SPAWN.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(feature = "test-hang")]
+pub fn take_last_spawn() -> Option<SpawnTrace> {
+    last_spawn_lock().lock().ok().and_then(|mut g| g.take())
+}
+
+#[cfg(feature = "test-hang")]
+fn record_spawn(pid: u32) {
+    if let Ok(mut g) = last_spawn_lock().lock() {
+        *g = Some(SpawnTrace {
+            pid,
+            helpers_joined: 0,
+        });
+    }
+}
+
+#[cfg(feature = "test-hang")]
+fn record_helpers_joined(n: u8) {
+    if let Ok(mut g) = last_spawn_lock().lock() {
+        if let Some(trace) = g.as_mut() {
+            trace.helpers_joined = n;
+        }
+    }
+}
+
 pub fn extract_in_process(bytes: &[u8], name: &str, limits: &Limits) -> ExtractReport {
     extract_bytes(bytes, name, limits)
 }
 
+/// Run extraction in a killable child. This call is **synchronous**: the
+/// deadline is `limits.timeout_ms` from admission. There is no external
+/// cancel token. Dropping a `JoinHandle` that wraps this function does **not**
+/// terminate the child; only the watchdog kill+reap path does.
 pub fn extract_killable(req: ExtractRequest) -> ExtractReport {
     if let Err(detail) = req.limits.validate() {
         return worker_fail(WorkerFailureReason::InvalidLimits, detail);
@@ -155,6 +199,8 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
     };
 
     let pid = child.id();
+    #[cfg(feature = "test-hang")]
+    record_spawn(pid);
     let stdin_join = match child.stdin.take() {
         Some(mut stdin) => {
             let payload = req.bytes;
@@ -197,7 +243,10 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
                 join_any(stdin_join);
                 join_any(stdout_join);
                 join_any(stderr_join);
-                return worker_fail(WorkerFailureReason::Wait, format!("wait failed: {err}"));
+                #[cfg(feature = "test-hang")]
+                record_helpers_joined(3);
+                return worker_fail(WorkerFailureReason::Wait, format!("wait failed: {err}"))
+                    .with_child_pid(pid);
             }
         }
     }
@@ -205,12 +254,15 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
     join_any(stdin_join);
     let stdout_bytes = join_pipe(stdout_join);
     let stderr_bytes = join_pipe(stderr_join);
+    #[cfg(feature = "test-hang")]
+    record_helpers_joined(3);
 
     if let Some(kind) = limit {
         return ExtractReport::new(ExtractStatus::ResourceLimit {
             kind,
             detail: format!("child pid {pid} exceeded {kind:?}; killed and reaped"),
-        });
+        })
+        .with_child_pid(pid);
     }
 
     let status = match wait_status {
@@ -218,24 +270,33 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
         None => match child.wait() {
             Ok(status) => status,
             Err(err) => {
-                return worker_fail(WorkerFailureReason::Wait, format!("reap failed: {err}"));
+                return worker_fail(WorkerFailureReason::Wait, format!("reap failed: {err}"))
+                    .with_child_pid(pid);
             }
         },
     };
 
     if let Some(report) = classify_child_status(status, pid, &stderr_bytes) {
-        return report;
+        return report.with_child_pid(pid);
     }
 
     match stdout_bytes {
         Ok(buf) => match serde_json::from_slice::<ExtractReport>(&buf) {
-            Ok(report) => report,
+            Ok(report) => report.with_child_pid(pid),
             Err(err) => worker_fail(
                 WorkerFailureReason::InvalidChildJson,
                 format!("child output is not JSON: {err}"),
-            ),
+            )
+            .with_child_pid(pid),
         },
-        Err(err) => worker_fail(WorkerFailureReason::InvalidChildJson, err),
+        Err(err) if err == "pipe exceeded bound" => {
+            ExtractReport::new(ExtractStatus::ResourceLimit {
+                kind: LimitKind::Output,
+                detail: format!("child stdout exceeded {MAX_CHILD_STDOUT_BYTES} bytes"),
+            })
+            .with_child_pid(pid)
+        }
+        Err(err) => worker_fail(WorkerFailureReason::InvalidChildJson, err).with_child_pid(pid),
     }
 }
 
