@@ -5,6 +5,17 @@ on:
   push:
     branches: [main]
 
+# Only obsolete runs of this workflow on the same PR are cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 permissions:
   contents: read
 
@@ -15,20 +26,35 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Restore Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: rust-fast-${{ runner.os }}-1.98.1-${{ hashFiles('Cargo.lock') }}
+          key: v2-cargo-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Restore server build outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target
+          key: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-fast-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**') }}
+          restore-keys: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-fast-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
       - run: cargo fetch --locked
       - run: cargo fmt --check
       - run: cargo check --locked --offline --all-targets --features db-tests
       - run: cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings
       - run: cargo test --locked --offline --lib
   postgres:
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            check: postgres
+          - runner: ubuntu-24.04-arm
+            check: postgres-arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     services:
       postgres:
@@ -43,14 +69,25 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.1 --profile minimal
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Restore Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: rust-db-${{ runner.os }}-1.98.1-${{ hashFiles('Cargo.lock') }}
+          key: v2-cargo-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Restore server build outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target
+          key: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**') }}
+          restore-keys: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
       - run: cargo fetch --locked
+      - name: Native server build and policy tests (ARM64)
+        if: runner.arch == 'ARM64'
+        run: |
+          cargo build --locked --offline --bins
+          cargo test --locked --offline --lib
       - name: PostgreSQL integration tests
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres

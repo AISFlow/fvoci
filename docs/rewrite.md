@@ -173,3 +173,29 @@ PR #1은 검증 HEAD79d7b69에서 squash merge되어 main `fe30bd1b7c6f2632c354c
   the current7 kinds and remains a future diagnostic refinement. Neither hides
   Partial status. No actual Hancom-saved completely empty fixture was provided;
   independently generated valid empty documents are tested without claiming that provenance.
+
+
+### CI 병렬화 후보 (2026-09-24)
+
+- main 1fc8af3 이후 별도 CI 변경. 기존 fast/postgres/native-extraction check 이름을
+  유지하고 PostgreSQL 및 native 추출을 ubuntu-24.04-arm에서도 실제 실행한다.
+  총5개 독립 job, needs 없음, 각 Cargo jobs2. QEMU/larger/self-hosted runner 없음.
+- 공개 저장소와 저장소 Actions enabled/allowed_actions=all 확인. 조직 전체 정책
+  조회는403으로 제한되어 동시 실행 한도를 읽지 못했다. 실제 job 접수/큐 시간을
+  확인하며 권한 확대나 결제 변경을 하지 않는다. 고정 PostgreSQL digest의
+  linux/amd64 및 linux/arm64 manifest를 확인했다.
+- workflow+event+PR 단위 concurrency로 같은 PR의 낡은 실행만 취소한다.
+  push는 main만 유지하여 PR branch push 중복 실행을 만들지 않는다.
+- Cargo 다운로드와 target 캐시 분리, OS/arch/toolchain/lock/manifest/feature/profile
+  및 제품 소스별 key와 같은 의존성 prefix 복원. rhwp 공개 고정 source를 별도
+  캐시하되 매번 origin/HEAD/clean 검증한다. 캐시 hit도 모든 테스트를 실행한다.
+  CI debug info/incremental을 끄고 캐시 전송/빌드 비용을 측정한다.
+- 이전 warm PR2: Rust35908128293 fast30s/postgres97s,
+  Native35908128283 native77s(캐시복원32s). 당시 캐시6개 총4,180,767,358bytes.
+  새 profile/architecture 최초 실행은 cold로 구분하며 warm 개선을 미리 주장하지 않는다.
+- 로컬 Actions 표현식 검증: 공식 actionlint1.7.12 Linux AMD64 archive의
+  SHA256 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+  확인 후 실행. 일반 YAML 파싱과 구분한다. 원격 CI/독립 검토는 아직 미수락.
+- 최신 사용자 지침에 따라 동일 통합 코드의 원격 수락 검사를 코디네이터가
+  SHA/명령/실행 수와 함께 확인하면 같은 전체 검사를 로컬에서 반복하지 않는다.
+  현재 제품 워커2개(UI/wiki)의 소유 경로와 로컬 heavy slot은 유지한다.
