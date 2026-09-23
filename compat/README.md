@@ -24,7 +24,8 @@ JS deps are dev-only (`compat/js`). `node_modules/` and `target/` are gitignored
 ## Commands (cwd `compat/`)
 
 ```bash
-python3 fixtures/gen.py
+# Use the checked-in fixtures. Optional synthetic specimens go elsewhere:
+# python3 fixtures/gen.py --output-dir /tmp/fvoci-synthetic-fixtures
 npm --prefix js ci --ignore-scripts
 export CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo
 export RUSTUP_HOME=/home/kinesis/orca/toolchains/fvoci-rust/rustup
@@ -86,14 +87,17 @@ Do not treat Yrs as a Hocuspocus server.
 
 Inspected locally (see `fixtures/NOTICE.md`): source `pickExtractor` sends `.hwp`/`.hwpx` to `hwpx-js`, pdf/docx/… to `officeparser` (pdfjs worker must be `file:`), thumbnails only raster MIME via magick-wasm. PDF/DOCX/HWP/HWPX are not in that thumbnail set.
 
-Generated format-valid representatives (`file(1)`: PDF 1.4, Word 2007+, HWPX, HWP 5.0 CFB). Not renamed text. Not customer data.
+PDF/DOCX are generated representatives. HWP/HWPX are owner-authored Hancom
+samples containing `안녕`, replaced at `bea3243`; see `fixtures/NOTICE.md`.
+They are real containers, not renamed text. The generator only writes to a
+separate empty output directory.
 
 | Format | This probe | Native on host | Blocker |
 | --- | --- | --- | --- |
 | PDF | uncompressed `(compat probe)` string | no pdftotext/mutool/poppler | production path is officeparser+pdfjs, not this scanner |
 | DOCX | `w:t` → `안녕 compat 🚀` | no LibreOffice | production path is officeparser |
-| HWPX | ZIP `hp:t` → `한글본문색인토큰 HWPX` | no hwpx CLI | production path is hwpx-js |
-| HWP | CFB magic + `HWP Document File` | no hwp5proc/olefile | **no BodyText decoder** |
+| HWPX | ZIP `hp:t` → `안녕` | no hwpx CLI | production path is hwpx-js |
+| HWP | authored HWP 5.0, BodyText present; probe reads CFB magic + `HWP Document File` | no hwp5proc/olefile | **no BodyText decoder** |
 | Thumbnails | not run | no ImageMagick | magick-wasm + image MIME only |
 
 No conversion framework was added.

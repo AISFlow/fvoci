@@ -50,7 +50,7 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 
 ## PR 및 원본 회귀 확인
 
-- 사용자가 대상 PR #1 (`fvoci/daggertooth` → main)을 직접 열었다. 새 PR을 생성하지 않는다.
+- 사용자가 대상 PR #1 (`fvoci/daggertooth` → main)을 직접 열었다. 같은 범위의 중복 PR은 만들지 않는다. 2026-09-24 추가 승인 이후 독립 기능의 후속 PR 생성과 수락 후 머지는 허용된다.
 - PR999 현재 CI35877360079: PG16/17/18 database-contract, image-tests, native standalone-arm64 성공; test의 `bun run test:pkg --affected`와 집계 report 실패. 원본 문서의 이전 성공 수치를 이 CI의 성공으로 대체하지 않는다.
 - 원본 확인: 설치 GET/POST /api/v1/setup, 성공201 {userId,workspaceId}, 재설치404 instance_setup_already_completed. 로그인 POST /api/v1/auth/login, 성공200 {userId}, 누락/오류/정지401 invalid_email_or_password. 설치는 실제 첫 workspace/owner도 원자 생성해야 한다.
 - 협업 위험 probe: Grok task_1532bb645f74 / ctx_00b1baf38504, rust-compat-probe worktree, base31b6790, 단독 소유 compat/**. 저장 updateV1과 Hocuspocus 프레임 호환을 따로 확인하며 실제 UI/권한 검증 미실행을 감추지 않는다.
@@ -111,3 +111,24 @@ DB 검사는 원본 앱 역할 제한과 같은 종류의 실제 비특권 역�
 - 협업 adapter/awareness/권한 철회/재시작 복원, 실제 HWP 본문·운영 추출/썸네일은 초기 probe를 넘어 검증하지 않았다. 나머지 기능은 위 범위 보존 표를 따른다.
 
 다음은 인증 기반 위 첫 workspace 연산: 현재 멤버십 인가, 실제 앱 역할 RLS·철회 경합·풀 컨텍스트 재사용 검증, 기존 React 호출 연결이다. 먼저 AGENTS → environment → 이 수락 SHA와 Orca task → git status/worktree를 확인한다. 재현 명령은 `cargo fetch --locked`, 빠른 gate, `scripts/start-test-postgres.sh`이며, 컨테이너/DB는 매 실행 새로 생성한다. 대상 PR #1은 사용자가 만들었고 이 작업에서는 push/PR 생성/원본 원격 쓰기를 하지 않았다.
+
+
+## 2026-09-24 후속 기능 재개 (진행 중)
+
+- PR #1 실제 재개 상태: Ready/open, HEAD `f5faf89fa38e00ae4772f61db912b826c8a68818`; 사용자 관찰의 Draft와 달랐다. 미커밋 변경 없음. 과거 push 미실행 기록 이후 사용자 요청으로 해당 HEAD가 push된 상태였다.
+- CI 수정 코드 `864a41e4e4da9988390e695655946318dbf8c22d`: job context를 사용할 수 없는 postgres job env에서 DB 검사 step env로 동적 포트 URL 이동. 실패한 push 실행35894918085/checksuite97197656447은 check-run/job0개여서 API annotation 목록이 없었고, gh는 workflow issue로 표시했다. 일반 YAML 파싱을 Actions 검증으로 간주하지 않았다.
+- 원격 [Actions35898070365](https://github.com/AISFlow/fvoci/actions/runs/35898070365), 동일 HEAD PR 이벤트: fast/postgres 모두 성공. 실제 lib6/DB24, ignored0. 원격 cold DB compile41.48s+본문55.21s, lib compile31.79s+본문8.67s. 고정 Actions 두 SHA 조회 성공, Rust1.98.1 공식 manifest200 및 CI설치 성공, PG고정 이미지 CI초기화·실행 성공. 로컬 warm과 다른 장비/조건이므로 단순 속도비교하지 않는다.
+- 동일 SHA 로컬: fmt0.31s/check0.51s/clippy0.51s, lib6본문5.61s/전체5.88s, `scripts/start-test-postgres.sh` DB24본문27.63s/준비·정리포함30.38s, 모두0failed/0ignored. 기존 fast10s/DB35s 로컬 예산 이내. 테스트 소유 컨테이너 정리됨.
+- PR1 제목/본문을 실제 인증 제품 코드·검증·미구현 범위로 수정했다. `gh pr edit`는 deprecated projectCards GraphQL 오류로 실패하여 승인된 GitHub REST PATCH로 갱신했다. rulesets없음/main보호API는 Branch not protected404; 이를 검사 면제로 사용하지 않는다.
+- 독립 PR1 검토: Claude Code Fable5.1 medium task `task_f82e7dfa064b` / dispatch `ctx_655c9221016b`, 고정864a41e, `rust-pr1-final-review`; 아직 결과 대기. PR1 머지 미실행.
+- Workspace: Composer2.5 task `task_d6e1a47da19a` / dispatch `ctx_8acea26b1479`, base864a41e, `rust-workspace-slice`; 소유 src/**, tests/**, 신규003_workspace.sql, grant-app-role.sql. 원본 계약·RLS·철회 경합 구현 중, 미수락. 공통 manifest/lock/CI는 코디네이터 소유.
+- Native rhwp: Grok4.6 task `task_d8508aa82dc4` / dispatch `ctx_ecd7e7cf88f4`, base864a41e, `rust-rhwp-extract`; 소유 crates/document-extract/**와 독립 manifest/lock/fixtures. native검증/제품첨부연결 모두 아직 미수락. 무거운 검증 슬롯은 rhwp에 배정, workspace DB는 조정 후 실행.
+- 두 Cursor 실행 receipt의 요청/유효 모델 일치 및 실제 TUI 작업/프로젝트스킬 읽기 확인. Fable 요청/유효 claude-fable-5-1 medium 일치, turnStart observed. 기존 Run 유지, retained/user_takeover와 소유 불명 fvoci-rust-test-pg-kinesis 및 다른 runner 컨테이너 보존.
+- 다음: Orca `orchestration check`의 전체 delivery 처리 → 고정HEAD Fable지적 해결 → PR1 조건 충족 시 기대HEAD로 squash merge → 최신 main에서 후속통합 worktree/PR. Workspace backend 수락 후 기존 React/DTO생성 연결, rhwp native 수락 후 실제 부모권한·첨부 연결. 현재 Hocuspocus probe의 미지원 상태는 그대로다.
+
+### PR1 독립 검토와 사용자 fixture 추가
+
+- Fable `ctx_655c9221016b`는 864a41e 제품 전체 및 이후 `bea324300d133d0fa5b81880fef9ea50c132e451` fixture-only diff를 검토했다. 인증 slice의 차단 지적 없음. 보고서 `/tmp/fvoci-pr1-review-864a41e.md`, worker_done 수신 후 release 완료. source와 다른 새 workspace 제품 코드는 아직 검토·수락하지 않았다.
+- bea3243은 사용자가 sample.hwp/sample.hwpx를 실제 Hancom 파일로 교체한 커밋이다. 사용자가 직접 파일을 확인하고 `안녕`을 입력했다고 확인하고 계속 진행하도록 승인했다. 기존 파일을 보존했으며 NOTICE/README를 실제 출처·기대 본문으로 수정했다. gen.py는 별도 빈 디렉터리만 받도록 변경하여 원본 fixture 덮어쓰기를 막았다. 임시 디렉터리 생성 성공, 비어 있지 않은/체크인 경로 거부, 기존 fixture SHA256 불변을 실제 검사했다.
+- bea3243 원격 CI35898327395 성공, auth 제품 코드 변화 없음. 관련 로컬 `bash compat/run.sh` exit0/0.76s; 기존 Yrs6사례와 Hocuspocus envelope 차이를 유지했고 HWPX token은 `안녕`이다. HWP probe는 여전히 CFB/FileHeader만 확인하며 native 본문 추출 성공을 뜻하지 않는다.
+- Fable 비차단 권고: 알 수 없는 세션 로그아웃의 불필요한 이벤트 저장은 Composer 소유 identity.rs에서 다음 slice에 회귀 검사와 함께 수정한다. 빈 familyName 정규화, timezone 제한, sliding cookie 갱신, hash 오류 진단, definer search_path 축소·반환 열 명시 및 관련 검사 보강은 추적 중이다. 기존 slice의 제한을 수락하는 것이며 전체 보안 동등성 선언이 아니다.

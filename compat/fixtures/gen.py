@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import struct
 import zipfile
 from io import BytesIO
@@ -213,4 +214,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", required=True, type=Path,
+                        help="Empty directory for synthetic fixtures; never the checked-in fixture directory")
+    args = parser.parse_args()
+    ROOT = args.output_dir.resolve()
+    if ROOT == Path(__file__).resolve().parent or (ROOT.exists() and any(ROOT.iterdir())):
+        parser.error("output directory must be empty and separate from checked-in fixtures")
+    ROOT.mkdir(parents=True, exist_ok=True)
     main()
