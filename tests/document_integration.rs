@@ -151,12 +151,7 @@ async fn app_state(app_url: &str) -> AppState {
 }
 
 fn document_app(state: AppState) -> axum::Router {
-    axum::Router::new()
-        .merge(fvoci_server::http::routes::setup::router())
-        .merge(fvoci_server::http::routes::auth::router())
-        .merge(fvoci_server::http::routes::workspaces::router())
-        .merge(fvoci_server::http::routes::documents::router())
-        .with_state(state)
+    fvoci_server::http::router(state, None)
 }
 
 async fn json_request(

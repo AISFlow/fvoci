@@ -24,7 +24,7 @@ use crate::http::guard::{check_origin, reject_bearer};
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 
-/// Independently callable wiki document router. Production merge is coordinator-owned.
+/// Wiki resource routes using current session and transactional document authorization.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(

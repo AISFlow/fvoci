@@ -418,3 +418,25 @@ index no-store, 실행 예시 bind/origin, 기본 feature 서버의 E2E 실행�
 오류와 인가 거부 구분. 이들을 완료했다고 표시하지 않는다. 문서 워커002bc57은
 icon null/정렬 prefix/parentId 및 실제 멤버 변경 경합을 수정하고 DB13을 통과했으나
 제품 router·migration4 통합은 PR4 수락 후 진행한다.
+
+
+### PR4 수락·머지와 문서 통합 재개
+
+PR4 https://github.com/AISFlow/fvoci/pull/4 는 수락 코드5d8cac8에서
+Fable medium 추가 검토 차단0 및 원격 Rust35913683110/Web35913683261/
+Native35913683122 전체6job 성공 후 squash merge했다. main 머지 SHA는
+0617e7f9ed716a696eaa0ed80648959d09351477. lib12, 실제 DB66씩 x64/ARM64,
+static5/schema1/React6(35초), native 양 아키텍처 성공. reviewer 종료 당시
+진행 중이던 x64DB도 코디네이터가 66/0ignored를 확인했다. post-merge CI는 확인 중.
+
+새 통합 worktree rust-document-integration은 main0617e7f에서 시작했다.
+Grok 제출ca3193a+002bc57을 순서대로 통합하고 실제 제품 router에 wiki
+생성/tree/조회/ancestors/body/metadata PATCH를 연결한다. migration004와
+기존003 업그레이드·RLS·현재 역할/정지/폐기·atomic audit/event 검사가 범위다.
+기존 승인 migration001–003은 수정하지 않는다. 원격 PostgreSQL job은 기존66과
+새 document_integration13을 실제 실행하며, 통합/독립 검토 전 미수락이다.
+문서 본문 변경·CRDT·첨부·프로젝트 문서·복구/이전은 아직 제품 구현이 아니다.
+
+codec 제출f7a7307은 실제 provider4.6 고정 계약을 Grok task4b18c0b69cec/
+ctx_a0b85bb5b3e4가 교차 검증 중이다. 아직 /collab 비활성. Fable 주간 한도는
+도달하지 않았고 Opus로 전환하지 않았다. 기존 모든 작업 커밋/worktree 보존.
