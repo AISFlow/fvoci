@@ -153,3 +153,42 @@ DB 검사는 원본 앱 역할 제한과 같은 종류의 실제 비특권 역�
 - 후속 공통 `bb5c268`: 고정 tower-http0.6.11의 `fs` feature와 필요한4개 lock 패키지 추가. 실제 `cargo check --locked --offline --all-targets --features db-tests,api-schema` exit0/5.76s. Rust의 정적 자산 제공을 위한 준비이며 React 연결 완료는 아니다.
 - Workspace `fcafb5d` 및 개인 workspace 원자 기록 delta `f209310` 제출. Fable `task_cfa3723946b8 / ctx_c0ca3ffbb59b`는 고정 fcafb5d와 별도 f209310 delta를 읽기 전용 검토 중이다. f209310 실제 DB57 중56성공/1실패/ignored0, exit101, 본문52.38s·전체55.27s. 실패는 fresh migration fixture가 스키마 삭제 후 해당 테이블 제약을 삭제하려 한 순서 오류이며 수정·재실행 중이다. 성공으로 기록하지 않는다. 기존35s 예산은 auth24개 기준이고 이번 검사 범위가 늘었으며 같은 범위의 속도 개선을 주장하지 않는다.
 - Native 첫 제출 `222a80b`: Grok는25개 fixture/process 검사 및 clippy 성공을 보고했다. 코디네이터가 해당 task의 빌드된 native CLI를 사용자 HWP/HWPX에 직접 실행해 두 경우 `status:ok`, 본문 `안녕`, `used_preview_stream:false`를 확인했다. 단, helper 종료 검사가 실제 제품 경로를 충분히 검사하지 않고 출력 줄바꿈 한도·누락 내용 분류 결함이 있어 **미수락**이다. 보완 task `task_e512f2100714 / ctx_2e8a2222db50`에 동일 crate 소유권을 이관했다. 첨부·검색·썸네일은 미연결이다.
+
+
+### Workspace integrated candidate bf1ab03 (2026-09-24)
+
+- Composer backend submissions eaec22c/41da1b5/fcafb5d/f209310 and final regression
+  handoff59a24d2 are preserved and integrated in `rust-workspace-integration`.
+  Coordinator bf1ab03 replaces the partial fullwidth mapping with pinned
+  unicode-normalization0.1.25 (MIT OR Apache-2.0, already transitive in the lock).
+  Source3937952 `_shared.ts` requires NFKC then lowercase-only pattern: uppercase
+  and surrounding whitespace are rejected, not silently lowercased/trimmed.
+- Local exact bf1ab03: `cargo fmt --check`0.13s;
+  `cargo check --locked --offline --all-targets --features db-tests,api-schema`0.17s;
+  corresponding clippy `-- -D warnings`2.12s; `cargo test --locked --offline --lib`
+  7 passed/0 ignored, body5.67s, total17.43s including fresh feature build.
+  `bash scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test db_integration`
+  66 passed/0 failed/0 ignored, build5.70s, body57.21s, total65.80s including
+  ephemeral PG setup/cleanup. The prior35s budget measured auth24 tests; added
+  workspace/RLS/revocation/rollback/upgrade cases change the scope. No speedup claimed.
+- Actual app-role tests cover membership self-policy negatives, foreign tenant
+  SQLSTATE42501, commit/rollback/error/dropped-transaction pool reuse, suspension
+  and role/membership/session revocation races, event/audit rollback, concurrent
+  owner demotion/removal exact404 loser and 001/002→003 migration plus grants.
+- Fable fixed-fcafb5d/f209310 review found no remaining blocking product defect but
+  required test corrections. Focused bf1ab03 delta review task6280ab04ca66 /
+  ctx0446f2b9d341 is pending; this is tested candidate code, not final acceptance.
+  Composer prior task89edff0528f8 is settled/released with clean worktree59a24d2.
+- Current narrow API and deployment limits are in RUNNING.md. Counts remain zero
+  placeholders, not computed aggregate parity; quotas/member-list/invitations/
+  shared-view side effects/delete/UI remain incomplete. The Rust-only name and
+  personal-workspace event+audit records intentionally strengthen atomicity.
+- Native [PR2](https://github.com/AISFlow/fvoci/pull/2) is Draft at7034135.
+  Rust35905000682 and documents35905000886 CI jobs succeeded, but independent
+  Fable review found silent failed-section and table-caption omission. Grok task
+  task_9b0113938837 / ctx_ac064a370261 owns crates/document-extract/** in its
+  separate worktree and is fixing these blockers. Native acceptance and attachment
+  product integration remain incomplete; no merge authorized by a green CI alone.
+- Next: finish fixed-SHA delta reviews, accept backend only after closure, assign
+  existing React flow and Rust DTO→OpenAPI→TS implementation to Composer; integrate
+  native fixes into PR2, re-run relevant native gates and remote CI before merge.

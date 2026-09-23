@@ -81,3 +81,29 @@ Integration tests always create and drop their own UUID database and app role; t
 | POST | `/api/v1/auth/logout` | Revoke current session and clear cookie |
 
 PATCH requires `givenName`; `familyName` omitted preserves the value, null or an empty string clears it. Other optional fields are `locale` (`ko`), `timezone`, `weekStartsOn` (0/1), and `textScale` (16/18/20). Unknown fields are rejected. Use the bound address printed at startup; default port 0 is selected by the listening socket.
+
+## Initial workspace operations
+
+Authenticated sessions can list `GET /api/v1/me/workspaces` and read metadata with
+`GET /api/v1/workspaces/{id}`. The list contains the current membership role.
+An instance administrator can `POST /api/v1/workspaces`; membership authorization
+still applies to private workspace access. Authorized owners/admins can rename
+with `PATCH /api/v1/workspaces/{id}`. Role updates/removal use
+`PATCH`/`DELETE /api/v1/workspaces/{id}/members/{userId}` with the source role caps,
+self-change restrictions and owner invariant. `POST /api/v1/me/personal-workspace`
+is idempotent; personal workspace metadata/members are immutable.
+
+Migration 003 adds the membership self-selection policy and personal-workspace
+constraints. **Re-run `scripts/grant-app-role.sql` after applying migration 003**
+to restrict the new helper function's EXECUTE grant to the app role. The tested
+upgrade is from this Rust slice's 001/002 schema, not from a TypeScript installation.
+
+Workspace mutations write the body, event and audit in one transaction. Name and
+personal workspace events are deliberate additions to the source contract.
+RLS isolates tenants; current membership and session authorization are additionally
+enforced by product operations. This is not a claim that arbitrary SQL executed
+with the app credentials is restricted to an authenticated end user's authority.
+
+Document/task count fields currently return zero because those domains are not
+implemented. Counts, quotas, member listing, invitations, exports, deletion and
+the existing React UI are not yet supported by this slice.
