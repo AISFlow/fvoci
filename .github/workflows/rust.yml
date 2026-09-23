@@ -93,3 +93,61 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
         run: cargo test --locked --offline --features db-tests --test db_integration --test document_integration --test collab_integration
+
+  collaboration:
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            check: collaboration
+          - runner: ubuntu-24.04-arm
+            check: collaboration-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+        env:
+          POSTGRES_PASSWORD: ci-ephemeral-only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Restore Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: v1-cargo-collaboration-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
+      - name: Restore server build outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target
+          key: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-collaboration-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/collab-engine/src/**') }}
+          restore-keys: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-collaboration-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+      - name: Restore production helper build outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: crates/collab-engine/target
+          key: v1-collab-product-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+          restore-keys: v1-collab-product-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Fetch locked dependencies before offline validation
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
+      - name: Build production helper on the native runner
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/crates/collab-engine/target
+        run: cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine
+      - name: WebSocket, PostgreSQL and native helper integration tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+          FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
+        run: cargo test --locked --offline --features db-tests --test collab_product

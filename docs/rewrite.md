@@ -657,3 +657,35 @@ FVOCI_COLLAB_ENGINE 경로를 추가하고 worktree 안 독립 target/cache로 �
 상대 CARGO_TARGET_DIR은 cwd 변경 전에 절대경로로 고정한다. bash -n과
 기존 actionlint1.7.12 검사 exit0; 제품 UI/WS 통합 검사는 아직 미실행이다.
 이 공통 변경은 새 기능 수락을 의미하지 않는다. scripts/CI는 계속 코디네이터 소유.
+
+Fable taskb5d6a996852f/ctx61175969f007의 좁은 설계 자문 완료·release
+(실제 Fable5.1medium, quota/Opus 전환 없음). 이는 제품 diff 수락이 아니다.
+코디네이터 결정: 정확한 proposed snapshot+ordered tail+candidate를 새 helper의
+단일 Load로 커밋 전에 검증하고 validation4초/recovery8초로 여유를 둔다.
+미래 임의 부하에서도 시간 보장을 증명한다는 뜻은 아니다. Load만 성공한
+8MiB 초과 복합 상태를 저장하지 않도록 validator Snapshot 출력 한도도 검사한다.
+AppendCollabInput expected_tail_seq와 기존 호출부/회귀 변경을 Composer에 명시
+위임했다. DuplicateAck 확인 뒤 실제 tx에서 예상 순번을 확인한다. 단일 actor가
+private candidate를 쓰는 동안 join/sync/compaction을 공개하지 않고 실패 시
+committed 상태로 재생성하는 경계는 유지 가능하다. DB 이전 전파는 금지한다.
+room guard는 전용 detached connection/try-lock/명시 close, 최대4room·8helper.
+철회 signal/poll만으로 새 전달을 인가하지 않고 sync/broadcast/awareness마다
+현재 권한을 확인한다. Origin 부재는 원본의 비브라우저 cookie 정책을 유지하며
+present malformed/multiple 값은 거부한다. 초기 WIP의 동기 recv와 root worker
+feature는 작업자에게 수정 지시했고 rootmanifest/lock 원복을 실제 확인했다.
+
+Composer 첫 제품 WIP47df897을25db2ba로 통합했으나 수락하지 않았다. 보고된
+실제 PG/helper4검사와 wire11검사는 종료·철회·persist 보장을 충분히 검사하지
+않았다. 코디네이터가 확인한 초기 구현의 sender 유지 후 thread join 교착,
+동시 최초 room 생성·pooled advisory guard, 임의 연결의 persist 인가, 정확한
+복원 bundle/expected tail 조건 누락은 수정 대상이다. 같은 검증된 Composer
+process를 taskb149a7105ddb/ctx926f7177dd39로 재사용하여 보완·실제 회귀를 맡겼다.
+root collab_product DB 검사 등록95af8b5만 명시적으로 cherry-pick 허용했다.
+현재 통합95af8b5는 미수락이며 원격 push/새 PR 전 관련 결함을 해결한다.
+UI ctx259ebcae441c는 독립 구현을 계속하고 전체 E2E는 backend 보완 뒤 실행한다.
+
+코디네이터는 실제 collab_product 검사에 독립 x64/ARM64 CI job을 추가했다.
+기존 PostgreSQL 인가 검사는 helper 빌드를 기다리지 않는다. 새 job은 production
+worker만 별도 target/cache에서 빌드하고 정확한 FVOCI_COLLAB_ENGINE을 전달한다.
+architecture/toolchain/lock/features/source를 캐시 키에 포함했다. actionlint1.7.12
+exit0; 아직 push 전이므로 새 job의 원격 실행·제품 수락은 미완료다.
