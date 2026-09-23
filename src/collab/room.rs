@@ -47,6 +47,20 @@ pub async fn disarm_spawn_room_block(document_id: Uuid) {
     SPAWN_ROOM_BLOCKS.lock().await.remove(&document_id);
 }
 
+#[cfg(feature = "db-tests")]
+static FORCE_PRIMARY_APPLY_FAIL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "db-tests")]
+pub fn arm_force_primary_apply_fail() {
+    FORCE_PRIMARY_APPLY_FAIL.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(feature = "db-tests")]
+pub fn disarm_force_primary_apply_fail() {
+    FORCE_PRIMARY_APPLY_FAIL.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 async fn wait_spawn_room_block(_document_id: Uuid) {
     #[cfg(feature = "db-tests")]
     {
@@ -380,6 +394,9 @@ impl RoomActor {
             .map_err(|_| JoinError::DbError)?;
             let load = load.map_err(|_| JoinError::AdmissionDenied)?;
             self.set_committed_from_load(&load);
+            if self.primary_loaded {
+                let _ = self.engine.recycle().await;
+            }
             self.load_engine_primary().await?;
             self.primary_loaded = true;
             self.primary_dirty = false;
@@ -633,6 +650,10 @@ impl RoomActor {
                 }
             }
             SyncStep::Step2 | SyncStep::Update => {
+                if payload.is_empty() {
+                    self.send_sync_status(events, routing_key, false).await;
+                    return;
+                }
                 if read_only && !is_empty_update(&payload) {
                     self.send_sync_status(events, routing_key, false).await;
                     return;
@@ -745,17 +766,22 @@ impl RoomActor {
                     }
                 };
 
-                self.committed.tail_payloads.push(payload.clone());
+                if self.committed.tail_seq < seq {
+                    self.committed.tail_payloads.push(payload.clone());
+                }
                 self.committed.tail_seq = seq;
                 self.fifo_seq += 1;
                 let op_prefix = self.fifo_seq;
 
                 self.broadcast_update(&sync.y_protocol);
-                self.integrate_committed_update(&payload).await;
-
+                let primary_ok = self.integrate_committed_update(&payload).await.is_ok();
                 self.send_sync_status(events, routing_key, true).await;
                 if let Some(c) = self.connections.get_mut(&conn_id) {
                     c.in_flight = false;
+                }
+                if !primary_ok {
+                    self.fatal_primary_unhealthy(actor_user_id, session_id).await;
+                    return;
                 }
                 self.flush_connection_persist(conn_id, op_prefix).await;
                 self.maybe_compact().await;
@@ -837,6 +863,15 @@ impl RoomActor {
                 {
                     Ok(Ok(load)) => {
                         if let Some(row) = load.tail.iter().find(|r| r.op_id == op_id) {
+                            if row.payload != payload {
+                                self.fatal_room_divergence(actor_user_id, session_id).await;
+                                return None;
+                            }
+                            let row_digest = payload_digest(&row.payload);
+                            if row_digest != digest {
+                                self.fatal_room_divergence(actor_user_id, session_id).await;
+                                return None;
+                            }
                             self.set_committed_from_load(&load);
                             return Some(AppendCollabResult::DuplicateAck { seq: row.seq });
                         }
@@ -881,10 +916,7 @@ impl RoomActor {
         .await
         {
             self.set_committed_from_load(&load);
-            let _ = self.engine.recycle().await;
-            let _ = self.load_engine_primary().await;
-            self.primary_loaded = true;
-            self.primary_dirty = false;
+            let _ = self.reload_primary_from_committed().await;
         }
         self.writer_generation = None;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
@@ -892,30 +924,48 @@ impl RoomActor {
         }
     }
 
+    async fn fatal_primary_unhealthy(&mut self, actor_user_id: Uuid, session_id: Uuid) {
+        if let Ok(Ok(load)) = load_collab_readonly(
+            &self.pool,
+            self.workspace_id,
+            actor_user_id,
+            session_id,
+            self.document_id,
+        )
+        .await
+        {
+            self.set_committed_from_load(&load);
+            let _ = self.reload_primary_from_committed().await;
+        }
+        for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
+            self.close_connection(conn_id, 1011, "primary engine unhealthy");
+        }
+    }
+
     async fn ensure_primary_capacity(&mut self) -> Result<(), JoinError> {
         if self.engine.needs_recycle() {
-            let _ = self.engine.recycle().await;
-            self.load_engine_primary().await?;
-            self.primary_loaded = true;
-            self.primary_dirty = false;
+            self.reload_primary_from_committed().await?;
         }
         Ok(())
     }
 
-    async fn integrate_committed_update(&mut self, payload: &[u8]) {
+    async fn integrate_committed_update(&mut self, payload: &[u8]) -> Result<(), JoinError> {
         if self.engine.needs_recycle() {
-            let _ = self.reload_primary_from_committed().await;
-            return;
+            return self.reload_primary_from_committed().await;
         }
         self.primary_dirty = true;
-        if !self.apply_primary(payload).await {
-            let _ = self.reload_primary_from_committed().await;
-        } else {
+        if self.apply_primary(payload).await {
             self.primary_dirty = false;
+            return Ok(());
         }
+        self.reload_primary_from_committed().await
     }
 
     async fn apply_primary(&mut self, payload: &[u8]) -> bool {
+        #[cfg(feature = "db-tests")]
+        if FORCE_PRIMARY_APPLY_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
         let report = match self
             .engine
             .call(Request::Apply {
@@ -930,11 +980,24 @@ impl RoomActor {
         report.outcome.is_applied_ok()
     }
 
-    async fn reload_primary_from_committed(&mut self) {
-        let _ = self.engine.recycle().await;
-        let _ = self.load_engine_primary().await;
-        self.primary_loaded = true;
-        self.primary_dirty = false;
+    async fn reload_primary_from_committed(&mut self) -> Result<(), JoinError> {
+        if self.engine.recycle().await.is_err() {
+            self.primary_loaded = false;
+            self.primary_dirty = true;
+            return Err(JoinError::EngineUnavailable);
+        }
+        match self.load_engine_primary().await {
+            Ok(()) => {
+                self.primary_loaded = true;
+                self.primary_dirty = false;
+                Ok(())
+            }
+            Err(err) => {
+                self.primary_loaded = false;
+                self.primary_dirty = true;
+                Err(err)
+            }
+        }
     }
 
     async fn load_engine_primary(&mut self) -> Result<(), JoinError> {
@@ -1044,7 +1107,7 @@ impl RoomActor {
             return format!("persist-failed:{request_id}");
         }
 
-        if self.ensure_primary_capacity().await.is_err() {
+        if self.ensure_primary_capacity().await.is_err() || !self.primary_loaded {
             self.compact_unhealthy = true;
             return format!("persist-failed:{request_id}");
         }
@@ -1103,8 +1166,11 @@ impl RoomActor {
                 Ok(Ok(load)) => {
                     self.compact_unhealthy = false;
                     self.set_committed_from_load(&load);
-                    if self.engine.needs_recycle() {
-                        let _ = self.reload_primary_from_committed().await;
+                    if self.engine.needs_recycle()
+                        && self.reload_primary_from_committed().await.is_err()
+                    {
+                        self.compact_unhealthy = true;
+                        return format!("persist-failed:{request_id}");
                     }
                     format!("persisted:{request_id}")
                 }

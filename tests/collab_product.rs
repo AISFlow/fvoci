@@ -15,8 +15,8 @@ use fvoci_server::collab::config::CollabConfig;
 use fvoci_server::collab::guard::RoomGuard;
 use fvoci_server::collab::hub::RoomLifecyclePhase;
 use fvoci_server::collab::room::{
-    arm_spawn_room_block, disarm_spawn_room_block, AuthenticatedConnection, CollabSession,
-    JoinError, RoomJoin,
+    arm_force_primary_apply_fail, arm_spawn_room_block, disarm_force_primary_apply_fail,
+    disarm_spawn_room_block, AuthenticatedConnection, CollabSession, JoinError, RoomJoin,
 };
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, SyncMessage, SyncStep,
@@ -361,6 +361,35 @@ async fn hub_join(
     client_id: u32,
 ) -> Result<Uuid, JoinError> {
     hub_join_document(hub, wiki, wiki.document_id, client_id).await
+}
+
+async fn hub_join_readonly(
+    hub: &CollabHub,
+    wiki: &WikiDocFixture,
+    client_id: u32,
+) -> Result<Uuid, JoinError> {
+    let conn_id = Uuid::now_v7();
+    let (events_tx, mut events_rx) = mpsc::channel(8);
+    tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let join = RoomJoin {
+        conn: AuthenticatedConnection {
+            conn_id,
+            session: CollabSession {
+                session_id: wiki.session.session_id,
+                user_id: wiki.session.user_id,
+                given_name: "Reader".into(),
+                family_name: None,
+            },
+            client_id,
+            read_only: true,
+            routing_key,
+        },
+        events: events_tx,
+    };
+    hub.join_room((wiki.session.workspace_id, wiki.document_id), join)
+        .await?;
+    Ok(conn_id)
 }
 
 async fn wait_for_booting(hub: &CollabHub, key: (Uuid, Uuid)) {
@@ -1191,7 +1220,49 @@ async fn collab_reconnect_step1_includes_server_state_vector() {
 }
 
 #[tokio::test]
-async fn collab_noop_update_is_not_stored() {
+async fn collab_empty_byte_update_is_rejected() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 32).await;
+    writer
+        .send(Message::Binary(sync_update_frame(&routing_key, &[]).into()))
+        .await
+        .unwrap();
+
+    let mut saw_rejected = false;
+    for _ in 0..6 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::SyncStatus { applied: false },
+            ..
+        }) = recv_document_frame(&mut writer, 1).await
+        {
+            saw_rejected = true;
+            break;
+        }
+    }
+    assert!(saw_rejected, "byte-empty update must be rejected as malformed");
+
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(load.tail.is_empty());
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_canonical_noop_update_is_not_stored() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
     let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
@@ -1535,4 +1606,172 @@ async fn collab_delete_only_round_trip_persists() {
         "delete-only state should be snapshotted"
     );
     harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_two_readonly_joins_then_writer_edits() {
+    run_lifecycle_test("collab_two_readonly_joins_then_writer_edits", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&harness.admin_url)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = $1")
+            .bind(wiki.document_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+
+        let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+        let key = (wiki.session.workspace_id, wiki.document_id);
+        assert!(hub_join_readonly(&hub, &wiki, 81).await.is_ok());
+        assert!(hub_join_readonly(&hub, &wiki, 82).await.is_ok());
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&harness.admin_url)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE fvoci.documents SET status = 'published' WHERE id = $1")
+            .bind(wiki.document_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+
+        let conn_id = hub_join(&hub, &wiki, 83).await.expect("writer join");
+        let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+        hub.send_frame(
+            key,
+            conn_id,
+            sync_update_frame(&routing_key, &sample_hi_update()),
+        )
+        .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut tail_len = 0usize;
+        while tokio::time::Instant::now() < deadline {
+            let load = load_collab_document(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            tail_len = load.tail.len();
+            if tail_len == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(tail_len, 1, "writer update must persist after two readonly joins");
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_committed_update_survives_primary_apply_fail_reload() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let update = sample_hi_update();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 91).await;
+    arm_force_primary_apply_fail();
+    writer
+        .send(Message::Binary(sync_update_frame(&routing_key, &update).into()))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "durable commit must not be rejected when primary apply fails"
+    );
+    disarm_force_primary_apply_fail();
+
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(load.tail.len(), 1);
+    assert_eq!(load.tail[0].payload, update);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_foreign_leave_does_not_evict_member() {
+    run_lifecycle_test("collab_lifecycle_foreign_leave_does_not_evict_member", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let hub = CollabHub::new(test_collab_config(4, 200), wiki.session.pool.clone());
+        let key = (wiki.session.workspace_id, wiki.document_id);
+        let conn_id = hub_join(&hub, &wiki, 1).await.expect("join");
+        assert_eq!(hub.room_lifecycle_phase(key).await, RoomLifecyclePhase::Live);
+
+        hub.leave_room(key, Uuid::now_v7()).await;
+        assert_eq!(hub.room_lifecycle_phase(key).await, RoomLifecyclePhase::Live);
+
+        hub.leave_room(key, conn_id).await;
+        wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_shutdown_during_booting_reclaims_slot() {
+    run_lifecycle_test("collab_lifecycle_shutdown_during_booting_reclaims_slot", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let release = arm_spawn_room_block(wiki.document_id).await;
+        let hub = Arc::new(CollabHub::new(
+            test_collab_config(4, 30_000),
+            wiki.session.pool.clone(),
+        ));
+        let key = (wiki.session.workspace_id, wiki.document_id);
+        let slots_before = hub.available_room_slots();
+
+        let join_task = tokio::spawn({
+            let hub = hub.clone();
+            let wiki = wiki.clone_fixture();
+            async move { hub_join(&hub, &wiki, 1).await }
+        });
+        wait_for_booting(&hub, key).await;
+        assert_eq!(hub.available_room_slots(), slots_before - 1);
+
+        let shutdown_task = tokio::spawn({
+            let hub = hub.clone();
+            async move { hub.shutdown().await }
+        });
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+
+        release.send(()).expect("release startup gate");
+        let join_result = join_task.await.expect("join task");
+        assert!(join_result.is_err(), "join during shutdown must fail");
+        shutdown_task.await.expect("shutdown task");
+        assert_eq!(hub.available_room_slots(), slots_before);
+        assert_eq!(hub.room_lifecycle_phase(key).await, RoomLifecyclePhase::Absent);
+        disarm_spawn_room_block(wiki.document_id).await;
+        harness.cleanup().await;
+    })
+    .await;
 }
