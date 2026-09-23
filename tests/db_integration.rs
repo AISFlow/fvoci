@@ -788,6 +788,10 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .execute(&admin)
         .await
         .unwrap();
+    sqlx::query("DROP FUNCTION public.app_tenant_id(), public.app_system_ctx_on()")
+        .execute(&admin)
+        .await
+        .unwrap();
     let mut blocker = admin.begin().await.unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(847291003552)")
         .execute(&mut *blocker)
