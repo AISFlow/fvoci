@@ -776,6 +776,62 @@ async fn stored_password_hash_verifies_on_login() {
 }
 
 #[tokio::test]
+async fn concurrent_migrations_wait_then_initialize_once() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    // This is a UUID database owned exclusively by this test, never a supplied DB.
+    sqlx::query("DROP SCHEMA fvoci CASCADE")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut blocker = admin.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(847291003552)")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let first_url = harness.admin_url.clone();
+    let second_url = harness.admin_url.clone();
+    let first = tokio::spawn(async move { migrate::run_migrations(&first_url).await });
+    let second = tokio::spawn(async move { migrate::run_migrations(&second_url).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'
+                 AND NOT granted AND database =
+                 (SELECT oid FROM pg_database WHERE datname = current_database())",
+            )
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+            if waiting == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both migrations must reach the held lock");
+    blocker.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+    })
+    .await
+    .expect("both migrations must complete");
+    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.schema_migrations")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(versions, 2);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn versioned_migrations_are_idempotent_on_rerun() {
     let harness = TestDb::bootstrap().await;
     migrate::run_migrations(&harness.admin_url)
