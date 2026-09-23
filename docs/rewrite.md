@@ -141,3 +141,11 @@ DB 검사는 원본 앱 역할 제한과 같은 종류의 실제 비특권 역�
 - Workspace 첫 제출 `eaec22c`는 빠른 검사만 완료되어 미수락. 후속 검증 task `task_ed526f3bccd5` / `ctx_0c2f0b3e544b`가 같은 Composer 터미널과 파일 소유권을 인계했다. Fable fixed-eaec22c review task `task_d8dd8e9f40cc` / `ctx_441329a7aad7` 진행 중. DB gate 및 보완 지적 해결 후 통합한다.
 - Post-merge CI35900278533은 main fe30bd1에서 fast/postgres 모두 성공했다. Fable은 후속 메시지 msg_3230eda1ade0에서 79d7b69의 문서·생성기 diff도 별도로 검토해 수락 가능하다고 보고했다(전체 후속 workspace 승인 아님).
 - Rust DTO 기반 계약 생성을 위한 공통 의존성은 선택 feature `api-schema`의 utoipa `=6.0.0`으로 고정한다. 공식 crates sparse index와 실제 .crate Cargo.toml에서 MSRV1.88, MIT OR Apache-2.0 및 공식 Git tag를 확인했다. 기존 Rust1.98.1과 호환 범위이며 기본 인증 검사에서는 feature를 활성화하지 않는다. lockfile은 utoipa6.0.0/utoipa-gen6.0.1을 추가하고 기존 패키지 버전을 바꾸지 않았다. 실제 DTO→OpenAPI→TS 생성 연결은 다음 UI task에서 구현하며 의존성 추가만으로 완료 표시하지 않는다.
+
+### 후속 구현 검토·보완 체크포인트
+
+- Workspace 후속 `41da1b58eeef8c3d316e905609acae964afe913a`는 워커가 DB41/41(42.84s)과 lib6/clippy 성공을 보고했으나 **미수락**이다. 고정 eaec22c의 Fable 보고서 `/tmp/fvoci-workspace-review-eaec22c.md`와 후속 diff 확인에서 감사 기록 원자성, 인가 전 개인 workspace 정보 노출, 삭제된 대상 사용자 변경, 개인 workspace FK/unique 보강이 남았다. 보고된 검사 개수만으로 기능을 수락하지 않는다.
+- 보완 task `task_89edff0528f8` / `ctx_66cc86b4814d`는 같은 Composer 터미널·worktree와 src/tests/신규003/grant 스크립트 소유권을 인계했다. 이전 두 제출 커밋은 보존하며 통합 전 차단 지적을 수정한다. 다음은 고정 제출 SHA 검토와 통합 SHA의 실제 DB 검사다.
+- rhwp task `task_d8508aa82dc4` / `ctx_ecd7e7cf88f4`는 native crate를 구현 중이며 아직 실제 native 검사·수락 전이다. upstream Git 전체 이력 fetch가 공유 crate 캐시를 막아 해당 소유 fetch만 중단했다. 정확한 rhwp revision의 얕은 sparse checkout을 준비 단계에서 검증하는 경로로 바꾼다. Cargo.lock만으로 path 의존성 내용이 고정되지는 않으므로 manifest metadata의 revision과 checkout origin/HEAD/clean 검사가 필수다. 테스트/build.rs에서 다운로드하지 않는다.
+- 무거운 검사 슬롯은 Composer DB 종료 후 rhwp native build/test로 이관했다. 두 워커의 파일/target은 별도다. native 완료와 실제 부모 권한·첨부 저장·검색 연결 완료를 구분한다.
+- 공통 통합 `43fc7bb`의 `cargo check --locked --offline --all-targets --features db-tests,api-schema` 성공(새 target17.71s). DTO/TS 생성 기능 자체는 아직 구현 전이다. PR #1 이후 추가 제품 코드는 아직 통합·push하지 않았고 후속 PR도 아직 생성하지 않았다.
