@@ -523,3 +523,32 @@ update/snapshot8MiB, snapshot+tail 총32MiB/64행, native JSONframe48MiB다.
 한도 초과는 명시적 실패이며 잘린 성공/부분 복원은 금지한다. 원본 환경변수
 COLLAB_MAX_PAYLOAD_BYTES override 연결은 아직 미구현이다. 원본 저장 데이터의
 이전 지원이나 대형 문서 전체 호환성을 이 기본값 확인만으로 수락하지 않는다.
+
+### 협업 기반 제출 검증 (진행 중)
+
+DB 제출3a08bc4를 통합0532bb0에 반영하고1ba6124에서 collab_integration을
+실제 x64/ARM64 PostgreSQL CI에 연결했다. 로컬 all-targets Clippy 경고1건을
+수정해 통과했고 actionlint 성공. PR6 HEAD1ba6124의 Rust35921661165,
+Web35921661087, Native35921661026 전체6job 성공 확인. 알려진 receipt 결함과
+독립 검토가 남아 해당 기능은 미수락이다.
+
+DB 원본 제출 worker task2d8c8f185502/ctx809d0a92afb8는 유효 완료 메시지를
+확인해 release했다. 앞뒤의 capability 누락/무효/폐기 완료 시도는 성공 증거에서 제외했다.
+새 Composer taskc7428b1b7d31/ctx8ee8395734c7는 같은 persistence worktree의
+receipt 권한·해시 기반 재확인·누적 조회 비용 보강을 소유한다. Fable medium
+task736355da318b/ctxdafa8d332309는 고정3a08bc4를 읽기 전용 검토 중이다.
+Grok engine9874a87 제출은 잠정2MiB 제한이 남아 미수락이며, 같은 터미널의
+후속 taska755ad0b14fa/ctx445b177a1ece가 최종8/32MiB 계약과 복원 가능한
+Apply 수락 경계를 보강한다. 통합 코디네이터는 native-engine CI를 준비 중이다.
+Fable 실제 주간 한도 도달 시 Claude Code Opus5.5 medium으로 대체한다는
+승인은 유지한다. 이번 검토의 요청/유효 모델은 Fable5.1 medium이며 대체 미실행.
+
+재개: 위 dispatch 제출/검토 확인 → 고정 커밋별 통합 → 최종 원격 CI 및
+독립 검토 → PR6 수락 판단. /collab 제품 경로·두 실제 편집기 수락은 아직 없다.
+
+engine 후속3eb3ded를 a42d503으로 통합했다(기초9874a87→a80a4f6). 워커가
+worker21검사4.96초/test-hang23검사6.04초를 보고했고, 통합 fmt 및 all-targets
+clippy(test-hang)는7.60초 성공했다. Linux x64/ARM64 별도2job에 실제 native
+검사와 production 테스트제어 거부·부모 no-default-features 컴파일을 연결한다.
+Fable taskc7193b74e436/ctx05cc4dbef3ca는 고정3eb3ded 엔진을 읽기 전용 검토 중.
+Grok 보강 dispatch445b177a1ece는 유효 제출 확인 후 release했고 worktree는 보존했다.
