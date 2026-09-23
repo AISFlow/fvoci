@@ -9,13 +9,29 @@
 
 ## 현재 수락 지점
 
-**첫 수직 기능 수락**: 코드 `195a58f0a3a9bc77c980279cd7960b1d1ec4f069` (2026-09-24). 실제 설치·비밀번호 로그인·세션 조회/폐기·인증된 프로필 변경을 Rust HTTP → PostgreSQL 앱 역할 → 트랜잭션/이벤트/감사 → 응답까지 검증했다. 이후 문서 커밋은 제품 코드를 바꾸지 않는다. 전체 재작성은 **부분 구현**이며 아래 미착수 범위를 유지한다. Run `run_b01d432a9dee`.
+전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
+
+- PR1 인증 slice merged `fe30bd1`; 원격/실제 DB·HTTP 검증 완료.
+- [PR2](https://github.com/AISFlow/fvoci/pull/2) native 추출 merged `1fc8af347246b1ae26881103d621268155c5c3d7`.
+  검증 HEAD `0d3fb355119adeea8309c3d9a53ba3804dab6cb1`, 최신 로컬 fmt/clippy와
+  production/test-hang 각52개 성공(ignored0). 원격 Rust35908128293 fast/postgres,
+  Native35908128283 actual52+52 성공. Fable12140a6+0d3fb35 차단 없음.
+  기대 HEAD를 지정해 squash merge하고 actual merged/main 반영 확인. Post-merge CI 대기.
+- Workspace backend `bf1ab03`: 로컬 lib7/DB66와 Fable 검토 완료, 원격 수락 전.
+  통합은 `rust-workspace-integration`에서 새 main을 병합했다. UI는 Composer
+  `task_ebca570d74e9 / ctx_4761880b5c3a` (`rust-workspace-web`) 구현 중.
+- 다음 문서 기반은 Grok `task_76f95af84a63 / ctx_db38f9d1f96e`
+  (`rust-wiki-document`, base d5da209): 신규documents route/DB/004/grants와 독립검사.
+  UI와 파일 소유권을 분리했고 production router 연결은 UI 제출 뒤 코디네이터 담당.
+  Workspace/UI PR 수락 뒤 문서/협업 후속 PR로 통합하며 stacked PR은 만들지 않는다.
 
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
-| 설치·세션·인증된 프로필 변경 | identity/routes.ts, core/auth.ts, pg/identity-access.ts, contracts/identity.ts | 활성 사용자, 정지 경합, 프로필/이벤트/감사 원자성 | 첫 수직 기능 검증 완료: src/auth, src/db, src/http | 최종 순수6/DB24 + 실제 두 서버 HTTP·재시작 성공 | 확장 인증·정책/프론트 연결은 아래 미착수 |
-| 협업·문서 처리 | editor/package.json 및 서버 구현 | 저장 문서, 실제 provider, 한글/이모지, 철회·복원 | 제품 미착수, compat 조사 코드 | 좁은 probe 성공·불일치 확인 (아래) | 전체 UI/철회/복원 및 HWP 본문 미구현 |
-| 나머지 제품 기능 | 실제 라우트·UI 목록 조사 예정 | 원본 기능·보안·데이터 계약 | 미착수 | 미실행 | 인증 확장, 워크스페이스/프로젝트/태스크/문서, 첨부/검색/알림/연동, MCP/CLI/운영/백업 |
+| 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 검증 완료, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | 확장 인증·정책·UI 연결 |
+| 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | backend 부분 수락bf1ab03 | lib7/실제DB66/Fable | UI/원격gate 진행, counts·quota·groups·members-list 등 미구현 |
+| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component 검증 완료, PR2 merged | 로컬·CI52+52/Fable | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
+| 문서·협업 | domains/documents/collab, 기존 React/Tiptap | 문서 권한·provider envelope·철회·CRDT 저장/복원 | 문서 기반 구현 중, 협업은 probe만 있음 | 제품 검증 미실행 | 실제2UI 편집·awareness·재접속·persist·새 프로세스 복원 후 편집 |
+| 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
 
@@ -36,7 +52,7 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 인증 확장·PAT·OIDC·MFA·사용자 생명주기 | packages/contracts/src/routes.ts auth/me/admin, core/auth.ts | 세션 폐기, 범위, 마지막 관리자, 탈퇴/복구 | 재작성 미착수 | 미실행 | 첫 로그인 외 전체 |
-| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 재작성 미착수 | 미실행 | 첫 workspace slice에서 실제 앱 역할 RLS 수락 |
+| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend 부분 수락bf1ab03 | 실제 앱 역할DB66/Fable | UI 진행, groups/확장 정책 등 미구현 |
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
 | 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | 재작성 미착수 | 미실행 | 전체 |
 | 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | 재작성 미착수 | 조사 중 | CRDT 호환과 provider 호환을 별도로 검증 |
@@ -232,3 +248,54 @@ Ping/Pong 및 close/error를 원본 provider에 맞춘다. 새 provider로 우�
   each production/test-hang passed, ignored0. Remote latest CI and Fable fixed
   delta review are pending; possible valid-empty HWPX classification remains under
   investigation through the pinned upstream public parser API. No merge yet.
+## Native HWP/HWPX 추출 후보 — PR #1 이후
+
+PR #1은 검증 HEAD79d7b69에서 squash merge되어 main `fe30bd1b7c6f2632c354c4317c73969789de3f23`에 반영됐고 post-merge CI35900278533도 성공했다. 이 후속 브랜치는 해당 main에서 분기했으며 workspace 제품 변경과 독립적이다.
+
+- 구현: `crates/document-extract`, native edwardkim/rhwp revision `e8800c8def63449808a4092798442652ed460552`. 공개 crate 미게시를 확인하여 Cargo metadata의 불변 revision + 준비 스크립트의 origin/HEAD/clean 확인으로 path 의존성을 고정한다. lockfile만으로 path 내용이 고정된다고 주장하지 않는다. 라이선스/fixture 출처는 crate NOTICE에 보존했다.
+- 본문: HWP5 압축/비압축 BodyText와 HWPX section/table 순서, 한글/이모지/빈 문서, 잘린 컨테이너·암호화/배포 문서·형식 불일치·제한 오류를 구분한다. 출력/깊이/지원하지 않는 본문 요소로 내용이 빠지면 Partial이다. 사용자 작성 Hancom HWP/HWPX 모두 실제 CLI에서 `안녕`이 나오며 PrvText를 본문으로 승격하지 않는다.
+- 실행 경계: Linux native child, 검증한 입력/ZIP/출력 한도, exec 전 OS 주소 공간/CPU 제한, wall-clock/RSS 감시, timeout kill+wait 및 helper thread join. 동기 API이며 비동기 HTTP 스레드에서 직접 호출할 수 없다. 외부 요청 취소가 자동으로 child를 중단한다고 주장하지 않는다. Linux 이외 실행/ARM64는 미검증이다.
+- worker: Grok4.6 `task_d8508aa82dc4 / ctx_ecd7e7cf88f4`의222a80b, 보완 `task_e512f2100714 / ctx_2e8a2222db50`의b0c4c82/625d940을 순차 통합했다. 완료 메시지를 확인하고 마지막 terminal release; worktree/커밋은 보존했다.
+- 코디네이터 검증 SHA `7b05c269d06d57f523dc10c8cf5077596d53479b`: `cargo fmt --check`, `cargo test --locked --offline --all-targets --features test-hang -j 2` (32/32, ignored0, 전체4.11s), 같은 default-feature 검사(32/32, ignored0, 3.91s), `cargo clippy --locked --offline --all-targets --features test-hang -j 2 -- -D warnings` (exit0, 새 check 산출물54.54s). 모든 명령 cwd는 이 worktree의 crates/document-extract다. 이전 후보 c656ff3에서 독립 fresh 준비23.95s, 최초 test --no-run 빌드113.98s/최대RSS3126296KB를 별도 측정했다. 빌드 성공을 테스트 성공으로 바꾸어 기록하지 않는다.
+- 자원: 32CPU/load3.34/가용42GB를 관찰한 뒤 이 별도 target의 초기 빌드만 jobs2로 제한해 별도 UUID DB 검증과 병행했다. 기본 Rust 인증 build에는 rhwp를 연결하지 않았다. 별도 Native documents CI는 explicit 준비/fetch 후 offline 검증한다.
+- 현재 **미수락**: 독립 Fable 검토와 최신 원격 CI가 아직 남았다. 첨부 부모 권한·업로드·보존·추출 상태 저장·인가 다운로드와 검색 인덱스, 뷰어/썸네일은 미구현이다. native 추출과 제품 첨부 연결을 혼동하지 않는다. workspace/React는 다른 작업에서 진행 중이며 이 PR에서 완료하지 않는다.
+
+
+### Native PR2 final correction candidate12140a6
+
+- Grok fd6afc0 integrated as4011be3: failed-section handling, caption/form/equation
+  extraction, bounded warnings/stdin and helper error classification. Local50 tests
+  per production/test-hang passed; remote Rust35907475049 and documents35907475180
+  execute at4011be3 (documents success confirmed). Fable fixed4011be3 closed earlier
+  blockers and recommended public-parser empty-section refinement.
+- Coordinator12140a6 uses pinned public HwpxReader/parse_content_hpf/
+  parse_hwpx_section only for ambiguous HWPX empty sections, preserving package
+  order. Valid zero-paragraph Empty, mixed-empty+body Ok, all-failed Corrupt and
+  partial failure Partial are distinguished without custom parser or stderr inference.
+  Allocator failure scans full bounded stderr, with a regression after800chars.
+- Exact12140a6 stamped `/tmp/fvoci-native-final-gates.log`: fmt0.11s,
+  clippy all-targets/test-hang0.62s, test-hang52 passed/0ignored total1.22s,
+  production52 passed/0ignored total3.19s. Commands use `--locked --offline`.
+  Tests comprise7 unit+37extract+8process-boundary; zero-test binary harness is
+  not counted as test evidence. Actual fixtures include user-authored 안녕 plus
+  independent multi-section/table/Korean/emoji/empty/malformed/resource cases.
+- Fable delta task_6f8dcd8866c2 / ctx_faf9d9844108 reviewing12140a6. PR2 stays
+  Draft until this closure and latest remote CI. Native component only: parent
+  document permission/upload/storage/extraction-status/download/search/thumbnail
+  product flow is still absent. No claim of attachment integration or full rewrite.
+- Nonblocking diagnostics: repeated failed-section warnings count occurrences but
+  retain only the first index; the warning-kind cap fallback is unreachable with
+  the current7 kinds and remains a future diagnostic refinement. Neither hides
+  Partial status. No actual Hancom-saved completely empty fixture was provided;
+  independently generated valid empty documents are tested without claiming that provenance.
+
+
+### 다음 문서/협업 설계 결정
+
+원본 계약 조사 `/tmp/fvoci-document-collab-contract.md`의 wiki-only parentId/null,
+WIKI 번호·tree/get·prosemirror/updateV1/gc:false 계약을 사용한다. 사용자 요구가
+원본보다 우선한다: 원본의 persist 권한 재검사 누락을 복제하지 않고 현재 write
+권한을 트랜잭션에서 보장한다. Node provider 검사만으로2실제UI 수락을 대신하지 않는다.
+현재 단일 프로세스 범위에서 문서별 task를 소유하게 하되 Redis/다중인스턴스 기능은
+미지원으로 추적한다. 데이터 손실 방지를 위해 공유DB에서 중복 room 소유와 오래된
+snapshot 덮어쓰기를 방지하는 경계까지 다음 보안 설계 검토에 포함한다.
