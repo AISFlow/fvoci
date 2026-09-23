@@ -52,13 +52,27 @@ async function createWikiDoc(page: Page, title: string): Promise<{ id: string; d
   return { id: body.id, displayId: body.displayId, url: `/w/acme/${body.displayId}` };
 }
 
-async function waitSaved(page: Page): Promise<void> {
-  await expect(page.getByText("연결됨 · 저장됨")).toBeVisible({ timeout: 15_000 });
+async function waitConnected(page: Page): Promise<void> {
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({
+    timeout: 15_000,
+  });
+}
+
+async function waitDurableSaved(page: Page): Promise<void> {
+  await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(page.getByText("연결됨 · 저장됨", { exact: true })).toBeVisible();
+}
+
+async function persistBody(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await waitDurableSaved(page);
 }
 
 async function openEditor(page: Page, url: string): Promise<ReturnType<Page["locator"]>> {
   await page.goto(url);
-  await waitSaved(page);
+  await waitConnected(page);
   const editor = page.locator(".fvoci-editor .ProseMirror");
   await expect(editor).toBeVisible();
   return editor;
@@ -75,10 +89,10 @@ test("member wiki doc types Korean/Han/emoji, keeps data-id, and reloads the sam
   const editor = await openEditor(page, doc.url);
   await editor.click();
   await page.keyboard.type("본문 한글과 漢字🙂");
-  await waitSaved(page);
+  await persistBody(page);
   await expect(editor.locator("[data-id]").first()).toBeVisible();
   await page.reload();
-  await waitSaved(page);
+  await waitConnected(page);
   await expect(page.locator(".fvoci-editor .ProseMirror")).toContainText("본문 한글과 漢字🙂");
 });
 
@@ -115,6 +129,10 @@ test("two contexts converge, show awareness, and drop the peer on close", async 
 
     await expect(pageA.getByLabel(/동시 접속 \d+명/)).toBeVisible({ timeout: 15_000 });
     await expect(pageB.getByLabel(/동시 접속 \d+명/)).toBeVisible();
+    await expect(pageA.locator('[data-collab-status="connected"]')).toBeVisible();
+    await expect(pageB.locator('[data-collab-status="connected"]')).toBeVisible();
+    await expect(pageA.locator('[data-collab-persisted="true"]')).toHaveCount(0);
+    await expect(pageB.locator('[data-collab-persisted="true"]')).toHaveCount(0);
 
     await editorA.click();
     await pageA.keyboard.type("A가 쓴 줄");
@@ -146,10 +164,11 @@ test("insertion and deletion collide and both survive", async ({ browser }) => {
     const editorA = await openEditor(pageA, doc.url);
     await editorA.click();
     await pageA.keyboard.type("공통 문장");
-    await waitSaved(pageA);
+    await expect(editorA).toContainText("공통 문장");
 
     await login(pageB, member.email, member.password);
     const editorB = await openEditor(pageB, doc.url);
+    await expect(editorB).toContainText("공통 문장", { timeout: 15_000 });
     await editorA.click();
     await pageA.keyboard.press("Home");
     await pageA.keyboard.type("앞쪽삽입 ");
@@ -159,7 +178,8 @@ test("insertion and deletion collide and both survive", async ({ browser }) => {
     await pageB.keyboard.press("Backspace");
     await expect(editorA).toContainText("앞쪽삽입", { timeout: 15_000 });
     await expect(editorB).toContainText("앞쪽삽입", { timeout: 15_000 });
-    await expect(editorA).not.toContainText("공통 문장.");
+    await expect(editorA).not.toContainText("공통 문장");
+    await expect(editorB).not.toContainText("공통 문장");
   } finally {
     await ctxA.close();
     await ctxB.close().catch(() => {});
@@ -175,7 +195,8 @@ test("offline typing reconnects without dropping unsent text", async ({ page, co
   await page.keyboard.type("오프라인에서 쓴 줄");
   await expect(page.getByText("연결됨 · 저장 대기")).toBeVisible();
   await context.setOffline(false);
-  await waitSaved(page);
+  await waitConnected(page);
+  await expect(page.locator('[data-collab-persisted="true"]')).toHaveCount(0);
   await expect(editor).toContainText("오프라인에서 쓴 줄");
 });
 
@@ -186,7 +207,9 @@ test("archived document stays connected and read-only", async ({ page }) => {
   await page.getByLabel("문서 상태").selectOption("archived");
   await expect(page.getByLabel("문서 상태")).toHaveValue("archived");
   await expect(page.getByText("읽기 전용")).toBeVisible();
-  await expect(page.getByText("연결됨 · 저장됨")).toBeVisible();
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
+  await expect(page.getByText("연결됨 · 저장됨", { exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-collab-persisted="true"]')).toHaveCount(0);
   await expect(page.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
 });
 
@@ -211,7 +234,7 @@ test("membership revoke while connected stops further edits", async ({ browser }
     const editor = await openEditor(memberPage, doc.url);
     await editor.click();
     await memberPage.keyboard.type("철회 전 문장");
-    await waitSaved(memberPage);
+    await expect(editor).toContainText("철회 전 문장");
 
     const ws = await workspaceId(ownerPage, "acme");
     const revoke = await ownerPage.request.delete(
@@ -236,18 +259,17 @@ test("deletion-only then structured subsequent edits survive persist", async ({ 
   const editor = await openEditor(page, doc.url);
   await editor.click();
   await page.keyboard.type("지울 문장");
-  await waitSaved(page);
+  await persistBody(page);
   await page.keyboard.press("Control+A");
   await page.keyboard.press("Backspace");
-  await page.getByRole("button", { name: "저장", exact: true }).click();
-  await waitSaved(page);
+  await expect(page.locator('[data-collab-persisted="true"]')).toHaveCount(0);
+  await persistBody(page);
   await page.keyboard.type("/표");
   await page.keyboard.press("Enter");
   await expect(page.locator(".fvoci-editor table")).toBeVisible();
-  await page.getByRole("button", { name: "저장", exact: true }).click();
-  await waitSaved(page);
+  await persistBody(page);
   await page.reload();
-  await waitSaved(page);
+  await waitConnected(page);
   await expect(page.locator(".fvoci-editor table")).toBeVisible();
   await expect(page.locator(".fvoci-editor .ProseMirror")).not.toContainText("지울 문장");
 });

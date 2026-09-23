@@ -5,6 +5,7 @@ export type CollabBadgeTone = "live" | "wait" | "danger";
 export interface CollabBadge {
   label:
     | "doc.collab.saved"
+    | "doc.collab.connected"
     | "doc.collab.pending"
     | "doc.collab.connecting"
     | "doc.collab.reconnecting"
@@ -14,7 +15,7 @@ export interface CollabBadge {
 
 const COLLAB_BADGE: Record<CollabStatus, CollabBadge> = {
   connected: {
-    label: "doc.collab.saved",
+    label: "doc.collab.connected",
     tone: "live",
   },
   connecting: {
@@ -31,12 +32,24 @@ const COLLAB_BADGE: Record<CollabStatus, CollabBadge> = {
   },
 };
 
-/** WHY: #517 — 오프라인이어도 provider 는 30초까지 connected 다. 「저장됨」은 미전송 변경이 없을 때만. */
-export function collabBadge(status: CollabStatus, pending: boolean): CollabBadge {
-  return status === "connected" && pending
-    ? {
-        label: "doc.collab.pending",
-        tone: "wait",
-      }
-    : COLLAB_BADGE[status];
+/** WHY: 소켓 동기화와 DB persist ack 는 다르다. 「저장됨」은 일치하는 persist 성공만. */
+export function collabBadge(
+  status: CollabStatus,
+  pending: boolean,
+  persisted = false,
+): CollabBadge {
+  if (status !== "connected") return COLLAB_BADGE[status];
+  if (pending) {
+    return {
+      label: "doc.collab.pending",
+      tone: "wait",
+    };
+  }
+  if (persisted) {
+    return {
+      label: "doc.collab.saved",
+      tone: "live",
+    };
+  }
+  return COLLAB_BADGE.connected;
 }

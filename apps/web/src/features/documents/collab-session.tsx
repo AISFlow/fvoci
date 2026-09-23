@@ -9,6 +9,11 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
 import {
+	applyPersistAck,
+	createPersistAck,
+	isDurablySaved,
+} from "./collab-persist-ack";
+import {
 	blockIdOf,
 	CLAIM_RETRY_LIMIT,
 	type CollabPeer,
@@ -33,6 +38,12 @@ export {
 	reassertPresence,
 	setTitleEditing,
 } from "./collab-model";
+export { isDurablySaved } from "./collab-persist-ack";
+
+function roomNameOf(provider: { configuration?: { name?: string } }): string {
+	const name = provider.configuration?.name;
+	return typeof name === "string" ? name : "";
+}
 
 export function CollabRoom({
 	workspaceId,
@@ -107,12 +118,15 @@ export function useCollabSession(
 ): CollabSession | null {
 	const provider = useHocuspocusProvider();
 	const connectionStatus = useHocuspocusConnectionStatus();
+	const connectionId = useMemo(() => crypto.randomUUID(), [provider]);
+	const documentId = roomNameOf(provider);
 	// WHY: #653 — provider 가 살아있는 채 리마운트되면 synced 를 다시 미동기화로 접으면 안 된다.
 	const [synced, setSynced] = useState(() => provider.synced);
 	const [unsent, setUnsent] = useState(false);
 	const [peers, setPeers] = useState<CollabPeer[]>([]);
 	const [readOnly, setReadOnly] = useState(false);
 	const [unauthorized, setUnauthorized] = useState(false);
+	const [ack, setAck] = useState(() => createPersistAck(documentId, connectionId));
 
 	useHocuspocusEvent("synced", ({ state }) => {
 		if (state) setSynced(true);
@@ -127,6 +141,23 @@ export function useCollabSession(
 	useHocuspocusEvent("unsyncedChanges", ({ number }) => {
 		setUnsent(number > 0);
 	});
+
+	useEffect(() => {
+		setAck((prev) =>
+			applyPersistAck(prev, { type: "bind", documentId, connectionId }),
+		);
+	}, [documentId, connectionId]);
+
+	useEffect(() => {
+		const doc = provider.document;
+		const onUpdate = () => {
+			setAck((prev) => applyPersistAck(prev, { type: "edit" }));
+		};
+		doc.on("update", onUpdate);
+		return () => {
+			doc.off("update", onUpdate);
+		};
+	}, [provider.document]);
 
 	useEffect(() => {
 		if (!user) return;
@@ -179,11 +210,22 @@ export function useCollabSession(
 			synced,
 			// WHY: #517 — readOnly 연결은 서버가 update 에 ack 를 주지 않아 카운터가 내려가지 않는다.
 			pending: unsent && !readOnly,
+			durableSaved: isDurablySaved(ack),
 			peers,
 			readOnly,
-			persistNow: () => persistNow(provider),
+			persistNow: () =>
+				persistNow(provider, {
+					onRequest: (requestId) =>
+						setAck((prev) => applyPersistAck(prev, { type: "request", requestId })),
+					onAck: (requestId) =>
+						setAck((prev) => applyPersistAck(prev, { type: "ack", requestId })),
+					onFail: (requestId) =>
+						setAck((prev) => applyPersistAck(prev, { type: "fail", requestId })),
+					onTimeout: (requestId) =>
+						setAck((prev) => applyPersistAck(prev, { type: "timeout", requestId })),
+				}),
 		}),
-		[provider, unauthorized, connectionStatus, synced, unsent, readOnly, peers],
+		[provider, unauthorized, connectionStatus, synced, unsent, readOnly, peers, ack],
 	);
 
 	if (!user) return null;

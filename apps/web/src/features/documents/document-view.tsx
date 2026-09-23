@@ -138,7 +138,11 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
   const readOnly = archived || (collabSession?.readOnly ?? false);
   const ready = Boolean(collabSession?.synced && collabUser);
   const badge = collabSession
-    ? collabBadge(collabSession.status, collabSession.pending)
+    ? collabBadge(
+        collabSession.status,
+        collabSession.pending || persisting,
+        collabSession.durableSaved,
+      )
     : null;
   const canPersist =
     ready &&
@@ -289,11 +293,15 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
                 className={`document-page__collab-status document-page__collab-status--${badge.tone}`}
                 data-collab-status={collabSession?.status}
                 data-collab-pending={collabSession?.pending ? "true" : "false"}
+                data-collab-persisted={collabSession?.durableSaved ? "true" : "false"}
               >
                 {t(badge.label)}
               </span>
             ) : (
-              <span className="document-page__collab-status document-page__collab-status--wait">
+              <span
+                className="document-page__collab-status document-page__collab-status--wait"
+                data-collab-persisted="false"
+              >
                 {t("doc.collab.connecting")}
               </span>
             )}

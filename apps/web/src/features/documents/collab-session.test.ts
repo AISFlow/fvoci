@@ -12,6 +12,9 @@ test("collab-session 은 provider-react 를 쓴다", () => {
   const src = readFileSync(sessionPath, "utf8");
   assert.equal(src.includes("@hocuspocus/provider-react"), true);
   assert.equal(src.includes("new HocuspocusProvider"), false);
+  assert.equal(src.includes("gc: false"), true);
+  assert.equal(src.includes("durableSaved"), true);
+  assert.equal(src.includes("applyPersistAck"), true);
 });
 
 test("collab-session 에 hex 리터럴이 없다", () => {

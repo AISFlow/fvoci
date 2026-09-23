@@ -137,8 +137,10 @@ export interface CollabSession {
 	fragment: Y.XmlFragment;
 	status: CollabStatus;
 	synced: boolean;
-	/** WHY: #517 — 서버가 아직 받았다고 답하지 않은 변경이 남았다. false 여야 「저장됨」이다. */
+	/** WHY: #517 — 서버가 아직 소켓으로 받았다고 답하지 않은 변경이 남았다. */
 	pending: boolean;
+	/** WHY: persist:<id> 성공 ack 가 이 문서·연결·편집 prefix 와 맞을 때만 true. */
+	durableSaved: boolean;
 	peers: CollabPeer[];
 	readOnly: boolean;
 	persistNow: () => Promise<void>;
@@ -156,33 +158,53 @@ export const CLAIM_RETRY_LIMIT = 3;
 
 export const PERSIST_TIMEOUT_MS = 5000;
 
+export interface PersistNowObserver {
+	onRequest?: (requestId: string) => void;
+	onAck?: (requestId: string) => void;
+	onFail?: (requestId: string) => void;
+	onTimeout?: (requestId: string) => void;
+}
+
 /* WHY: 저장 응답은 요청별로 확인한다. timeout·실패 응답은 저장 성공이 아니므로
  * 보관·내보내기·버전 저장 호출자가 작업을 중단하고 오류를 표시한다. */
-export function persistNow(provider: HocuspocusProvider): Promise<void> {
+export function persistNow(
+	provider: HocuspocusProvider,
+	observer?: PersistNowObserver,
+): Promise<void> {
 	const requestId = crypto.randomUUID();
 	return new Promise((resolve, reject) => {
-		const done = (error?: Error) => {
+		let settled = false;
+		const done = (kind: "ack" | "fail" | "timeout", error?: Error) => {
+			if (settled) return;
+			settled = true;
 			globalThis.clearTimeout(timer);
 			provider.off("stateless", onStateless);
+			if (kind === "ack") observer?.onAck?.(requestId);
+			else if (kind === "fail") observer?.onFail?.(requestId);
+			else observer?.onTimeout?.(requestId);
 			if (error) reject(error);
 			else resolve();
 		};
 		const onStateless = ({ payload }: onStatelessParameters) => {
-			if (payload === `${COLLAB_PERSIST_DONE}:${requestId}`) done();
-			if (payload === `${COLLAB_PERSIST_FAILED}:${requestId}`)
-				done(new Error("collab persist failed"));
+			if (payload === `${COLLAB_PERSIST_DONE}:${requestId}`) done("ack");
+			if (payload === `${COLLAB_PERSIST_FAILED}:${requestId}`) {
+				done("fail", new Error("collab persist failed"));
+			}
 		};
-		const timer = globalThis.setTimeout(
-			() => done(new Error("collab persist timed out")),
-			PERSIST_TIMEOUT_MS,
-		);
+		const timer = globalThis.setTimeout(() => {
+			done("timeout", new Error("collab persist timed out"));
+		}, PERSIST_TIMEOUT_MS);
 		provider.on("stateless", onStateless);
 		/* WHY: flushDelay 배칭은 문서 업데이트만 묶고 stateless 는 직행이라 마지막 ≤200ms 편집을 추월한다 — 먼저 내보낸다. */
 		try {
 			provider.flushPendingUpdates();
+			observer?.onRequest?.(requestId);
 			provider.sendStateless(`${COLLAB_PERSIST_REQUEST}:${requestId}`);
 		} catch (error) {
-			done(error instanceof Error ? error : new Error("collab persist failed"));
+			done(
+				"fail",
+				error instanceof Error ? error : new Error("collab persist failed"),
+			);
 		}
 	});
 }

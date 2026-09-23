@@ -83,3 +83,21 @@ test("timeout 은 저장 성공이 아니다", async () => {
     globalThis.clearTimeout = realClearTimeout;
   }
 });
+
+test("persistNow observer 는 요청 id 만 알리고 외국 ack 는 성공으로 부르지 않는다", async () => {
+  const fake = fakeProvider();
+  const seen: string[] = [];
+  const persisted = persistNow(fake.provider, {
+    onRequest: (id) => seen.push(`request:${id}`),
+    onAck: (id) => seen.push(`ack:${id}`),
+    onFail: (id) => seen.push(`fail:${id}`),
+    onTimeout: (id) => seen.push(`timeout:${id}`),
+  });
+  const requestId = fake.calls[1]?.slice(`stateless:${COLLAB_PERSIST_REQUEST}:`.length);
+  assert.deepEqual(seen, [`request:${requestId}`]);
+  fake.emit(`${COLLAB_PERSIST_DONE}:${crypto.randomUUID()}`);
+  assert.deepEqual(seen, [`request:${requestId}`]);
+  fake.emit(`${COLLAB_PERSIST_DONE}:${requestId}`);
+  await persisted;
+  assert.deepEqual(seen, [`request:${requestId}`, `ack:${requestId}`]);
+});
