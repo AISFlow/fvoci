@@ -1,4 +1,5 @@
 pub mod context;
+pub mod documents;
 pub mod identity;
 pub mod migrate;
 pub mod pool;
