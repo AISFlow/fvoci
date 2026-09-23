@@ -209,3 +209,26 @@ Ping/Pong 및 close/error를 원본 provider에 맞춘다. 새 provider로 우�
 문서별 task 소유권/idle eviction/flush/cancellation/join을 두고 종료는 새 연결 중단
 →write 중단→flush→persist 확인→awareness/socket 종료→task join 순서다.
 첨부 native 검증은 병행하되 무인가 업로드나 가짜 부모 리소스로 제품 연결을 대신하지 않는다.
+
+
+### Workspace backend review closure and active UI task
+
+- Fable5.1 medium `task_6280ab04ca66 / ctx_0446f2b9d341` reviewed fixed
+  `bf1ab031933f5243cd91eceb87f703d9f9469ddc`, read the integrated logs and closed
+  B1/B2/R1–R5. Report `/tmp/fvoci-workspace-review-bf1ab03.md`; no blocking issue
+  for the narrow backend scope. Local backend is accepted; remote workspace CI,
+  UI and whole-domain parity are still pending. Transaction-drop coverage is not
+  an HTTP abort test. Default-feature unused import is assigned for correction.
+- Composer2.5 `task_ebca570d74e9 / ctx_4761880b5c3a`, base `f1b97f0`, owns
+  `rust-workspace-web` apps/web plus the explicitly scoped Rust schema/static
+  transport changes and browser tests. It must reuse actual source React UI,
+  generate TS from Rust DTOs, and run against real Rust+nonprivileged PostgreSQL.
+  Root dependency/lock/CI/migration final ownership remains coordinator; only an
+  exporter bin manifest entry was narrowly delegated. No UI result accepted yet.
+- Grok4.6 `task_8f11568ea952 / ctx_c4d11404c451` is read-only for exact next
+  document/collaboration contracts; no repeat of the already proven envelope
+  mismatch. Source contracts will drive real initial document + two-client slice.
+- Native fix4011be3 was pushed to PR2 after coordinator fmt/clippy and50 tests
+  each production/test-hang passed, ignored0. Remote latest CI and Fable fixed
+  delta review are pending; possible valid-empty HWPX classification remains under
+  investigation through the pinned upstream public parser API. No merge yet.
