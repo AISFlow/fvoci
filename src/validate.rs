@@ -1,5 +1,6 @@
 use regex::Regex;
 use std::sync::LazyLock;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::error::{AppError, ProblemCode};
 
@@ -23,21 +24,8 @@ pub fn normalize_email(email: &str) -> Result<String, AppError> {
     Ok(trimmed.to_ascii_lowercase())
 }
 
-fn nfkc_compat(input: &str) -> String {
-    input
-        .chars()
-        .map(|c| {
-            if ('\u{FF01}'..='\u{FF5E}').contains(&c) || ('\u{FF10}'..='\u{FF19}').contains(&c) {
-                char::from_u32(c as u32 - 0xFEE0).unwrap_or(c)
-            } else {
-                c
-            }
-        })
-        .collect()
-}
-
 pub fn normalize_slug(slug: &str) -> Result<String, AppError> {
-    let folded = nfkc_compat(slug.trim());
+    let folded: String = slug.nfkc().collect();
     if !SLUG_RE.is_match(&folded) {
         return Err(AppError::problem(
             axum::http::StatusCode::BAD_REQUEST,
@@ -114,6 +102,16 @@ pub fn validate_family_name(value: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slug_matches_source_nfkc_without_case_folding_or_trimming() {
+        assert_eq!(normalize_slug("ａｃｍｅ").unwrap(), "acme");
+        assert_eq!(normalize_slug("ⓐⓑ").unwrap(), "ab");
+        assert_eq!(normalize_slug("team-12").unwrap(), "team-12");
+        for invalid in ["ACME", "ＡＣＭＥ", " acme", "acme ", "a", "한글"] {
+            assert!(normalize_slug(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
 
     #[test]
     fn password_minimum_counts_utf16_code_units() {
