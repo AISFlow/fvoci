@@ -7,10 +7,11 @@ use utoipa::{Modify, OpenApi};
 
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
-    BrandingOutput, CreateWorkspaceBody, LoginBody, LoginResponse, MemberResponse, MemberRoleBody,
-    OkResponse, PatchMeBody, PatchWorkspaceBody, ProblemResponse, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, WorkspaceListItemResponse, WorkspaceListResponse,
-    WorkspaceMetaResponse,
+    AncestorsResponse, BodyResponse, BrandingOutput, CreateDocumentBody, CreateWorkspaceBody,
+    DocumentMetaResponse, LoginBody, LoginResponse, MemberResponse, MemberRoleBody, OkResponse,
+    PatchDocumentBody, PatchMeBody, PatchWorkspaceBody, ProblemResponse, SessionUserOutput,
+    SetupBody, SetupResponse, SetupStatusResponse, TreeResponse, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -33,7 +34,7 @@ impl Modify for CookieSecurityAddon {
     info(
         title = "FVOCI API",
         version = "0.1.0",
-        description = "Rust slice HTTP contract for authentication and workspace operations."
+        description = "Rust slice HTTP contract for authentication, workspace, and wiki document operations."
     ),
     paths(
         setup_status,
@@ -49,6 +50,12 @@ impl Modify for CookieSecurityAddon {
         patch_workspace,
         patch_member,
         remove_member,
+        create_document,
+        list_tree,
+        get_document,
+        patch_document,
+        get_ancestors,
+        get_body,
     ),
     components(
         schemas(
@@ -68,6 +75,12 @@ impl Modify for CookieSecurityAddon {
             CreateWorkspaceBody,
             PatchWorkspaceBody,
             MemberRoleBody,
+            CreateDocumentBody,
+            PatchDocumentBody,
+            DocumentMetaResponse,
+            TreeResponse,
+            AncestorsResponse,
+            BodyResponse,
             ProblemResponse,
         )
     ),
@@ -76,6 +89,7 @@ impl Modify for CookieSecurityAddon {
         (name = "setup", description = "Instance setup"),
         (name = "auth", description = "Authentication and profile"),
         (name = "workspaces", description = "Workspace membership and metadata"),
+        (name = "documents", description = "Wiki documents"),
     )
 )]
 pub struct ApiDoc;
@@ -264,6 +278,106 @@ fn patch_member() {}
     )
 )]
 fn remove_member() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = CreateDocumentBody,
+    responses(
+        (status = 201, description = "Created", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+    )
+)]
+fn create_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/tree",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Document tree", body = TreeResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_tree() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Document metadata", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = PatchDocumentBody,
+    responses(
+        (status = 200, description = "Updated metadata", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+    )
+)]
+fn patch_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/ancestors",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Ancestor chain", body = AncestorsResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_ancestors() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/body",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Document body", body = BodyResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_body() {}
 
 #[cfg(feature = "api-schema")]
 pub fn spec_json() -> String {

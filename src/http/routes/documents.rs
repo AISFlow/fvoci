@@ -9,10 +9,13 @@ use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde::de::Deserializer;
 use serde::Deserialize;
-use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::api::dto::{
+    AncestorResponse, AncestorsResponse, BodyResponse, DocumentMetaResponse,
+    PatchDocumentBody, TreeNodeResponse, TreeResponse,
+};
 use crate::auth::session::SessionUser;
 use crate::db::documents::{
     create_wiki_document, get_wiki_document, list_wiki_ancestors, list_wiki_tree,
@@ -67,14 +70,6 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for RequiredNullable<T> {
     }
 }
 
-fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    Deserialize::deserialize(deserializer).map(Some)
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateDocumentBody {
@@ -85,15 +80,6 @@ struct CreateDocumentBody {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PatchDocumentBody {
-    title: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
-    icon: Option<Option<String>>,
-    status: Option<String>,
-}
-
-#[derive(Deserialize)]
 struct TreeQuery {
     tag: Option<String>,
 }
@@ -101,73 +87,6 @@ struct TreeQuery {
 #[derive(Deserialize)]
 struct BodyQuery {
     format: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DocumentMetaResponse {
-    id: String,
-    workspace_id: String,
-    title: String,
-    number: i32,
-    icon: Option<String>,
-    path: String,
-    parent_id: Option<String>,
-    sort_key: String,
-    project_id: Option<String>,
-    status: String,
-    schema_version: i32,
-    version: i32,
-    created_by: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    display_id: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TreeResponse {
-    items: Vec<TreeNodeResponse>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TreeNodeResponse {
-    id: String,
-    workspace_id: String,
-    parent_id: Option<String>,
-    project_id: Option<String>,
-    title: String,
-    icon: Option<String>,
-    path: String,
-    sort_key: String,
-    number: i32,
-    status: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AncestorsResponse {
-    items: Vec<AncestorResponse>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AncestorResponse {
-    id: String,
-    title: String,
-    icon: Option<String>,
-    path: String,
-    project_id: Option<String>,
-    number: i32,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BodyResponse {
-    content_json: Value,
-    version: i32,
 }
 
 enum DocumentApiError {
@@ -551,5 +470,13 @@ mod tests {
         assert_eq!(clear.icon, Some(None));
         let set: PatchDocumentBody = serde_json::from_str(r#"{"icon":"📄"}"#).unwrap();
         assert_eq!(set.icon, Some(Some("📄".to_string())));
+    }
+
+    #[test]
+    fn patch_document_body_deserializes_double_option_icon() {
+        let body: PatchDocumentBody =
+            serde_json::from_str(r#"{"icon":"📄","status":"draft"}"#).unwrap();
+        assert_eq!(body.icon, Some(Some("📄".to_string())));
+        assert_eq!(body.status.as_deref(), Some("draft"));
     }
 }
