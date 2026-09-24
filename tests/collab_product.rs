@@ -519,8 +519,21 @@ fn room_key(workspace_id: Uuid, document_id: Uuid) -> String {
     .routing_key()
 }
 
+/// Raw Yjs update that inserts `Y.Text("hi")` at the fragment name `prosemirror`.
+/// Valid for Apply/broadcast; not a Tiptap XmlFragment. Success persist/recycle
+/// tests reuse pinned engine XML fixtures instead of this payload.
 fn sample_hi_update() -> Vec<u8> {
     hex::decode("0101e8eda5a2070004010b70726f73656d6972726f7202686900").expect("fixture")
+}
+
+/// Pinned engine Tiptap XmlFragment update (`pending_u1.v1`: paragraph "one").
+fn tiptap_xml_pending_u1() -> Vec<u8> {
+    engine_fixture("pending_u1.v1")
+}
+
+/// Independent sequential follow-up (`pending_u2.v1`: paragraph "two한글").
+fn tiptap_xml_pending_u2() -> Vec<u8> {
+    engine_fixture("pending_u2.v1")
 }
 
 fn engine_fixture(name: &str) -> Vec<u8> {
@@ -615,27 +628,68 @@ async fn wait_for_sync_applied(
     false
 }
 
-async fn wait_for_stateless_prefix(
+#[derive(Debug)]
+enum PersistOutcome {
+    Persisted,
+    Failed(String),
+    Closed(Option<String>),
+    Timeout,
+}
+
+async fn wait_for_persist_outcome(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    prefix: &str,
+    request_id: Uuid,
     within: Duration,
-) -> bool {
+) -> PersistOutcome {
+    let persisted = format!("persisted:{request_id}");
+    let failed = format!("persist-failed:{request_id}");
     let deadline = tokio::time::Instant::now() + within;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if let Some(WireFrame::Document {
-            message: DocumentMessage::Stateless(body),
-            ..
-        }) = recv_document_frame_within(ws, remaining.min(Duration::from_millis(200))).await
-        {
-            if body.starts_with(prefix) {
-                return true;
+        match recv_document_frame_within(ws, remaining.min(Duration::from_millis(200))).await {
+            Some(WireFrame::Document {
+                message: DocumentMessage::Stateless(body),
+                ..
+            }) => {
+                if body == persisted {
+                    return PersistOutcome::Persisted;
+                }
+                if body == failed || body.starts_with("persist-failed:") {
+                    return PersistOutcome::Failed(body);
+                }
             }
+            Some(WireFrame::Document {
+                message: DocumentMessage::Close { reason },
+                ..
+            }) => return PersistOutcome::Closed(reason),
+            _ => {}
         }
     }
-    false
+    PersistOutcome::Timeout
+}
+
+async fn expect_persisted(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    request_id: Uuid,
+    within: Duration,
+    context: &str,
+) {
+    match wait_for_persist_outcome(ws, request_id, within).await {
+        PersistOutcome::Persisted => {}
+        PersistOutcome::Failed(body) => panic!(
+            "{context}: expected persisted:{request_id}, got {body} (fail promptly, do not wait out the barrier)"
+        ),
+        PersistOutcome::Closed(reason) => panic!(
+            "{context}: unexpected Close before persist ack for {request_id} ({reason:?})"
+        ),
+        PersistOutcome::Timeout => panic!(
+            "{context}: timed out waiting for persisted:{request_id} ({within:?})"
+        ),
+    }
 }
 
 fn sync_update_frame(routing_key: &str, update: &[u8]) -> Vec<u8> {
@@ -1395,48 +1449,61 @@ async fn collab_persist_barrier_and_id_correlation() {
     let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
     let addr = spawn_server(app).await;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-    let update = sample_hi_update();
-    let request_id = Uuid::now_v7();
+    let first = tiptap_xml_pending_u1();
+    let second = tiptap_xml_pending_u2();
+    let first_id = Uuid::now_v7();
+    let second_id = Uuid::now_v7();
 
     let mut writer = connect_member(addr, &wiki.session.session_token).await;
     auth_and_join(&mut writer, &routing_key, 41).await;
-    writer
-        .send(Message::Binary(
-            sync_update_frame(&routing_key, &update).into(),
-        ))
-        .await
-        .unwrap();
-    for _ in 0..8 {
-        if let Some(WireFrame::Document {
-            message: DocumentMessage::SyncStatus { applied: true },
-            ..
-        }) = recv_document_frame(&mut writer, 1).await
-        {
-            break;
-        }
-    }
 
     writer
         .send(Message::Binary(
-            stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
+            sync_update_frame(&routing_key, &first).into(),
         ))
         .await
         .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "first sequential Tiptap XmlFragment edit must apply"
+    );
+    writer
+        .send(Message::Binary(
+            stateless_frame(&routing_key, &format!("persist:{first_id}")).into(),
+        ))
+        .await
+        .unwrap();
+    expect_persisted(
+        &mut writer,
+        first_id,
+        Duration::from_secs(5),
+        "first persist barrier",
+    )
+    .await;
 
-    let mut saw_persisted = false;
-    for _ in 0..8 {
-        if let Some(WireFrame::Document {
-            message: DocumentMessage::Stateless(body),
-            ..
-        }) = recv_document_frame(&mut writer, 1).await
-        {
-            if body == format!("persisted:{request_id}") {
-                saw_persisted = true;
-                break;
-            }
-        }
-    }
-    assert!(saw_persisted, "persist reply must echo request id");
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &second).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "second independent sequential Tiptap edit must apply after commit"
+    );
+    writer
+        .send(Message::Binary(
+            stateless_frame(&routing_key, &format!("persist:{second_id}")).into(),
+        ))
+        .await
+        .unwrap();
+    expect_persisted(
+        &mut writer,
+        second_id,
+        Duration::from_secs(5),
+        "second persist barrier",
+    )
+    .await;
 
     let load = load_collab_document(
         &wiki.session.pool,
@@ -1450,6 +1517,11 @@ async fn collab_persist_barrier_and_id_correlation() {
     .unwrap();
     assert_eq!(load.snapshot_cutoff_seq, load.tail_seq);
     assert!(load.tail.is_empty(), "persist should compact tail");
+    assert_ne!(
+        load.snapshot,
+        vec![0, 0],
+        "snapshot must hold sequential Tiptap XmlFragment edits"
+    );
     harness.cleanup().await;
 }
 
@@ -1462,7 +1534,7 @@ async fn collab_primary_recycles_after_op_cap_then_edits_persist() {
             fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
         let addr = spawn_server(app).await;
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-        let update = sample_hi_update();
+        let update = tiptap_xml_pending_u1();
         let request_id = Uuid::now_v7();
 
         let mut writer = connect_member(addr, &wiki.session.session_token).await;
@@ -1525,10 +1597,13 @@ async fn collab_primary_recycles_after_op_cap_then_edits_persist() {
             ))
             .await
             .unwrap();
-        assert!(
-            wait_for_stateless_prefix(&mut writer, &format!("persisted:{request_id}"), Duration::from_secs(5)).await,
-            "persist must succeed after op-cap recycle"
-        );
+        expect_persisted(
+            &mut writer,
+            request_id,
+            Duration::from_secs(5),
+            "persist must succeed after op-cap recycle",
+        )
+        .await;
 
         let load = load_collab_document(
             &wiki.session.pool,
@@ -1671,23 +1746,13 @@ async fn collab_delete_only_round_trip_persists() {
         ))
         .await
         .unwrap();
-    let mut saw_persisted = false;
-    for _ in 0..8 {
-        if let Some(WireFrame::Document {
-            message: DocumentMessage::Stateless(body),
-            ..
-        }) = recv_document_frame(&mut writer, 1).await
-        {
-            if body == format!("persisted:{request_id}") {
-                saw_persisted = true;
-                break;
-            }
-        }
-    }
-    assert!(
-        saw_persisted,
-        "delete-only persist must echo persisted:<id>"
-    );
+    expect_persisted(
+        &mut writer,
+        request_id,
+        Duration::from_secs(5),
+        "delete-only persist must echo persisted:<id>",
+    )
+    .await;
 
     let load = load_collab_document(
         &wiki.session.pool,
