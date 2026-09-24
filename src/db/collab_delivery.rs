@@ -16,11 +16,17 @@
 //!
 //! ## Already in-flight frames (not recalled)
 //! The room actor enqueues bounded frames without this query. Authority is
-//! applied when the transport dequeues a Data frame, immediately before
-//! `send_ws_message`. A read whose statement started before revoke commit may
-//! still return Allowed; that frame may be written after t_R (R1, bounded by
-//! one DB round trip plus `outbound_send_deadline_ms`). Frames already inside
-//! `send_ws_message` are not recalled.
+//! applied when the transport dequeues a Data frame. Transport captures one
+//! `tokio::time::Instant` deadline at dequeue (`outbound_send_deadline_ms`
+//! from that instant). The delivery read and the Data-frame socket write both
+//! use `timeout_at` / remaining time against **that same Instant**. They do
+//! not each get a fresh full `outbound_send_deadline_ms`. A read whose
+//! statement started before revoke commit may still return Allowed; that
+//! frame may be written after t_R only if both the read and the write finish
+//! before the shared deadline (R1). Frames already inside `send_ws_message`
+//! are not recalled. Denied / DB-error Close frames in that path also use
+//! leftover time from the same deadline so a slow read cannot add a second
+//! full send budget.
 //!
 //! Idle sockets with an empty outbound queue wait for `poll_acl` (up to
 //! `revoke_poll_ms`). That delay is not authorization of new data.
@@ -87,6 +93,86 @@ pub fn disarm_force_delivery_read_fail(document_id: Uuid) {
     }
 }
 
+#[cfg(feature = "db-tests")]
+struct DeliveryReadBarrier {
+    reached_tx: tokio::sync::oneshot::Sender<()>,
+    proceed_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "db-tests")]
+static DELIVERY_READ_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, DeliveryReadBarrier>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+static FORCE_DELIVERY_TX_ERROR: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<Uuid>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Pause `check_delivery_admission` after `set_tenant` for `session_id`.
+#[cfg(feature = "db-tests")]
+pub fn arm_delivery_read_barrier(
+    session_id: Uuid,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    DELIVERY_READ_BARRIERS
+        .lock()
+        .expect("delivery read barriers")
+        .insert(
+            session_id,
+            DeliveryReadBarrier {
+                reached_tx,
+                proceed_rx,
+            },
+        );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub fn disarm_delivery_read_barrier(session_id: Uuid) {
+    if let Ok(mut barriers) = DELIVERY_READ_BARRIERS.lock() {
+        barriers.remove(&session_id);
+    }
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_delivery_read_barrier(session_id: Uuid) {
+    let barrier = DELIVERY_READ_BARRIERS
+        .lock()
+        .ok()
+        .and_then(|mut barriers| barriers.remove(&session_id));
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
+#[cfg(feature = "db-tests")]
+pub fn arm_force_delivery_tx_error(session_id: Uuid) {
+    if let Ok(mut set) = FORCE_DELIVERY_TX_ERROR.lock() {
+        set.insert(session_id);
+    }
+}
+
+#[cfg(feature = "db-tests")]
+pub fn disarm_force_delivery_tx_error(session_id: Uuid) {
+    if let Ok(mut set) = FORCE_DELIVERY_TX_ERROR.lock() {
+        set.remove(&session_id);
+    }
+}
+
+#[cfg(feature = "db-tests")]
+fn take_force_delivery_tx_error(session_id: Uuid) -> bool {
+    FORCE_DELIVERY_TX_ERROR
+        .lock()
+        .map(|mut set| set.remove(&session_id))
+        .unwrap_or(false)
+}
+
 type DeliveryRow = (
     bool,
     bool,
@@ -107,6 +193,12 @@ pub async fn check_delivery_admission(
         .execute(&mut *tx)
         .await?;
     set_tenant(&mut tx, workspace_id).await?;
+    #[cfg(feature = "db-tests")]
+    pause_for_delivery_read_barrier(session_id).await;
+    #[cfg(feature = "db-tests")]
+    if take_force_delivery_tx_error(session_id) {
+        sqlx::query("SELECT 1 / 0").execute(&mut *tx).await?;
+    }
     let row: Option<DeliveryRow> = sqlx::query_as(
         r#"
         SELECT

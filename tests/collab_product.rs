@@ -22,6 +22,7 @@ use fvoci_server::collab::room::{
     disarm_spawn_room_block, AuthenticatedConnection, CollabSession, JoinError, RoomClientEvent,
     RoomJoin,
 };
+use fvoci_server::collab::transport::take_data_frame_send_budget;
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, SyncMessage, SyncStep,
     WireFrame,
@@ -30,8 +31,10 @@ use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
 use fvoci_server::db::collab::{load_collab_document, resolve_collab_admission, CollabDbError};
 use fvoci_server::db::collab_delivery::{
-    arm_force_delivery_read_fail, check_delivery_admission, delivery_read_count,
-    disarm_force_delivery_read_fail, reset_delivery_read_count, DeliveryAdmission,
+    arm_delivery_read_barrier, arm_force_delivery_read_fail, arm_force_delivery_tx_error,
+    check_delivery_admission, delivery_read_count, disarm_delivery_read_barrier,
+    disarm_force_delivery_read_fail, disarm_force_delivery_tx_error, reset_delivery_read_count,
+    DeliveryAdmission,
 };
 use fvoci_server::db::documents::CreateDocumentInput;
 use fvoci_server::db::identity::revoke_session;
@@ -3514,5 +3517,285 @@ async fn collab_control_frames_skip_delivery_admission_read() {
         0,
         "pre-auth denial must not run the outbound delivery read"
     );
+    harness.cleanup().await;
+}
+
+async fn wait_for_close_without_sync_update(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) -> Result<(), &'static str> {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(50)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(()),
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    message:
+                        DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Update,
+                            ..
+                        }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    return Err("sync update delivered");
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(_))) => return Err("websocket error"),
+            _ => {}
+        }
+    }
+    Err("socket did not close")
+}
+
+async fn pooled_tenant_setting(pool: &PgPool) -> String {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT NULLIF(current_setting('app.tenant_id', true), '')",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn collab_delivery_auth_and_send_share_one_dequeue_deadline() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let mut cfg = test_collab_config(4, 30_000);
+    cfg.outbound_send_deadline_ms = 200;
+    let app = fvoci_server::http::router(
+        collab_app_state_with_config(&harness.app_url, cfg).await,
+        None,
+    );
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut reader = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut reader, &routing_key, 501).await;
+    let writer_token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
+    let mut writer = connect_member(addr, &writer_token.token).await;
+    auth_and_join(&mut writer, &routing_key, 502).await;
+
+    let (reached_rx, proceed_tx) = arm_delivery_read_barrier(wiki.session.session_id);
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), reached_rx)
+        .await
+        .expect("delivery read must reach the dequeue barrier")
+        .expect("barrier signal");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    proceed_tx.send(()).expect("release delivery read");
+    disarm_delivery_read_barrier(wiki.session.session_id);
+
+    let mut saw_update = false;
+    let wait_until = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < wait_until {
+        match recv_document_frame_within(&mut reader, Duration::from_millis(100)).await {
+            Some(WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Update,
+                        ..
+                    }),
+                ..
+            }) => {
+                saw_update = true;
+                break;
+            }
+            Some(_) => {}
+            None => {}
+        }
+    }
+    assert!(
+        saw_update,
+        "reader must still receive the update after a shared leftover send"
+    );
+    let budget = take_data_frame_send_budget(wiki.session.session_id)
+        .expect("transport must record the Data-frame budget");
+    assert_eq!(budget.total, Duration::from_millis(200));
+    assert!(
+        budget.auth_remaining <= budget.total,
+        "auth remaining is taken from the dequeue deadline"
+    );
+    assert!(
+        budget.send_remaining <= budget.auth_remaining,
+        "send must use leftover time, not a second full budget"
+    );
+    assert!(
+        budget.send_remaining <= Duration::from_millis(180),
+        "holding auth for 50ms must shrink send leftover below a fresh 200ms budget, got {:?}",
+        budget.send_remaining
+    );
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_delivery_auth_timeout_closes_1011_without_data_frame() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let mut cfg = test_collab_config(4, 30_000);
+    cfg.outbound_send_deadline_ms = 100;
+    let app = fvoci_server::http::router(
+        collab_app_state_with_config(&harness.app_url, cfg).await,
+        None,
+    );
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut reader = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut reader, &routing_key, 511).await;
+    let writer_token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
+    let mut writer = connect_member(addr, &writer_token.token).await;
+    auth_and_join(&mut writer, &routing_key, 512).await;
+
+    let (reached_rx, proceed_tx) = arm_delivery_read_barrier(wiki.session.session_id);
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), reached_rx)
+        .await
+        .expect("delivery read must reach the dequeue barrier")
+        .expect("barrier signal");
+    wait_for_close_without_sync_update(&mut reader, Duration::from_millis(400))
+        .await
+        .expect("auth timeout must close without delivering the Data frame");
+    drop(proceed_tx);
+    disarm_delivery_read_barrier(wiki.session.session_id);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_delivery_auth_cancel_closes_without_waiting_full_deadline() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let mut cfg = test_collab_config_with_revoke(4, 30_000, 50);
+    cfg.outbound_send_deadline_ms = 5_000;
+    let app = fvoci_server::http::router(
+        collab_app_state_with_config(&harness.app_url, cfg).await,
+        None,
+    );
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut reader = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut reader, &routing_key, 521).await;
+    let writer_token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
+    let mut writer = connect_member(addr, &writer_token.token).await;
+    auth_and_join(&mut writer, &routing_key, 522).await;
+
+    let (reached_rx, proceed_tx) = arm_delivery_read_barrier(wiki.session.session_id);
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), reached_rx)
+        .await
+        .expect("delivery read must reach the dequeue barrier")
+        .expect("barrier signal");
+    revoke_session(
+        &wiki.session.pool,
+        &fvoci_server::auth::token::hash_token(&wiki.session.session_token),
+        Some(wiki.session.user_id),
+    )
+    .await
+    .expect("revoke reader");
+    let started = std::time::Instant::now();
+    wait_for_close_without_sync_update(&mut reader, Duration::from_millis(800))
+        .await
+        .expect("cancel must close without delivering the Data frame");
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "cancel must not run the full outbound deadline, elapsed {:?}",
+        started.elapsed()
+    );
+    drop(proceed_tx);
+    disarm_delivery_read_barrier(wiki.session.session_id);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_delivery_cancel_and_error_reset_pool_tenant_context() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.app_url)
+        .await
+        .unwrap();
+    let ws = wiki.session.workspace_id;
+    let user = wiki.session.user_id;
+    let session = wiki.session.session_id;
+    let doc = wiki.document_id;
+
+    let (reached_rx, proceed_tx) = arm_delivery_read_barrier(session);
+    let handle = tokio::spawn({
+        let pool = pool.clone();
+        async move { check_delivery_admission(&pool, ws, user, session, doc).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), reached_rx)
+        .await
+        .expect("in-tx tenant must be set before the cancel barrier")
+        .expect("barrier signal");
+    handle.abort();
+    let _ = handle.await;
+    drop(proceed_tx);
+    disarm_delivery_read_barrier(session);
+    let tenant = tokio::time::timeout(Duration::from_secs(2), pooled_tenant_setting(&pool))
+        .await
+        .expect("pool connection must be reusable after cancel")
+        .trim()
+        .to_string();
+    assert!(
+        tenant.is_empty(),
+        "cancelled delivery tx must not leak app.tenant_id onto the pooled connection, got {tenant:?}"
+    );
+    let after_cancel = tokio::time::timeout(
+        Duration::from_secs(2),
+        check_delivery_admission(&pool, ws, user, session, doc),
+    )
+    .await
+    .expect("admission after cancel must not hang on a dirty connection")
+    .expect("admission query");
+    assert!(matches!(
+        after_cancel,
+        DeliveryAdmission::Allowed { read_only: false }
+    ));
+
+    arm_force_delivery_tx_error(session);
+    let failed = check_delivery_admission(&pool, ws, user, session, doc).await;
+    disarm_force_delivery_tx_error(session);
+    assert!(
+        failed.is_err(),
+        "forced in-tx error must surface as sqlx::Error"
+    );
+    let tenant = tokio::time::timeout(Duration::from_secs(2), pooled_tenant_setting(&pool))
+        .await
+        .expect("pool connection must be reusable after in-tx error")
+        .trim()
+        .to_string();
+    assert!(
+        tenant.is_empty(),
+        "failed delivery tx must not leak app.tenant_id onto the pooled connection, got {tenant:?}"
+    );
+    let after_error = check_delivery_admission(&pool, ws, user, session, doc)
+        .await
+        .expect("admission after error");
+    assert!(matches!(
+        after_error,
+        DeliveryAdmission::Allowed { read_only: false }
+    ));
+    pool.close().await;
     harness.cleanup().await;
 }

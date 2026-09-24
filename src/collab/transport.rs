@@ -2,6 +2,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "db-tests")]
+use std::sync::LazyLock;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -175,10 +178,42 @@ impl PreAuthOutboundAllowance {
     }
 }
 
-async fn send_ws_message(
+#[cfg(feature = "db-tests")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataFrameSendBudget {
+    pub total: Duration,
+    pub auth_remaining: Duration,
+    pub send_remaining: Duration,
+}
+
+#[cfg(feature = "db-tests")]
+static DATA_FRAME_SEND_BUDGETS: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, DataFrameSendBudget>>,
+> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub fn take_data_frame_send_budget(session_id: Uuid) -> Option<DataFrameSendBudget> {
+    DATA_FRAME_SEND_BUDGETS
+        .lock()
+        .ok()
+        .and_then(|mut traces| traces.remove(&session_id))
+}
+
+#[cfg(feature = "db-tests")]
+fn record_data_frame_send_budget(session_id: Uuid, budget: DataFrameSendBudget) {
+    if let Ok(mut traces) = DATA_FRAME_SEND_BUDGETS.lock() {
+        traces.insert(session_id, budget);
+    }
+}
+
+fn remaining_until(deadline: tokio::time::Instant) -> Duration {
+    deadline.saturating_duration_since(tokio::time::Instant::now())
+}
+
+async fn send_ws_message_until(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     message: Message,
-    send_deadline: Duration,
+    deadline: tokio::time::Instant,
     max_frame_bytes: usize,
 ) -> bool {
     let byte_len = match &message {
@@ -191,9 +226,43 @@ async fn send_ws_message(
         return false;
     }
     matches!(
-        tokio::time::timeout(send_deadline, sender.send(message)).await,
+        tokio::time::timeout_at(deadline, sender.send(message)).await,
         Ok(Ok(()))
     )
+}
+
+async fn send_ws_message(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: Message,
+    send_deadline: Duration,
+    max_frame_bytes: usize,
+) -> bool {
+    send_ws_message_until(
+        sender,
+        message,
+        tokio::time::Instant::now() + send_deadline,
+        max_frame_bytes,
+    )
+    .await
+}
+
+async fn send_close_until(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    code: u16,
+    reason: &str,
+    deadline: tokio::time::Instant,
+    max_frame_bytes: usize,
+) {
+    let _ = send_ws_message_until(
+        sender,
+        Message::Close(Some(axum::extract::ws::CloseFrame {
+            code,
+            reason: reason.into(),
+        })),
+        deadline,
+        max_frame_bytes,
+    )
+    .await;
 }
 
 async fn send_close(
@@ -203,13 +272,11 @@ async fn send_close(
     send_deadline: Duration,
     max_frame_bytes: usize,
 ) {
-    let _ = send_ws_message(
+    send_close_until(
         sender,
-        Message::Close(Some(axum::extract::ws::CloseFrame {
-            code,
-            reason: reason.into(),
-        })),
-        send_deadline,
+        code,
+        reason,
+        tokio::time::Instant::now() + send_deadline,
         max_frame_bytes,
     )
     .await;
@@ -250,51 +317,58 @@ async fn handle_socket(
                         if outbound.kind == OutboundKind::Data {
                             if let Some((key, _, authenticated, read_only)) = &joined_room {
                                 if *authenticated {
+                                    let workspace_id = key.0;
+                                    let document_id = key.1;
+                                    let read_only = *read_only;
+                                    let deadline =
+                                        tokio::time::Instant::now() + send_deadline;
+                                    #[cfg(feature = "db-tests")]
+                                    let auth_remaining = remaining_until(deadline);
                                     let auth = tokio::select! {
                                         biased;
                                         _ = cancel_rx.changed() => {
                                             let cancel = cancel_rx.borrow_and_update().clone();
                                             if let Some(cancel) = cancel {
-                                                send_close(
+                                                send_close_until(
                                                     &mut sender,
                                                     cancel.code,
                                                     &cancel.reason,
-                                                    send_deadline,
+                                                    deadline,
                                                     max_frame_bytes,
                                                 )
                                                 .await;
                                             }
                                             break;
                                         }
-                                        auth = tokio::time::timeout(
-                                            send_deadline,
+                                        auth = tokio::time::timeout_at(
+                                            deadline,
                                             authorize_outbound_delivery(
                                                 hub.pool(),
-                                                key.0,
+                                                workspace_id,
                                                 live.user_id,
                                                 live.session_id,
-                                                key.1,
+                                                document_id,
                                             ),
                                         ) => auth,
                                     };
                                     match auth {
                                         Err(_) | Ok(OutboundDeliveryAuth::DbError) => {
-                                            send_close(
+                                            send_close_until(
                                                 &mut sender,
                                                 1011,
                                                 "authorization unavailable",
-                                                send_deadline,
+                                                deadline,
                                                 max_frame_bytes,
                                             )
                                             .await;
                                             break;
                                         }
                                         Ok(OutboundDeliveryAuth::Denied) => {
-                                            send_close(
+                                            send_close_until(
                                                 &mut sender,
                                                 1008,
                                                 "permission revoked",
-                                                send_deadline,
+                                                deadline,
                                                 max_frame_bytes,
                                             )
                                             .await;
@@ -303,12 +377,12 @@ async fn handle_socket(
                                         Ok(OutboundDeliveryAuth::Allowed {
                                             read_only: admission_ro,
                                         }) => {
-                                            if !(*read_only || !admission_ro) {
-                                                send_close(
+                                            if !(read_only || !admission_ro) {
+                                                send_close_until(
                                                     &mut sender,
                                                     1008,
                                                     "permission revoked",
-                                                    send_deadline,
+                                                    deadline,
                                                     max_frame_bytes,
                                                 )
                                                 .await;
@@ -316,6 +390,38 @@ async fn handle_socket(
                                             }
                                         }
                                     }
+                                    let send_remaining = remaining_until(deadline);
+                                    #[cfg(feature = "db-tests")]
+                                    record_data_frame_send_budget(
+                                        live.session_id,
+                                        DataFrameSendBudget {
+                                            total: send_deadline,
+                                            auth_remaining,
+                                            send_remaining,
+                                        },
+                                    );
+                                    if send_remaining.is_zero() {
+                                        send_close_until(
+                                            &mut sender,
+                                            1011,
+                                            "authorization unavailable",
+                                            deadline,
+                                            max_frame_bytes,
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                    if !send_ws_message_until(
+                                        &mut sender,
+                                        Message::Binary(outbound.bytes.into()),
+                                        deadline,
+                                        max_frame_bytes,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                    continue;
                                 }
                             }
                         }
@@ -331,12 +437,10 @@ async fn handle_socket(
                         }
                     }
                     Some(RoomClientEvent::Close { code, reason }) => {
-                        let _ = send_ws_message(
+                        send_close(
                             &mut sender,
-                            Message::Close(Some(axum::extract::ws::CloseFrame {
-                                code,
-                                reason: reason.into(),
-                            })),
+                            code,
+                            &reason,
                             send_deadline,
                             max_frame_bytes,
                         )
@@ -352,12 +456,10 @@ async fn handle_socket(
                     guard.clone()
                 };
                 if let Some(cancel) = cancel {
-                    let _ = send_ws_message(
+                    send_close(
                         &mut sender,
-                        Message::Close(Some(axum::extract::ws::CloseFrame {
-                            code: cancel.code,
-                            reason: cancel.reason.into(),
-                        })),
+                        cancel.code,
+                        &cancel.reason,
                         send_deadline,
                         max_frame_bytes,
                     )
