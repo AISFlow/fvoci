@@ -1,13 +1,20 @@
 #![cfg(feature = "db-tests")]
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::auth::password::Keyring;
+use fvoci_server::auth::token::hash_token;
 use fvoci_server::auth::AuthService;
+use fvoci_server::db::attachments::{
+    authorize_upload_part, commit_upload_part, test_barrier, AttachmentDbError,
+};
 use fvoci_server::db::{migrate, pool, Db};
+use futures_util::stream;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
 use rand::RngCore;
@@ -143,8 +150,12 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
 }
 
 async fn app_state(app_url: &str) -> AppState {
-    let pool = pool::connect_app(app_url).await.expect("app pool");
     let storage_root = std::env::temp_dir().join(format!("fvoci-att-store-{}", Uuid::now_v7()));
+    app_state_with_storage(app_url, storage_root).await
+}
+
+async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppState {
+    let pool = pool::connect_app(app_url).await.expect("app pool");
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
         auth: Arc::new(AuthService {
@@ -350,6 +361,69 @@ async fn create_user_with_role(
 struct UploadSession {
     attachment_id: String,
     etag: String,
+}
+
+async fn session_id_for_cookie(harness: &TestDb, cookie: &str) -> Uuid {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.sessions WHERE token_hash = $1")
+        .bind(hash_token(cookie))
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    id
+}
+
+async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
+    sqlx::query(&format!(
+        r#"
+        CREATE OR REPLACE FUNCTION fvoci.{fn_name}()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'insert blocked on {target}';
+        END;
+        $$;
+        "#,
+    ))
+    .execute(admin)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        r#"
+        CREATE TRIGGER fvoci_{fn_name}
+        BEFORE INSERT ON fvoci.{target}
+        FOR EACH ROW EXECUTE FUNCTION fvoci.{fn_name}()
+        "#,
+    ))
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+async fn begin_upload(
+    app: &axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    document_id: &str,
+    name: &str,
+    bytes: &[u8],
+) -> (String, String, String) {
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+        Some(json!({ "name": name, "sizeBytes": bytes.len() })),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+    let part_url = created["parts"][0]["url"].as_str().unwrap().to_string();
+    (attachment_id, part_url, name.to_string())
 }
 
 async fn upload_bytes(
@@ -761,5 +835,693 @@ async fn attachment_completed_event_is_recorded() {
     .unwrap();
     assert_eq!(count.0, 1);
     admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn attachment_app_role_rls_two_tenant_isolation() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let other_ws = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, 'tenant-b', 'B')")
+        .bind(other_ws)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let foreign_doc = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, sort_key, number, status, schema_version,
+            content_json, created_by
+        ) VALUES (
+            $1, $2, 'Secret', $3, 'V', 1, 'draft', 2, '{"type":"doc"}'::jsonb, $4
+        )
+        "#,
+    )
+    .bind(foreign_doc)
+    .bind(other_ws)
+    .bind(foreign_doc.simple().to_string())
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let foreign_att = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.attachments (
+            id, workspace_id, document_id, uploader_id, status, name, reserved_size_bytes,
+            size_bytes, storage_key, completed_at
+        ) VALUES ($1, $2, $3, $4, 'stored', 'secret.bin', 5, 5, $5, now())
+        "#,
+    )
+    .bind(foreign_att)
+    .bind(other_ws)
+    .bind(foreign_doc)
+    .bind(owner_id)
+    .bind(Uuid::now_v7().to_string())
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let mut tx = app_pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
+        .bind(workspace_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let hidden: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM fvoci.attachments WHERE id = $1")
+            .bind(foreign_att)
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap();
+    assert!(hidden.is_none());
+    let foreign_insert = sqlx::query(
+        r#"
+        INSERT INTO fvoci.attachments (
+            id, workspace_id, document_id, uploader_id, status, name, reserved_size_bytes, storage_key
+        ) VALUES ($1, $2, $3, $4, 'uploading', 'leak', 1, $5)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(other_ws)
+    .bind(foreign_doc)
+    .bind(owner_id)
+    .bind(Uuid::now_v7().to_string())
+    .execute(&mut *tx)
+    .await;
+    let err = foreign_insert.expect_err("foreign tenant insert must be denied");
+    assert_eq!(
+        err.as_database_error()
+            .and_then(|e| e.code())
+            .map(|c| c.to_string()),
+        Some("42501".to_string())
+    );
+    tx.rollback().await.unwrap();
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn put_stream_revocation_blocks_part_publication() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-stage-{}", Uuid::now_v7()));
+    let state = app_state_with_storage(&harness.app_url, storage_root).await;
+    let app = app_router(state.clone());
+    let (_, _, cookie_hdr) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "stage@example.com",
+            "password": "supersecret1",
+            "givenName": "Stage",
+            "workspaceSlug": "stage",
+            "workspaceName": "Stage"
+        })),
+        None,
+    )
+    .await;
+    let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (owner_id, workspace_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT u.id, w.id FROM fvoci.users u JOIN fvoci.workspaces w ON w.slug = 'stage'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"stage-me";
+    let (attachment_id, _part_url, _) =
+        begin_upload(&app, &cookie, workspace_id, &document_id, "stage.bin", payload).await;
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    let session_id = session_id_for_cookie(&harness, &cookie).await;
+    let pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let storage_key = authorize_upload_part(
+        &pool,
+        workspace_id,
+        attachment_uuid,
+        owner_id,
+        session_id,
+        1,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .0;
+    let staged = state
+        .storage
+        .stage_part_stream(
+            &storage_key,
+            1,
+            stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
+                bytes::Bytes::from_static(payload),
+            )]),
+            payload.len() as u64,
+        )
+        .await
+        .unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    let denied = commit_upload_part(
+        &pool,
+        &state.storage,
+        workspace_id,
+        attachment_uuid,
+        owner_id,
+        session_id,
+        1,
+        &staged,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(matches!(denied, AttachmentDbError::Forbidden));
+    let parts = state.storage.list_parts(&storage_key).await.unwrap();
+    assert!(parts.is_empty());
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn mid_assembly_revocation_denies_stored_publication() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"assembly";
+    let (attachment_id, part_url, _) =
+        begin_upload(&app, &cookie, workspace_id, &document_id, "asm.bin", payload).await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap();
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    let mut barrier = test_barrier::arm_pre_mark_stored(attachment_uuid);
+    let complete = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let attachment_id = attachment_id.clone();
+        let etag = etag.to_string();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+                Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+        .await
+        .expect("complete should reach pre-mark barrier")
+        .expect("barrier entered");
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let token_hash = hash_token(&cookie);
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE token_hash = $1")
+        .bind(&token_hash)
+        .execute(&admin)
+        .await
+        .unwrap();
+    barrier.proceed();
+    let (status, _, _) = complete.await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "revoked session must be denied at final publication recheck"
+    );
+    let row: (String,) = sqlx::query_as("SELECT status FROM fvoci.attachments WHERE id = $1")
+        .bind(attachment_uuid)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_ne!(row.0, "stored");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn attachment_event_and_audit_failures_roll_back_and_retry() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-rb-{}", Uuid::now_v7()));
+    let state = app_state_with_storage(&harness.app_url, storage_root).await;
+    let app = app_router(state.clone());
+    let (_, _, cookie_hdr) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "rollback@example.com",
+            "password": "supersecret1",
+            "givenName": "Rollback",
+            "workspaceSlug": "rollback",
+            "workspaceName": "Rollback"
+        })),
+        None,
+    )
+    .await;
+    let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
+    let admin_ws = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM fvoci.workspaces WHERE slug = 'rollback'",
+    )
+    .fetch_one(&admin_ws)
+    .await
+    .unwrap();
+    admin_ws.close().await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"rollback";
+    let (attachment_id, part_url, _) =
+        begin_upload(&app, &cookie, workspace_id, &document_id, "rb.bin", payload).await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    install_insert_fail_trigger(&admin, "events", "test_att_event_fail").await;
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let row: (String,) = sqlx::query_as("SELECT status FROM fvoci.attachments WHERE id = $1")
+        .bind(Uuid::parse_str(&attachment_id).unwrap())
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_ne!(row.0, "stored");
+    let storage_key: (String,) =
+        sqlx::query_as("SELECT storage_key FROM fvoci.attachments WHERE id = $1")
+            .bind(Uuid::parse_str(&attachment_id).unwrap())
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let parts = state.storage.list_parts(&storage_key.0).await.unwrap();
+    assert_eq!(parts.len(), 1);
+    sqlx::query("DROP TRIGGER fvoci_test_att_event_fail ON fvoci.events")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    install_insert_fail_trigger(&admin, "audit_log", "test_att_audit_fail").await;
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let row: (String,) = sqlx::query_as("SELECT status FROM fvoci.attachments WHERE id = $1")
+        .bind(Uuid::parse_str(&attachment_id).unwrap())
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_ne!(row.0, "stored");
+    sqlx::query("DROP TRIGGER fvoci_test_att_audit_fail ON fvoci.audit_log")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let (status, completed, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retry complete: {:?}", completed);
+    assert_eq!(completed["sizeBytes"], payload.len());
+    assert_eq!(completed["scanStatus"], "skipped");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_complete_is_idempotent() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"concurrent";
+    let (attachment_id, part_url, _) =
+        begin_upload(&app, &cookie, workspace_id, &document_id, "dup.bin", payload).await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+    let body = json!({ "parts": [{ "partNumber": 1, "etag": etag }] });
+    let first = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let attachment_id = attachment_id.clone();
+        let body = body.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+                Some(body),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    let second = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let attachment_id = attachment_id.clone();
+        let body = body.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+                Some(body),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    let (s1, _, _) = first.await.unwrap();
+    let (s2, _, _) = second.await.unwrap();
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let stored: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.attachments WHERE id = $1 AND status = 'stored'",
+    )
+    .bind(Uuid::parse_str(&attachment_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, 1);
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'attachment.completed' AND target_id = $1",
+    )
+    .bind(Uuid::parse_str(&attachment_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn aborted_complete_releases_lock_for_retry_on_same_pool() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"cancel-retry";
+    let (attachment_id, part_url, _) =
+        begin_upload(&app, &cookie, workspace_id, &document_id, "cancel.bin", payload).await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    let mut barrier = test_barrier::arm_pre_mark_stored(attachment_uuid);
+    let aborted = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let attachment_id = attachment_id.clone();
+        let etag = etag.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+                Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+        .await
+        .expect("complete should reach pre-mark barrier")
+        .expect("barrier entered");
+    aborted.abort();
+    let _ = aborted.await;
+    test_barrier::disarm_pre_mark_stored(attachment_uuid);
+    let (status, completed, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retry complete: {:?}", completed);
+    assert_eq!(completed["sizeBytes"], payload.len());
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn fresh_migration_006_adds_attachments_table() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let versions: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.schema_migrations")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(versions.0, 6);
+    let has_attachments: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'attachments')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(has_attachments.0);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn migration_005_upgrades_to_006_attachments() {
+    let admin_base = std::env::var("TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
+        .expect("TEST_DATABASE_URL missing");
+    let db_name = format!("fvoci_att_upg_{}", Uuid::now_v7().simple());
+    let server_url = server_db_url(&admin_base);
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&server_url)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    admin_pool.close().await;
+
+    let admin_url = join_db_url(&server_url, &db_name);
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&admin_url)
+        .await
+        .unwrap();
+    for sql in [
+        include_str!("../migrations/001_schema.sql"),
+        include_str!("../migrations/002_functions.sql"),
+        include_str!("../migrations/003_workspace.sql"),
+        include_str!("../migrations/004_documents.sql"),
+        include_str!("../migrations/005_collab_updates.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(&migration_pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO fvoci.schema_migrations (version) VALUES (1), (2), (3), (4), (5)")
+        .execute(&migration_pool)
+        .await
+        .unwrap();
+    let has_attachments: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'attachments')",
+    )
+    .fetch_one(&migration_pool)
+    .await
+    .unwrap();
+    assert!(!has_attachments.0);
+    migration_pool.close().await;
+
+    migrate::run_migrations(&admin_url).await.unwrap();
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&admin_url)
+        .await
+        .unwrap();
+    let versions: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.schema_migrations")
+        .fetch_one(&migration_pool)
+        .await
+        .unwrap();
+    assert_eq!(versions.0, 6);
+    let has_attachments: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'attachments')",
+    )
+    .fetch_one(&migration_pool)
+    .await
+    .unwrap();
+    assert!(has_attachments.0);
+    migration_pool.close().await;
+
+    let server_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server_url)
+        .await
+        .unwrap();
+    let _ = sqlx::query(&format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
+        db_name
+    ))
+    .execute(&server_pool)
+    .await;
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", db_name))
+        .execute(&server_pool)
+        .await;
+    server_pool.close().await;
+}
+
+#[tokio::test]
+async fn stored_original_survives_service_recreation() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-persist-{}", Uuid::now_v7()));
+    let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
+    let app = app_router(state);
+    let (_, _, cookie_hdr) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "persist@example.com",
+            "password": "supersecret1",
+            "givenName": "Persist",
+            "workspaceSlug": "persist",
+            "workspaceName": "Persist"
+        })),
+        None,
+    )
+    .await;
+    let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM fvoci.workspaces WHERE slug = 'persist'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"persist-bytes";
+    let uploaded = upload_bytes(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "persist.bin",
+        payload,
+        None,
+    )
+    .await;
+
+    let app2 = app_router(app_state_with_storage(&harness.app_url, storage_root).await);
+    let (status, body, _) = request(
+        app2,
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{}/download",
+            uploaded.attachment_id
+        ),
+        None,
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, payload);
     harness.cleanup().await;
 }

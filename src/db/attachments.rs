@@ -69,7 +69,7 @@ pub struct CreateUploadInput {
 }
 
 struct AttachmentSessionLock {
-    conn: PoolConnection<Postgres>,
+    conn: Option<PoolConnection<Postgres>>,
     lock_key: i32,
     held: bool,
 }
@@ -80,6 +80,9 @@ impl AttachmentSessionLock {
         attachment_id: Uuid,
     ) -> Result<Option<Self>, sqlx::Error> {
         let mut conn = pool.acquire().await?;
+        // Never return this connection to the pool: session advisory locks must not
+        // survive pool reuse, including when this task is cancelled mid-flight.
+        conn.close_on_drop();
         let lock_key = lock_key_from_uuid(attachment_id);
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
             .bind(ATTACHMENT_LOCK_NAMESPACE)
@@ -90,28 +93,27 @@ impl AttachmentSessionLock {
             return Ok(None);
         }
         Ok(Some(Self {
-            conn,
+            conn: Some(conn),
             lock_key,
             held: true,
         }))
     }
 
     async fn begin(&mut self) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
-        self.conn.begin().await
+        self.conn.as_mut().expect("lock connection").begin().await
     }
 
     async fn release(mut self) {
         if self.held {
-            let unlock = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-                .bind(ATTACHMENT_LOCK_NAMESPACE)
-                .bind(self.lock_key)
-                .execute(&mut *self.conn)
-                .await;
-            if let Err(err) = unlock {
-                tracing::warn!("attachment advisory unlock failed: {}", err);
+            if let Some(mut conn) = self.conn.take() {
+                let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+                    .bind(ATTACHMENT_LOCK_NAMESPACE)
+                    .bind(self.lock_key)
+                    .execute(&mut *conn)
+                    .await;
             }
-            self.held = false;
         }
+        self.held = false;
     }
 }
 
@@ -209,7 +211,7 @@ async fn parent_document_live(
     document_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
     let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
-        "SELECT deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+        "SELECT deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
     )
     .bind(workspace_id)
     .bind(document_id)
@@ -272,7 +274,7 @@ async fn recheck_upload_write_access(
         Ok(()) => {}
         Err(err) => return Ok(Err(err)),
     }
-    if att.status != "uploading" && att.status != "assembling" {
+    if att.status != "uploading" && att.status != "assembling" && att.status != "stored" {
         return Ok(Err(AttachmentDbError::UploadState));
     }
     Ok(Ok(att))
@@ -499,6 +501,7 @@ pub async fn commit_upload_part(
 ) -> Result<Result<crate::attachments::PartInfo, AttachmentDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
+    with_upload_xact_lock(&mut tx, attachment_id).await?;
     let att = match recheck_upload_write_access(
         &mut tx,
         workspace_id,
@@ -527,21 +530,29 @@ pub async fn commit_upload_part(
         LocalStorage::discard_staged_part(staged).await;
         return Ok(Err(AttachmentDbError::InvalidInput));
     }
-    tx.commit().await?;
-
+    let storage_key = att.storage_key.clone();
     let published = match storage
-        .publish_staged_part(&att.storage_key, part_number, staged)
+        .publish_staged_part(&storage_key, part_number, staged)
         .await
     {
         Ok(part) => part,
         Err(StorageError::UploadGone) => {
+            tx.rollback().await?;
+            LocalStorage::discard_staged_part(staged).await;
             return Ok(Err(AttachmentDbError::UploadState));
         }
         Err(StorageError::PartTooLarge) => {
+            tx.rollback().await?;
+            LocalStorage::discard_staged_part(staged).await;
             return Ok(Err(AttachmentDbError::PartTooLarge));
         }
-        Err(err) => return Err(sqlx::Error::Io(std::io::Error::other(err.to_string()))),
+        Err(err) => {
+            tx.rollback().await?;
+            LocalStorage::discard_staged_part(staged).await;
+            return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
+        }
     };
+    tx.commit().await?;
     Ok(Ok(published))
 }
 
@@ -810,6 +821,9 @@ async fn complete_owned_inner(
     let image = is_image_mime(&mime);
     let extract_status = initial_extract_status(&att_name, &mime);
 
+    #[cfg(feature = "db-tests")]
+    test_barrier::wait_pre_mark_stored_barrier(attachment_id).await;
+
     let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
@@ -856,6 +870,12 @@ async fn complete_owned_inner(
     .execute(&mut *tx)
     .await?;
     if updated.rows_affected() == 0 {
+        let stored = fetch_attachment(&mut tx, workspace_id, attachment_id).await?;
+        if stored.as_ref().is_some_and(|row| row.status == "stored") {
+            tx.commit().await?;
+            let _ = storage.finalize_multipart(&storage_key).await;
+            return Ok(CompleteAttempt::Done(stored.expect("stored row")));
+        }
         tx.rollback().await?;
         return Ok(CompleteAttempt::Retry);
     }
@@ -1004,5 +1024,59 @@ pub async fn open_download(
 impl std::fmt::Display for AttachmentDbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+#[cfg(feature = "db-tests")]
+pub mod test_barrier {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    use uuid::Uuid;
+
+    static BARRIERS: LazyLock<
+        Mutex<HashMap<Uuid, (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
+    > = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub struct PreMarkStoredBarrier {
+        entered_rx: tokio::sync::oneshot::Receiver<()>,
+        proceed_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    pub fn arm_pre_mark_stored(attachment_id: Uuid) -> PreMarkStoredBarrier {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+        BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .insert(attachment_id, (entered_tx, proceed_rx));
+        PreMarkStoredBarrier {
+            entered_rx,
+            proceed_tx: Some(proceed_tx),
+        }
+    }
+
+    pub fn disarm_pre_mark_stored(attachment_id: Uuid) {
+        BARRIERS.lock().expect("barrier mutex").remove(&attachment_id);
+    }
+
+    impl PreMarkStoredBarrier {
+        pub async fn wait_entered(&mut self) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+            (&mut self.entered_rx).await
+        }
+
+        pub fn proceed(&mut self) {
+            if let Some(proceed_tx) = self.proceed_tx.take() {
+                let _ = proceed_tx.send(());
+            }
+        }
+    }
+
+    pub async fn wait_pre_mark_stored_barrier(attachment_id: Uuid) {
+        let entry = BARRIERS.lock().expect("barrier mutex").remove(&attachment_id);
+        if let Some((entered_tx, proceed_rx)) = entry {
+            let _ = entered_tx.send(());
+            let _ = proceed_rx.await;
+        }
     }
 }

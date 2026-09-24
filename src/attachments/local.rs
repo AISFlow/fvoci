@@ -127,14 +127,23 @@ impl LocalStorage {
         let mut hasher = Sha256::new();
         let mut size_bytes = 0u64;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| StorageError::Io(io::Error::other(e)))?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    let _ = fs::remove_file(&writing_path).await;
+                    return Err(StorageError::Io(io::Error::other(err)));
+                }
+            };
             size_bytes += chunk.len() as u64;
             if size_bytes > max_bytes {
                 let _ = fs::remove_file(&writing_path).await;
                 return Err(StorageError::PartTooLarge);
             }
             hasher.update(&chunk);
-            file.write_all(&chunk).await?;
+            if let Err(err) = file.write_all(&chunk).await {
+                let _ = fs::remove_file(&writing_path).await;
+                return Err(StorageError::Io(err));
+            }
         }
         file.flush().await?;
         let etag = hex::encode(hasher.finalize());
@@ -158,14 +167,14 @@ impl LocalStorage {
             return Err(StorageError::UploadGone);
         }
         let final_path = dir.join(part_number.to_string());
-        fs::rename(&staged.writing_path, &final_path).await.map_err(|err| {
-            let _ = fs::remove_file(&staged.writing_path);
-            if err.kind() == io::ErrorKind::NotFound {
+        if let Err(err) = fs::rename(&staged.writing_path, &final_path).await {
+            let _ = fs::remove_file(&staged.writing_path).await;
+            return Err(if err.kind() == io::ErrorKind::NotFound {
                 StorageError::UploadGone
             } else {
                 StorageError::Io(err)
-            }
-        })?;
+            });
+        }
         Ok(PartInfo {
             part_number,
             etag: staged.etag.clone(),
@@ -251,6 +260,7 @@ impl LocalStorage {
             out.write_all(&data).await?;
         }
         out.flush().await?;
+        out.sync_all().await?;
         fs::rename(&assembly_path, self.object_path(key)).await?;
         Ok(size_bytes)
     }
@@ -280,14 +290,25 @@ impl LocalStorage {
         end: u64,
     ) -> Result<Vec<u8>, StorageError> {
         Self::assert_key(key)?;
-        let path = self.object_path(key);
-        let mut file = fs::File::open(&path).await?;
         let len = end - start + 1;
+        let mut file = self.open_payload_at(key, start).await?;
         let mut buf = vec![0u8; len as usize];
-        use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-        file.seek(SeekFrom::Start(start)).await?;
+        use tokio::io::AsyncReadExt;
         file.read_exact(&mut buf).await?;
         Ok(buf)
+    }
+
+    pub async fn open_payload_at(
+        &self,
+        key: &str,
+        start: u64,
+    ) -> Result<tokio::fs::File, StorageError> {
+        Self::assert_key(key)?;
+        let path = self.object_path(key);
+        let mut file = fs::File::open(&path).await?;
+        use tokio::io::{AsyncSeekExt, SeekFrom};
+        file.seek(SeekFrom::Start(start)).await?;
+        Ok(file)
     }
 
     pub async fn sniff_mime(&self, key: &str) -> Result<String, StorageError> {

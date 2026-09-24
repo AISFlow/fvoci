@@ -12,8 +12,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use bytes::Bytes;
 use futures_util::StreamExt;
+use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -502,12 +503,18 @@ async fn serve_download(
             if head_only {
                 return Ok((StatusCode::OK, response_headers).into_response());
             }
-            let bytes = state
+            let file = state
                 .storage
-                .read_range(&att.storage_key, 0, (size - 1) as u64)
+                .open_payload_at(&att.storage_key, 0)
                 .await
                 .map_err(|_| AppError::internal())?;
-            return Ok((StatusCode::OK, response_headers, Bytes::from(bytes)).into_response());
+            let stream = ReaderStream::with_capacity(file.take(size as u64), 64 * 1024);
+            return Ok((
+                StatusCode::OK,
+                response_headers,
+                Body::from_stream(stream),
+            )
+                .into_response());
         }
         ParsedRange::Bytes { start, end } => {
             let len = end - start + 1;
@@ -523,15 +530,16 @@ async fn serve_download(
             if head_only {
                 return Ok((StatusCode::PARTIAL_CONTENT, response_headers).into_response());
             }
-            let bytes = state
+            let file = state
                 .storage
-                .read_range(&att.storage_key, start, end)
+                .open_payload_at(&att.storage_key, start)
                 .await
                 .map_err(|_| AppError::internal())?;
+            let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
             return Ok((
                 StatusCode::PARTIAL_CONTENT,
                 response_headers,
-                Bytes::from(bytes),
+                Body::from_stream(stream),
             )
                 .into_response());
         }
