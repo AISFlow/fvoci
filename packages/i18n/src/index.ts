@@ -31,6 +31,8 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   personal_workspace_is_immutable: "personal workspace is immutable",
   origin_mismatch: "origin mismatch",
   rate_limit_exceeded: "Rate limit exceeded",
+  conflict: "conflict",
+  project_archived: "project.archivedReadOnly",
   internal_error: "error.http.fallback",
 };
 

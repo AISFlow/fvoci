@@ -273,6 +273,7 @@ fn map_workspace_error(err: WorkspaceDbError, create_route: bool) -> AppError {
         }
         WorkspaceDbError::RoleCap => AppError::from_code(ProblemCode::CannotManageRoleAboveOwn),
         WorkspaceDbError::SlugTaken => AppError::from_code(ProblemCode::SlugTaken),
+        WorkspaceDbError::LastProjectLead => AppError::from_code(ProblemCode::Conflict),
     }
 }
 

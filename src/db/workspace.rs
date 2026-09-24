@@ -2,10 +2,12 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{clear_self_user, lock_key_from_uuid, set_self_user, set_tenant};
+use crate::db::context::{
+    clear_self_user, lock_membership_users, recheck_session, session_is_live, set_self_user,
+    set_tenant,
+};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
-
-const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
+use crate::db::projects;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceRole {
@@ -58,6 +60,7 @@ pub enum WorkspaceDbError {
     SelfChange,
     RoleCap,
     SlugTaken,
+    LastProjectLead,
 }
 
 pub struct WorkspaceListItem {
@@ -86,77 +89,6 @@ pub fn personal_workspace_slug(user_id: Uuid) -> String {
     let hex = user_id.simple().to_string();
     let tail = hex.chars().rev().take(12).collect::<String>();
     format!("u-{}", tail.chars().rev().collect::<String>())
-}
-
-async fn lock_membership_users(
-    tx: &mut Transaction<'_, Postgres>,
-    user_ids: &[Uuid],
-) -> Result<(), sqlx::Error> {
-    let mut keys = user_ids
-        .iter()
-        .map(|id| lock_key_from_uuid(*id))
-        .collect::<Vec<_>>();
-    keys.sort_unstable();
-    keys.dedup();
-    for key in keys {
-        sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
-            .bind(MEMBERSHIP_LOCK_NAMESPACE)
-            .bind(key)
-            .execute(&mut **tx)
-            .await?;
-    }
-    Ok(())
-}
-
-async fn session_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let live: Option<(bool,)> = sqlx::query_as(
-        r#"
-        SELECT (
-            s.revoked_at IS NULL
-            AND s.expires_at > clock_timestamp()
-            AND u.deleted_at IS NULL
-            AND u.suspended_at IS NULL
-        )
-        FROM fvoci.users u
-        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
-        WHERE u.id = $1
-        "#,
-    )
-    .bind(user_id)
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(live.map(|(v,)| v).unwrap_or(false))
-}
-
-async fn recheck_session(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let live: Option<(bool,)> = sqlx::query_as(
-        r#"
-        SELECT (
-            s.revoked_at IS NULL
-            AND s.expires_at > clock_timestamp()
-            AND u.deleted_at IS NULL
-            AND u.suspended_at IS NULL
-        )
-        FROM fvoci.users u
-        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
-        WHERE u.id = $1
-        FOR UPDATE OF u, s
-        "#,
-    )
-    .bind(user_id)
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(live.map(|(v,)| v).unwrap_or(false))
 }
 
 async fn user_is_active(
@@ -747,6 +679,12 @@ pub async fn remove_member(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::LastOwner));
     }
+    if projects::workspace_removal_blocked_by_private_leads(&mut tx, workspace_id, target_user_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::LastProjectLead));
+    }
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
         .bind(workspace_id)
         .bind(target_user_id)
@@ -769,8 +707,13 @@ pub async fn remove_member(
         },
     )
     .await?;
-    tx.commit().await?;
-    Ok(Ok(()))
+    match tx.commit().await {
+        Ok(()) => Ok(Ok(())),
+        Err(err) if crate::db::projects::is_private_lead_violation(&err) => {
+            Ok(Err(WorkspaceDbError::LastProjectLead))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn count_owners(

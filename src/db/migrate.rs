@@ -12,6 +12,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/007_attachment_extract.sql"),
         7,
     ),
+    (include_str!("../../migrations/008_projects.sql"), 8),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -42,14 +43,21 @@ $$;
 "#;
 
 pub async fn run_migrations(url: &str) -> Result<(), sqlx::Error> {
+    run_migrations_through(url, i32::MAX).await
+}
+
+pub async fn run_migrations_through(url: &str, max_version: i32) -> Result<(), sqlx::Error> {
     let pool = PgPoolOptions::new().max_connections(2).connect(url).await?;
-    let result = apply_migrations(&pool).await;
+    let result = apply_migrations(&pool, max_version).await;
     pool.close().await;
     result
 }
 
-async fn apply_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
+async fn apply_migrations(pool: &PgPool, max_version: i32) -> Result<(), sqlx::Error> {
     for (sql, version) in MIGRATIONS {
+        if *version > max_version {
+            continue;
+        }
         let mut tx = pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(MIGRATION_LOCK_KEY)
@@ -233,7 +241,8 @@ pub async fn assert_app_role(pool: &PgPool) -> Result<(), String> {
               AND c.relname IN (
                   'schema_migrations', 'users', 'workspaces', 'memberships',
                   'sessions', 'events', 'audit_log', 'documents', 'document_states',
-                  'document_collab_updates', 'document_collab_op_receipts', 'attachments'
+                  'document_collab_updates', 'document_collab_op_receipts', 'attachments',
+                  'projects', 'project_members', 'workflows', 'statuses', 'tasks'
               )
               AND pg_get_userbyid(c.relowner) = current_user
         )
@@ -306,6 +315,10 @@ mod tests {
         (
             7,
             "36752ac87f153e689ba298b5cfab6c9a1375b34b1ec3dc839942d36da8c0b0fa",
+        ),
+        (
+            8,
+            "03a94479c2f4e44f2a79e1dfe30f5f3c697eccfb35525b34dacc21f243bb030b",
         ),
     ];
 
