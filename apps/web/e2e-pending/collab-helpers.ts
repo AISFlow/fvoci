@@ -328,7 +328,9 @@ export async function editorShape(page: Page): Promise<EditorShape> {
 }
 
 export async function placeContentCaret(page: Page, where: "start" | "end"): Promise<void> {
-  await editorLocator(page).evaluate((root, edge) => {
+  const locator = editorLocator(page);
+  await locator.focus();
+  const position = await locator.evaluate((root, edge) => {
     const isDecoration = (node: Node) => {
       const el = node instanceof Element ? node : node.parentElement;
       return Boolean(el?.closest(".collaboration-carets__caret, .collaboration-carets__label"));
@@ -348,7 +350,13 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
       last = node;
     }
     const target = edge === "start" ? first : last;
-    if (!target) return;
+    if (!target) throw new Error("content caret requires an existing text node");
+    const editor = (root as HTMLElement & {
+      editor?: { view: { posAtDOM(node: Node, offset: number): number } };
+    }).editor;
+    if (!editor) throw new Error("missing live editor for caret inspection");
+    const offset = edge === "start" ? 0 : target.length;
+    const position = editor.view.posAtDOM(target, offset);
     const range = document.createRange();
     if (edge === "start") range.setStart(target, 0);
     else range.setStart(target, target.length);
@@ -356,7 +364,16 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
+    return position;
   }, where);
+  // Browser selectionchange is asynchronous. Observe the real ProseMirror
+  // selection before typing; never dispatch a synthetic editor transaction.
+  await expect.poll(() => locator.evaluate((root) => {
+    const editor = (root as HTMLElement & {
+      editor?: { state: { selection: { from: number; to: number } } };
+    }).editor;
+    return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
+  })).toEqual([position, position]);
 }
 
 export function uniqueBlockIds(shape: EditorShape): string[] {

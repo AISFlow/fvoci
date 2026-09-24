@@ -120,15 +120,12 @@ test("insert and delete conflict keeps the insertion and applies the deletion", 
     await expectTokens(pageA, ["한글본문"]);
     const editorB = await openEditor(pageB, doc.url);
     await expectTokens(pageB, ["한글본문"]);
+    await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
     await Promise.all([
       (async () => {
-        await editorA.click();
-        await placeContentCaret(pageA, "start");
         await pageA.keyboard.type("앞쪽삽입");
       })(),
       (async () => {
-        await editorB.click();
-        await placeContentCaret(pageB, "end");
         await pageB.keyboard.press("Backspace");
         await pageB.keyboard.press("Backspace");
       })(),
@@ -164,17 +161,14 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
     await expectTokens(pageB, ["안녕🙂세계"]);
     await expectConverged(pageA, pageB);
     const beforeIds = uniqueBlockIds(await editorShape(pageA));
+    await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
     await Promise.all([
       (async () => {
-        await editorA.click();
-        await placeContentCaret(pageA, "start");
         await pageA.keyboard.press("ArrowRight");
         await pageA.keyboard.press("ArrowRight");
         await pageA.keyboard.type("중간");
       })(),
       (async () => {
-        await editorB.click();
-        await placeContentCaret(pageB, "end");
         await pageB.keyboard.press("ArrowLeft");
         await pageB.keyboard.press("ArrowLeft");
         await pageB.keyboard.press("ArrowLeft");

@@ -959,3 +959,39 @@ Tiptap resizable TableView는 node.attrs.id를 DOM에 복사하지 않음을 확
 검사 oracle은 Tiptap이 DOM에 노출한 실제 editor.getJSON()을 읽기 전용으로
 조회하고 전체 구조를 비교하도록 수정한다. 표 ID를 실제 문서에서 확인하고
 UUID 검증을 강화하며, 문서를 JSON으로 재생성하거나 문자열을 정규화하지 않는다.
+
+통합 f69839389351774f6c0a0edceeec4b6e1669a333: 원격 Rust35942027513,
+Documents35942027533, Engine35942027496와 Web35942027511의 workspace-flow 성공.
+새 협업 E2E는14개 모두 실행,13pass/1fail/0skip(2.2분). 실제 server 종료 중
+offline 입력→같은 port 재접속→새 페이지 동기화, 삭제-only/구조, 기존 context
+종료 후 process-tree SIGKILL→fresh context 두 개 복원→후속 편집 모두 통과했다.
+실패는 늦게 접속한 pageB의 presence 표시(line510); 초기 awareness snapshot
+누락과 대조 중이며 Composer 제품 수정이 아직 미통합이다. 전체 협업 수락 아님.
+
+Fable task_dcf323744d52/ctx_1213c5b7e035는 acab411과 명시적 delta
+acab411..f698393을 읽기 전용 검토 후 유효 완료·release했다. 실제
+Claude Code Fable5.1 medium, 주간 quota/Opus 전환 없음. 보고서
+/tmp/fvoci-collab-e2e-review-acab411.md. 중복 peer fixture와 실제 단절 없는
+offline 검사는 수정 확인. 초기 보고의 timeout 증액 권고는 teardown 별도 budget과
+실측에 따라 철회했고 시간 제한을 늘리지 않았다. helper는 실제 room별 long-lived
+프로세스이며 unacked commit은 복원될 수 있다는 계약도 보고서에서 바로잡았다.
+Caret DOM Range와 PM selection의 비동기 반영 차이를 추가 지적: 코디네이터가
+읽기 전용 실제 selection 일치 확인 및 두 클라이언트 입력 전 위치 준비를 보완 중.
+이 후속 diff는 pending tsc/diff check만 통과했으며 브라우저 재검증 전이다.
+
+Native Project 제출687f8a063be109bfde13a5c4b559171c3694b9b1은 아직 미통합.
+Grok task761c0f98805f/ctx03ca7b6b0eeb 완료 후 같은 검증된 terminal을
+후속 task_7736b745ebb4/ctx_45f86dff91f7에 재사용했다. 원본 withoutYChange의
+빈 marks/retained mark 처리와 중첩 Any 값 예산·bounded 출력 수정이 남는다.
+소유 경로·heavy slot은 이전과 같으며 Composer가 무거운 현지 검사를 소유한다.
+다음: 두 쓰기 dispatch 제출 확인→고정 SHA 검토→한 제출씩 통합→최신 remote gate.
+
+Grok 후속 c980efaf665b5765271457041a053e63007a90ec 제출·유효 완료·release.
+단위16/16(0.42s), Yjs23/23(--skip near_max_load,1filtered,5.26s),
+process_boundary13/13(1.25s), clippy0.46s, parent no-worker check0.09s 보고.
+전체 near_max_load/test-hang은 미실행이며 원격 gate 대상이다. 원본 marks 빈 배열과
+살아남은 mark attrs 보존, nested Any 예산 및 counting-writer 출력 상한을 보강했다.
+Fable task_847aa9e8b31b/ctx_442c5c49568e가 고정c980efa를 독립 검토 중이다.
+요청/유효 claude-fable-5-1 medium 일치, quota/Opus 전환 없음. HashMap mark 순서의
+원본 의미와 fixture 강도도 확인하도록 요청했다. 이 native 경계는 아직 DB/REST
+파생 본문 제품 연결이나 전체 협업 수락이 아니다.
