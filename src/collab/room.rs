@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "db-tests")]
 use futures_util::future::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};

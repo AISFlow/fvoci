@@ -1333,3 +1333,21 @@ Opus bdc7cc1 검토를 이후 test-only delta 전체 승인이라고 표시하�
 해당 Cargo test stanza만 단독 소유. 종료 신호 시 admission 중단·독립 room 정리·
 명시적 비정상 deadline을 구현한다. room/transport/DB 변경은 현재 범위 밖이다.
 종료·actor panic·재접속·오류분류 등의 남은 차단 사항 때문에 PR7은 Draft다.
+
+통합d18655e4ce91428a01f466faf59f630cb9db199d 일반 push 완료, PR7 설명 갱신.
+최종 db-tests all-targets clippy3.18s 추가 성공. 현재 CI Rust35963812510/
+Web35963812539 실행 중, Documents35963812508/Engine35963812509 성공;
+최종 원격 결과는 다음 확인 후 기록한다. PR7 Draft, auto-merge 미설정.
+Composer task643f182ffca5/ctx121682a068d1는 새 Orca rust-collab-error-boundary
+(based18655e)에서 room/validation/projection tests/support만 소유해 R1/R4를
+구현한다. 실제 composer-2.5 요청/유효 일치, 별도 effort 없음. Grok shutdown
+소유와 겹치지 않으며 무거운 로컬 검사는 Grok 우선이다.
+
+d18655e 원격 기본feature 빌드에서 E0599(poll_unpin)가 발생했다. 코디네이터가
+마지막 경고 정리에서 FutureExt를 db-tests로 잘못 제한한 것이 원인이다.
+앞선 lib44 성공은 그 마지막 cfg 수정 전이며 d18655e 기본feature 성공 근거가
+아니다. db-tests 경로의 양 아키텍처 협업 검사는 성공했지만 fast/ARM native
+server/Web은 컴파일 실패로 필요한 검사가 미실행됐다. 해당 cfg 한 줄을 되돌려
+기본 lib44/44(body5.77s/compile2.78s), api-schema bins check8.49s, 기본 bins
+build9.49s와 fmt를 실제로 다시 성공 확인했다. hub의 test-only import 경고1건은
+별도 소유자의 후속 수정 항목이며 오류를 숨기기 위한 경고 억제는 하지 않았다.
