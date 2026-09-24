@@ -78,3 +78,22 @@ Orca1.4.207 기존 실행 경로와 Run을 유지했다. Composer2.5 / Grok4.6 /
 사용자 추가 승인: Fable5.1의 실제 주간 한도 도달 시 Claude Code Opus5.5
 medium으로 자문을 대체할 수 있다. 아직 한도 도달/Opus 모델 ID·선택을
 확인하거나 전환 실행하지 않았다. 현재 검토는 Fable5.1 medium이다.
+
+## 2026-09-24 Fable 한도와 승인된 자문 전환
+
+고정0f862f8 lifecycle 자문 task08b0ddbb932f/ctx601e47738d17의 실제 Claude Code
+응답은 "You've reached your Fable limit. Run /usage-credits to continue or switch
+models with /model."였다. 검토 보고서/worker_done 없이 종료되어 검토 완료로
+인정하지 않았으며, 해당 dispatch를 worker-stop으로 중단·터미널 종료했다.
+설치 실행 파일은 /home/kinesis/.local/share/claude/versions/2.1.281이며, 같은
+한도 안내에는 "included Fable usage for this week"가 포함돼 있다. 설치된
+모델 카탈로그에서 claude-opus-5-5를 확인했고 CLI --effort medium 지원도
+확인했다. 사용자가 승인한 이 조건의 fallback만 적용한다. Opus 요청/유효
+receipt와 실제 검토 반환은 아래 후속 기록으로 확인하며, 아직 완료로 주장하지 않는다.
+/usage 읽기 전용 조회 외에 usage credits 활성화·결제·전역 설정 변경은 하지 않았다.
+
+재개 receipt: 같은 task08b0ddbb932f의 ctx9edaf2220d96, Claude Code
+`claude-opus-5-5`, medium 요청/유효 일치, turnStart observed. 실제 terminal
+term582f3fbb-7a5a-416d-921b-3ee6e6ebb2ac의 해당 고정 SHA 읽기 전용 검토만
+재개했다. 이전 Fable-only task 문구는 이 검증된 사용자 승인 fallback으로
+명시적으로 대체 전달했다. 검토 완료 여부는 docs/rewrite 최신 결과를 따른다.

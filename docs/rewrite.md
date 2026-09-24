@@ -10,27 +10,19 @@
 ## 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
-
-- PR1 인증 slice merged `fe30bd1`; 원격/실제 DB·HTTP 검증 완료.
-- [PR2](https://github.com/AISFlow/fvoci/pull/2) native 추출 merged `1fc8af347246b1ae26881103d621268155c5c3d7`.
-  검증 HEAD `0d3fb355119adeea8309c3d9a53ba3804dab6cb1`, 최신 로컬 fmt/clippy와
-  production/test-hang 각52개 성공(ignored0). 원격 Rust35908128293 fast/postgres,
-  Native35908128283 actual52+52 성공. Fable12140a6+0d3fb35 차단 없음.
-  기대 HEAD를 지정해 squash merge하고 actual merged/main 반영 확인. Post-merge CI 대기.
-- Workspace backend `bf1ab03`: 로컬 lib7/DB66와 Fable 검토 완료, 원격 수락 전.
-  통합은 `rust-workspace-integration`에서 새 main을 병합했다. UI는 Composer
-  `task_ebca570d74e9 / ctx_4761880b5c3a` (`rust-workspace-web`) 구현 중.
-- 다음 문서 기반은 Grok `task_76f95af84a63 / ctx_db38f9d1f96e`
-  (`rust-wiki-document`, base d5da209): 신규documents route/DB/004/grants와 독립검사.
-  UI와 파일 소유권을 분리했고 production router 연결은 UI 제출 뒤 코디네이터 담당.
-  Workspace/UI PR 수락 뒤 문서/협업 후속 PR로 통합하며 stacked PR은 만들지 않는다.
+최신 main `ba19932b03a98a69b24479e33ade68946b5bbd47`은 PR1–6의 수락 결과다.
+PR7은 Draft/미병합이며 협업 제품 경로의 결함 보강·독립 검토 중이다.
+최신 원격 검증 HEAD는 `8855c64e13c37cde0b4804d007b73b117eaa03b3`:
+4 workflow 성공, 실제 React13/협업14 및 양 아키텍처 DB/native 검사 완료.
+그 뒤 로컬 통합과 미수락 변경은 문서 끝의 최신 기록을 따른다.
 
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
-| 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 검증 완료, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | 확장 인증·정책·UI 연결 |
-| 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락5d8cac8, PR4 merged | lib12/DB66 양 아키텍처/React6/CI/Fable | counts·quota·groups·members-list 등 미구현 |
-| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component 검증 완료, PR2 merged | 로컬·CI52+52/Fable | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
-| 문서·협업 | domains/documents/collab, 기존 React/Tiptap | 문서 권한·provider envelope·철회·CRDT 저장/복원 | wiki PR5 수락; codec/DB/native engine PR6 수락, /collab 미연결 | PR5/6 실제 앱역할 DB·양 아키텍처 CI/Fable 통과 | 실제2UI 편집·awareness·재접속·persist·새 프로세스 복원 후 편집 |
+| 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 첫 slice 수락, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | PAT/OIDC/MFA·계정 생명주기·확장 정책 |
+| 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락, PR4 merged | 실제 앱 역할DB66·양 아키텍처·React·CI·독립 검토 | counts·quota·groups·members-list 등 |
+| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component 수락, PR2 merged | 실제 문서/native52+52·CI·독립 검토 | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
+| 기본 위키 문서 | domains/documents | 생성·조회·metadata·현재 문서 권한 | 첫 backend/React 수락, PR5 merged | 실제 앱 역할DB13·UI·CI·독립 검토 | 댓글·공유·리비전·확장 문서 기능 |
+| 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 부분 구현 | 실제2UI14개 회귀·새 프로세스 복원 등 실행; 최신 수정은 재검증 중 | 종료/재접속 수명주기·파생 본문 실패 경계 차단 지적 해결 전. 명시적 opt-in이며 전체 협업 수락 아님 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
@@ -54,15 +46,15 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 인증 확장·PAT·OIDC·MFA·사용자 생명주기 | packages/contracts/src/routes.ts auth/me/admin, core/auth.ts | 세션 폐기, 범위, 마지막 관리자, 탈퇴/복구 | 재작성 미착수 | 미실행 | 첫 로그인 외 전체 |
 | 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend/React 수락5d8cac8, PR4 merged | 실제 앱 역할DB66 양 아키텍처/React6/CI/Fable | groups/확장 정책 등 미구현 |
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
-| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata 부분 구현 PR5 | 워커DB13, 통합/UI 검증 진행 | 본문 편집·댓글·공유·리비전 미구현 |
-| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine 기반 PR6 수락, 제품 미연결 | provider fixture11/native35·38 양 아키텍처 검증 | 문서/인가 기반 뒤 durable Yrs·실제2UI 수락 필요 |
-| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | 재작성 미착수 | 조사 중 | native 대체 실증 필요 |
+| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata PR5 수락; 본문 협업 PR7 진행 | PR5 실제DB/UI/CI; PR7 검증은 최신 기록 | 댓글·공유·리비전, 협업 최종 수락 미완료 |
+| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine PR6 수락; 실제 제품/2UI PR7 진행 | provider/native/DB/2UI 회귀 실행, 최신 수정 재검증 중 | 종료·재접속·파생 본문 실패 경계 차단 해소 및 전체 수락 필요 |
+| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | rhwp native 본문 추출 PR2 수락; 첨부 제품 미연결 | native52+52·CI·독립 검토 | 부모 권한·업로드·저장·다운로드·썸네일 |
 | 검색·색인·AI | server domains/search, packages/search, routes.ts ai | 검색에서도 인가·철회·색인 복구 | 재작성 미착수 | 미실행 | 전체 |
 | 알림·메일·webhook·연동 | server domains/notifications, packages/jobs, routes.ts github/webhooks | outbox·커밋 후 전달·중복/재시도 | 재작성 미착수 | 미실행 | 전체 |
 | 동의·감사·사용권 | routes.ts legal/auth.consents/admin.audit, packages/ee | 동의 gate·증거·서명·권한 | 재작성 미착수 | 미실행 | 프로필 감사 강화 외 전체 |
 | MCP·CLI·설치·백업·복구 | server src/init.ts/backup.ts/doctor.ts, 제품 MCP | 프로토콜·오류·복원·운영 취소 | 재작성 미착수 | 미실행 | 첫 설치 외 전체 |
 | SQLite/libSQL/Turso 및 이관 | PR999 packages/db | 원본 제공 범위와 목표 구분 | 재작성 미착수 | 미실행 | PG 우선; 원본 전체 다중 DB 완료로 간주하지 않음 |
-| 프론트엔드·배포·ARM64 | apps/web, packages/editor, 배포 리소스 | 한국어·접근성·편집 흐름·정적 자산 | 재작성 미착수 | 미실행 | 최초 실제 HTTP slice 이후 연결; 이관/운영/ARM64 지원 미선언 |
+| 프론트엔드·배포·ARM64 | apps/web, packages/editor, 배포 리소스 | 한국어·접근성·편집 흐름·정적 자산 | 기존 React 설치/인증/workspace/wiki 연결; 협업 PR7 진행 | 해당 브라우저 회귀와 x64/ARM64 native CI | 전체 UI·배포/이관/복구 미수락; native CI를 전체 플랫폼 지원으로 확대하지 않음 |
 
 ## PR 및 원본 회귀 확인
 
@@ -1112,3 +1104,79 @@ room의 native Project 호출→DB 파생 본문 저장 연결과 내부 참조 
 송신 보강은 Grok ctx61d9504aaccf에서 계속하며 해당 파일 소유권을 유지한다.
 PR7 Draft/미병합, 전체 협업 수락·auto-merge 미설정. 다음 작업은 송신 제출 SHA
 검토·통합 후 room projection hook 연결이며 lifecycle F4–F7도 별도 해소한다.
+
+8855c64e13c37cde0b4804d007b73b117eaa03b3 원격 CI4workflow 모두 성공:
+Rust35947070941/Web35947070937/Documents35947071155/Engine35947071116.
+실제 checkoutfa9ba7e=PR8855c64+mainba19932. lib43/wire11, 양 아키텍처
+DB30+66+13 및 collab_product37 실제 실행, skip0. React13/13(54.8s),
+협업14/14(2.1분). 고정 본문 DB 기반의 해당 범위 검증 완료, room 연결은 아직이다.
+송신e20903a를81d106f로 로컬 통합했으나 아직 push/수락 전이다.
+Grok taskc6eb00281ed9/ctx61d9504aaccf의 실제 앱 역할45/45(56.7s) 제출 후,
+보고와 코드가 다른 공통 마감시간 문제(조회·send 각각 전체 budget)를 발견했다.
+같은 검증된 Grok process를 task26673bfe7ac7/ctx3e1aafaa052f에 재사용:
+transport/db_delivery/tests만 보완, local heavy slot 소유. room/hub 변경은 금지.
+Fable task2a599c84f817/ctxa30d52a0575f는 e20903a 고정 diff를 읽기 전용 검토한다.
+실제 요청·유효 claude-fable-5-1 medium/turnStart 확인, 주간 한도 오류 없음.
+첫 검토 시작 시 잘못된 worktree selector로 preflight 거부됐고 새 실행은 생기지
+않았다. Orca 목록의 실제 rust-collab-projection 경로로 수정해 시작했다.
+
+Composer task015787594204/ctx594c2b741ee5는 새 Orca child rust-collab-derived-room,
+기준81d106f에서 실제 composer-2.5(요청/유효 일치, effort 미지정)로 room 본문 연결을
+구현한다. 소유 src/collab/room.rs + 새 tests/collab_projection.rs(필요 시 새 support),
+Grok의 transport/db_delivery/collab_product와 비중복. 순수 검사는 가능하고 전체
+실DB/native 묶음은 Grok 슬롯 반납 후 실행한다. 원본 deterministic derive 실패와
+DB 실패를 구분하며, binary commit 후 파생 DB 오류를 persist 성공으로 숨기지 않는다.
+실제 GET body·삭제-only·실패 후 재시도·새 hub 복원 회귀를 수락 조건으로 배정했다.
+81d106f 통합 fmt/clippy(4.37s)/lib43/43(body5.76s) 성공. 최신 원격은8855c64이며
+81d106f의 통합 원격 검증은 마감시간 follow-up 제출과 묶어 실행한다.
+
+Fable e20903a 검토(task2a599c84f817/ctxa30d52a0575f) 완료·release:
+B1/B2 해소, 새 보안 차단 없음. 공통 마감시간 보완은 별도이며 Close code 실제
+assertion·권한 상태별 parity와 5-peer 비용 측정을 후속 검증으로 남겼다.
+Grok43d4bc1(49/49, body60.9s)을0f862f8로 통합, fmt/clippy all-targets5.44s 성공.
+해당 워커ctx3e1aafaa052f는 완료·release. 다음 close-code/parity task53929a1a1da0
+재사용 시도ctx50d0c698602a/ctxdda4143e2ba2는 agent_readiness timeout으로 입력 전
+실패했다. 이전 agent의 완료·idle 확인 후 release하고 같은 실제 Grok4.6 모델로
+ctx96080363ab48(요청/유효cursor-grok-4.6-high, effort 미지정)를 시작했다.
+소유 transport/db_delivery/collab_product만 유지한다. lifecycle/room 변경 없음.
+
+Composer ctx594c2b741ee5는 미커밋 구현·compile 성공만 제출해 제품 미수락이다.
+동일 검증된 Composer를 taskcfd40d74abcb/ctx69c4dacedfc0에 재사용해 실패 의미 보강과
+실제 collab_projection 검증·커밋을 수행한다. Grok49개 묶음 종료 후 heavy slot은
+Composer 소유다. 현재 두 쓰기 워커의 파일은 겹치지 않는다. env/모델 fallback은
+기존 규칙 유지, 현재까지 Fable 주간 한도 오류나 Opus 전환은 없다.
+
+종료 경계 자문 task08b0ddbb932f/ctx601e47738d17은 실제 Fable 한도 오류로
+보고서 없이 중단됐다(검토 완료 아님). 환경 기록의 근거로 사용자 승인된
+Claude Code Opus5.5 medium에 같은 task를 재시도: ctx9edaf2220d96, 요청/유효
+claude-opus-5-5 medium 일치·turnStart observed. 고정0f862f8 lifecycle 자문이며
+제품 수락 검토와 구분한다. 크레딧·결제·전역 설정 변경 없음.
+
+Opus5.5 medium lifecycle 자문(task08b0ddbb932f/ctx9edaf2220d96) 완료:
+고정0f862f8의 F4–F7과 shutdown 순서/무한 DB 대기를 확인했다. 코드/검사 실행은
+없으며 제품 수락이 아니다. 보고서의 파생 JSON 오류를 모두 무시한다는 권고는
+원본과 달라 채택하지 않았다(InvalidDocumentBody/DocumentTooLarge만 허용).
+state vector만으로 삭제 복원을 증명하거나 EOF만으로 helper join을 주장하지 않는다.
+같은 검증된 Opus 프로세스를 taskb901fa7d3ebe/ctx1c6aea2aa5e4에 재사용하여
+다음 실제 room 제출 SHA를 읽기 전용 검토한다.
+
+Composer f3031222d649b6fda0309311131b614cecf5523c를87a393e로 로컬 통합했다.
+worker 실제 collab_projection9/9(body16.78s), tree clean 후 release. 코디네이터가
+Cargo required-features와 기존 양 아키텍처 collaboration CI 실행 명령에 새
+검사 target을 연결했다. 통합 fmt 성공, clippy는 새 테스트의 unused import와
+unused sample_hi_update 2건으로 실패했다. 테스트 서버 JoinHandle 미회수도
+발견해 독립 검토/보강 대상으로 남겼다. 아직 push/수락하지 않았다.
+Grok ctx96080363ab48은 aad2ea5의 CloseFrame/인가 parity/5-peer 보강 9개 관련
+검사 성공 후 전체 collab_product를 실행 중이다. Composer 종료 이후 local
+heavy slot을 Grok에 이관했다. 최신 원격 수락 근거는 여전히8855c64다.
+
+Opus f303122 검토에서 결정적 Project 실패 후 죽은 helper 재사용 B1을 확인했다.
+Memory 전체를 결정적 크기 초과로 분류하라는 B2 권고는 실제 process RSS 초과도
+같은 enum을 쓰므로 그대로 채택하지 않고 재검토 중이다. 수정 소유 Composer
+실제 composer-2.5 task48f0ac14173f/ctx7cd4044ac6c8, 기존 room/test 경로만 유지.
+Opus 동일 검증 프로세스 task1e3d65ae3268/ctx5cc5ff9adc24는 aad2ea5 송신 delta를
+검토한다. Grok aad2ea5 전체 collab_product는49성공/1실패/skip0(body90.56s),
+collab_reload_failure_after_commit_preserves_durable_tail 실패로 미수락이다.
+같은 Grok process task07c244fbbfdd/ctxd09f2f25bf01에 재현·원인 수정을 배정했다.
+무거운 로컬 검사 슬롯도 해당 Grok 소유다. CI target 연결 커밋e2b2906은 로컬에만
+있으며 최신 원격8855c64의 성공을 이후 수정의 증거로 재사용하지 않는다.
