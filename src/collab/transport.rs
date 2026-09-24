@@ -11,9 +11,9 @@ use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::auth::token::hash_token;
+use crate::collab::config::CollabConfig;
 use crate::collab::hub::CollabHub;
 use crate::collab::origin::{validate_collab_origin, CollabOriginError};
-use crate::collab::config::CollabConfig;
 use crate::collab::room::{
     parse_client_id, AuthenticatedConnection, CollabSession, ConnectionCancel, JoinError,
     OutboundFrame, RoomClientEvent, RoomJoin,
@@ -178,20 +178,17 @@ async fn send_ws_message(
 ) -> bool {
     let byte_len = match &message {
         Message::Binary(bytes) => bytes.len(),
-        Message::Close(frame) => frame
-            .as_ref()
-            .map(|f| f.reason.len())
-            .unwrap_or(0),
+        Message::Close(frame) => frame.as_ref().map(|f| f.reason.len()).unwrap_or(0),
         Message::Ping(payload) | Message::Pong(payload) => payload.len(),
         _ => 0,
     };
     if byte_len > max_frame_bytes {
         return false;
     }
-    match tokio::time::timeout(send_deadline, sender.send(message)).await {
-        Ok(Ok(())) => true,
-        _ => false,
-    }
+    matches!(
+        tokio::time::timeout(send_deadline, sender.send(message)).await,
+        Ok(Ok(()))
+    )
 }
 
 async fn handle_socket(
@@ -209,11 +206,10 @@ async fn handle_socket(
     let mut joined_room: Option<(crate::collab::room::RoomKey, String, bool, bool)> = None;
     let send_deadline = Duration::from_millis(config.outbound_send_deadline_ms);
     let max_frame_bytes = config.max_ws_frame_bytes;
-    let auth_deadline =
-        Instant::now() + Duration::from_millis(config.auth_wait_ms);
-    let mut auth_wait = Box::pin(tokio::time::sleep_until(
-        tokio::time::Instant::from_std(auth_deadline),
-    ));
+    let auth_deadline = Instant::now() + Duration::from_millis(config.auth_wait_ms);
+    let mut auth_wait = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
+        auth_deadline,
+    )));
     let mut collab_authenticated = false;
     let mut pre_auth_outbound = PreAuthOutboundAllowance::new(config);
     let mut inbound_window_start = Instant::now();
@@ -309,8 +305,7 @@ async fn handle_socket(
                                     &live,
                                     routing_key,
                                     &bytes,
-                                    &events_tx,
-                                    &cancel_tx,
+                                    ConnectionEvents { events: &events_tx, cancel: &cancel_tx },
                                     &mut pre_auth_outbound,
                                 )
                                 .await;
@@ -388,22 +383,27 @@ async fn first_room_from_frame(
         return None;
     }
     let key = (room_name.workspace_id, room_name.resource_id);
-    let (auth_ok, read_only) = if matches!(message, DocumentMessage::Auth(AuthMessage::Token { .. })) {
-        try_authenticate(
-            hub,
-            conn_id,
-            live,
-            &routing_key,
-            bytes,
-            events,
-            cancel,
-            pre_auth_outbound,
-        )
-        .await
-    } else {
-        (false, false)
-    };
+    let (auth_ok, read_only) =
+        if matches!(message, DocumentMessage::Auth(AuthMessage::Token { .. })) {
+            try_authenticate(
+                hub,
+                conn_id,
+                live,
+                &routing_key,
+                bytes,
+                ConnectionEvents { events, cancel },
+                pre_auth_outbound,
+            )
+            .await
+        } else {
+            (false, false)
+        };
     Some((key, routing_key, auth_ok, read_only))
+}
+
+struct ConnectionEvents<'a> {
+    events: &'a mpsc::Sender<RoomClientEvent>,
+    cancel: &'a watch::Sender<Option<ConnectionCancel>>,
 }
 
 async fn try_authenticate(
@@ -412,10 +412,10 @@ async fn try_authenticate(
     live: &CollabSession,
     routing_key: &str,
     bytes: &[u8],
-    events: &mpsc::Sender<RoomClientEvent>,
-    cancel: &watch::Sender<Option<ConnectionCancel>>,
+    channels: ConnectionEvents<'_>,
     pre_auth_outbound: &mut PreAuthOutboundAllowance,
 ) -> (bool, bool) {
+    let ConnectionEvents { events, cancel } = channels;
     let frame = crate::collab::wire::decode(bytes).ok();
     let token = match frame {
         Some(WireFrame::Document {

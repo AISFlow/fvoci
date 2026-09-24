@@ -18,7 +18,9 @@ use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
 use crate::collab::engine_bridge::{BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
-use crate::collab::validation::{validate_recovery_bundle, validate_snapshot_only, BundleValidation};
+use crate::collab::validation::{
+    validate_recovery_bundle, validate_snapshot_only, BundleValidation,
+};
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::verify_collab_operation;
@@ -107,16 +109,13 @@ pub async fn arm_append_revoke_barrier(
 ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (reached_tx, reached_rx) = oneshot::channel();
     let (proceed_tx, proceed_rx) = oneshot::channel();
-    APPEND_REVOKE_BARRIERS
-        .lock()
-        .await
-        .insert(
-            document_id,
-            AppendRevokeBarrier {
-                reached_tx,
-                proceed_rx,
-            },
-        );
+    APPEND_REVOKE_BARRIERS.lock().await.insert(
+        document_id,
+        AppendRevokeBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
     (reached_rx, proceed_tx)
 }
 
@@ -210,7 +209,10 @@ impl std::fmt::Debug for OutboundFrame {
 
 impl OutboundFrame {
     pub fn unaccounted(bytes: Vec<u8>) -> Self {
-        Self { bytes, permit: None }
+        Self {
+            bytes,
+            permit: None,
+        }
     }
 }
 
@@ -551,7 +553,8 @@ impl RoomActor {
             })?;
             self.set_committed_from_load(&claim.load);
             if let Err(err) = self.reload_primary_from_committed().await {
-                self.close_all_connections(1011, "engine reload failed").await;
+                self.close_all_connections(1011, "engine reload failed")
+                    .await;
                 return Err(err);
             }
             self.writer_generation = Some(claim.writer_generation);
@@ -568,7 +571,8 @@ impl RoomActor {
             let load = load.map_err(|_| JoinError::AdmissionDenied)?;
             self.set_committed_from_load(&load);
             if let Err(err) = self.reload_primary_from_committed().await {
-                self.close_all_connections(1011, "engine reload failed").await;
+                self.close_all_connections(1011, "engine reload failed")
+                    .await;
                 return Err(err);
             }
         }
@@ -710,8 +714,7 @@ impl RoomActor {
                     return;
                 }
                 if room.is_none() {
-                    self.close_connection(conn_id, 1008, "invalid room")
-                        .await;
+                    self.close_connection(conn_id, 1008, "invalid room").await;
                     return;
                 }
                 if !self.session_authorized(&session, read_only).await {
@@ -762,7 +765,8 @@ impl RoomActor {
     ) {
         match message {
             DocumentMessage::Auth(auth) => {
-                self.handle_auth(conn_id, routing_key, read_only, auth).await;
+                self.handle_auth(conn_id, routing_key, read_only, auth)
+                    .await;
             }
             DocumentMessage::Sync(sync) => {
                 self.handle_sync(conn_id, routing_key, read_only, sync)
@@ -806,11 +810,7 @@ impl RoomActor {
         auth: AuthMessage,
     ) {
         if let AuthMessage::Token { .. } = auth {
-            let scope = if read_only {
-                "readonly"
-            } else {
-                "read-write"
-            };
+            let scope = if read_only { "readonly" } else { "read-write" };
             self.deliver_document_message(
                 conn_id,
                 routing_key,
@@ -1102,7 +1102,8 @@ impl RoomActor {
             c.poisoned = true;
         }
         self.send_sync_status(conn_id, routing_key, false).await;
-        self.close_connection(conn_id, 1008, "update rejected").await;
+        self.close_connection(conn_id, 1008, "update rejected")
+            .await;
     }
 
     async fn reconcile_ambiguous_append(
@@ -1453,8 +1454,7 @@ impl RoomActor {
                         && self.reload_primary_from_committed().await.is_err()
                     {
                         self.compact_unhealthy = true;
-                        self.compact_retry_at_tail_len =
-                            Some(self.committed.tail_payloads.len());
+                        self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
                         return format!("persist-failed:{request_id}");
                     }
                     format!("persisted:{request_id}")
@@ -1479,7 +1479,7 @@ impl RoomActor {
             return;
         }
         if self.compact_unhealthy {
-            let retry = self.compact_retry_at_tail_len.map_or(false, |at_fail| {
+            let retry = self.compact_retry_at_tail_len.is_some_and(|at_fail| {
                 self.committed.tail_payloads.len() >= at_fail.saturating_add(8)
             });
             if !retry {
@@ -1509,7 +1509,14 @@ impl RoomActor {
         let recipients = self
             .connections
             .iter()
-            .map(|(id, conn)| (*id, conn.routing_key.clone(), conn.session.clone(), conn.read_only))
+            .map(|(id, conn)| {
+                (
+                    *id,
+                    conn.routing_key.clone(),
+                    conn.session.clone(),
+                    conn.read_only,
+                )
+            })
             .collect::<Vec<_>>();
         for (conn_id, routing_key, session, read_only) in recipients {
             let frame = encode(&WireFrame::Document {
@@ -1530,7 +1537,14 @@ impl RoomActor {
         let recipients = self
             .connections
             .iter()
-            .map(|(id, conn)| (*id, conn.routing_key.clone(), conn.session.clone(), conn.read_only))
+            .map(|(id, conn)| {
+                (
+                    *id,
+                    conn.routing_key.clone(),
+                    conn.session.clone(),
+                    conn.read_only,
+                )
+            })
             .collect::<Vec<_>>();
         for (conn_id, routing_key, session, read_only) in recipients {
             let frame = encode(&WireFrame::Document {

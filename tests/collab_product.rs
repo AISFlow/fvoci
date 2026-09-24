@@ -11,14 +11,15 @@ use futures_util::{SinkExt, StreamExt};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::new_token;
 use fvoci_server::auth::AuthService;
+use fvoci_server::collab::awareness::{decode_awareness, encode_awareness, AwarenessUpdate};
 use fvoci_server::collab::config::CollabConfig;
 use fvoci_server::collab::guard::RoomGuard;
 use fvoci_server::collab::hub::RoomLifecyclePhase;
 use fvoci_server::collab::room::{
     arm_append_revoke_barrier, arm_force_primary_apply_fail, arm_force_primary_load_fail,
     arm_spawn_room_block, disarm_append_revoke_barrier, disarm_force_primary_apply_fail,
-    disarm_force_primary_load_fail, disarm_spawn_room_block,
-    AuthenticatedConnection, CollabSession, JoinError, RoomClientEvent, RoomJoin,
+    disarm_force_primary_load_fail, disarm_spawn_room_block, AuthenticatedConnection,
+    CollabSession, JoinError, RoomClientEvent, RoomJoin,
 };
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, SyncMessage, SyncStep,
@@ -26,10 +27,9 @@ use fvoci_server::collab::wire::{
 };
 use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
-use fvoci_server::collab::awareness::{decode_awareness, encode_awareness, AwarenessUpdate};
 use fvoci_server::db::collab::load_collab_document;
-use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::documents::CreateDocumentInput;
+use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::workspace;
 use fvoci_server::db::{documents, migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
@@ -37,9 +37,6 @@ use fvoci_server::http::state::AppState;
 use rand::RngCore;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use collab_engine::outcome::EngineStatus;
-use collab_engine::process::{EngineSession, SpawnRequest};
-use collab_engine::protocol::Request;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
@@ -435,36 +432,6 @@ async fn wait_for_cancel_signal(
     })
     .await
     .unwrap_or(false)
-}
-
-fn snapshot_xml_len_blocking(snapshot: &[u8]) -> Option<u32> {
-    let limits = collab_engine::limits::Limits::for_tests();
-    let mut session = EngineSession::spawn(SpawnRequest {
-        engine_bin: engine_bin(),
-        limits,
-        test_hang_ms: None,
-        test_exit_after_read: None,
-        test_close_stdout_hang_ms: None,
-        test_exit_after_write: None,
-    })
-    .ok()?;
-    let load = session.call(&Request::Load {
-        snapshot_b64: Some(snapshot.to_vec()),
-        tail_b64: Vec::new(),
-        encoding: 1,
-    });
-    if !load.outcome.is_applied_ok() {
-        session.kill_and_reap();
-        return None;
-    }
-    let inspect = session.call(&Request::Inspect);
-    session.kill_and_reap();
-    match inspect.outcome {
-        EngineStatus::Ok {
-            xml_len: Some(len), ..
-        } => Some(len),
-        _ => None,
-    }
 }
 
 async fn wait_for_booting(hub: &CollabHub, key: (Uuid, Uuid)) {
@@ -1708,7 +1675,10 @@ async fn collab_delete_only_round_trip_persists() {
             }
         }
     }
-    assert!(saw_persisted, "delete-only persist must echo persisted:<id>");
+    assert!(
+        saw_persisted,
+        "delete-only persist must echo persisted:<id>"
+    );
 
     let load = load_collab_document(
         &wiki.session.pool,
@@ -1792,7 +1762,11 @@ async fn collab_append_revoke_barrier_rejects_writer_not_room() {
     let mut reader_still_live = false;
     for _ in 0..8 {
         if let Some(WireFrame::Document {
-            message: DocumentMessage::Sync(SyncMessage { step: SyncStep::Step2, .. }),
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Step2,
+                    ..
+                }),
             ..
         }) = recv_document_frame(&mut reader, 1).await
         {
@@ -1800,10 +1774,12 @@ async fn collab_append_revoke_barrier_rejects_writer_not_room() {
             break;
         }
     }
-    assert!(reader_still_live, "reader must remain live after writer-only rejection");
+    assert!(
+        reader_still_live,
+        "reader must remain live after writer-only rejection"
+    );
 
-    let fresh_writer_token =
-        add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
+    let fresh_writer_token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
     let mut fresh_writer = connect_member(addr, &fresh_writer_token.token).await;
     auth_and_join(&mut fresh_writer, &routing_key, 212).await;
     fresh_writer
@@ -1815,10 +1791,11 @@ async fn collab_append_revoke_barrier_rejects_writer_not_room() {
     let mut reader_saw_followup = false;
     for _ in 0..12 {
         if let Some(WireFrame::Document {
-            message: DocumentMessage::Sync(SyncMessage {
-                step: SyncStep::Update,
-                ..
-            }),
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Update,
+                    ..
+                }),
             ..
         }) = recv_document_frame(&mut reader, 1).await
         {
@@ -1865,10 +1842,11 @@ async fn collab_malformed_step1_closes_offender_healthy_peer_syncs() {
     let mut saw_step2 = false;
     for _ in 0..12 {
         if let Some(WireFrame::Document {
-            message: DocumentMessage::Sync(SyncMessage {
-                step: SyncStep::Step2,
-                ..
-            }),
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Step2,
+                    ..
+                }),
             ..
         }) = recv_document_frame(&mut healthy, 1).await
         {
@@ -1982,10 +1960,11 @@ async fn collab_committed_update_survives_primary_apply_fail_reload() {
     let mut reader_saw_broadcast = false;
     for _ in 0..12 {
         if let Some(WireFrame::Document {
-            message: DocumentMessage::Sync(SyncMessage {
-                step: SyncStep::Update,
-                ..
-            }),
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Update,
+                    ..
+                }),
             ..
         }) = recv_document_frame(&mut reader, 1).await
         {
@@ -2089,10 +2068,11 @@ async fn collab_reload_failure_after_commit_preserves_durable_tail() {
     let mut saw_step2 = false;
     for _ in 0..12 {
         if let Some(WireFrame::Document {
-            message: DocumentMessage::Sync(SyncMessage {
-                step: SyncStep::Step2,
-                ..
-            }),
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Step2,
+                    ..
+                }),
             ..
         }) = recv_document_frame(&mut recovery, 1).await
         {
@@ -2277,13 +2257,19 @@ async fn collab_archived_readonly_scope_allows_sync_refuses_write() {
         other => panic!("expected readonly auth, got {other:?}"),
     }
 
-    ws.send(Message::Binary(sync_step1_frame(&routing_key, &[0, 0]).into()))
-        .await
-        .unwrap();
+    ws.send(Message::Binary(
+        sync_step1_frame(&routing_key, &[0, 0]).into(),
+    ))
+    .await
+    .unwrap();
     let mut saw_step2 = false;
     for _ in 0..8 {
         if let Some(WireFrame::Document {
-            message: DocumentMessage::Sync(SyncMessage { step: SyncStep::Step2, .. }),
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Step2,
+                    ..
+                }),
             ..
         }) = recv_document_frame(&mut ws, 1).await
         {
@@ -2374,10 +2360,11 @@ async fn collab_revoked_session_closes_without_post_revoke_broadcast() {
     while tokio::time::Instant::now() < deadline {
         match recv_document_frame_within(&mut reader, Duration::from_millis(100)).await {
             Some(WireFrame::Document {
-                message: DocumentMessage::Sync(SyncMessage {
-                    step: SyncStep::Update,
-                    ..
-                }),
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Update,
+                        ..
+                    }),
                 ..
             }) => {
                 saw_post_revoke_broadcast = true;
@@ -2595,7 +2582,10 @@ async fn collab_awareness_generation_takeover_old_leave_cannot_clear() {
                 }) = fvoci_server::collab::wire::decode(&bytes)
                 {
                     let updates = decode_awareness(&payload).expect("awareness");
-                    if updates.iter().any(|u| u.client_id == 201 && u.state.is_none()) {
+                    if updates
+                        .iter()
+                        .any(|u| u.client_id == 201 && u.state.is_none())
+                    {
                         saw_tombstone = true;
                         break;
                     }
@@ -2812,9 +2802,7 @@ async fn collab_pre_auth_outbound_is_bounded() {
         ),
         "invalid auth must yield a bounded pre-auth denial"
     );
-    ws.send(Message::Binary(invalid_auth.into()))
-        .await
-        .unwrap();
+    ws.send(Message::Binary(invalid_auth.into())).await.unwrap();
     let second = recv_document_frame_within(&mut ws, Duration::from_millis(250)).await;
     assert!(
         second.is_none(),

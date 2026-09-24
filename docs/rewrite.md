@@ -995,3 +995,24 @@ Fable task_847aa9e8b31b/ctx_442c5c49568e가 고정c980efa를 독립 검토 중�
 요청/유효 claude-fable-5-1 medium 일치, quota/Opus 전환 없음. HashMap mark 순서의
 원본 의미와 fixture 강도도 확인하도록 요청했다. 이 native 경계는 아직 DB/REST
 파생 본문 제품 연결이나 전체 협업 수락이 아니다.
+
+통합 후보1938755에 Composer9e6d1d9(6파일)를 반영했다. task_f5025d90f3a7 /
+ctx_477df6e00c12 유효 완료·release. 워커는 실제 앱 역할 collab_product37/37
+(52.37s)을 보고했다. 통합 시 scoped fmt 및 clippy 진단을 수정하고 미사용 테스트
+helper/import만 제거했다(테스트 삭제 없음). cargo fmt --check, clippy all-targets
+/db-tests 성공(1.09s), lib32/32(skip0, build4.76s/body5.53s). 최신 통합 DB/E2E는
+아직 수락 전이다. outbound permit 수명, 독립 cancel, pre-auth 제한과 late-join
+awareness 보강은 후속 고정 SHA 독립 검토 대상이다.
+
+직전 원격ed794437f596f6bd7677dd6f36048c60053aa67d: Rust35943448632,
+Documents35943448513, Engine35943448514 성공. Web35943448567 workspace-flow
+성공, collaboration-flow12pass/2fail/0skip(2.3분): crash scenario30초 초과와
+late-join pageB presence 누락. timeout 증액/재시도로 성공 처리하지 않는다.
+
+Fable task847aa9e8b31b/ctx442c5c49568e 고정c980efa 검토 완료·release.
+실제 Fable5.1 medium, quota 오류/Opus 전환 없음. 두 차단 결함을 독립 재현:
+여러 mark의 HashMap 순서가 호출마다 변함, non-XML child에서 성공으로 조용히
+본문을 잘라냄. Grok task617664371567/ctx37541c692818를 기존 projection worktree에
+배정했다(기준c980efa, 실제 cursor-grok-4.6-high). native Project/tests/fixtures만
+소유하며 원본 JS oracle을 보존하고 의도적인 mark 배열 순서 차이를 명시한다.
+DB/REST 파생 본문 연결은 여전히 미구현이며 PR7 Draft/미수락, 자동 머지 미설정.

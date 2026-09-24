@@ -59,16 +59,14 @@ impl CollabConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(4 * 1024 * 1024);
-        let max_outbound_frames_per_connection =
-            env::var("FVOCI_COLLAB_MAX_OUTBOUND_FRAMES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(64);
-        let max_outbound_bytes_per_connection =
-            env::var("FVOCI_COLLAB_MAX_OUTBOUND_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(4 * 1024 * 1024);
+        let max_outbound_frames_per_connection = env::var("FVOCI_COLLAB_MAX_OUTBOUND_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64);
+        let max_outbound_bytes_per_connection = env::var("FVOCI_COLLAB_MAX_OUTBOUND_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4 * 1024 * 1024);
         let outbound_send_deadline_ms = env::var("FVOCI_COLLAB_OUTBOUND_DEADLINE_MS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -86,16 +84,14 @@ impl CollabConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30_000);
-        let max_pre_auth_outbound_frames =
-            env::var("FVOCI_COLLAB_MAX_PRE_AUTH_OUTBOUND_FRAMES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(2);
-        let max_inbound_messages_per_window =
-            env::var("FVOCI_COLLAB_MAX_INBOUND_MSGS_PER_WINDOW")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(256);
+        let max_pre_auth_outbound_frames = env::var("FVOCI_COLLAB_MAX_PRE_AUTH_OUTBOUND_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let max_inbound_messages_per_window = env::var("FVOCI_COLLAB_MAX_INBOUND_MSGS_PER_WINDOW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256);
         let inbound_message_window_ms = env::var("FVOCI_COLLAB_INBOUND_MSG_WINDOW_MS")
             .ok()
             .and_then(|v| v.parse().ok())
