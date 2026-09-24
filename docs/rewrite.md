@@ -1016,3 +1016,32 @@ Fable task847aa9e8b31b/ctx442c5c49568e 고정c980efa 검토 완료·release.
 배정했다(기준c980efa, 실제 cursor-grok-4.6-high). native Project/tests/fixtures만
 소유하며 원본 JS oracle을 보존하고 의도적인 mark 배열 순서 차이를 명시한다.
 DB/REST 파생 본문 연결은 여전히 미구현이며 PR7 Draft/미수락, 자동 머지 미설정.
+
+974fe7db686eb4fc1348821f00a3e7bbef1bb092 원격 수락 검사: Rust35944446772,
+Web35944446728, Documents35944446734, Engine35944446727 모두 성공.
+Web 실제 checkout018e48f는 PR974fe7d + mainba19932의 합성 커밋이다.
+기존 React13/13(37s), 협업14/14(2.1분), skip/retry0. 협업 job01:47:17–01:51:00
+(3분43초, 준비·빌드·정리 포함), workspace job2분19초. 같은 검증 범위의 전후
+통제 측정은 아니므로 속도 향상 수치로 일반화하지 않는다.
+로컬 같은974fe7d에서 FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh
+--grep 'instance setup|fresh context after process-tree crash|two users show presence'
+3/3(36.7s): setup7.5s/crash19.4s/presence8.7s. 기본30초 timeout/retry0 유지.
+이전 ed79443 crash timeout 원인은 이 좁은 실행에서 재현되지 않았다.
+
+Fable task9e1ca50c24dd/ctx6448929fbdab는 고정974fe7d transport/room/lifecycle
+독립 검토 중(실제 claude-fable-5-1 medium, quota/Opus 전환 없음).
+Composer task9a2149a2b80c/ctx29f180d3e224는 Orca child rust-collab-derived-db,
+기준974fe7d, 실제 composer-2.5. src/db/collab.rs와 새 collab/derived_body.rs,
+해당 mod 선언·collab_integration tests만 단독 소유. exact generation/tail fence와
+현재 ACL, 본문/시스템 이벤트 원자성·실제 앱 역할을 구현한다. room hook/REST
+제품 수락은 아직이며 native Project 수정과 별도 통합한다. 로컬 heavy slot은
+이 DB 작업에 배정했다. root manifest/lock/CI/migration 변경은 위임하지 않았다.
+
+Grok task617664371567/ctx37541c692818 유효 완료·release, 제출ea7a6c2d0c52f4dee93328e251774b512ffad3b1을7309f9e로 통합했다.
+원본 raw JS oracle과 Rust의 결정적 raw-key mark 순서를 별도로 보존한다.
+non-XML child 잘림은 Malformed로 구분하며 binary 불변 검사를 추가했다.
+워커 lib17/17(0.46s), yjs25/25(near_max_load1filtered,5.44s), process14/14
+(1.70s), clippy0.49s. 통합 native fmt/clippy 성공4.46s; 전체 원격 검사·재검토 전.
+기존 parent EngineSession은 non-Ok 응답을 받은 helper를 회수하는 정책을 유지한다.
+helper가 Malformed 프레임을 반환한 것과 parent가 process를 재사용한 것은 다르다.
+검사에서 전자를 확인했으며 후자 성공을 주장하지 않는다.
