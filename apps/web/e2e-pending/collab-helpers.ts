@@ -496,8 +496,8 @@ export async function installCaretProbe(page: Page): Promise<void> {
       push(snap("selectionchange"));
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Home") return;
-      push(snap("home-keydown", {
+      if (event.key !== "Home" && event.key !== "Delete") return;
+      push(snap(`${event.key.toLowerCase()}-keydown`, {
         shift: event.shiftKey,
         prevented: event.defaultPrevented,
       }));
