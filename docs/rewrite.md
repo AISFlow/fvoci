@@ -1807,3 +1807,15 @@ Worker실행은DB12/native9/noignored/all-targetextract-native-testsclippy성공
 공유target경로해석을고치고prepare단계에서고정source검증/fetch명시,검사는
 offline으로분리했다. source경로의존없이제품build가가능해야한다.
 최종Opusdelta/원격CI전추출미수락이며main회귀도별도해결전이다.
+
+2026-09-24 10:29 UTC: native 추출 PR11 https://github.com/AISFlow/fvoci/pull/11
+Draft생성, HEAD9cf3f02ba910de494535beb4e936de12b07111c5, base0582c29,
+검사mergea4d8388053381268e9ab88cab803e39a25bbdf80. Rust35987164200/
+Web35987164257/Documents35987164226/Engine35987164229 실제실행.
+x64 native107592441075에서생산helper authenticated2와전체lifecycle9가
+실행·성공했다. 단Opus taskd43aab7cf4da/ctxb749794097de의 B1: absent-env
+기동검사가부모FVOCI_EXTRACTOR_BIN을상속하여실제로enabled경로를검사했다.
+해당9개통과를disabled경로증거로쓰지않는다. fixture의child환경에서helper와
+poll변수를먼저제거한뒤명시값만추가하도록수정한다. 제품/보안차단은없었고
+앱역할실제grant와2/9/12 CI연결을검토했다. 새HEAD원격검사전은미수락.
+관련보고서/tmp/fvoci-native-job-opus-final-9cf3f02.md.

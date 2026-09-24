@@ -573,6 +573,10 @@ pub fn spawn_server_process_guarded(
     extractor_bin: Option<&Path>,
 ) -> (ServerProcessGuard, mpsc::Receiver<String>) {
     let mut command = Command::new(server_bin());
+    // CI configures the helper for the parent test binary. Start each server
+    // with only the extractor settings explicitly requested by this fixture.
+    command.env_remove("FVOCI_EXTRACTOR_BIN");
+    command.env_remove("FVOCI_EXTRACT_POLL_SECS");
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
