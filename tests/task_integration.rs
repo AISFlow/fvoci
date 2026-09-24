@@ -13,6 +13,7 @@ use project_harness::{
     setup_session, wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
+use url::form_urlencoded;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -597,6 +598,7 @@ async fn concurrent_visibility_private_vs_task_create_under_project_lock() {
     let other = add_workspace_user(&admin, workspace_id, "member", "other").await;
     let lab = create_project(app.clone(), &lead.cookie, workspace_id, "LAB", "workspace").await;
     let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    let tasks_before = count_rows(&admin, "tasks").await;
     let events_before = count_rows(&admin, "events").await;
 
     let mut barrier = admin.begin().await.unwrap();
@@ -613,14 +615,14 @@ async fn concurrent_visibility_private_vs_task_create_under_project_lock() {
 
     let patch = tokio::spawn({
         let app = app.clone();
-        let owner_cookie = owner_cookie.clone();
+        let lead_cookie = lead.cookie.clone();
         async move {
             json_request(
                 app,
                 "PATCH",
                 &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
                 Some(json!({"visibility":"private"})),
-                Some(&owner_cookie),
+                Some(&lead_cookie),
             )
             .await
         }
@@ -661,7 +663,8 @@ async fn concurrent_visibility_private_vs_task_create_under_project_lock() {
         .expect("join");
     assert_eq!(patch_status, StatusCode::OK);
     assert_eq!(create_status, StatusCode::NOT_FOUND);
-    assert_eq!(count_rows(&admin, "events").await, events_before);
+    assert_eq!(count_rows(&admin, "tasks").await, tasks_before);
+    assert_eq!(count_rows(&admin, "events").await, events_before + 1);
     admin.close().await;
     harness.cleanup().await;
 }
@@ -753,11 +756,14 @@ async fn contract_task_meta_fields_workflow_and_list_pagination() {
         assert_eq!(status, StatusCode::CREATED);
     }
 
+    let list_query = r#"{"sort":[{"field":"number","direction":"asc"}]}"#;
+    let encoded_query = form_urlencoded::byte_serialize(list_query.as_bytes()).collect::<String>();
+
     let (status, page1) = json_request(
         app.clone(),
         "GET",
         &format!(
-            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={{\"sort\":[{{\"field\":\"number\",\"direction\":\"asc\"}}]}}"
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={encoded_query}"
         ),
         None,
         Some(&cookie),
@@ -775,11 +781,12 @@ async fn contract_task_meta_fields_workflow_and_list_pagination() {
     assert!(first["labelIds"].as_array().unwrap().is_empty());
 
     let cursor = page1["nextCursor"].as_str().unwrap();
+    let encoded_cursor = form_urlencoded::byte_serialize(cursor.as_bytes()).collect::<String>();
     let (status, page2) = json_request(
         app,
         "GET",
         &format!(
-            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={{\"sort\":[{{\"field\":\"number\",\"direction\":\"asc\"}}]}}&cursor={cursor}"
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={encoded_query}&cursor={encoded_cursor}"
         ),
         None,
         Some(&cookie),

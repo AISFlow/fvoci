@@ -69,7 +69,7 @@ impl TestDb {
         .execute(&migration_pool)
         .await
         .expect("create role");
-        apply_grants(&migration_pool, &role_name).await;
+        apply_grants_through(&migration_pool, &role_name, max_migration_version).await;
         migration_pool.close().await;
         let mut app = url::Url::parse(&admin_url).expect("database url");
         app.set_username(&role_name).ok();
@@ -121,10 +121,23 @@ fn join_db_url(server_url: &str, db_name: &str) -> String {
 }
 
 async fn apply_grants(pool: &PgPool, role_name: &str) {
+    apply_grants_through(pool, role_name, 8).await;
+}
+
+async fn apply_grants_through(pool: &PgPool, role_name: &str, max_migration_version: i32) {
     let quoted_role = format!("\"{}\"", role_name);
     let grants =
         include_str!("../../scripts/grant-app-role.sql").replace(":\"app_role\"", &quoted_role);
     for statement in grants.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        if max_migration_version < 8
+            && (statement.contains("fvoci.projects")
+                || statement.contains("fvoci.project_members")
+                || statement.contains("fvoci.workflows")
+                || statement.contains("fvoci.statuses")
+                || statement.contains("fvoci.tasks"))
+        {
+            continue;
+        }
         sqlx::query(statement).execute(pool).await.expect("grant");
     }
 }
@@ -435,30 +448,93 @@ pub async fn wait_for_user_for_update_blocked(admin: &PgPool, blocker_pid: i32) 
 }
 
 pub async fn wait_for_query_blocked_by(admin: &PgPool, blocker_pid: i32, query_like: &str) -> i32 {
+    wait_for_blocked_query_count(admin, blocker_pid, query_like, 1)
+        .await
+        .into_iter()
+        .next()
+        .expect("expected one blocked query")
+}
+
+pub async fn wait_for_blocked_query_count(
+    admin: &PgPool,
+    blocker_pid: i32,
+    query_like: &str,
+    expected: usize,
+) -> Vec<i32> {
+    wait_for_blocked_by_holder(admin, blocker_pid, Some(query_like), expected).await
+}
+
+pub async fn wait_for_blocked_by_holder(
+    admin: &PgPool,
+    blocker_pid: i32,
+    query_like: Option<&str>,
+    expected: usize,
+) -> Vec<i32> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
-        let blocked: Option<i32> = sqlx::query_scalar(
-            r#"
-            SELECT activity.pid
-            FROM pg_stat_activity AS activity
-            WHERE activity.wait_event_type = 'Lock'
-              AND activity.state = 'active'
-              AND activity.query ILIKE $2
-              AND $1 = ANY(pg_blocking_pids(activity.pid))
-            LIMIT 1
-            "#,
-        )
-        .bind(blocker_pid)
-        .bind(query_like)
-        .fetch_optional(admin)
-        .await
-        .unwrap();
-        if let Some(pid) = blocked {
-            return pid;
+        let blocked: Vec<i32> = if let Some(query_like) = query_like {
+            sqlx::query_scalar(
+                r#"
+                SELECT activity.pid
+                FROM pg_stat_activity AS activity
+                WHERE activity.wait_event_type = 'Lock'
+                  AND activity.state = 'active'
+                  AND activity.query ILIKE $2
+                  AND $1 = ANY(pg_blocking_pids(activity.pid))
+                ORDER BY activity.pid
+                "#,
+            )
+            .bind(blocker_pid)
+            .bind(query_like)
+            .fetch_all(admin)
+            .await
+            .unwrap()
+        } else {
+            sqlx::query_scalar(
+                r#"
+                SELECT activity.pid
+                FROM pg_stat_activity AS activity
+                WHERE activity.wait_event_type = 'Lock'
+                  AND activity.state = 'active'
+                  AND $1 = ANY(pg_blocking_pids(activity.pid))
+                ORDER BY activity.pid
+                "#,
+            )
+            .bind(blocker_pid)
+            .fetch_all(admin)
+            .await
+            .unwrap()
+        };
+        if blocked.len() >= expected {
+            return blocked;
         }
         tokio::task::yield_now().await;
     }
-    panic!("expected blocked query matching {query_like}");
+    let detail = query_like.unwrap_or("any query");
+    panic!("expected at least {expected} blocked queries matching {detail}");
+}
+
+pub async fn wait_for_project_lock_waiters(admin: &PgPool, expected: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM pg_stat_activity AS activity
+            WHERE activity.wait_event_type = 'Lock'
+              AND activity.state = 'active'
+              AND activity.query ILIKE '%fvoci.projects%'
+            "#,
+        )
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        if waiting >= expected as i64 {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("expected at least {expected} active project-lock waiters");
 }
 
 pub async fn wait_for_advisory_blocked_by(admin: &PgPool, blocker_pid: i32) -> i32 {
