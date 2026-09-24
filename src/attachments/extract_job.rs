@@ -94,13 +94,14 @@ impl ExtractJobHandle {
         self.cancel.cancel();
     }
 
-    pub async fn join(self) {
+    pub async fn join(self) -> Result<(), String> {
         let handle = self.join.lock().await.take();
         if let Some(handle) = handle {
-            if let Err(err) = handle.await {
-                warn!(error = %err, "attachment extract task join failed");
-            }
+            handle
+                .await
+                .map_err(|err| format!("attachment extract task join failed: {err}"))?;
         }
+        Ok(())
     }
 }
 

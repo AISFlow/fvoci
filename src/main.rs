@@ -79,6 +79,7 @@ enum HubOutcome {
 struct DrainOutcome {
     serve: Result<(), std::io::Error>,
     hub: HubOutcome,
+    extract: Result<(), String>,
 }
 
 #[tokio::main]
@@ -186,11 +187,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             wait_for_deadline(
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
-                    join_extract_finished(&extract_task).await;
+                    let extract = join_extract_finished(&extract_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve: map_serve_result(serve_result),
                         hub,
+                        extract,
                     }
                 },
                 Some(started),
@@ -212,9 +214,13 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 async {
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
-                    join_extract_finished(&extract_task).await;
+                    let extract = join_extract_finished(&extract_task).await;
                     drain_pool.close().await;
-                    DrainOutcome { serve, hub }
+                    DrainOutcome {
+                        serve,
+                        hub,
+                        extract,
+                    }
                 },
                 started,
                 deadline,
@@ -237,11 +243,12 @@ fn map_serve_result(
 
 async fn join_extract_finished(
     extract_task: &tokio::sync::Mutex<Option<ExtractJobHandle>>,
-) {
+) -> Result<(), String> {
     if let Some(job) = extract_task.lock().await.take() {
         job.request_shutdown();
-        job.join().await;
+        job.join().await?;
     }
+    Ok(())
 }
 
 async fn join_hub_finished(
@@ -305,8 +312,9 @@ where
     };
     match tokio::time::timeout(remaining, drained).await {
         Ok((outcome, joined)) => {
-            if let Some(error) =
-                hub_failure_error(joined).or_else(|| hub_failure_error(outcome.hub))
+            if let Some(error) = hub_failure_error(joined)
+                .or_else(|| hub_failure_error(outcome.hub))
+                .or_else(|| extract_failure_error(outcome.extract))
             {
                 return Err(error);
             }
@@ -335,6 +343,13 @@ fn hub_failure_error(outcome: HubOutcome) -> Option<Box<dyn std::error::Error>> 
         HubOutcome::Clean => None,
         HubOutcome::Failed(status) => Some(shutdown_status_error(status)),
         HubOutcome::Panicked => Some(shutdown_panic_error()),
+    }
+}
+
+fn extract_failure_error(result: Result<(), String>) -> Option<Box<dyn std::error::Error>> {
+    match result {
+        Ok(()) => None,
+        Err(message) => Some(std::io::Error::other(message).into()),
     }
 }
 

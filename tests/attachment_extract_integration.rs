@@ -690,3 +690,158 @@ async fn finish_first_then_document_delete_keeps_extract_text() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn deletion_first_barrier_blocks_concurrent_finish() {
+    let harness = TestDb::bootstrap().await;
+    let app = app_pool(&harness.app_url).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (workspace_id, user_id, document_id) = seed_workspace(&admin).await;
+    let attachment_id =
+        insert_pending_attachment(&admin, workspace_id, document_id, user_id, "race.hwp").await;
+    let claim = claim_extract(&app).await.unwrap().expect("claim");
+
+    let mut blocker = admin.begin().await.unwrap();
+    sqlx::query("SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1 FOR UPDATE")
+        .bind(workspace_id)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query(
+        "SELECT deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&mut *blocker)
+    .await
+    .unwrap();
+
+    let finish_app = app_pool(&harness.app_url).await;
+    let finish_claim = claim;
+    let finish_handle = tokio::spawn(async move {
+        finish_extract(
+            &finish_app,
+            &finish_claim,
+            &FinishExtract {
+                status: "ok".into(),
+                text: "must-not-persist".into(),
+                warnings: vec![],
+                rhwp_rev: None,
+            },
+        )
+        .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    sqlx::query(
+        "UPDATE fvoci.documents SET deleted_at = now() WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    blocker.commit().await.unwrap();
+
+    let applied = finish_handle.await.unwrap().unwrap();
+    assert!(!applied);
+
+    let state = fetch_extract_state(&app, workspace_id, attachment_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.extract_text, "");
+    assert_eq!(state.extract_status, "pending");
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn migration_006_upgrades_to_007_attachment_extract() {
+    let admin_base = std::env::var("TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
+        .expect("TEST_DATABASE_URL missing");
+    let db_name = format!("fvoci_ext_upg_{}", Uuid::now_v7().simple());
+    let server_url = server_db_url(&admin_base);
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&server_url)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    admin_pool.close().await;
+
+    let admin_url = join_db_url(&server_url, &db_name);
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&admin_url)
+        .await
+        .unwrap();
+    for sql in [
+        include_str!("../migrations/001_schema.sql"),
+        include_str!("../migrations/002_functions.sql"),
+        include_str!("../migrations/003_workspace.sql"),
+        include_str!("../migrations/004_documents.sql"),
+        include_str!("../migrations/005_collab_updates.sql"),
+        include_str!("../migrations/006_attachments.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(&migration_pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO fvoci.schema_migrations (version) VALUES (1), (2), (3), (4), (5), (6)")
+        .execute(&migration_pool)
+        .await
+        .unwrap();
+    let has_lease: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'fvoci' AND table_name = 'attachments' AND column_name = 'extract_lease_token')",
+    )
+    .fetch_one(&migration_pool)
+    .await
+    .unwrap();
+    assert!(!has_lease.0);
+    migration_pool.close().await;
+
+    migrate::run_migrations(&admin_url).await.unwrap();
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&admin_url)
+        .await
+        .unwrap();
+    let versions: (i64,) = sqlx::query_as("SELECT count(*) FROM fvoci.schema_migrations")
+        .fetch_one(&migration_pool)
+        .await
+        .unwrap();
+    assert_eq!(versions.0, 7);
+    let has_lease: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'fvoci' AND table_name = 'attachments' AND column_name = 'extract_lease_token')",
+    )
+    .fetch_one(&migration_pool)
+    .await
+    .unwrap();
+    assert!(has_lease.0);
+    migration_pool.close().await;
+
+    let server_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server_url)
+        .await
+        .unwrap();
+    let _ = sqlx::query(&format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
+        db_name
+    ))
+    .execute(&server_pool)
+    .await;
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
+        .execute(&server_pool)
+        .await;
+    server_pool.close().await;
+}

@@ -55,7 +55,7 @@ async fn authenticated_hwp_upload_extracts_안녕_and_download_matches() {
     let downloaded = download_original(&app, &cookie, workspace_id, &uploaded.attachment_id).await;
     assert_eq!(downloaded, fixture, "download must be byte-identical to upload");
     job.request_shutdown();
-    job.join().await;
+    job.join().await.expect("extract job join");
     pool.close().await;
     harness.cleanup().await;
 }
@@ -94,7 +94,7 @@ async fn authenticated_hwpx_upload_extracts_안녕_and_download_matches() {
     let downloaded = download_original(&app, &cookie, workspace_id, &uploaded.attachment_id).await;
     assert_eq!(downloaded, fixture, "download must be byte-identical to upload");
     job.request_shutdown();
-    job.join().await;
+    job.join().await.expect("extract job join");
     pool.close().await;
     harness.cleanup().await;
 }
@@ -124,7 +124,7 @@ async fn graceful_shutdown_while_pending_does_not_burn_attempt() {
     )
     .await;
     job.request_shutdown();
-    job.join().await;
+    job.join().await.expect("extract job join");
     let pool = app_pool(&harness.app_url).await;
     let state = fvoci_server::db::attachment_extract::fetch_extract_state(
         &pool,
@@ -165,7 +165,7 @@ async fn restart_job_resumes_durable_pending_without_memory() {
     )
     .await;
     first.request_shutdown();
-    first.join().await;
+    first.join().await.expect("first extract job join");
     let second = spawn_extract_for_storage(
         &harness,
         &storage_root,
@@ -176,7 +176,7 @@ async fn restart_job_resumes_durable_pending_without_memory() {
     let text = wait_for_extract(&pool, workspace_id, attachment_id, Duration::from_secs(60)).await;
     assert!(text.contains("안녕"), "restart must resume pending extract");
     second.request_shutdown();
-    second.join().await;
+    second.join().await.expect("second extract job join");
     pool.close().await;
     harness.cleanup().await;
 }
