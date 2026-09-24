@@ -3,9 +3,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::future::join_all;
 use futures_util::FutureExt;
 use sqlx::postgres::PgPool;
-use tokio::sync::{oneshot, watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
+#[cfg(feature = "db-tests")]
+use tokio::sync::oneshot;
+use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -199,6 +202,36 @@ impl CollabHub {
         &self.config
     }
 
+    /// Synchronously stop admission. Idle eviction is asked to exit; in-flight
+    /// eviction/startup still own their actor, guard, and permit until they finish.
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let _ = self.idle_stop.send(true);
+    }
+
+    pub fn shutdown_progress(&self) -> ShutdownProgress {
+        let rooms = self.rooms.try_read().map(|guard| guard.len()).ok();
+        let sockets_held = self
+            .config
+            .max_collab_sockets
+            .saturating_sub(self.socket_permits.available_permits());
+        ShutdownProgress {
+            rooms,
+            sockets_held,
+        }
+    }
+
+    async fn wait_if_shutting_down(&self) {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
+        let mut stopped = self.idle_stop.subscribe();
+        if *stopped.borrow() {
+            return;
+        }
+        let _ = stopped.changed().await;
+    }
+
     pub fn try_acquire_socket(&self, session_id: Uuid) -> Option<CollabSocketPermit> {
         if self.shutting_down.load(Ordering::Relaxed) {
             return None;
@@ -346,6 +379,16 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
+    pub fn spawn_panicking_start_task_for_tests(&self) {
+        self.starts
+            .lock()
+            .expect("room start task list")
+            .push(tokio::spawn(async {
+                panic!("injected collaboration startup failure");
+            }));
+    }
+
+    #[cfg(feature = "db-tests")]
     pub async fn room_waiter_count(&self, key: RoomKey) -> usize {
         self.room_slot(key)
             .await
@@ -457,35 +500,99 @@ impl CollabHub {
         }
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> ShutdownStatus {
         let _shutdown = self.shutdown_lock.lock().await;
-        self.shutting_down.store(true, Ordering::Release);
-        let _ = self.idle_stop.send(true);
-        // Never abort an eviction while it owns an actor, completion receiver,
-        // and permit. Finish that teardown before closing the remaining rooms.
-        if let Some(task) = self.idle_task.lock().await.take() {
-            if let Err(error) = task.await {
-                tracing::error!(%error, "collaboration eviction task failed");
-            }
-        }
+        self.begin_shutdown();
+        // Eviction that already owns an actor keeps that ownership. Startup that
+        // already holds a guard/actor is joined, not aborted. Independent live
+        // rooms close concurrently so one lock-blocked actor cannot stall the rest.
+        let idle = self.idle_task.lock().await.take();
         let starts = std::mem::take(&mut *self.starts.lock().expect("room start task list"));
-        for task in starts {
-            if let Err(error) = task.await {
-                tracing::error!(%error, "collaboration startup task failed");
-            }
-        }
+        let live_rooms = self.take_live_rooms_for_shutdown().await;
 
-        let entries = self
+        let idle_join = async {
+            match idle {
+                Some(task) => match task.await {
+                    Ok(()) => false,
+                    Err(error) => {
+                        tracing::error!(%error, "collaboration eviction task failed");
+                        true
+                    }
+                },
+                None => false,
+            }
+        };
+        let starts_join = async {
+            let mut failures = 0usize;
+            for result in join_all(starts).await {
+                if let Err(error) = result {
+                    tracing::error!(%error, "collaboration startup task failed");
+                    failures += 1;
+                }
+            }
+            failures
+        };
+        let rooms_join = async {
+            let mut failures = 0usize;
+            for failed in join_all(live_rooms.into_iter().map(|(key, live)| {
+                let hub = self.clone();
+                async move {
+                    live.handle.shutdown().await;
+                    let failed = live.finished.await.is_err();
+                    if failed {
+                        tracing::error!(
+                            document_id = %key.1,
+                            "collaboration actor exited without completion"
+                        );
+                    }
+                    drop(live.permit);
+                    // Drop the slot as soon as this actor finished so a sibling
+                    // blocked on persist cannot keep this room visible as Closing.
+                    hub.forget_closed_room(key).await;
+                    failed
+                }
+            }))
+            .await
+            {
+                if failed {
+                    failures += 1;
+                }
+            }
+            failures
+        };
+        let (idle_task_failed, start_task_failures, mut actor_failures) =
+            tokio::join!(idle_join, starts_join, rooms_join);
+
+        let leftover = self
             .rooms
             .read()
             .await
             .iter()
             .map(|(key, slot)| (*key, slot.clone()))
             .collect::<Vec<_>>();
-        for (key, slot) in entries {
-            self.force_close_slot(key, slot).await;
+        for (key, slot) in leftover {
+            if self.force_close_slot(key, slot).await {
+                actor_failures += 1;
+            }
         }
         self.rooms.write().await.clear();
+
+        let socket_cap = u32::try_from(self.config.max_collab_sockets).unwrap_or(u32::MAX);
+        if socket_cap > 0 {
+            if let Ok(held) = self
+                .socket_permits
+                .clone()
+                .acquire_many_owned(socket_cap)
+                .await
+            {
+                drop(held);
+            }
+        }
+        ShutdownStatus {
+            idle_task_failed,
+            start_task_failures,
+            actor_failures,
+        }
     }
 
     async fn room_slot(&self, key: RoomKey) -> Option<Arc<RoomSlot>> {
@@ -647,11 +754,18 @@ impl CollabHub {
             return Err(JoinError::EngineUnavailable);
         }
 
-        let permit = match self.room_permits.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => {
+        let permit = tokio::select! {
+            biased;
+            result = self.room_permits.clone().acquire_owned() => match result {
+                Ok(permit) => permit,
+                Err(_) => {
+                    self.cleanup_starting(key, &slot).await;
+                    return Err(JoinError::RoomFull);
+                }
+            },
+            () = self.wait_if_shutting_down() => {
                 self.cleanup_starting(key, &slot).await;
-                return Err(JoinError::RoomFull);
+                return Err(JoinError::EngineUnavailable);
             }
         };
 
@@ -669,7 +783,26 @@ impl CollabHub {
             return Err(JoinError::EngineUnavailable);
         }
 
-        let guard = match RoomGuard::try_acquire(&self.pool, key.1).await {
+        let pooled = tokio::select! {
+            biased;
+            result = self.pool.acquire() => match result {
+                Ok(pooled) => pooled,
+                Err(_) => {
+                    self.fail_starting(key, &slot).await;
+                    return Err(JoinError::DbError);
+                }
+            },
+            () = self.wait_if_shutting_down() => {
+                self.fail_starting(key, &slot).await;
+                return Err(JoinError::EngineUnavailable);
+            }
+        };
+        if self.shutting_down.load(Ordering::Acquire) {
+            drop(pooled);
+            self.fail_starting(key, &slot).await;
+            return Err(JoinError::EngineUnavailable);
+        }
+        let guard = match RoomGuard::try_lock_pooled(pooled, key.1).await {
             Ok(Some(guard)) => guard,
             Ok(None) => {
                 self.fail_starting(key, &slot).await;
@@ -680,6 +813,11 @@ impl CollabHub {
                 return Err(JoinError::DbError);
             }
         };
+        if self.shutting_down.load(Ordering::Acquire) {
+            guard.release().await;
+            self.fail_starting(key, &slot).await;
+            return Err(JoinError::EngineUnavailable);
+        }
 
         let (workspace_id, document_id) = key;
         let live_conns = Arc::new(AtomicUsize::new(0));
@@ -776,7 +914,7 @@ impl CollabHub {
         slot.ready.notify_waiters();
     }
 
-    async fn force_close_slot(&self, key: RoomKey, slot: Arc<RoomSlot>) {
+    async fn force_close_slot(&self, key: RoomKey, slot: Arc<RoomSlot>) -> bool {
         let live = {
             let mut phase = slot.phase.lock().await;
             match std::mem::replace(&mut *phase, RoomPhase::Closing) {
@@ -788,10 +926,12 @@ impl CollabHub {
                 RoomPhase::Starting | RoomPhase::Failed | RoomPhase::Closing => None,
             }
         };
+        let mut actor_failed = false;
         if let Some(live) = live {
             live.handle.shutdown().await;
             if live.finished.await.is_err() {
                 tracing::error!(document_id = %key.1, "collaboration actor exited without completion");
+                actor_failed = true;
             }
             drop(live.permit);
         }
@@ -804,7 +944,62 @@ impl CollabHub {
             rooms.remove(&key);
         }
         slot.ready.notify_waiters();
+        actor_failed
     }
+
+    async fn forget_closed_room(&self, key: RoomKey) {
+        let slot = {
+            let mut rooms = self.rooms.write().await;
+            rooms.remove(&key)
+        };
+        if let Some(slot) = slot {
+            slot.ready.notify_waiters();
+        }
+    }
+
+    async fn take_live_rooms_for_shutdown(&self) -> Vec<(RoomKey, LiveRoom)> {
+        let entries = self
+            .rooms
+            .read()
+            .await
+            .iter()
+            .map(|(key, slot)| (*key, slot.clone()))
+            .collect::<Vec<_>>();
+        let mut live = Vec::new();
+        for (key, slot) in entries {
+            let mut phase = slot.phase.lock().await;
+            if matches!(*phase, RoomPhase::Live(_)) {
+                if let RoomPhase::Live(room) = std::mem::replace(&mut *phase, RoomPhase::Closing) {
+                    live.push((key, room));
+                }
+            }
+        }
+        live
+    }
+}
+
+/// Observed helper/actor join failures during hub shutdown.
+/// A clean value is not a deadline expiry; a non-clean value must not be a
+/// process success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShutdownStatus {
+    pub idle_task_failed: bool,
+    pub start_task_failures: usize,
+    pub actor_failures: usize,
+}
+
+impl ShutdownStatus {
+    pub fn is_clean(self) -> bool {
+        !self.idle_task_failed && self.start_task_failures == 0 && self.actor_failures == 0
+    }
+}
+
+/// Observed rooms/sockets while shutdown is in progress. `rooms` is `None` if
+/// the map lock is busy; never treat a missing count as proof of a clean exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownProgress {
+    pub rooms: Option<usize>,
+    pub sockets_held: usize,
 }
 
 enum ReserveOutcome {

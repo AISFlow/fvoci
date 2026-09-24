@@ -1375,3 +1375,25 @@ main/config/hub/guard/shutdown test/Cargo target을 보존해 종료 실패 전�
 PR7 Draft/미병합, auto-merge 미설정. F5–F7과 B1/브라우저 실패를 해소한 뒤
 고정 SHA Opus delta/원격 검사로 수락한다. 다음 명령은 기존 Run inbox 확인과
 두 고정 제출 delta 검토·통합이다. 소유 불명 자원은 그대로 보존했다.
+
+후속 로컬 통합 후보: Grok8ebb102(F5 종료)와 Composer8e197b0(R1/R4/B1).
+Grok은 격리 PG shutdown6/6(body9.35s), Composer는 projection19/19(body13.53s),
+기본lib51/51을 실행했다. 코디네이터는 마지막 hub join도 전역 deadline 안에
+넣고 결정적 회귀1개를 추가했으며, 종료 후 쓰기 거부 검사를1초 부재 관찰에서
+actor FIFO probe로 바꿨다. 통합 기본lib51/51 및 bin5/5 성공; 전체 원격 수락 전.
+새 shutdown target은 양 아키텍처 협업 CI에 포함한다. 워커8ebb102의 검사 뒤
+수정된 두 경계는 이전 검사 근거로 대신하지 않는다.
+
+a52cf71 CI: Rust35965767911/Documents35965767910/Engine35965767906 성공.
+Web35965767898은 workspace 성공, collaboration13/14: 앞선 서식 검사는 성공,
+이번 실패는 fresh-context SIGKILL 복원 시나리오의 전체30초 timeout이다.
+이를 같은 실패 재시도 성공으로 처리하지 않고 별도 재현·단계 시간 조사 중이다.
+실패 DOM artifact가 실제로 업로드됐으나 이 사례는 context 종료 뒤라 단계 정보가
+없다. 로컬 private trace로 진단하며 credential/network trace는 원격 공개하지 않는다.
+
+Opus task39a1256fcffa/ctxeda690cc4e0e의 고정a52cf71 F6/F7 자문 보고서는
+`/tmp/fvoci-collab-f6-f7-advice-a52cf71.md`에 보존했다. 실제 모델/medium 및
+보고서 작성을 확인했지만 마지막 lifecycle 호출이 빈 orca 실행 파일을 사용해
+완료 전송되지 않았다. 최종 turn 종료를 확인하고 해당 dispatch만 worker-stop했다.
+검토 내용은 자문으로 사용하되 Orca 성공 settlement나 제품 수락으로 기록하지 않는다.
+다음 구현은 F5 검토 후 actor 자원 정리·동일 슬롯 재접속·일시 장애1011 구분이다.

@@ -43,7 +43,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo check --locked --offline --all-targets --features db-tests
       - run: cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings
-      - run: cargo test --locked --offline --lib
+      - run: cargo test --locked --offline --lib --bin fvoci-server
       - run: cargo test --locked --offline --test collab_wire
   postgres:
     name: ${{ matrix.check }}
@@ -150,4 +150,4 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
-        run: cargo test --locked --offline --features db-tests --test collab_product --test collab_projection --test collab_lifecycle
+        run: cargo test --locked --offline --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown

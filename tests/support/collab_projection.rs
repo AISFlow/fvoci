@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +11,8 @@ use fvoci_server::auth::token::new_token;
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::config::CollabConfig;
 use fvoci_server::collab::wire::{
-    encode, AuthMessage, CollabRoomName, DocumentMessage, SyncMessage, SyncStep, WireFrame,
+    encode, AuthMessage, CollabRoomName, ConnectionMessage, DocumentMessage, SyncMessage, SyncStep,
+    WireFrame,
 };
 use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
@@ -274,6 +275,95 @@ pub fn tiny_output_project_collab_config(max_rooms: usize, idle_evict_ms: u64) -
     cfg
 }
 
+/// Per-fixture symlink to the real collab-engine binary. Unlinking breaks fresh
+/// validator spawns for that path while an already-running primary child survives.
+pub struct OwnedEngineSymlink {
+    link_path: PathBuf,
+    real_bin: PathBuf,
+}
+
+impl OwnedEngineSymlink {
+    pub fn new() -> Self {
+        let real_bin = fvoci_server::collab::config::require_collab_engine_for_tests();
+        let link_path = std::env::temp_dir().join(format!(
+            "fvoci-collab-engine-{}.link",
+            Uuid::now_v7().simple()
+        ));
+        std::os::unix::fs::symlink(&real_bin, &link_path).unwrap_or_else(|e| {
+            panic!(
+                "symlink {} -> {}: {e}",
+                link_path.display(),
+                real_bin.display()
+            )
+        });
+        Self {
+            link_path,
+            real_bin,
+        }
+    }
+
+    pub fn path(&self) -> PathBuf {
+        self.link_path.clone()
+    }
+
+    pub fn break_spawn(&self) {
+        if std::fs::symlink_metadata(&self.link_path).is_ok() {
+            std::fs::remove_file(&self.link_path).unwrap_or_else(|e| {
+                panic!(
+                    "unlink owned engine symlink {}: {e}",
+                    self.link_path.display()
+                )
+            });
+        }
+        assert!(
+            std::fs::symlink_metadata(&self.link_path).is_err(),
+            "owned engine symlink must be absent after break_spawn: {}",
+            self.link_path.display()
+        );
+    }
+
+    pub fn restore(&self) {
+        if std::fs::symlink_metadata(&self.link_path).is_ok() {
+            std::fs::remove_file(&self.link_path).unwrap_or_else(|e| {
+                panic!(
+                    "clear stale owned engine symlink {}: {e}",
+                    self.link_path.display()
+                )
+            });
+        }
+        std::os::unix::fs::symlink(&self.real_bin, &self.link_path).unwrap_or_else(|e| {
+            panic!(
+                "restore engine symlink {} -> {}: {e}",
+                self.link_path.display(),
+                self.real_bin.display()
+            )
+        });
+    }
+}
+
+impl Drop for OwnedEngineSymlink {
+    fn drop(&mut self) {
+        if std::fs::symlink_metadata(&self.link_path).is_ok() {
+            std::fs::remove_file(&self.link_path).unwrap_or_else(|e| {
+                panic!(
+                    "drop owned engine symlink {}: {e}",
+                    self.link_path.display()
+                )
+            });
+        }
+    }
+}
+
+pub fn test_collab_config_with_engine(
+    max_rooms: usize,
+    idle_evict_ms: u64,
+    engine_bin: impl AsRef<Path>,
+) -> CollabConfig {
+    let mut cfg = test_collab_config(max_rooms, idle_evict_ms);
+    cfg.engine_bin = engine_bin.as_ref().to_path_buf();
+    cfg
+}
+
 pub fn test_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig {
     CollabConfig {
         engine_bin: fvoci_server::collab::config::require_collab_engine_for_tests(),
@@ -437,6 +527,24 @@ pub async fn spawn_server(app: Router, hub: Arc<CollabHub>) -> TestServer {
 
 pub fn delete_only_base_update() -> Vec<u8> {
     engine_fixture("delete_only_base.v1")
+}
+
+/// Crafted updateV1 tail from collab-engine `classify_decode` coverage: a huge varint
+/// length makes `Update::decode_v1` return `ReadError::NotEnoughMemory` → `LimitKind::Memory`.
+pub fn huge_varint_memory_candidate() -> Vec<u8> {
+    vec![0xff, 0xff, 0xff, 0xff, 0x0f]
+}
+
+/// Corrupts `utf8_korean.v1` like `invalid_utf8_is_malformed_result_and_child_is_recycled`.
+pub fn invalid_utf8_update_candidate() -> Vec<u8> {
+    let mut bytes = engine_fixture("utf8_korean.v1");
+    let marker = [0xEC, 0x95, 0x88];
+    let pos = bytes
+        .windows(3)
+        .position(|w| w == marker)
+        .expect("안녕 utf8 marker in utf8_korean.v1 fixture");
+    bytes[pos] = 0xFF;
+    bytes
 }
 
 pub fn delete_only_update() -> Vec<u8> {
@@ -1083,6 +1191,234 @@ pub async fn join_denied(
         ),
         "join must be denied when room engine is unavailable, got {frame:?}"
     );
+}
+
+pub async fn assert_peer_still_connected(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) {
+    ws.send(Message::Binary(
+        encode(&WireFrame::Connection(ConnectionMessage::Ping))
+            .expect("ping frame")
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(_)))) => {
+                panic!("peer closed immediately after join recovery failure denied a new joiner");
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if matches!(
+                    fvoci_server::collab::wire::decode(&bytes),
+                    Ok(WireFrame::Connection(ConnectionMessage::Pong))
+                ) {
+                    return;
+                }
+            }
+            Ok(None) => panic!("bare TCP EOF while peer should remain connected"),
+            Ok(Some(Err(err))) => {
+                panic!("websocket error while peer should remain connected: {err}")
+            }
+            Ok(Some(Ok(_))) | Err(_) => {}
+        }
+    }
+    panic!("timed out waiting for peer pong while connection should remain open");
+}
+
+async fn peer_step2_excludes_rejected_candidate(
+    peer: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    expected_routing_key: &str,
+    rejected_candidate: &[u8],
+    within: Duration,
+) {
+    peer.send(Message::Binary(
+        sync_step1_frame(expected_routing_key, &[0, 0]).into(),
+    ))
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + within;
+    let mut saw_step2 = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), peer.next()).await {
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    routing_key,
+                    message:
+                        DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Step2,
+                            y_protocol,
+                        }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    assert_eq!(
+                        routing_key, expected_routing_key,
+                        "peer Step2 routing_key must match the room"
+                    );
+                    let (step, payload) = parse_sync_payload(
+                        &y_protocol,
+                        fvoci_server::collab::wire::Limits::DEFAULT.max_binary_payload_bytes,
+                    )
+                    .expect("peer Step2 y_protocol must parse");
+                    assert_eq!(step, SyncStep::Step2);
+                    if !rejected_candidate.is_empty() {
+                        assert!(
+                            !payload
+                                .windows(rejected_candidate.len())
+                                .any(|w| w == rejected_candidate),
+                            "peer Step2 must not include rejected candidate bytes"
+                        );
+                    }
+                    saw_step2 = true;
+                    break;
+                }
+                if matches!(
+                    fvoci_server::collab::wire::decode(&bytes),
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Update,
+                            ..
+                        }),
+                        ..
+                    })
+                ) {
+                    panic!("rejected update must not broadcast Sync Update to peer");
+                }
+            }
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                panic!("peer closed during post-rejection Step1 barrier: {frame:?}");
+            }
+            Ok(None) => panic!("peer TCP EOF during post-rejection Step1 barrier"),
+            Ok(Some(Err(err))) => {
+                panic!("peer websocket error during post-rejection Step1 barrier: {err}");
+            }
+            Ok(Some(Ok(_))) | Err(_) => {}
+        }
+    }
+    assert!(
+        saw_step2,
+        "peer must receive Step2 after policy rejection proving committed state excludes candidate"
+    );
+}
+
+pub async fn wait_for_policy_rejection_close(
+    writer: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    peer: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    expected_routing_key: &str,
+    rejected_candidate: &[u8],
+    within: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut saw_applied_false = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let slice = remaining.min(Duration::from_millis(100));
+        tokio::select! {
+            biased;
+            msg = tokio::time::timeout(slice, writer.next()) => {
+                match msg {
+                    Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                        assert_eq!(
+                            ws_close_code(&frame),
+                            1008,
+                            "policy rejection must CloseFrame 1008, got {:?}",
+                            frame.code
+                        );
+                        assert_eq!(
+                            close_reason_str(&frame),
+                            "update rejected",
+                            "policy rejection reason mismatch"
+                        );
+                        assert!(
+                            saw_applied_false,
+                            "policy rejection must send applied:false before CloseFrame 1008"
+                        );
+                        peer_step2_excludes_rejected_candidate(
+                            peer,
+                            expected_routing_key,
+                            rejected_candidate,
+                            deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(Some(Ok(Message::Close(None)))) => {
+                        panic!("writer Close without code before policy CloseFrame 1008");
+                    }
+                    Ok(Some(Ok(Message::Binary(bytes)))) => {
+                        if let Ok(WireFrame::Document {
+                            routing_key,
+                            message: DocumentMessage::SyncStatus { applied: false },
+                            ..
+                        }) = fvoci_server::collab::wire::decode(&bytes)
+                        {
+                            assert_eq!(
+                                routing_key,
+                                expected_routing_key,
+                                "applied:false routing_key must match the room"
+                            );
+                            saw_applied_false = true;
+                        }
+                        if matches!(
+                            fvoci_server::collab::wire::decode(&bytes),
+                            Ok(WireFrame::Document {
+                                message: DocumentMessage::Sync(SyncMessage {
+                                    step: SyncStep::Update,
+                                    ..
+                                }),
+                                ..
+                            })
+                        ) {
+                            panic!("rejected update must not broadcast Sync Update to writer");
+                        }
+                    }
+                    Ok(None) => panic!("bare TCP EOF before policy CloseFrame 1008"),
+                    Ok(Some(Err(err))) => panic!("websocket error before policy CloseFrame 1008: {err}"),
+                    Ok(Some(Ok(_))) | Err(_) => {}
+                }
+            }
+            msg = tokio::time::timeout(slice, peer.next()) => {
+                match msg {
+                    Ok(Some(Ok(Message::Binary(bytes)))) => {
+                        if matches!(
+                            fvoci_server::collab::wire::decode(&bytes),
+                            Ok(WireFrame::Document {
+                                message: DocumentMessage::Sync(SyncMessage {
+                                    step: SyncStep::Update,
+                                    ..
+                                }),
+                                ..
+                            })
+                        ) {
+                            panic!("rejected update must not broadcast Sync Update to peer");
+                        }
+                    }
+                    Ok(Some(Ok(Message::Close(frame)))) => {
+                        panic!("peer closed before writer policy CloseFrame 1008: {frame:?}");
+                    }
+                    Ok(None) => panic!("peer TCP EOF before writer policy CloseFrame 1008"),
+                    Ok(Some(Err(err))) => {
+                        panic!("peer websocket error before writer policy CloseFrame 1008: {err}");
+                    }
+                    Ok(Some(Ok(_))) | Err(_) => {}
+                }
+            }
+        }
+    }
+    panic!("timed out waiting for policy CloseFrame 1008; saw_applied_false={saw_applied_false}");
 }
 
 pub async fn get_document_body(

@@ -1,15 +1,84 @@
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::signal;
+use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use fvoci_server::auth::AuthService;
+use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
 use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
+
+#[derive(Debug)]
+struct ShutdownDeadlineExceeded {
+    rooms: Option<usize>,
+    sockets_held: usize,
+}
+
+impl std::fmt::Display for ShutdownDeadlineExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "server shutdown deadline exceeded (rooms={:?}, sockets_held={})",
+            self.rooms, self.sockets_held
+        )
+    }
+}
+
+impl std::error::Error for ShutdownDeadlineExceeded {}
+
+#[derive(Debug)]
+struct ShutdownObservedFailure {
+    idle_task_failed: bool,
+    start_task_failures: usize,
+    actor_failures: usize,
+}
+
+impl std::fmt::Display for ShutdownObservedFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "server shutdown failed (idle_task_failed={}, start_task_failures={}, actor_failures={})",
+            self.idle_task_failed, self.start_task_failures, self.actor_failures
+        )
+    }
+}
+
+impl std::error::Error for ShutdownObservedFailure {}
+
+#[derive(Debug)]
+struct ShutdownTaskPanicked;
+
+impl std::fmt::Display for ShutdownTaskPanicked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "server shutdown failed (collaboration task panicked)")
+    }
+}
+
+impl std::error::Error for ShutdownTaskPanicked {}
+
+struct HubShutdownTask {
+    join: JoinHandle<ShutdownStatus>,
+    finished: Option<tokio::sync::oneshot::Receiver<ShutdownStatus>>,
+}
+
+#[derive(Debug)]
+enum HubOutcome {
+    Clean,
+    Failed(ShutdownStatus),
+    Panicked,
+}
+
+struct DrainOutcome {
+    serve: Result<(), std::io::Error>,
+    hub: HubOutcome,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,10 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     migrate::run_migrations(&config.migration_url).await?;
 
     let pool = pool::connect_app(&config.app_database_url).await?;
-    let run_result = run_server(config, pool.clone()).await;
-    pool.close().await;
-    run_result?;
-    Ok(())
+    run_server(config, pool).await
 }
 
 async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +105,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let collab = CollabConfig::from_env().map(|cfg| Arc::new(CollabHub::new(cfg, pool.clone())));
     let state = AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool),
+            db: Db::new(pool.clone()),
             password_keys: config.password_keys.clone(),
         }),
         branding_name: config.branding_name.clone(),
@@ -49,22 +115,241 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         collab: collab.clone(),
     };
 
-    let serve_result = axum::serve(
+    let deadline = config.shutdown_deadline;
+    let (signaled_tx, signaled_rx) = tokio::sync::oneshot::channel::<Instant>();
+    let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
+    let collab_for_signal = collab.clone();
+    let hub_task_for_signal = hub_task.clone();
+
+    let serve = axum::serve(
         listener,
         router(state, config.static_dir.clone())
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await;
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        let started = Instant::now();
+        if let Some(hub) = collab_for_signal {
+            hub.begin_shutdown();
+            let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+            let join = tokio::spawn(async move {
+                let status = hub.shutdown().await;
+                let _ = finished_tx.send(status);
+                status
+            });
+            *hub_task_for_signal.lock().await = Some(HubShutdownTask {
+                join,
+                finished: Some(finished_rx),
+            });
+            tracing::info!("collaboration shutdown started concurrently with HTTP drain");
+        }
+        let _ = signaled_tx.send(started);
+    })
+    .into_future();
 
-    // Upgraded WebSockets outlive the HTTP graceful-shutdown watcher. Join the
-    // room owners and reap their native helpers before dropping the DB pool.
-    // Also clean up if serving fails; do not return early on that error.
-    if let Some(hub) = collab {
-        hub.shutdown().await;
+    let mut serve_task = tokio::spawn(serve);
+    let mut signaled_rx = Some(signaled_rx);
+    tokio::select! {
+        biased;
+        serve_result = &mut serve_task => {
+            let started = signaled_rx
+                .take()
+                .and_then(|mut rx| rx.try_recv().ok())
+                .unwrap_or_else(Instant::now);
+            let drain_pool = pool.clone();
+            wait_for_deadline(
+                async {
+                    let hub = join_hub_finished(&hub_task, collab.clone()).await;
+                    drain_pool.close().await;
+                    DrainOutcome {
+                        serve: map_serve_result(serve_result),
+                        hub,
+                    }
+                },
+                Some(started),
+                deadline,
+                &hub_task,
+                collab.as_ref(),
+            )
+            .await
+        }
+        started = async {
+            match signaled_rx.as_mut() {
+                Some(rx) => rx.await.ok(),
+                None => None,
+            }
+        } => {
+            let _ = signaled_rx.take();
+            let drain_pool = pool.clone();
+            wait_for_deadline(
+                async {
+                    let serve = map_serve_result(serve_task.await);
+                    let hub = join_hub_finished(&hub_task, collab.clone()).await;
+                    drain_pool.close().await;
+                    DrainOutcome { serve, hub }
+                },
+                started,
+                deadline,
+                &hub_task,
+                collab.as_ref(),
+            )
+            .await
+        }
     }
-    serve_result?;
-    Ok(())
+}
+
+fn map_serve_result(
+    result: Result<Result<(), std::io::Error>, tokio::task::JoinError>,
+) -> Result<(), std::io::Error> {
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(std::io::Error::other(error)),
+    }
+}
+
+async fn join_hub_finished(
+    hub_task: &tokio::sync::Mutex<Option<HubShutdownTask>>,
+    collab: Option<Arc<CollabHub>>,
+) -> HubOutcome {
+    let finished = hub_task
+        .lock()
+        .await
+        .as_mut()
+        .and_then(|task| task.finished.take());
+    if let Some(finished) = finished {
+        match finished.await {
+            Ok(status) if status.is_clean() => HubOutcome::Clean,
+            Ok(status) => HubOutcome::Failed(status),
+            Err(_) => HubOutcome::Panicked,
+        }
+    } else if let Some(hub) = collab {
+        status_outcome(hub.shutdown().await)
+    } else {
+        HubOutcome::Clean
+    }
+}
+
+fn status_outcome(status: ShutdownStatus) -> HubOutcome {
+    if status.is_clean() {
+        HubOutcome::Clean
+    } else {
+        HubOutcome::Failed(status)
+    }
+}
+
+async fn wait_for_deadline<F>(
+    work: F,
+    started: Option<Instant>,
+    deadline: std::time::Duration,
+    hub_task: &tokio::sync::Mutex<Option<HubShutdownTask>>,
+    collab: Option<&Arc<CollabHub>>,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: std::future::Future<Output = DrainOutcome>,
+{
+    let remaining = match started {
+        Some(started) => {
+            let remaining = deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                detach_hub_task(hub_task).await;
+                return shutdown_deadline_error(collab, deadline);
+            }
+            remaining
+        }
+        None => deadline,
+    };
+
+    // The final task join belongs to the same deadline as HTTP, rooms and DB.
+    // A completion notification is not proof that its owning task has exited.
+    let drained = async {
+        let outcome = work.await;
+        let joined = join_owned_hub_task(hub_task).await;
+        (outcome, joined)
+    };
+    match tokio::time::timeout(remaining, drained).await {
+        Ok((outcome, joined)) => {
+            if let Some(error) =
+                hub_failure_error(joined).or_else(|| hub_failure_error(outcome.hub))
+            {
+                return Err(error);
+            }
+            outcome.serve?;
+            Ok(())
+        }
+        Err(_) => {
+            detach_hub_task(hub_task).await;
+            shutdown_deadline_error(collab, deadline)
+        }
+    }
+}
+
+async fn join_owned_hub_task(hub_task: &tokio::sync::Mutex<Option<HubShutdownTask>>) -> HubOutcome {
+    match hub_task.lock().await.take() {
+        Some(task) => match task.join.await {
+            Ok(status) => status_outcome(status),
+            Err(_) => HubOutcome::Panicked,
+        },
+        None => HubOutcome::Clean,
+    }
+}
+
+fn hub_failure_error(outcome: HubOutcome) -> Option<Box<dyn std::error::Error>> {
+    match outcome {
+        HubOutcome::Clean => None,
+        HubOutcome::Failed(status) => Some(shutdown_status_error(status)),
+        HubOutcome::Panicked => Some(shutdown_panic_error()),
+    }
+}
+
+async fn detach_hub_task(hub_task: &tokio::sync::Mutex<Option<HubShutdownTask>>) {
+    // Tokio JoinHandle drop detaches; it does not abort and does not reap.
+    let _ = hub_task.lock().await.take();
+}
+
+fn shutdown_deadline_error(
+    collab: Option<&Arc<CollabHub>>,
+    deadline: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let progress = collab.map(|hub| hub.shutdown_progress());
+    let rooms = progress.and_then(|p| p.rooms);
+    let sockets_held = progress.map(|p| p.sockets_held).unwrap_or(0);
+    eprintln!(
+        "server shutdown deadline exceeded (rooms={rooms:?}, sockets_held={sockets_held}, deadline_ms={})",
+        deadline.as_millis()
+    );
+    tracing::error!(
+        ?rooms,
+        sockets_held,
+        deadline_ms = deadline.as_millis() as u64,
+        "server shutdown deadline exceeded"
+    );
+    Err(Box::new(ShutdownDeadlineExceeded {
+        rooms,
+        sockets_held,
+    }))
+}
+
+fn shutdown_status_error(status: ShutdownStatus) -> Box<dyn std::error::Error> {
+    let error = ShutdownObservedFailure {
+        idle_task_failed: status.idle_task_failed,
+        start_task_failures: status.start_task_failures,
+        actor_failures: status.actor_failures,
+    };
+    eprintln!("{error}");
+    tracing::error!(
+        idle_task_failed = status.idle_task_failed,
+        start_task_failures = status.start_task_failures,
+        actor_failures = status.actor_failures,
+        "server shutdown failed"
+    );
+    Box::new(error)
+}
+
+fn shutdown_panic_error() -> Box<dyn std::error::Error> {
+    let error = ShutdownTaskPanicked;
+    eprintln!("{error}");
+    tracing::error!("server shutdown failed (collaboration task panicked)");
+    Box::new(error)
 }
 
 async fn shutdown_signal() {
@@ -89,5 +374,97 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod shutdown_outcome_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn final_task_join_cannot_escape_shutdown_deadline() {
+        let (release, pending) = tokio::sync::oneshot::channel();
+        let (finished, observed) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = pending.await;
+            let _ = finished.send(());
+            ShutdownStatus::default()
+        });
+        let owned = tokio::sync::Mutex::new(Some(HubShutdownTask {
+            join: task,
+            finished: None,
+        }));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_deadline(
+                async {
+                    DrainOutcome {
+                        serve: Ok(()),
+                        hub: HubOutcome::Clean,
+                    }
+                },
+                Some(Instant::now()),
+                std::time::Duration::from_millis(20),
+                &owned,
+                None,
+            ),
+        )
+        .await;
+        // Always finish the owned test task, including on the regression path.
+        let _ = release.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(1), observed)
+            .await
+            .expect("test task must finish after release")
+            .expect("task must not be aborted");
+        let error = result
+            .expect("final join must obey the inner shutdown deadline")
+            .expect_err("pending final join cannot report successful shutdown");
+        assert!(error.downcast_ref::<ShutdownDeadlineExceeded>().is_some());
+    }
+
+    #[test]
+    fn observed_failure_is_not_deadline_or_success() {
+        let error = ShutdownObservedFailure {
+            idle_task_failed: false,
+            start_task_failures: 1,
+            actor_failures: 0,
+        };
+        let text = error.to_string();
+        assert!(text.contains("shutdown failed"), "{text}");
+        assert!(text.contains("start_task_failures=1"), "{text}");
+        assert!(!text.contains("deadline"), "{text}");
+    }
+
+    #[test]
+    fn join_panic_is_not_deadline_or_success() {
+        let text = ShutdownTaskPanicked.to_string();
+        assert!(text.contains("shutdown failed"), "{text}");
+        assert!(text.contains("panicked"), "{text}");
+        assert!(!text.contains("deadline"), "{text}");
+    }
+
+    #[test]
+    fn deadline_error_mentions_deadline() {
+        let text = ShutdownDeadlineExceeded {
+            rooms: Some(1),
+            sockets_held: 2,
+        }
+        .to_string();
+        assert!(text.contains("deadline exceeded"), "{text}");
+        assert!(!text.contains("shutdown failed"), "{text}");
+    }
+
+    #[test]
+    fn unclean_status_is_failure() {
+        let status = ShutdownStatus {
+            idle_task_failed: true,
+            start_task_failures: 0,
+            actor_failures: 0,
+        };
+        assert!(!status.is_clean());
+        match status_outcome(status) {
+            HubOutcome::Failed(observed) => assert_eq!(observed, status),
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
     }
 }

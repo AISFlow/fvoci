@@ -1,4 +1,6 @@
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnection, PgPool};
+use sqlx::Postgres;
 use uuid::Uuid;
 
 use crate::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
@@ -18,6 +20,15 @@ impl RoomGuard {
         document_id: Uuid,
     ) -> Result<Option<Self>, sqlx::Error> {
         let pooled = pool.acquire().await?;
+        Self::try_lock_pooled(pooled, document_id).await
+    }
+
+    /// Finish the fence on a connection that has already been acquired.
+    /// `pool.acquire()` may be cancelled at shutdown; this step must not be.
+    pub async fn try_lock_pooled(
+        pooled: PoolConnection<Postgres>,
+        document_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
         let mut conn = pooled.detach();
         let acquired: (bool,) = sqlx::query_as("SELECT pg_try_advisory_lock($1, $2)")
             .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)

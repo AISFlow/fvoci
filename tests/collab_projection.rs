@@ -10,8 +10,10 @@ use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, SinkExt};
 use fvoci_server::collab::room::{
     arm_append_projection_barrier, arm_force_primary_apply_fail, arm_force_primary_load_fail,
-    disarm_append_projection_barrier, disarm_force_primary_apply_fail,
-    disarm_force_primary_load_fail,
+    arm_force_primary_load_fail_after, disarm_append_projection_barrier,
+    disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
+    disarm_force_primary_load_fail_after, test_join_catchup_projection_attempt_count,
+    test_primary_load_attempt_count,
 };
 use fvoci_server::collab::wire::{CollabKind, CollabRoomName, DocumentMessage, WireFrame};
 use fvoci_server::db::collab::claim_writer_and_load;
@@ -19,14 +21,16 @@ use fvoci_server::db::documents::empty_document_json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use support::{
-    auth_and_join, complete_sync_handshake, connect_member, delete_only_base_update,
-    delete_only_json_after, delete_only_json_before, delete_only_update, engine_fixture,
-    expectations, get_document_body, join_denied, persist_barrier, recv_document_frame,
+    assert_peer_still_connected, auth_and_join, complete_sync_handshake, connect_member,
+    delete_only_base_update, delete_only_json_after, delete_only_json_before, delete_only_update,
+    engine_fixture, expectations, get_document_body, huge_varint_memory_candidate,
+    invalid_utf8_update_candidate, join_denied, persist_barrier, recv_document_frame,
     setup_wiki_doc, stateless_frame, sync_step1_frame, sync_update_frame, test_collab_config,
-    tiny_output_project_collab_config, wait_for_committed_update_then_close,
+    test_collab_config_with_engine, tiny_output_project_collab_config,
+    wait_for_committed_update_then_close, wait_for_policy_rejection_close,
     wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update,
-    wait_for_writer_close_without_peer_update, wait_for_ws_close_code, TestDb, TestRun,
-    WikiDocFixture,
+    wait_for_writer_close_without_peer_update, wait_for_ws_close_code, OwnedEngineSymlink, TestDb,
+    TestRun, WikiDocFixture,
 };
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -1083,6 +1087,322 @@ async fn collab_unloaded_primary_precommit_update_closes_without_broadcast() {
             })
         },
     )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_join_catchup_recovery_failure_denies_join() {
+    run_test("collab_join_catchup_recovery_failure_denies_join", |run| {
+        Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let addr = run
+                .spawn_router(&app_url, tiny_output_project_collab_config(4, 30_000))
+                .await;
+            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let update = delete_only_base_update();
+
+            let mut writer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut writer, &routing_key, 110).await;
+            writer
+                .send(Message::Binary(
+                    sync_update_frame(&routing_key, &update).into(),
+                ))
+                .await
+                .unwrap();
+            assert!(
+                wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+                "writer must establish tail_seq>=1 before join catch-up recovery test"
+            );
+
+            let mut peer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut peer, &routing_key, 111).await;
+
+            let load_before = fvoci_server::db::collab::load_collab_document(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            let projection_before_denied =
+                test_join_catchup_projection_attempt_count(wiki.document_id).await;
+
+            arm_force_primary_load_fail_after(wiki.document_id, 1).await;
+
+            let mut denied = connect_member(addr, &wiki.session.session_token).await;
+            join_denied(&mut denied, &routing_key, 112).await;
+
+            assert_eq!(
+                test_join_catchup_projection_attempt_count(wiki.document_id).await,
+                projection_before_denied + 1,
+                "denied join must hit join catch-up projection recovery, not ensure_primary_capacity alone"
+            );
+            assert_eq!(
+                test_primary_load_attempt_count(wiki.document_id).await,
+                1,
+                "join recovery reload must consume exactly one hooked primary load"
+            );
+
+            assert_peer_still_connected(&mut peer, Duration::from_secs(5)).await;
+
+            let load_after = fvoci_server::db::collab::load_collab_document(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(load_after.snapshot, load_before.snapshot);
+            assert_eq!(load_after.tail_seq, load_before.tail_seq);
+            assert_eq!(
+                load_after
+                    .tail
+                    .iter()
+                    .map(|row| row.payload.clone())
+                    .collect::<Vec<_>>(),
+                load_before
+                    .tail
+                    .iter()
+                    .map(|row| row.payload.clone())
+                    .collect::<Vec<_>>(),
+                "join catch-up recovery failure must not mutate durable tail"
+            );
+
+            disarm_force_primary_load_fail_after(wiki.document_id).await;
+
+            let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut recovery, &routing_key, 113).await;
+            complete_sync_handshake(&mut recovery, &routing_key).await;
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_precommit_validator_unavailable_closes_1011() {
+    run_test(
+        "collab_precommit_validator_unavailable_closes_1011",
+        |run| {
+            Box::pin(async {
+                let app_url = run.harness.app_url.clone();
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let engine_link = OwnedEngineSymlink::new();
+                let addr = run
+                    .spawn_router(
+                        &app_url,
+                        test_collab_config_with_engine(4, 30_000, engine_link.path()),
+                    )
+                    .await;
+                let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let update = delete_only_base_update();
+
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 114).await;
+                let mut peer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut peer, &routing_key, 115).await;
+
+                let load_before = fvoci_server::db::collab::load_collab_document(
+                    &wiki.session.pool,
+                    wiki.session.workspace_id,
+                    wiki.session.user_id,
+                    wiki.session.session_id,
+                    wiki.document_id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+
+                engine_link.break_spawn();
+                assert!(
+                    std::fs::symlink_metadata(engine_link.path()).is_err(),
+                    "owned helper symlink must be removed before pre-commit validator spawn"
+                );
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &update).into(),
+                    ))
+                    .await
+                    .unwrap();
+                wait_for_writer_close_without_peer_update(
+                    &mut writer,
+                    &mut peer,
+                    1011,
+                    Duration::from_secs(5),
+                    Some("engine unavailable"),
+                )
+                .await;
+
+                let load_after = fvoci_server::db::collab::load_collab_document(
+                    &wiki.session.pool,
+                    wiki.session.workspace_id,
+                    wiki.session.user_id,
+                    wiki.session.session_id,
+                    wiki.document_id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(load_after.tail_seq, load_before.tail_seq);
+                assert!(load_after.tail.is_empty());
+
+                engine_link.restore();
+                assert!(
+                    std::fs::symlink_metadata(engine_link.path()).is_ok(),
+                    "owned helper symlink must be restored for recovery join"
+                );
+
+                let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut recovery, &routing_key, 116).await;
+                recovery
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &update).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_sync_applied(&mut recovery, Duration::from_secs(5)).await,
+                    "follow-up edit must ack after validator spawn is restored"
+                );
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_precommit_malformed_update_rejected_1008() {
+    run_test("collab_precommit_malformed_update_rejected_1008", |run| {
+        Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let addr = run
+                .spawn_router(&app_url, test_collab_config(4, 30_000))
+                .await;
+            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let malformed = invalid_utf8_update_candidate();
+
+            let mut writer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut writer, &routing_key, 117).await;
+            let mut peer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut peer, &routing_key, 118).await;
+
+            writer
+                .send(Message::Binary(
+                    sync_update_frame(&routing_key, &malformed).into(),
+                ))
+                .await
+                .unwrap();
+            wait_for_policy_rejection_close(
+                &mut writer,
+                &mut peer,
+                &routing_key,
+                &malformed,
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let load = fvoci_server::db::collab::load_collab_document(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                load.tail.is_empty(),
+                "malformed pre-commit candidate must not append durable tail"
+            );
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_precommit_huge_varint_memory_rejected_1008() {
+    run_test("collab_precommit_huge_varint_memory_rejected_1008", |run| {
+        Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let addr = run
+                .spawn_router(&app_url, test_collab_config(4, 30_000))
+                .await;
+            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let poison = huge_varint_memory_candidate();
+            let valid = delete_only_base_update();
+
+            let mut writer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut writer, &routing_key, 119).await;
+            let mut peer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut peer, &routing_key, 120).await;
+
+            let load_before = fvoci_server::db::collab::load_collab_document(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            writer
+                .send(Message::Binary(
+                    sync_update_frame(&routing_key, &poison).into(),
+                ))
+                .await
+                .unwrap();
+            wait_for_policy_rejection_close(
+                &mut writer,
+                &mut peer,
+                &routing_key,
+                &poison,
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let load_after = fvoci_server::db::collab::load_collab_document(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(load_after.snapshot, load_before.snapshot);
+            assert_eq!(load_after.tail_seq, load_before.tail_seq);
+            assert!(
+                load_after.tail.is_empty(),
+                "memory-limit candidate must not append durable tail"
+            );
+
+            let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut recovery, &routing_key, 121).await;
+            recovery
+                .send(Message::Binary(
+                    sync_update_frame(&routing_key, &valid).into(),
+                ))
+                .await
+                .unwrap();
+            assert!(
+                wait_for_sync_applied(&mut recovery, Duration::from_secs(5)).await,
+                "follow-up valid edit must ack after memory-limit rejection"
+            );
+        })
+    })
     .await;
 }
 

@@ -137,6 +137,21 @@ static FORCE_PRIMARY_LOAD_FAIL: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
 
 #[cfg(feature = "db-tests")]
+static FORCE_PRIMARY_LOAD_FAIL_AFTER: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<Uuid, u32>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+static FORCE_PRIMARY_LOAD_FAIL_COUNT: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<Uuid, u32>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+static JOIN_CATCHUP_PROJECTION_ATTEMPTS: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<Uuid, u32>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "db-tests")]
 pub async fn arm_force_primary_apply_fail(document_id: Uuid) {
     FORCE_PRIMARY_APPLY_FAIL.lock().await.insert(document_id);
 }
@@ -157,13 +172,71 @@ pub async fn disarm_force_primary_load_fail(document_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
+pub async fn arm_force_primary_load_fail_after(document_id: Uuid, after: u32) {
+    FORCE_PRIMARY_LOAD_FAIL_AFTER
+        .lock()
+        .await
+        .insert(document_id, after);
+    FORCE_PRIMARY_LOAD_FAIL_COUNT
+        .lock()
+        .await
+        .insert(document_id, 0);
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_force_primary_load_fail_after(document_id: Uuid) {
+    FORCE_PRIMARY_LOAD_FAIL_AFTER
+        .lock()
+        .await
+        .remove(&document_id);
+    FORCE_PRIMARY_LOAD_FAIL_COUNT
+        .lock()
+        .await
+        .remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn test_primary_load_attempt_count(document_id: Uuid) -> u32 {
+    FORCE_PRIMARY_LOAD_FAIL_COUNT
+        .lock()
+        .await
+        .get(&document_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn test_join_catchup_projection_attempt_count(document_id: Uuid) -> u32 {
+    JOIN_CATCHUP_PROJECTION_ATTEMPTS
+        .lock()
+        .await
+        .get(&document_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "db-tests")]
 async fn consume_force_primary_apply_fail(document_id: Uuid) -> bool {
     FORCE_PRIMARY_APPLY_FAIL.lock().await.remove(&document_id)
 }
 
 #[cfg(feature = "db-tests")]
-async fn primary_load_fail_armed(document_id: Uuid) -> bool {
-    FORCE_PRIMARY_LOAD_FAIL.lock().await.contains(&document_id)
+async fn should_fail_primary_load(document_id: Uuid) -> bool {
+    if FORCE_PRIMARY_LOAD_FAIL.lock().await.contains(&document_id) {
+        return true;
+    }
+    let after = FORCE_PRIMARY_LOAD_FAIL_AFTER
+        .lock()
+        .await
+        .get(&document_id)
+        .copied();
+    if let Some(threshold) = after {
+        let mut counts = FORCE_PRIMARY_LOAD_FAIL_COUNT.lock().await;
+        let count = counts.entry(document_id).or_insert(0);
+        *count += 1;
+        return *count >= threshold;
+    }
+    false
 }
 
 #[cfg(feature = "db-tests")]
@@ -984,10 +1057,17 @@ impl RoomActor {
             }
         }
         self.ensure_primary_capacity().await?;
-        if !read_only
-            && self.writer_generation.is_some()
-            && self.committed.tail_seq >= 1
-            && matches!(
+        if !read_only && self.writer_generation.is_some() && self.committed.tail_seq >= 1 {
+            #[cfg(feature = "db-tests")]
+            {
+                JOIN_CATCHUP_PROJECTION_ATTEMPTS
+                    .lock()
+                    .await
+                    .entry(self.document_id)
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+            }
+            if matches!(
                 self.maybe_project_derived_body(
                     self.committed.tail_seq,
                     join.conn.session.user_id,
@@ -996,9 +1076,9 @@ impl RoomActor {
                 )
                 .await,
                 ProjectDerivedOutcome::StaleWriter
-            )
-        {
-            return Err(JoinError::WriterStale);
+            ) {
+                return Err(JoinError::WriterStale);
+            }
         }
         if !self.primary_loaded {
             return Err(JoinError::EngineUnavailable);
@@ -1444,6 +1524,10 @@ impl RoomActor {
                     payload.clone(),
                 )
                 .await;
+                if validation == BundleValidation::EngineUnavailable {
+                    self.reject_candidate_engine_unavailable(conn_id).await;
+                    return;
+                }
                 if validation != BundleValidation::Ok {
                     self.reject_candidate(conn_id, routing_key).await;
                     return;
@@ -1467,8 +1551,12 @@ impl RoomActor {
                     .await
                 {
                     LockingAuth::Allow => {}
-                    LockingAuth::Deny | LockingAuth::DbError => {
+                    LockingAuth::Deny => {
                         self.reject_candidate(conn_id, routing_key).await;
+                        return;
+                    }
+                    LockingAuth::DbError => {
+                        self.reject_candidate_engine_unavailable(conn_id).await;
                         return;
                     }
                 }
@@ -1597,6 +1685,17 @@ impl RoomActor {
         )
     }
 
+    async fn reject_candidate_engine_unavailable(&mut self, conn_id: Uuid) {
+        if self.primary_dirty {
+            let _ = self.reload_primary_from_committed().await;
+        }
+        if let Some(c) = self.connections.get_mut(&conn_id) {
+            c.in_flight = false;
+        }
+        self.close_connection(conn_id, 1011, "engine unavailable")
+            .await;
+    }
+
     async fn reject_candidate(&mut self, conn_id: Uuid, routing_key: &str) {
         if self.primary_dirty {
             let _ = self.reload_primary_from_committed().await;
@@ -1606,7 +1705,7 @@ impl RoomActor {
             c.poisoned = true;
         }
         self.send_sync_status(conn_id, routing_key, false).await;
-        self.close_connection(conn_id, 1008, "update rejected")
+        self.close_connection_ordered(conn_id, 1008, "update rejected")
             .await;
     }
 
@@ -2049,7 +2148,7 @@ impl RoomActor {
 
     async fn load_engine_primary(&mut self) -> Result<(), JoinError> {
         #[cfg(feature = "db-tests")]
-        if primary_load_fail_armed(self.document_id).await {
+        if should_fail_primary_load(self.document_id).await {
             return Err(JoinError::EngineUnavailable);
         }
         let tail_b64 = self.committed.tail_payloads.clone();
