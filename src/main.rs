@@ -44,6 +44,8 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         public_origin,
         cookie_secure: config.cookie_secure,
         rate_limiter: RateLimiter::new(),
+        storage: fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
+        upload: config.upload.clone(),
     };
 
     axum::serve(

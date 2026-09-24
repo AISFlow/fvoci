@@ -19,6 +19,7 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::auth::router())
         .merge(routes::workspaces::router())
         .merge(routes::documents::router())
+        .merge(routes::attachments::router())
         .with_state(state);
 
     let app = match static_dir {
