@@ -609,8 +609,8 @@ export async function readCaretProbe(page: Page): Promise<unknown> {
 
 export async function placeContentCaret(page: Page, where: "start" | "end"): Promise<void> {
   const locator = editorLocator(page);
-  await locator.focus();
-  const position = await locator.evaluate((root, edge) => {
+  await locator.scrollIntoViewIfNeeded();
+  const target = await locator.evaluate((root, edge) => {
     const isDecoration = (node: Node) => {
       const el = node instanceof Element ? node : node.parentElement;
       return Boolean(el?.closest(".collaboration-carets__caret, .collaboration-carets__label"));
@@ -629,58 +629,72 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
       if (!first) first = node;
       last = node;
     }
-    const target = edge === "start" ? first : last;
-    if (!target) throw new Error("content caret requires an existing text node");
+    const text = edge === "start" ? first : last;
+    if (!text) throw new Error("content caret requires an existing text node");
     const editor = (root as HTMLElement & {
       editor?: { view: { posAtDOM(node: Node, offset: number): number } };
     }).editor;
     if (!editor) throw new Error("missing live editor for caret inspection");
-    const offset = edge === "start" ? 0 : target.length;
-    const position = editor.view.posAtDOM(target, offset);
+    const offset = edge === "start" ? 0 : text.length;
+    const position = editor.view.posAtDOM(text, offset);
+    text.parentElement?.scrollIntoView({ block: "center", inline: "nearest" });
     const range = document.createRange();
-    if (edge === "start") range.setStart(target, 0);
-    else range.setStart(target, target.length);
-    range.collapse(true);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    let livePos: number | null = null;
-    let liveOffset: number | null = null;
-    let liveText: string | null = null;
-    try {
-      const live = window.getSelection();
-      const anchor = live?.anchorNode;
-      liveOffset = live?.anchorOffset ?? null;
-      liveText = anchor instanceof Text ? anchor.data : anchor ? anchor.nodeName : null;
-      if (anchor) livePos = editor.view.posAtDOM(anchor, live?.anchorOffset ?? 0);
-    } catch {
-      livePos = null;
+    if (edge === "start") {
+      range.setStart(text, 0);
+      range.setEnd(text, Math.min(1, text.length));
+    } else {
+      range.setStart(text, Math.max(0, text.length - 1));
+      range.setEnd(text, text.length);
     }
+    const rect = range.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) {
+      throw new Error("content caret target has an empty layout rect");
+    }
+    const inset = Math.max(1, rect.width * 0.2);
+    const x = edge === "start" ? rect.left + inset : rect.right - inset;
+    const y = rect.top + Math.max(rect.height / 2, 1);
     const probeHost = globalThis as unknown as {
       __fvociCaretProbe?: Array<Record<string, unknown>>;
     };
     probeHost.__fvociCaretProbe?.push({
-      kind: "place-range",
+      kind: "place-click",
       t: Date.now(),
       where: edge,
       position,
       nativeOffset: offset,
-      nativeText: target.data,
-      nativeTextLen: target.length,
-      livePos,
-      liveOffset,
-      liveText,
+      nativeText: text.data,
+      nativeTextLen: text.length,
+      x,
+      y,
     });
-    return position;
+    return { x, y, position };
   }, where);
-  // Browser selectionchange is asynchronous. Observe the real ProseMirror
-  // selection before typing; never dispatch a synthetic editor transaction.
+  // Click the first/last content glyph (PM pointer path). Control+Home/End then
+  // moves to the document edge if the click landed inside a table cell or wrap.
+  // Do not use locator.focus()+Range: that races PM's 20ms focus restore.
+  await page.mouse.click(target.x, target.y);
+  await expect.poll(() => locator.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: { view: { hasFocus(): boolean } };
+    }).editor;
+    const active = document.activeElement;
+    return (live?.view.hasFocus() ?? false) || (active != null && root.contains(active));
+  })).toBe(true);
+  const already = await locator.evaluate((root) => {
+    const editor = (root as HTMLElement & {
+      editor?: { state: { selection: { from: number; to: number } } };
+    }).editor;
+    return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
+  });
+  if (already?.[0] !== target.position || already[1] !== target.position) {
+    await page.keyboard.press(where === "start" ? "Control+Home" : "Control+End");
+  }
   await expect.poll(() => locator.evaluate((root) => {
     const editor = (root as HTMLElement & {
       editor?: { state: { selection: { from: number; to: number } } };
     }).editor;
     return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
-  })).toEqual([position, position]);
+  })).toEqual([target.position, target.position]);
 }
 
 export function uniqueBlockIds(shape: EditorShape): string[] {

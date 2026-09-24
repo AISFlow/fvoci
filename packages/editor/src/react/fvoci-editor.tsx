@@ -61,10 +61,7 @@ import {
 	MathNodeView,
 	MermaidNodeView,
 } from "./node-views.js";
-import {
-	shouldAdoptNativeOnAwareness,
-	shouldWriteSelectionToDom,
-} from "./awareness-selection-guard.js";
+import { shouldAdoptNativeOnAwareness } from "./awareness-selection-guard.js";
 import { isNativeOwnedDeleteKey } from "./native-delete-owner.js";
 import { overlayOwner } from "./overlay-owner.js";
 import { parseWorkspaceUrl, resolvePastedEmbed } from "./paste-embed.js";
@@ -140,68 +137,41 @@ function handleNativeOwnedDeleteKeyDown(
 	) {
 		return false;
 	}
-	const domSel = view.dom.ownerDocument.defaultView?.getSelection();
-	const anchorNode = domSel?.anchorNode;
-	const focusNode = domSel?.focusNode;
-	if (!domSel || !anchorNode || !focusNode) return false;
-	if (!view.dom.contains(anchorNode) || !view.dom.contains(focusNode)) {
-		return false;
-	}
-	for (const node of [anchorNode, focusNode]) {
-		const element = node instanceof Element ? node : node.parentElement;
-		const leaf = element?.closest('[contenteditable="false"]');
-		if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return false;
-	}
-	let aligned: TextSelection;
-	try {
-		const doc = view.state.doc;
-		aligned = TextSelection.between(
-			doc.resolve(view.posAtDOM(anchorNode, domSel.anchorOffset, 1)),
-			doc.resolve(view.posAtDOM(focusNode, domSel.focusOffset, 1)),
-		) as TextSelection;
-	} catch {
-		return false;
-	}
-	if (aligned.eq(selection)) return false;
+	const aligned = nativeTextSelectionFromDom(view, view.state.doc);
+	if (!aligned || aligned.eq(selection)) return false;
 	view.dispatch(view.state.tr.setSelection(aligned));
 	return false;
 }
 
 /* WHY: awareness-only yCursorPlugin transactions rebuild caret widgets. PM then
  * calls selectionToDOM because inner decorations changed, even when
- * state.selection did not. The 20ms-after-focus timeout in prosemirror-view
- * 1.42.x does the same write without a transaction. Probe: place-range livePos 5,
- * then selectionchange pos 1 with no updateState. Skip that DOM write unless
- * PM set the selection (or force). A capture-phase selectionchange listener
- * that always adopted native remounted the format bubble (링크 button detached)
- * and a post-skip microtask adopt typed `/표` into the previous paragraph.
- * Skip the clobber only when the current dispatch did not setSelection
- * (view.dispatch wrap). Enter/split therefore still writes. PM adopts via
- * appendTransaction on awareness and via its own selectionchange flush once
- * suppress is cleared. Mapping matches handleNativeOwnedDeleteKeyDown.
- * Do not patch y-tiptap. docView/domObserver are not in prosemirror-view's
- * .d.ts; this targets the pinned @tiptap/pm view (prosemirror-view 1.42.x). */
+ * state.selection did not. That can clobber a native caret PM has not read yet
+ * (Arrow keys, then a peer awareness message before selectionchange). Adopt
+ * native only when the live DOM selection differs from PM's last-synced
+ * currentSelection — native ahead, not a browser focus reset that left PM
+ * ahead. Do not wrap docView.setSelection or view.dispatch: those skips also
+ * drop PM's own focus writes (view.focus rAF, 20ms restore, flush doc-start
+ * kludge). Do not clear suppressingSelectionUpdates (desktop Chrome never
+ * sets it from selectionToDOM; clearing it would undo PM #820 on Android).
+ * Mapping matches handleNativeOwnedDeleteKeyDown. Do not patch y-tiptap.
+ * domObserver.currentSelection / domSelectionRange are not in
+ * prosemirror-view's .d.ts; this targets the pinned @tiptap/pm view
+ * (prosemirror-view 1.42.x). */
 const awarenessSelectionGuardKey = new PluginKey("fvociAwarenessSelectionGuard");
 
-type ProseMirrorDomObserver = {
-	suppressingSelectionUpdates: boolean;
+type ProseMirrorDomSelectionRange = {
+	anchorNode: Node | null;
+	anchorOffset: number;
+	focusNode: Node | null;
+	focusOffset: number;
 };
 
-type GuardedDocView = {
-	setSelection: (
-		anchor: number,
-		head: number,
-		view: EditorView,
-		force?: boolean,
-	) => void;
-	__fvociCaretWriteGuard?: boolean;
+type ProseMirrorViewInternals = EditorView & {
+	domObserver?: {
+		currentSelection: { eq(other: ProseMirrorDomSelectionRange): boolean };
+	};
+	domSelectionRange(): ProseMirrorDomSelectionRange;
 };
-
-function clearAwarenessSelectionSuppress(view: EditorView): void {
-	const observer = (view as EditorView & { domObserver?: ProseMirrorDomObserver })
-		.domObserver;
-	if (observer) observer.suppressingSelectionUpdates = false;
-}
 
 function nativeTextSelectionFromDom(
 	view: EditorView,
@@ -229,56 +199,20 @@ function nativeTextSelectionFromDom(
 	}
 }
 
-function guardSelectionWritesToDom(
-	view: EditorView,
-	selectionSet: () => boolean,
-): void {
-	const docView = (view as EditorView & { docView?: GuardedDocView }).docView;
-	if (!docView || docView.__fvociCaretWriteGuard) return;
-	docView.__fvociCaretWriteGuard = true;
-	const orig = docView.setSelection.bind(docView);
-	docView.setSelection = (anchor, head, currentView, force = false) => {
-		const native = nativeTextSelectionFromDom(currentView, currentView.state.doc);
-		if (
-			!shouldWriteSelectionToDom({
-				force,
-				selectionSet: selectionSet(),
-				native: native ? { from: native.from, to: native.to } : null,
-				writeFrom: anchor,
-				writeTo: head,
-			})
-		) {
-			return;
-		}
-		orig(anchor, head, currentView, force);
-	};
+function observedDomSelectionMatchesNative(view: EditorView): boolean {
+	const current = view as ProseMirrorViewInternals;
+	const observer = current.domObserver;
+	if (!observer) return true;
+	return observer.currentSelection.eq(current.domSelectionRange());
 }
 
 function createAwarenessSelectionGuardPlugin(): Plugin {
 	let view: EditorView | null = null;
-	let clearSuppressAfterUpdate = false;
-	let selectionSetThisDispatch = false;
 	return new Plugin({
 		key: awarenessSelectionGuardKey,
 		view: (editorView) => {
 			view = editorView;
-			guardSelectionWritesToDom(editorView, () => selectionSetThisDispatch);
-			const origDispatch = editorView.dispatch.bind(editorView);
-			editorView.dispatch = (tr: Transaction) => {
-				if (tr.selectionSet) selectionSetThisDispatch = true;
-				origDispatch(tr);
-				selectionSetThisDispatch = false;
-			};
 			return {
-				update(currentView) {
-					guardSelectionWritesToDom(
-						currentView,
-						() => selectionSetThisDispatch,
-					);
-					if (!clearSuppressAfterUpdate) return;
-					clearSuppressAfterUpdate = false;
-					clearAwarenessSelectionSuppress(currentView);
-				},
 				destroy() {
 					view = null;
 				},
@@ -291,33 +225,28 @@ function createAwarenessSelectionGuardPlugin(): Plugin {
 		) {
 			const current = view;
 			if (!current) return null;
-			const selectionSet = transactions.some((tr) => tr.selectionSet);
-			if (selectionSet) selectionSetThisDispatch = true;
 			const awarenessUpdated = transactions.some((tr) => {
 				const meta = tr.getMeta(yCursorPluginKey) as
 					| { awarenessUpdated?: boolean }
 					| undefined;
 				return Boolean(meta?.awarenessUpdated);
 			});
-			const docChanged = transactions.some((tr) => tr.docChanged);
-			if (awarenessUpdated && !docChanged) {
-				clearSuppressAfterUpdate = true;
-			}
 			if (
 				!shouldAdoptNativeOnAwareness({
 					awarenessUpdated,
-					docChanged,
-					selectionSet,
+					docChanged: transactions.some((tr) => tr.docChanged),
+					selectionSet: transactions.some((tr) => tr.selectionSet),
 					composing: current.composing,
 					editable: current.editable,
 					pmIsTextSelection: state.selection instanceof TextSelection,
+					observedDomSelectionMatchesNative:
+						observedDomSelectionMatchesNative(current),
 				})
 			) {
 				return null;
 			}
 			const aligned = nativeTextSelectionFromDom(current, state.doc);
 			if (!aligned || !aligned.empty || aligned.eq(state.selection)) return null;
-			selectionSetThisDispatch = true;
 			return state.tr.setSelection(aligned);
 		},
 	});
