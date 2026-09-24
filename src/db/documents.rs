@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::db::context::{lock_tree, set_tenant};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::db::projects::{lock_project, project_permission};
 use crate::db::workspace::WorkspaceRole;
+use crate::projects::ProjectPermission;
 
 pub(crate) use crate::db::context::{lock_membership_users, recheck_session, session_is_live};
 pub const MAX_TREE_DEPTH: i32 = 20;
@@ -164,6 +166,101 @@ pub(crate) fn wiki_can_edit(role: Option<WorkspaceRole>) -> bool {
 
 fn wiki_can_view(role: Option<WorkspaceRole>) -> bool {
     wiki_can_edit(role)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DocumentPermission {
+    None,
+    View,
+    Edit,
+}
+
+impl DocumentPermission {
+    pub fn at_least(self, min: Self) -> bool {
+        self >= min
+    }
+}
+
+pub(crate) fn wiki_document_permission(role: Option<WorkspaceRole>) -> DocumentPermission {
+    if wiki_can_edit(role) {
+        DocumentPermission::Edit
+    } else {
+        DocumentPermission::None
+    }
+}
+
+pub(crate) async fn document_permission(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<DocumentPermission, DocumentDbError>, sqlx::Error> {
+    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((project_id, deleted_at)) = row else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if deleted_at.is_some() {
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    if project_id.is_none() {
+        let role = membership_role(tx, workspace_id, actor_user_id).await?;
+        return Ok(Ok(wiki_document_permission(role)));
+    }
+    let locked = lock_project(tx, workspace_id, project_id.unwrap()).await?;
+    let Some(locked) = locked else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+    Ok(Ok(match permission {
+        ProjectPermission::None => DocumentPermission::None,
+        ProjectPermission::View => DocumentPermission::View,
+        ProjectPermission::Edit | ProjectPermission::Manage => DocumentPermission::Edit,
+    }))
+}
+
+pub(crate) async fn assert_document_writable(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
+    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((project_id, deleted_at)) = row else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if deleted_at.is_some() {
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    if let Some(project_id) = project_id {
+        let locked = lock_project(tx, workspace_id, project_id).await?;
+        let Some(locked) = locked else {
+            return Ok(Err(DocumentDbError::NotFound));
+        };
+        if locked.status == "archived" {
+            return Ok(Err(DocumentDbError::NotFound));
+        }
+    }
+    Ok(Ok(()))
 }
 
 pub(crate) async fn membership_role(

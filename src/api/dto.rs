@@ -905,6 +905,69 @@ pub struct LookupListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateCommentBody {
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_user_ids: Option<Vec<Uuid>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_group_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchCommentBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentReactionBody {
+    pub emoji: String,
+    pub on: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentReactionSummary {
+    pub count: usize,
+    pub reacted_by_me: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentOutput {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub document_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+    pub parent_id: Option<Uuid>,
+    pub created_by: Uuid,
+    pub body: String,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub reactions: std::collections::HashMap<String, CommentReactionSummary>,
+    pub other_reaction_count: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentListResponse {
+    pub items: Vec<CommentOutput>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct ProblemResponse {
     pub title: String,
