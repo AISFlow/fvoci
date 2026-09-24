@@ -1,96 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  nativeOwnedDeleteDecision,
-  type NativeOwnedDeleteInput,
-} from "../src/react/overlay-owner.ts";
+  isNativeOwnedDeleteKey,
+  type NativeDeleteKey,
+} from "../src/react/native-delete-owner.ts";
 
-const base = (
-  overrides: Partial<NativeOwnedDeleteInput> = {},
-): NativeOwnedDeleteInput => ({
-  editable: true,
+const base = (overrides: Partial<NativeDeleteKey> = {}): NativeDeleteKey => ({
   trusted: true,
+  editable: true,
   composing: false,
   keyCode: 46,
   key: "Delete",
   pmIsTextSelection: true,
-  pmAnchor: 6,
-  pmHead: 6,
-  nativeAnchorInside: true,
-  nativeFocusInside: true,
-  nativeAnchorPos: 3,
-  nativeFocusPos: 3,
   ...overrides,
 });
 
-test("native owner aligns Delete when collapsed native pos differs from PM", () => {
-  assert.deepEqual(nativeOwnedDeleteDecision(base()), {
-    take: true,
-    anchorPos: 3,
-    headPos: 3,
-  });
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(base({ key: "Backspace", keyCode: 8 })),
-    { take: true, anchorPos: 3, headPos: 3 },
-  );
+test("trusted Delete and Backspace on a TextSelection are eligible", () => {
+  assert.equal(isNativeOwnedDeleteKey(base()), true);
+  assert.equal(isNativeOwnedDeleteKey(base({ key: "Backspace", keyCode: 8 })), true);
 });
 
-test("native owner falls through when PM already matches native caret", () => {
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(base({ nativeAnchorPos: 3, nativeFocusPos: 3, pmAnchor: 3, pmHead: 3 })),
-    { take: false },
-  );
+test("untrusted, readonly, composing and IME keydowns are left to PM", () => {
+  assert.equal(isNativeOwnedDeleteKey(base({ trusted: false })), false);
+  assert.equal(isNativeOwnedDeleteKey(base({ editable: false })), false);
+  assert.equal(isNativeOwnedDeleteKey(base({ composing: true })), false);
+  assert.equal(isNativeOwnedDeleteKey(base({ keyCode: 229 })), false);
 });
 
-test("native owner aligns when PM range disagrees with native range", () => {
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(
-      base({
-        nativeAnchorPos: 1,
-        nativeFocusPos: 4,
-        pmAnchor: 6,
-        pmHead: 6,
-      }),
-    ),
-    { take: true, anchorPos: 1, headPos: 4 },
-  );
-});
-
-test("native owner skips untrusted, IME, readonly, non-text PM, and keys outside Delete/Backspace", () => {
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(base({ trusted: false })),
-    { take: false },
-  );
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(base({ composing: true })),
-    { take: false },
-  );
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(base({ keyCode: 229 })),
-    { take: false },
-  );
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(base({ editable: false })),
-    { take: false },
-  );
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(base({ pmIsTextSelection: false })),
-    { take: false },
-  );
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(
-      base({ nativeAnchorInside: false, nativeAnchorPos: null }),
-    ),
-    { take: false },
-  );
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(
-      base({ nativeFocusInside: false, nativeFocusPos: null }),
-    ),
-    { take: false },
-  );
-  assert.deepEqual(
-    nativeOwnedDeleteDecision(base({ key: "Enter", keyCode: 13 })),
-    { take: false },
-  );
+test("other keys and non-text selections are left to PM", () => {
+  assert.equal(isNativeOwnedDeleteKey(base({ key: "ArrowLeft", keyCode: 37 })), false);
+  assert.equal(isNativeOwnedDeleteKey(base({ key: "a", keyCode: 65 })), false);
+  assert.equal(isNativeOwnedDeleteKey(base({ pmIsTextSelection: false })), false);
 });

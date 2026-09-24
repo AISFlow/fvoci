@@ -59,10 +59,8 @@ import {
 	MathNodeView,
 	MermaidNodeView,
 } from "./node-views.js";
-import {
-	nativeOwnedDeleteDecision,
-	overlayOwner,
-} from "./overlay-owner.js";
+import { isNativeOwnedDeleteKey } from "./native-delete-owner.js";
+import { overlayOwner } from "./overlay-owner.js";
 import { parseWorkspaceUrl, resolvePastedEmbed } from "./paste-embed.js";
 import {
 	embedSlashItems,
@@ -111,69 +109,55 @@ export function collabCaretRender(peer: {
 	return caret;
 }
 
-/* WHY: collaboration Delete/Backspace must own one caret. Native Selection can
- * sit at posAtDOM N while PM state.selection still lags (arrow keys are native;
- * awareness/cursor setMeta can selectionToDOM the stale PM caret). Direct
- * editorProps.handleKeyDown runs before plugins: if the native caret/range
- * differs, a selection-only tr (addToHistory false) aligns PM and we return
- * false so Tiptap's stock Backspace/Delete chain (undoInputRule, join, atom
- * captureKeyDown) runs on the corrected selection. Untrusted keydown is
- * skipped — Android readDOMChange synthesizes Backspace. placeContentCaret
- * [1,1] is a different writer (selection-only awareness tr restoring PM over
- * a native Range) and is not a Delete keydown, so it is not changed here. */
-function nativeSelectionPositions(
-	view: EditorView,
-): { anchor: number; head: number } | null {
-	const domSel = view.dom.ownerDocument.defaultView?.getSelection();
-	if (!domSel || domSel.rangeCount === 0) return null;
-	const { anchorNode, focusNode } = domSel;
-	if (!anchorNode || !focusNode) return null;
-	if (!view.dom.contains(anchorNode) || !view.dom.contains(focusNode)) {
-		return null;
-	}
-	try {
-		return {
-			anchor: view.posAtDOM(anchorNode, domSel.anchorOffset),
-			head: view.posAtDOM(focusNode, domSel.focusOffset),
-		};
-	} catch {
-		return null;
-	}
-}
-
+/* WHY: see native-delete-owner.ts. When PM's selection lags the native caret at
+ * a Delete/Backspace keydown, dispatch one selection-only transaction and return
+ * false so Tiptap's stock chain (undoInputRule, joins, atom handling) runs on the
+ * caret the user sees. The native caret is mapped like PM's selectionFromDOM
+ * (bias 1, TextSelection.between normalisation) and skipped inside
+ * non-editable leaf DOM, where PM would pick a different position or a
+ * NodeSelection. placeContentCaret's [1,1] case is a different writer and is not
+ * handled here. */
 function handleNativeOwnedDeleteKeyDown(
 	view: EditorView,
 	event: KeyboardEvent,
 ): boolean {
 	const selection = view.state.selection;
-	const native = nativeSelectionPositions(view);
-	const decision = nativeOwnedDeleteDecision({
-		editable: view.editable,
-		trusted: event.isTrusted,
-		composing: event.isComposing,
-		keyCode: event.keyCode,
-		key: event.key,
-		pmIsTextSelection: selection instanceof TextSelection,
-		pmAnchor: selection.$anchor.pos,
-		pmHead: selection.$head.pos,
-		nativeAnchorInside: native != null,
-		nativeFocusInside: native != null,
-		nativeAnchorPos: native?.anchor ?? null,
-		nativeFocusPos: native?.head ?? null,
-	});
-	if (!decision.take) return false;
+	if (
+		!isNativeOwnedDeleteKey({
+			trusted: event.isTrusted,
+			editable: view.editable,
+			composing: event.isComposing,
+			keyCode: event.keyCode,
+			key: event.key,
+			pmIsTextSelection: selection instanceof TextSelection,
+		})
+	) {
+		return false;
+	}
+	const domSel = view.dom.ownerDocument.defaultView?.getSelection();
+	const anchorNode = domSel?.anchorNode;
+	const focusNode = domSel?.focusNode;
+	if (!domSel || !anchorNode || !focusNode) return false;
+	if (!view.dom.contains(anchorNode) || !view.dom.contains(focusNode)) {
+		return false;
+	}
+	for (const node of [anchorNode, focusNode]) {
+		const element = node instanceof Element ? node : node.parentElement;
+		const leaf = element?.closest('[contenteditable="false"]');
+		if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return false;
+	}
+	let aligned: TextSelection;
 	try {
-		const aligned = TextSelection.create(
-			view.state.doc,
-			decision.anchorPos,
-			decision.headPos,
-		);
-		view.dispatch(
-			view.state.tr.setSelection(aligned).setMeta("addToHistory", false),
-		);
+		const doc = view.state.doc;
+		aligned = TextSelection.between(
+			doc.resolve(view.posAtDOM(anchorNode, domSel.anchorOffset, 1)),
+			doc.resolve(view.posAtDOM(focusNode, domSel.focusOffset, 1)),
+		) as TextSelection;
 	} catch {
 		return false;
 	}
+	if (aligned.eq(selection)) return false;
+	view.dispatch(view.state.tr.setSelection(aligned));
 	return false;
 }
 
