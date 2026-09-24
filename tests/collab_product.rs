@@ -7,6 +7,9 @@ use std::time::Duration;
 
 use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
+use collab_engine::outcome::EngineStatus;
+use collab_engine::process::{EngineSession, SpawnRequest};
+use collab_engine::protocol::Request;
 use futures_util::{SinkExt, StreamExt};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::new_token;
@@ -43,6 +46,7 @@ use fvoci_server::db::{documents, migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
 use rand::RngCore;
+use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio::sync::{mpsc, watch};
@@ -536,6 +540,49 @@ fn tiptap_xml_pending_u2() -> Vec<u8> {
     engine_fixture("pending_u2.v1")
 }
 
+fn engine_expectations() -> Value {
+    serde_json::from_str(include_str!(
+        "../crates/collab-engine/fixtures/expectations.json"
+    ))
+    .expect("pinned engine expectations.json")
+}
+
+fn pending_tiptap_u1_json() -> Value {
+    engine_expectations()["pending"]["prosemirror_json_u1"].clone()
+}
+
+fn pending_tiptap_both_json() -> Value {
+    engine_expectations()["pending"]["prosemirror_json_both"].clone()
+}
+
+fn project_snapshot_json(snapshot: &[u8]) -> Value {
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin: engine_bin(),
+        limits: collab_engine::Limits::for_tests(),
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .expect("spawn helper to restore snapshot");
+    let load = session.call(&Request::Load {
+        snapshot_b64: Some(snapshot.to_vec()),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    });
+    match load.outcome {
+        EngineStatus::Ok { applied: true, .. } => {}
+        other => panic!("snapshot load must apply, got {other:?}"),
+    }
+    match session.call(&Request::Project { encoding: 1 }).outcome {
+        EngineStatus::Ok {
+            content_json: Some(json),
+            ..
+        } => json,
+        other => panic!("snapshot Project must return Tiptap JSON, got {other:?}"),
+    }
+}
+
 fn engine_fixture(name: &str) -> Vec<u8> {
     std::fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -633,6 +680,10 @@ enum PersistOutcome {
     Persisted,
     Failed(String),
     Closed(Option<String>),
+    Eof,
+    WsError(String),
+    UnexpectedStateless(String),
+    InvalidFrame(String),
     Timeout,
 }
 
@@ -648,23 +699,38 @@ async fn wait_for_persist_outcome(
     let deadline = tokio::time::Instant::now() + within;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match recv_document_frame_within(ws, remaining.min(Duration::from_millis(200))).await {
-            Some(WireFrame::Document {
-                message: DocumentMessage::Stateless(body),
-                ..
-            }) => {
-                if body == persisted {
-                    return PersistOutcome::Persisted;
-                }
-                if body == failed || body.starts_with("persist-failed:") {
-                    return PersistOutcome::Failed(body);
+        match tokio::time::timeout(remaining.min(Duration::from_millis(200)), ws.next()).await {
+            Err(_) => continue,
+            Ok(None) => return PersistOutcome::Eof,
+            Ok(Some(Err(err))) => return PersistOutcome::WsError(err.to_string()),
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                return PersistOutcome::Closed(frame.map(|close| close.reason.to_string()));
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                match fvoci_server::collab::wire::decode(&bytes) {
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Stateless(body),
+                        ..
+                    }) => {
+                        if body == persisted {
+                            return PersistOutcome::Persisted;
+                        }
+                        if body == failed {
+                            return PersistOutcome::Failed(body);
+                        }
+                        if body.starts_with("persisted:") || body.starts_with("persist-failed:") {
+                            return PersistOutcome::UnexpectedStateless(body);
+                        }
+                    }
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Close { reason },
+                        ..
+                    }) => return PersistOutcome::Closed(reason),
+                    Ok(_) => {}
+                    Err(err) => return PersistOutcome::InvalidFrame(err.to_string()),
                 }
             }
-            Some(WireFrame::Document {
-                message: DocumentMessage::Close { reason },
-                ..
-            }) => return PersistOutcome::Closed(reason),
-            _ => {}
+            Ok(Some(Ok(_))) => {}
         }
     }
     PersistOutcome::Timeout
@@ -685,6 +751,18 @@ async fn expect_persisted(
         ),
         PersistOutcome::Closed(reason) => panic!(
             "{context}: unexpected Close before persist ack for {request_id} ({reason:?})"
+        ),
+        PersistOutcome::Eof => panic!(
+            "{context}: WebSocket EOF before persist ack for {request_id}"
+        ),
+        PersistOutcome::WsError(err) => panic!(
+            "{context}: WebSocket error before persist ack for {request_id}: {err}"
+        ),
+        PersistOutcome::UnexpectedStateless(body) => panic!(
+            "{context}: persist reply {body} is not exact persisted:{request_id}"
+        ),
+        PersistOutcome::InvalidFrame(err) => panic!(
+            "{context}: undecodable frame before persist ack for {request_id}: {err}"
         ),
         PersistOutcome::Timeout => panic!(
             "{context}: timed out waiting for persisted:{request_id} ({within:?})"
@@ -1481,6 +1559,26 @@ async fn collab_persist_barrier_and_id_correlation() {
     )
     .await;
 
+    let after_first = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        after_first.tail.is_empty(),
+        "first persist should compact tail"
+    );
+    assert_eq!(
+        project_snapshot_json(&after_first.snapshot),
+        pending_tiptap_u1_json(),
+        "first persist snapshot must project pending u1 text one"
+    );
+
     writer
         .send(Message::Binary(
             sync_update_frame(&routing_key, &second).into(),
@@ -1517,10 +1615,10 @@ async fn collab_persist_barrier_and_id_correlation() {
     .unwrap();
     assert_eq!(load.snapshot_cutoff_seq, load.tail_seq);
     assert!(load.tail.is_empty(), "persist should compact tail");
-    assert_ne!(
-        load.snapshot,
-        vec![0, 0],
-        "snapshot must hold sequential Tiptap XmlFragment edits"
+    assert_eq!(
+        project_snapshot_json(&load.snapshot),
+        pending_tiptap_both_json(),
+        "compacted snapshot must project pending u1 one and u2 two한글"
     );
     harness.cleanup().await;
 }
@@ -1618,7 +1716,11 @@ async fn collab_primary_recycles_after_op_cap_then_edits_persist() {
         assert_eq!(load.tail_seq, 1);
         assert_eq!(load.snapshot_cutoff_seq, load.tail_seq);
         assert!(load.tail.is_empty(), "persist compacts accepted tail");
-        assert_ne!(load.snapshot, vec![0, 0], "snapshot must hold the edit");
+        assert_eq!(
+            project_snapshot_json(&load.snapshot),
+            pending_tiptap_u1_json(),
+            "recycled persist snapshot must project pending u1 text one"
+        );
         harness.cleanup().await;
     })
     .await
