@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { installNodeApiClient } from "../../../test/node-api-fetch.ts";
+import { installNodeRelativeRequestShim } from "../../../test/node-api-fetch.ts";
 
-installNodeApiClient();
+const restoreNodeRequest = installNodeRelativeRequestShim();
 
 const WS = "11111111-1111-7111-8111-111111111111";
 const DOC = "22222222-2222-7222-8222-222222222222";
@@ -94,12 +94,11 @@ async function loadBridge(
 }
 
 test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
-  t.beforeEach(() => {
-    installNodeApiClient();
+  t.after(() => {
+    restoreNodeRequest();
   });
   t.afterEach(() => {
     globalThis.fetch = originalFetch;
-    installNodeApiClient();
   });
 
   await t.test("part boundaries use the trailing remainder size", async () => {

@@ -2,30 +2,9 @@ import { t, tProblemTitle } from "@fvoci/i18n";
 import createClient from "openapi-fetch";
 import type { components, paths } from "@/generated/api";
 
-export type ApiClient = ReturnType<typeof createClient<paths>>;
-
-export function createApiClient(options?: { baseUrl?: string }): ApiClient {
-  return createClient<paths>({
-    credentials: "include",
-    fetch: (input) => globalThis.fetch(input),
-    ...options,
-  });
-}
-
-let apiClient = createApiClient();
-
-/** Test harness: install a client before importing modules that call the shared api. */
-export function installApiClient(client: ApiClient): void {
-  apiClient = client;
-}
-
-export const api: ApiClient = new Proxy({} as ApiClient, {
-  get(_target, prop) {
-    const value = Reflect.get(apiClient, prop, apiClient);
-    return typeof value === "function"
-      ? (value as (...args: unknown[]) => unknown).bind(apiClient)
-      : value;
-  },
+export const api = createClient<paths>({
+  credentials: "include",
+  fetch: (input) => globalThis.fetch(input),
 });
 
 type ProblemBody = components["schemas"]["ProblemResponse"];
