@@ -1687,3 +1687,52 @@ ctxe8025b41879f가 backend와 위임된 OpenAPI 오류등록만 소유하며 hea
 아직 없는 후속 diff/원격 CI의 성공으로 사용하지 않는다. 세션 lock 취소 누출을
 막는 close_on_drop-before-acquire 순서는 유지하며, pool churn 개선은 안전을
 약화하지 않는 후속 설계가 필요하다. 추출 job은 미구현/미dispatch, 열린 PR 없음.
+
+2026-09-24 09:42 UTC: React3421daf 후속 diff를 통합했고 제품의 test-only URL을
+제거했다. 테스트는 하네스의 Request URL 보완을 사용한다. 코디네이터는 소스
+문자열 존재 여부만 검사하는 새 guard를 제거했고 실제 동작 web67/타입검사 및
+첨부 구조 oracle1을 실행했다. 최초 통합 npm test는 미준비 typescript 때문에
+실패했으며 lockfile npm ci 준비 후 성공했다. 추가 oracle은 기존 Web CI에
+연결했다. 강화된 구조 비교의 브라우저 검사는 최종 CI에서 아직 실행해야 한다.
+Grok ctxe8025b41879f는 취소-safe 파일 생성과 상대/신규 root의 fsync,
+고유 경로별 barrier 및416/etag/OpenAPI 보강을 마무리 중이다.
+
+독립적인 다음 제품 구현을 Composer task6eb96cd402f4/ctx7c634e278fc4에
+배정했다. 실제 requested/effective composer-2.5 일치, effort 미지정과 TUI를
+확인했다. rust-attachment-native-job는 통합cd3515f의 명시적 의존 worktree다.
+새 migration007/추출 job/얇은 client 의존성/config/main만 단독 위임했으며
+Grok의 기존 storage/HTTP/DB attachment/API 파일과 겹치지 않는다. 제한된
+durable claim/lease-token CAS/current-parent 확인과 원본 보존·cancel/join을
+구현한다. 현재 첨부 저장 PR이 수락되면 최신main으로 기준을 통합한 뒤 후속
+PR을 만들며, 지금 추출 기능 완료나 새 PR 생성으로 기록하지 않는다. heavy
+local slot은 여전히 Grok이고 추출 worker는 별도 승인을 기다린다.
+
+Storage 보강 제출810d98c를 정상 통합했다. Grok 실제 첨부 단위10/스키마2 및
+lib clippy 성공, DB20은062f43f에서 실행했고 후속 상대경로/검사 helper 변경의
+성공으로 재사용하지 않는다. 최종 원격 PG에서 다시 확인한다. 초기 OpenAPI
+nullable 검사 실패는 oneOf null 표현 처리로 수정했고 preview assertion은
+유지했다. fsync 증거는 syscall/재열기 검사이며 실제 전원 손실 시험이 아니다.
+ctxe8025b41879f는 worker_done 수락 후 release했다. heavy slot은 통합 API
+생성을 위해 코디네이터가 잠시 사용한 뒤 native-job worker에 인계한다.
+
+최종 API exporter의 새 통합 target cold build53.94s와 OpenAPI/TS 생성이
+성공했다(의존성 다운로드 캐시 재사용, parser 미포함). native-job 첫 제출은
+DB/native 미실행·미커밋인 부분 구현이므로 수락하지 않았다. 같은 Composer
+terminal을 task68c510eee6b0/ctx6d15a07f0517로 재사용해 실제 앱 역할 DB/native
+HTTP 검사, 부모 삭제 경합과 종료 join을 끝까지 수행하게 했다. 기존 diff는
+보존했고 worker가 checkpoint commit 후 최종 storage 기준을 병합한다.
+
+PR10 https://github.com/AISFlow/fvoci/pull/10 생성(Draft, 미merged).
+head7653280d39b1094b56b142cfce3e29c6ded52541, base59b6ecd, CI 합성
+deb87d366e58928284111f8e8c4add9c02156c84. Rust35983576221,
+Web35983576153, Documents35983576184, Engine35983576182의 실제job이
+시작됐다. 아직 성공이 아니다. Claude Code Opus5.5 medium task17f2b2984f34/
+ctx39428db60a34의 requested/effective와 turnStart observed를 대조했다.
+검토는7653280 고정이며 sourcec40305a 이후 delta와 남은 차단 해소만 확인한다.
+로컬 heavy slot은 Composer ctx6d15a07f0517에 인계했다. native-job은 현재
+미수락이며 PR10에는 포함하지 않는다. 검증 중인HEAD는 상태 기록으로 재push하지 않는다.
+
+PR10 첫 Web collaboration-flow는107580924016에서 TS5097(import .ts 확장자)로
+브라우저 시작 전 실패했다. 기존 bundler 규칙과 같은 확장자 없는 import로
+고쳤고 해당 tsc와 oracle1을 로컬에서 다시 통과했다. 이 첫 실행의 네이티브
+4job/fast는 성공했지만 전체 CI 성공으로 기록하지 않는다. 후속HEAD 재실행 필요.

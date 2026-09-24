@@ -410,8 +410,11 @@ fn get_body() {}
     request_body = CreateAttachmentUploadBody,
     responses(
         (status = 201, description = "Upload session created", body = CreateAttachmentUploadResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
         (status = 413, description = "File too large", body = ProblemResponse),
+        (status = 429, description = "Create rate limited", body = ProblemResponse),
     )
 )]
 fn create_attachment_upload() {}
@@ -429,8 +432,12 @@ fn create_attachment_upload() {}
     ),
     responses(
         (status = 200, description = "Part stored", body = PutAttachmentPartResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 403, description = "Uploader mismatch", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Upload is not in the required state", body = ProblemResponse),
+        (status = 413, description = "Part too large", body = ProblemResponse),
     )
 )]
 fn put_attachment_part() {}
@@ -447,8 +454,10 @@ fn put_attachment_part() {}
     ),
     responses(
         (status = 200, description = "Resume state", body = ResumeAttachmentUploadResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 403, description = "Uploader mismatch", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Upload is not in the required state", body = ProblemResponse),
     )
 )]
 fn resume_attachment_upload() {}
@@ -467,8 +476,10 @@ fn resume_attachment_upload() {}
     responses(
         (status = 200, description = "Stored attachment", body = AttachmentOutput),
         (status = 400, description = "Invalid parts", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 403, description = "Uploader mismatch", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Upload is not in the required state", body = ProblemResponse),
     )
 )]
 fn complete_attachment_upload() {}
@@ -485,6 +496,7 @@ fn complete_attachment_upload() {}
     ),
     responses(
         (status = 200, description = "Attachment metadata", body = AttachmentOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
     )
 )]
@@ -504,6 +516,8 @@ fn get_attachment_meta() {}
     responses(
         (status = 200, description = "Original bytes", content_type = "application/octet-stream"),
         (status = 206, description = "Partial content", content_type = "application/octet-stream"),
+        (status = 400, description = "Invalid download variant", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
         (status = 416, description = "Range not satisfiable", body = ProblemResponse),
     )
@@ -520,6 +534,60 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
 
+    fn schema_is_nullable(schema: &Value) -> bool {
+        if schema["type"]
+            .as_array()
+            .is_some_and(|types| types.iter().any(|ty| ty == "null"))
+        {
+            return true;
+        }
+        for key in ["oneOf", "anyOf"] {
+            let Some(alts) = schema[key].as_array() else {
+                continue;
+            };
+            let has_null = alts
+                .iter()
+                .any(|alt| alt.get("type") == Some(&json!("null")));
+            let has_value = alts
+                .iter()
+                .any(|alt| alt.get("type") != Some(&json!("null")));
+            if has_null && has_value {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn assert_required_nullable(schemas: &Value, name: &str, field: &str) {
+        assert!(
+            schemas[name]["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} missing required"))
+                .contains(&json!(field)),
+            "{name}.{field} must be required"
+        );
+        assert!(
+            schema_is_nullable(&schemas[name]["properties"][field]),
+            "{name}.{field} must be nullable, got {}",
+            schemas[name]["properties"][field]
+        );
+    }
+
+    fn assert_required_non_nullable(schemas: &Value, name: &str, field: &str) {
+        assert!(
+            schemas[name]["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} missing required"))
+                .contains(&json!(field)),
+            "{name}.{field} must be required"
+        );
+        assert!(
+            !schema_is_nullable(&schemas[name]["properties"][field]),
+            "{name}.{field} must not be nullable, got {}",
+            schemas[name]["properties"][field]
+        );
+    }
+
     #[test]
     fn generated_nullability_matches_runtime_contract() {
         let spec: Value = serde_json::from_str(&spec_json()).unwrap();
@@ -529,14 +597,7 @@ mod tests {
             ("MemberResponse", &["familyName"][..]),
         ] {
             for field in fields {
-                assert!(schemas[name]["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(field)));
-                assert!(schemas[name]["properties"][field]["type"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("null")));
+                assert_required_nullable(schemas, name, field);
             }
         }
         for (name, fields) in [
@@ -552,15 +613,11 @@ mod tests {
             ),
         ] {
             for field in fields {
-                assert!(schemas[name]["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(field)));
-                assert!(schemas[name]["properties"][field]["type"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("null")));
+                assert_required_nullable(schemas, name, field);
             }
+        }
+        for field in ["id", "name", "mime", "scanStatus"] {
+            assert_required_non_nullable(schemas, "AttachmentOutput", field);
         }
         let create = &schemas["CreateDocumentBody"];
         assert!(create["required"]
@@ -595,6 +652,80 @@ mod tests {
                 .err()
                 .expect("null rejected");
             assert_eq!(error.source, Some(format!("/{field}")));
+        }
+    }
+
+    fn response_statuses(spec: &Value, path: &str, method: &str) -> Vec<String> {
+        spec["paths"][path][method]["responses"]
+            .as_object()
+            .expect("responses")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn attachment_routes_declare_runtime_error_statuses() {
+        let spec: Value = serde_json::from_str(&spec_json()).unwrap();
+        let create = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads",
+            "post",
+        );
+        for status in ["201", "400", "401", "404", "413", "429"] {
+            assert!(
+                create.iter().any(|s| s == status),
+                "create missing {status}"
+            );
+        }
+        let put = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/parts/{part_number}",
+            "put",
+        );
+        for status in ["200", "400", "401", "403", "404", "409", "413"] {
+            assert!(put.iter().any(|s| s == status), "put missing {status}");
+        }
+        let resume = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload",
+            "get",
+        );
+        for status in ["200", "401", "403", "404", "409"] {
+            assert!(
+                resume.iter().any(|s| s == status),
+                "resume missing {status}"
+            );
+        }
+        let complete = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete",
+            "post",
+        );
+        for status in ["200", "400", "401", "403", "404", "409"] {
+            assert!(
+                complete.iter().any(|s| s == status),
+                "complete missing {status}"
+            );
+        }
+        let meta = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}",
+            "get",
+        );
+        for status in ["200", "401", "404"] {
+            assert!(meta.iter().any(|s| s == status), "meta missing {status}");
+        }
+        let download = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download",
+            "get",
+        );
+        for status in ["200", "206", "400", "401", "404", "416"] {
+            assert!(
+                download.iter().any(|s| s == status),
+                "download missing {status}"
+            );
         }
     }
 }

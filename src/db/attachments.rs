@@ -77,8 +77,11 @@ struct AttachmentSessionLock {
 impl AttachmentSessionLock {
     async fn try_acquire(pool: &PgPool, attachment_id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         let mut conn = pool.acquire().await?;
-        // Never return this connection to the pool: session advisory locks must not
-        // survive pool reuse, including when this task is cancelled mid-flight.
+        // Fail-safe: close_on_drop before try-lock so cancellation during
+        // acquisition cannot return a lock-holding connection to the pool.
+        // Moving this after a successful lock would leak a session advisory lock
+        // if the task is cancelled between acquire and the flag. Connection churn
+        // while losers poll is a tracked follow-up (review N3), not this change.
         conn.close_on_drop();
         let lock_key = lock_key_from_uuid(attachment_id);
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
@@ -784,8 +787,14 @@ async fn complete_owned_inner(
         .await
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     let needs_assembly = if att.status == "assembling" {
-        !payload_exists
+        true
     } else if att.status == "uploading" {
+        if payload_exists {
+            storage
+                .discard_uncommitted_payload(&storage_key)
+                .await
+                .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
+        }
         let rows = sqlx::query(
             "UPDATE fvoci.attachments SET status = 'assembling' WHERE workspace_id = $1 AND id = $2 AND status = 'uploading'",
         )

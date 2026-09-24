@@ -10,7 +10,7 @@ import { createE2eUser } from "../e2e/helpers";
 import {
   attachmentNodesFromDocument,
   type AttachmentNodeShape,
-} from "./collab-attachment-oracle.ts";
+} from "./collab-attachment-oracle";
 import { startOwnedServer, type OwnedServer } from "./collab-restart";
 import {
   COLLAB_PERSIST_DONE,
