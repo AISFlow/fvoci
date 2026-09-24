@@ -1759,3 +1759,17 @@ Native job Composer8a0b664 제출: DB12/native5 통과이나 즉시취소 검사
 이 워커가 보유한다. 누락된808 전체기준 정상merge도 명시승인했다. PR10과
 별개이며 아직 새PR 없음. 코디네이터의 D5 로컬검사는 cold compile이 시작되어
 중단(exit130)했고 통과로 기록하지 않는다. 최종원격에서 관련검사를 실행한다.
+
+2026-09-24 10:56 UTC main0582c29 선택영역 진단:
+main Web35985930227의 delete-only/structured문서 시나리오에서 Shift+Home 후
+DOM/ProseMirror 선택이 모두 빈 문자열로 실패했다(17/18). 실제 원인 미확정.
+Grok task02ef291a2891/ctx4a1b94234068의58b325d는 bounded80개 이벤트 진단이며
+수정완료 아님. 로컬setup+해당시나리오2pass19s는 실패해소 증거로 사용하지 않는다.
+Opus task27836dfdbae0/ctxc0a645ae30de는 input-event의 일시적PM lag만으로
+후속키 경합을 설명할 수 없다고 확인했다(읽기전용, 테스트미실행).
+코디네이터는 입력 직후 DOM/PM커서·focus·editable을 읽기만 하는 엄격한 전제조건과
+실패시 root/editor동일성·재접속 횟수 진단을 추가했다. native Shift+Home 및
+선택문자열/marks/table/ID/저장복원 assertion은 유지한다. 선택을 강제로 설정하거나
+timeout/retry를 늘리지 않았다. 이 변경도 과거실패의 원인해소라고 주장하지 않는다.
+정확한 새HEAD의 원격실행 및 독립검토 전 미수락. 두조사dispatch release완료,
+현재heavy local슬롯은 project/task Composer taske52f987188e4/ctxfe53e7184240.

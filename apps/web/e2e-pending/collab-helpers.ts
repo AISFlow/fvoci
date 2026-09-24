@@ -430,6 +430,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
       __fvociCaretProbe?: Array<Record<string, unknown>>;
       __fvociCaretProbeInstalled?: boolean;
       __fvociCaretProbeEditor?: boolean;
+      __fvociCaretSnapshot?: () => Record<string, unknown>;
     };
     if (host.__fvociCaretProbeInstalled) return;
     host.__fvociCaretProbeInstalled = true;
@@ -439,6 +440,9 @@ export async function installCaretProbe(page: Page): Promise<void> {
       log.push(event);
       if (log.length > 80) log.splice(0, log.length - 80);
     };
+    const initialRoot = document.querySelector(".fvoci-editor .ProseMirror") as
+      (HTMLElement & { editor?: unknown }) | null;
+    const initialEditor = initialRoot?.editor;
     const snap = (kind: string, extra: Record<string, unknown> = {}) => {
       const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
         editor?: {
@@ -461,6 +465,11 @@ export async function installCaretProbe(page: Page): Promise<void> {
       return {
         kind,
         t: Date.now(),
+        sameRoot: root === initialRoot,
+        sameEditor: live === initialEditor,
+        initialRootConnected: initialRoot?.isConnected ?? false,
+        editable: root?.getAttribute("contenteditable") ?? null,
+        nativeInside: Boolean(root && anchor && root.contains(anchor)),
         focused: Boolean(root && document.activeElement === root),
         browser: native?.toString() ?? "",
         nativeCollapsed: native?.isCollapsed ?? null,
@@ -478,6 +487,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
         ...extra,
       };
     };
+    host.__fvociCaretSnapshot = () => snap("failure-snapshot");
     document.addEventListener("input", () => {
       push(snap("input"));
       queueMicrotask(() => push(snap("input-microtask")));
@@ -532,10 +542,13 @@ export async function installCaretProbe(page: Page): Promise<void> {
   });
 }
 
-export async function readCaretProbe(page: Page): Promise<unknown[]> {
+export async function readCaretProbe(page: Page): Promise<unknown> {
   return page.evaluate(() => {
-    const host = globalThis as unknown as { __fvociCaretProbe?: unknown[] };
-    return host.__fvociCaretProbe ?? [];
+    const host = globalThis as unknown as {
+      __fvociCaretProbe?: unknown[];
+      __fvociCaretSnapshot?: () => Record<string, unknown>;
+    };
+    return { events: host.__fvociCaretProbe ?? [], current: host.__fvociCaretSnapshot?.() };
   });
 }
 
