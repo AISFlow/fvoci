@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -86,11 +87,43 @@ pub async fn disarm_join_barrier(document_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
+static ACTOR_PANIC_AFTER_JOIN_BARRIER: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashSet<Uuid>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_actor_panic_after_join_barrier(document_id: Uuid) {
+    ACTOR_PANIC_AFTER_JOIN_BARRIER
+        .lock()
+        .await
+        .insert(document_id);
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_actor_panic_after_join_barrier(document_id: Uuid) {
+    ACTOR_PANIC_AFTER_JOIN_BARRIER
+        .lock()
+        .await
+        .remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn consume_actor_panic_after_join_barrier(document_id: Uuid) -> bool {
+    ACTOR_PANIC_AFTER_JOIN_BARRIER
+        .lock()
+        .await
+        .remove(&document_id)
+}
+
+#[cfg(feature = "db-tests")]
 async fn pause_for_join_barrier(document_id: Uuid) {
     let barrier = JOIN_BARRIERS.lock().await.remove(&document_id);
     if let Some(barrier) = barrier {
         let _ = barrier.reached_tx.send(());
         let _ = barrier.proceed_rx.await;
+        if consume_actor_panic_after_join_barrier(document_id).await {
+            panic!("db-tests collab actor panic after join barrier");
+        }
     }
 }
 
@@ -356,6 +389,117 @@ async fn pause_for_append_projection_barrier(document_id: Uuid) {
     }
 }
 
+#[cfg(feature = "db-tests")]
+static ACTOR_PANIC_ON_FRAME: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashSet<Uuid>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_actor_panic_on_next_frame(document_id: Uuid) {
+    ACTOR_PANIC_ON_FRAME.lock().await.insert(document_id);
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_actor_panic_on_next_frame(document_id: Uuid) {
+    ACTOR_PANIC_ON_FRAME.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn consume_actor_panic_on_frame(document_id: Uuid) -> bool {
+    ACTOR_PANIC_ON_FRAME.lock().await.remove(&document_id)
+}
+
+#[cfg(feature = "db-tests")]
+static TEARDOWN_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_teardown_barrier(
+    document_id: Uuid,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    TEARDOWN_BARRIERS.lock().await.insert(
+        document_id,
+        AppendRevokeBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_teardown_barrier(document_id: Uuid) {
+    TEARDOWN_BARRIERS.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_before_guard_release(document_id: Uuid) {
+    let barrier = TEARDOWN_BARRIERS.lock().await.remove(&document_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
+#[cfg(feature = "db-tests")]
+static ENGINE_STOP_WITNESSES: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_engine_stop_witness(document_id: Uuid) -> oneshot::Receiver<()> {
+    let (tx, rx) = oneshot::channel();
+    assert!(ENGINE_STOP_WITNESSES
+        .lock()
+        .await
+        .insert(document_id, tx)
+        .is_none());
+    rx
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_engine_stop_witness(document_id: Uuid) {
+    ENGINE_STOP_WITNESSES.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn signal_engine_stopped(document_id: Uuid) {
+    if let Some(tx) = ENGINE_STOP_WITNESSES.lock().await.remove(&document_id) {
+        let _ = tx.send(());
+    }
+}
+
+#[cfg(feature = "db-tests")]
+static JOIN_CHANNEL_ADMISSIONS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_join_channel_admission_witness(conn_id: Uuid) -> oneshot::Receiver<()> {
+    let (tx, rx) = oneshot::channel();
+    assert!(JOIN_CHANNEL_ADMISSIONS
+        .lock()
+        .await
+        .insert(conn_id, tx)
+        .is_none());
+    rx
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_join_channel_admission_witness(conn_id: Uuid) {
+    JOIN_CHANNEL_ADMISSIONS.lock().await.remove(&conn_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn signal_join_channel_admitted(conn_id: Uuid) {
+    if let Some(tx) = JOIN_CHANNEL_ADMISSIONS.lock().await.remove(&conn_id) {
+        let _ = tx.send(());
+    }
+}
+
 const OUTBOUND_FRAME_OVERHEAD: usize = 48;
 
 async fn wait_spawn_room_block(_document_id: Uuid) {
@@ -541,6 +685,27 @@ pub enum JoinError {
     DbError,
 }
 
+#[allow(dead_code)]
+pub(crate) enum JoinDelivery {
+    Replied(Result<ConnectionLease, JoinError>),
+    /// Actor mailbox closed; eligible for stale-slot retry when F7 lands.
+    NotDelivered(RoomJoin),
+    /// Mailbox full; not eligible for stale-slot retry.
+    QueueFull(RoomJoin),
+    NoReply,
+}
+
+impl std::fmt::Debug for JoinDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Replied(result) => f.debug_tuple("Replied").field(result).finish(),
+            Self::NotDelivered(_) => f.write_str("NotDelivered(..)"),
+            Self::QueueFull(_) => f.write_str("QueueFull(..)"),
+            Self::NoReply => f.write_str("NoReply"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RoomHandle {
     tx: mpsc::Sender<RoomCommand>,
@@ -559,6 +724,8 @@ impl RoomHandle {
             .send(RoomCommand::Join(join, reply_tx))
             .await
             .map_err(|_| JoinError::EngineUnavailable)?;
+        #[cfg(feature = "db-tests")]
+        signal_join_channel_admitted(conn_id).await;
         #[cfg(feature = "db-tests")]
         pause_before_join_reply(conn_id).await;
         reply_rx.await.map_err(|_| JoinError::EngineUnavailable)?
@@ -589,6 +756,25 @@ impl RoomHandle {
 
     pub async fn shutdown(&self) {
         let _ = self.tx.send(RoomCommand::Shutdown).await;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn deliver_join(&self, join: RoomJoin) -> JoinDelivery {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        match self.tx.try_send(RoomCommand::Join(join, reply_tx)) {
+            Ok(()) => match reply_rx.await {
+                Ok(result) => JoinDelivery::Replied(result),
+                Err(_) => JoinDelivery::NoReply,
+            },
+            Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => match cmd {
+                RoomCommand::Join(join, _) => JoinDelivery::QueueFull(join),
+                _ => JoinDelivery::NoReply,
+            },
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(cmd)) => match cmd {
+                RoomCommand::Join(join, _) => JoinDelivery::NotDelivered(join),
+                _ => JoinDelivery::NoReply,
+            },
+        }
     }
 }
 
@@ -679,7 +865,7 @@ pub async fn spawn_room(
     wait_spawn_room_block(document_id).await;
     let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
         .map_err(|_| JoinError::EngineUnavailable)?;
-    let (tx, rx) = mpsc::channel(config.max_queued_room_ops);
+    let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
     let (finished_tx, finished_rx) = oneshot::channel();
     let actor = RoomActor {
         workspace_id,
@@ -711,10 +897,30 @@ pub async fn spawn_room(
         flushing_awareness: false,
     };
     tokio::spawn(async move {
-        actor.run(rx).await;
-        let _ = finished_tx.send(());
+        let mut actor = actor;
+        let document_id = actor.document_id;
+        let exit = match AssertUnwindSafe(actor.run_loop(&mut rx))
+            .catch_unwind()
+            .await
+        {
+            Ok(exit) => exit,
+            Err(_) => {
+                tracing::error!(document_id = %document_id, "collab actor panicked");
+                RoomExit::Panicked
+            }
+        };
+        let teardown_clean = actor.teardown(rx, exit).await;
+        if matches!(exit, RoomExit::Clean) && teardown_clean {
+            let _ = finished_tx.send(());
+        }
     });
     Ok((RoomHandle { tx }, finished_rx))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomExit {
+    Clean,
+    Panicked,
 }
 
 enum LockingAuth {
@@ -761,7 +967,7 @@ impl RoomActor {
         });
     }
 
-    async fn run(mut self, mut rx: mpsc::Receiver<RoomCommand>) {
+    async fn run_loop(&mut self, rx: &mut mpsc::Receiver<RoomCommand>) -> RoomExit {
         let mut acl_tick = tokio::time::interval(Duration::from_millis(self.config.revoke_poll_ms));
         acl_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -814,15 +1020,40 @@ impl RoomActor {
                 break;
             }
         }
+        RoomExit::Clean
+    }
+
+    async fn teardown(mut self, mut rx: mpsc::Receiver<RoomCommand>, exit: RoomExit) -> bool {
+        let (close_code, close_reason) = match exit {
+            RoomExit::Clean => (1001, "server shutdown"),
+            RoomExit::Panicked => (1011, "collab unavailable"),
+        };
+
+        rx.close();
+        while let Ok(cmd) = rx.try_recv() {
+            if let RoomCommand::Join(_, reply) = cmd {
+                let _ = reply.send(Err(JoinError::EngineUnavailable));
+            }
+        }
+
         for (_, conn) in self.connections.drain() {
-            Self::enqueue_close(&conn.events, &conn.cancel, 1001, "server shutdown");
+            Self::enqueue_close(&conn.events, &conn.cancel, close_code, close_reason);
         }
         self.publish_live_conns();
+
         let engine = self.engine;
-        let _ = engine.stop().await;
+        let engine_stop_ok = engine.stop().await.is_ok();
+        #[cfg(feature = "db-tests")]
+        signal_engine_stopped(self.document_id).await;
+
+        #[cfg(feature = "db-tests")]
+        pause_before_guard_release(self.document_id).await;
+
         if let Some(guard) = self.room_guard.take() {
             guard.release().await;
         }
+
+        matches!(exit, RoomExit::Clean) && engine_stop_ok
     }
 
     async fn poll_acl(&mut self) {
@@ -1205,6 +1436,10 @@ impl RoomActor {
         let Some(conn) = self.connections.get_mut(&conn_id) else {
             return;
         };
+        #[cfg(feature = "db-tests")]
+        if consume_actor_panic_on_frame(self.document_id).await {
+            panic!("db-tests collab actor panic on frame");
+        }
         if conn.pending_bytes + bytes.len() > self.config.max_pending_bytes_per_connection {
             self.close_connection(conn_id, 1009, "pending bytes exceeded")
                 .await;
