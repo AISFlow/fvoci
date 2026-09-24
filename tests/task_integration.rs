@@ -292,7 +292,7 @@ async fn task_status_fk_rejects_cross_project_status() {
     assert_eq!(status, StatusCode::OK);
     let foreign_status = ops_workflow["statuses"][0]["id"].as_str().unwrap();
 
-    let (status, _) = json_request(
+    let (status, body) = json_request(
         app,
         "POST",
         &format!("/api/v1/workspaces/{workspace_id}/projects/{lab_id}/tasks"),
@@ -300,7 +300,8 @@ async fn task_status_fk_rejects_cross_project_status() {
         Some(&cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "status_not_in_project_workflow");
     admin.close().await;
     harness.cleanup().await;
 }
@@ -1753,7 +1754,7 @@ async fn task_patch_expected_dates_version_conflict() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(problem["code"], "conflict");
+    assert_eq!(problem["code"], "document_version_mismatch");
     assert_eq!(count_rows(&admin, "events").await, events_before);
 
     admin.close().await;
@@ -2356,20 +2357,6 @@ async fn concurrent_visibility_private_vs_task_patch_under_project_lock() {
         .await
         .unwrap();
 
-    let visibility_patch = tokio::spawn({
-        let app = app.clone();
-        let lead_cookie = lead.cookie.clone();
-        async move {
-            json_request(
-                app,
-                "PATCH",
-                &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
-                Some(json!({"visibility": "private"})),
-                Some(&lead_cookie),
-            )
-            .await
-        }
-    });
     let task_patch = tokio::spawn({
         let app = app.clone();
         let cookie = other.cookie.clone();
@@ -2385,8 +2372,21 @@ async fn concurrent_visibility_private_vs_task_patch_under_project_lock() {
             .await
         }
     });
-
-    let _ = wait_for_query_blocked_by(&admin, blocker_pid, "%fvoci.projects%").await;
+    wait_for_query_blocked_by(&admin, blocker_pid, "%fvoci.projects%").await;
+    let visibility_patch = tokio::spawn({
+        let app = app.clone();
+        let lead_cookie = lead.cookie.clone();
+        async move {
+            json_request(
+                app,
+                "PATCH",
+                &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
+                Some(json!({"visibility": "private"})),
+                Some(&lead_cookie),
+            )
+            .await
+        }
+    });
     sqlx::query(
         "UPDATE fvoci.projects SET visibility = 'private', updated_at = now() WHERE workspace_id = $1 AND id = $2",
     )
@@ -2408,6 +2408,659 @@ async fn concurrent_visibility_private_vs_task_patch_under_project_lock() {
     assert_eq!(visibility_status, StatusCode::OK);
     assert_eq!(task_status, StatusCode::NOT_FOUND);
     assert_eq!(count_rows(&admin, "events").await, events_before + 1);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn review_setup() -> (
+    TestDb,
+    axum::Router,
+    String,
+    Uuid,
+    sqlx::PgPool,
+    String,
+    Uuid,
+) {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap().to_string();
+    let pid = Uuid::parse_str(&project_id).unwrap();
+    (harness, app, cookie, workspace_id, admin, project_id, pid)
+}
+
+async fn workflow_status_ids(
+    app: axum::Router,
+    cookie: &str,
+    ws: Uuid,
+    project_id: &str,
+) -> Vec<(String, String)> {
+    let (_, wf) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/workflow"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    wf["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["id"].as_str().unwrap().to_string(),
+                s["category"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn task_patch_lost_update_preserves_concurrent_priority_under_project_lock() {
+    let (harness, app, _cookie, ws, admin, project_id, pid) = review_setup().await;
+    let other = add_workspace_user(&admin, ws, "member", "other").await;
+    let task =
+        create_task_with_title(app.clone(), &other.cookie, ws, &project_id, json!({"title": "T"}))
+            .await;
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let tid = Uuid::parse_str(&task_id).unwrap();
+    let mut holder = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 FOR UPDATE")
+        .bind(ws)
+        .bind(pid)
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let hpid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let patch = tokio::spawn({
+        let app = app.clone();
+        let c = other.cookie.clone();
+        let t = task_id.clone();
+        async move { patch_task(app, ws, &t, json!({"title": "Renamed"}), &c).await }
+    });
+    wait_for_query_blocked_by(&admin, hpid, "%fvoci.projects%").await;
+    sqlx::query("UPDATE fvoci.tasks SET priority='high' WHERE id=$1")
+        .bind(tid)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let (st, _) = patch.await.unwrap();
+    let row: (String, String) = sqlx::query_as("SELECT title, priority FROM fvoci.tasks WHERE id=$1")
+        .bind(tid)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(row.0, "Renamed");
+    assert_eq!(row.1, "high");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_patch_rejects_concurrently_archived_task_under_project_lock() {
+    let (harness, app, _cookie, ws, admin, project_id, pid) = review_setup().await;
+    let other = add_workspace_user(&admin, ws, "member", "other").await;
+    let task =
+        create_task_with_title(app.clone(), &other.cookie, ws, &project_id, json!({"title": "T"}))
+            .await;
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let tid = Uuid::parse_str(&task_id).unwrap();
+    let mut holder = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 FOR UPDATE")
+        .bind(ws)
+        .bind(pid)
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let hpid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let patch = tokio::spawn({
+        let app = app.clone();
+        let c = other.cookie.clone();
+        let t = task_id.clone();
+        async move { patch_task(app, ws, &t, json!({"title": "Renamed"}), &c).await }
+    });
+    wait_for_query_blocked_by(&admin, hpid, "%fvoci.projects%").await;
+    sqlx::query("UPDATE fvoci.tasks SET priority='high', archived_at=now() WHERE id=$1")
+        .bind(tid)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let (st, body) = patch.await.unwrap();
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "task_archived");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_patch_vs_trash_race_returns_not_found() {
+    let (harness, app, _cookie, ws, admin, project_id, pid) = review_setup().await;
+    let other = add_workspace_user(&admin, ws, "member", "other").await;
+    let task =
+        create_task_with_title(app.clone(), &other.cookie, ws, &project_id, json!({"title": "T"}))
+            .await;
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let tid = Uuid::parse_str(&task_id).unwrap();
+    let mut holder = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 FOR UPDATE")
+        .bind(ws)
+        .bind(pid)
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let hpid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let patch = tokio::spawn({
+        let app = app.clone();
+        let c = other.cookie.clone();
+        let t = task_id.clone();
+        async move { patch_task(app, ws, &t, json!({"title": "Renamed"}), &c).await }
+    });
+    wait_for_query_blocked_by(&admin, hpid, "%fvoci.projects%").await;
+    sqlx::query("UPDATE fvoci.tasks SET deleted_at=now() WHERE id=$1")
+        .bind(tid)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let (st, _) = patch.await.unwrap();
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_move_stale_expected_status_returns_version_conflict() {
+    let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
+    let other = add_workspace_user(&admin, ws, "member", "other").await;
+    let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
+    let task =
+        create_task_with_title(app.clone(), &other.cookie, ws, &project_id, json!({"title": "T"}))
+            .await;
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let tid = Uuid::parse_str(&task_id).unwrap();
+    let from = task["statusId"].as_str().unwrap().to_string();
+    let others: Vec<_> = statuses.iter().filter(|(id, _)| *id != from).collect();
+    let (s2, s3) = (others[0].0.clone(), others[1].0.clone());
+    let mut holder = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id=$1 AND id=$2 FOR UPDATE")
+        .bind(ws)
+        .bind(pid)
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let hpid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let mv = tokio::spawn({
+        let app = app.clone();
+        let c = other.cookie.clone();
+        let t = task_id.clone();
+        let from = from.clone();
+        let s3 = s3.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/tasks/{t}/move"),
+                Some(json!({"statusId": s3, "expectedStatusId": from})),
+                Some(&c),
+            )
+            .await
+        }
+    });
+    wait_for_query_blocked_by(&admin, hpid, "%fvoci.projects%").await;
+    sqlx::query("UPDATE fvoci.tasks SET status_id=$2::uuid WHERE id=$1")
+        .bind(tid)
+        .bind(&s2)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let (st, body) = mv.await.unwrap();
+    let now: (Uuid,) = sqlx::query_as("SELECT status_id FROM fvoci.tasks WHERE id=$1")
+        .bind(tid)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "document_version_mismatch");
+    assert_eq!(now.0.to_string(), s2);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_patch_rejects_hierarchy_cycle_via_type_change() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let epic = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "E", "type": "epic"}),
+    )
+    .await;
+    let eid = epic["id"].as_str().unwrap().to_string();
+    let t = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "T", "type": "task", "parentId": eid}),
+    )
+    .await;
+    let tid = t["id"].as_str().unwrap();
+    let (st, body) =
+        patch_task(app, ws, &eid, json!({"type": "subtask", "parentId": tid}), &cookie).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "task_hierarchy_violation");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_patch_rejects_type_change_that_orphans_children() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let story = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "S", "type": "story"}),
+    )
+    .await;
+    let sid = story["id"].as_str().unwrap().to_string();
+    create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "sub", "type": "subtask", "parentId": sid}),
+    )
+    .await;
+    let (st, body) = patch_task(app, ws, &sid, json!({"type": "epic"}), &cookie).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "task_hierarchy_violation");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_move_before_first_item_succeeds_without_panic() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let a = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "A"}),
+    )
+    .await;
+    let b = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "B"}),
+    )
+    .await;
+    let (aid, bid, sid) = (
+        a["id"].as_str().unwrap(),
+        b["id"].as_str().unwrap(),
+        a["statusId"].as_str().unwrap(),
+    );
+    let (st, body) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{bid}/move"),
+        Some(json!({"statusId": sid, "beforeId": aid})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        body["sortKey"].as_str().unwrap() < a["sortKey"].as_str().unwrap(),
+        "moved task should sort before anchor"
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_patch_rejects_invalid_recurrence_preset() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let t =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "T"})).await;
+    let tid = t["id"].as_str().unwrap();
+    let (st, body) = patch_task(
+        app,
+        ws,
+        tid,
+        json!({"recurrence": {"kind": "hourly", "x": [1, 2, 3]}}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_recurrence_preset");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_move_enforces_wip_limit() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
+    let a = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "A"}),
+    )
+    .await;
+    let b = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "B"}),
+    )
+    .await;
+    let target = statuses
+        .iter()
+        .find(|(id, _)| id != a["statusId"].as_str().unwrap())
+        .unwrap()
+        .0
+        .clone();
+    sqlx::query("UPDATE fvoci.statuses SET wip_limit=1 WHERE id=$1::uuid")
+        .bind(&target)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mv = |id: String| {
+        let app = app.clone();
+        let c = cookie.clone();
+        let target = target.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/tasks/{id}/move"),
+                Some(json!({"statusId": target})),
+                Some(&c),
+            )
+            .await
+        }
+    };
+    let (s1, _) = mv(a["id"].as_str().unwrap().to_string()).await;
+    let (s2, body) = mv(b["id"].as_str().unwrap().to_string()).await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "wip_limit_exceeded");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_move_to_done_spawns_recurring_next_occurrence() {
+    let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
+    let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
+    let done = statuses
+        .iter()
+        .find(|(_, c)| c == "done")
+        .unwrap()
+        .0
+        .clone();
+    let t = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({
+            "title": "R",
+            "recurrence": {"kind": "daily"},
+            "dueDate": "2026-01-01"
+        }),
+    )
+    .await;
+    let tid = t["id"].as_str().unwrap();
+    let before = count_rows(&admin, "tasks").await;
+    let (st, body) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{tid}/move"),
+        Some(json!({"statusId": done})),
+        Some(&cookie),
+    )
+    .await;
+    let after: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.tasks WHERE project_id=$1 AND deleted_at IS NULL",
+    )
+    .bind(pid)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(st, StatusCode::OK);
+    assert!(body["recurrence"].is_null());
+    assert_eq!(after.0, before + 1);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_patch_unrelated_fields_do_not_rewrite_estimate_precision() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let t =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "T"})).await;
+    let tid = t["id"].as_str().unwrap();
+    patch_task(
+        app.clone(),
+        ws,
+        tid,
+        json!({"estimate": "123456789012.123456"}),
+        &cookie,
+    )
+    .await;
+    let before: (String,) =
+        sqlx::query_as("SELECT estimate::text FROM fvoci.tasks WHERE id=$1::uuid")
+            .bind(tid)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    patch_task(app, ws, tid, json!({"title": "unrelated"}), &cookie).await;
+    let after: (String,) = sqlx::query_as("SELECT estimate::text FROM fvoci.tasks WHERE id=$1::uuid")
+        .bind(tid)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_move_and_patch_reject_cross_project_status() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let other = create_project(app.clone(), &cookie, ws, "OTH", "workspace").await;
+    let other_status =
+        workflow_status_ids(app.clone(), &cookie, ws, other["id"].as_str().unwrap()).await[0]
+            .0
+            .clone();
+    let t =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "T"})).await;
+    let tid = t["id"].as_str().unwrap();
+    let (s1, b1) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{tid}/move"),
+        Some(json!({"statusId": other_status})),
+        Some(&cookie),
+    )
+    .await;
+    let (s2, b2) = patch_task(
+        app.clone(),
+        ws,
+        tid,
+        json!({"statusId": other_status}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(s1, StatusCode::BAD_REQUEST);
+    assert_eq!(b1["code"], "status_not_in_project_workflow");
+    assert_eq!(s2, StatusCode::BAD_REQUEST);
+    assert_eq!(b2["code"], "status_not_in_project_workflow");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_patch_expected_dates_conflict_uses_document_version_mismatch() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let t =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "T"})).await;
+    let tid = t["id"].as_str().unwrap();
+    let (st, body) = patch_task(
+        app,
+        ws,
+        tid,
+        json!({
+            "expectedDates": {
+                "startDate": "2020-01-01",
+                "dueDate": null,
+                "dueAt": null
+            },
+            "title": "x"
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "document_version_mismatch");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_move_trash_restore_denied_for_private_non_member_and_viewer() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
+    let hid = create_project(app.clone(), &member.cookie, workspace_id, "HID", "private").await;
+    let project_id = hid["id"].as_str().unwrap();
+    let task = create_task_with_title(
+        app.clone(),
+        &member.cookie,
+        workspace_id,
+        project_id,
+        json!({"title": "Secret"}),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap();
+
+    for path in ["move", "trash"] {
+        let (status, _) = match path {
+            "move" => {
+                json_request(
+                    app.clone(),
+                    "POST",
+                    &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/{path}"),
+                    Some(json!({"statusId": task["statusId"]})),
+                    Some(&owner_cookie),
+                )
+                .await
+            }
+            _ => {
+                json_request(
+                    app.clone(),
+                    "POST",
+                    &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/{path}"),
+                    None,
+                    Some(&owner_cookie),
+                )
+                .await
+            }
+        };
+        assert_eq!(status, StatusCode::NOT_FOUND, "non-member {path}");
+    }
+
+    json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+        Some(json!({"userId": owner_id.to_string(), "role": "viewer"})),
+        Some(&member.cookie),
+    )
+    .await;
+
+    let (trash_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(trash_status, StatusCode::NOT_FOUND);
+
+    let (move_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move"),
+        Some(json!({"statusId": task["statusId"]})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(move_status, StatusCode::NOT_FOUND);
+
+    let (trash_ok, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(trash_ok, StatusCode::OK);
+
+    let (restore_status, _) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/restore"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(restore_status, StatusCode::NOT_FOUND);
 
     admin.close().await;
     harness.cleanup().await;

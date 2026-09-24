@@ -117,12 +117,7 @@ async fn create_task_route(
     .map_err(internal)?;
     match result {
         Ok(task) => Ok((StatusCode::CREATED, Json(task_meta_output(task))).into_response()),
-        Err(ProjectDbError::Conflict) => Err(TaskApiError::Coded {
-            status: StatusCode::CONFLICT,
-            code: "task_hierarchy_violation",
-            title: "task hierarchy violation".to_string(),
-        }),
-        Err(err) => Err(map_project_error(err).into()),
+        Err(err) => Err(map_task_db_error(err)),
     }
 }
 
@@ -344,6 +339,15 @@ fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiE
             return Err(AppError::from_code(ProblemCode::InvalidInput).into());
         }
     }
+    if let Some(Some(value)) = &body.recurrence {
+        if !recurrence_preset_is_valid(value) {
+            return Err(TaskApiError::Coded {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_recurrence_preset",
+                title: "invalid recurrence preset".to_string(),
+            });
+        }
+    }
     Ok(PatchTaskMetaInput {
         expected_dates: body
             .expected_dates
@@ -375,12 +379,30 @@ fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiE
     })
 }
 
+fn recurrence_preset_is_valid(value: &serde_json::Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    if obj.len() != 1 || !obj.contains_key("kind") {
+        return false;
+    }
+    matches!(
+        obj.get("kind").and_then(serde_json::Value::as_str),
+        Some("daily" | "weekly" | "monthly")
+    )
+}
+
 fn map_task_db_error(err: ProjectDbError) -> TaskApiError {
     match err {
         ProjectDbError::Conflict => TaskApiError::Coded {
             status: StatusCode::CONFLICT,
             code: "task_hierarchy_violation",
             title: "task hierarchy violation".to_string(),
+        },
+        ProjectDbError::VersionConflict => TaskApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "document_version_mismatch",
+            title: "document version mismatch".to_string(),
         },
         ProjectDbError::TaskArchived => TaskApiError::Coded {
             status: StatusCode::CONFLICT,
@@ -392,6 +414,17 @@ fn map_task_db_error(err: ProjectDbError) -> TaskApiError {
             code: "anchor_not_in_target_list",
             title: "anchor not in target list".to_string(),
         },
+        ProjectDbError::StatusNotInWorkflow => TaskApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "status_not_in_project_workflow",
+            title: "status not in project workflow".to_string(),
+        },
+        ProjectDbError::WipLimitExceeded => TaskApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "wip_limit_exceeded",
+            title: "wip limit exceeded".to_string(),
+        },
+        ProjectDbError::InvalidMoveAnchors => AppError::from_code(ProblemCode::InvalidInput).into(),
         other => map_project_error(other).into(),
     }
 }
@@ -478,7 +511,7 @@ fn task_meta_output(task: crate::db::tasks::TaskMetaRow) -> TaskMetaOutput {
         start_date: task.start_date,
         due_date: task.due_date,
         due_at: task.due_at,
-        estimate: task.estimate.map(|value| value.to_string()),
+        estimate: task.estimate,
         parent_id: task.parent_id.map(|id| id.to_string()),
         milestone_id: task.milestone_id.map(|id| id.to_string()),
         recurrence: task.recurrence,

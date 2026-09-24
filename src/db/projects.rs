@@ -30,6 +30,9 @@ pub enum ProjectDbError {
     VersionConflict,
     TaskArchived,
     InvalidAnchor,
+    StatusNotInWorkflow,
+    WipLimitExceeded,
+    InvalidMoveAnchors,
 }
 
 #[derive(Debug, Clone)]

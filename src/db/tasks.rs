@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
+use crate::db::context::{
+    lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live, set_tenant,
+};
 use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission, ProjectDbError};
@@ -26,7 +28,7 @@ pub struct TaskMetaRow {
     pub start_date: Option<NaiveDate>,
     pub due_date: Option<NaiveDate>,
     pub due_at: Option<DateTime<Utc>>,
-    pub estimate: Option<f64>,
+    pub estimate: Option<String>,
     pub parent_id: Option<Uuid>,
     pub milestone_id: Option<Uuid>,
     pub recurrence: Option<Value>,
@@ -181,6 +183,8 @@ async fn default_backlog_status(
     Ok(fallback.map(|(id,)| id))
 }
 
+const TASK_STATUS_LOCK_NAMESPACE: i32 = 1_907_002;
+
 fn violates_task_hierarchy(child_type: &str, parent_type: &str) -> bool {
     if child_type == "subtask" {
         !matches!(parent_type, "task" | "bug" | "story")
@@ -189,6 +193,181 @@ fn violates_task_hierarchy(child_type: &str, parent_type: &str) -> bool {
     } else {
         parent_type != "epic"
     }
+}
+
+fn allowed_child_types(task_type: &str) -> &'static [&'static str] {
+    match task_type {
+        "epic" => &["task", "bug", "story"],
+        "subtask" => &[],
+        _ => &["subtask"],
+    }
+}
+
+fn shift_recurrence_date(date: NaiveDate, kind: &str) -> NaiveDate {
+    match kind {
+        "daily" => date + chrono::Duration::days(1),
+        "weekly" => date + chrono::Duration::days(7),
+        "monthly" => date
+            .checked_add_months(chrono::Months::new(1))
+            .unwrap_or(date),
+        _ => date,
+    }
+}
+
+fn parse_recurrence_kind(value: &Value) -> Option<&str> {
+    value
+        .as_object()
+        .and_then(|obj| obj.get("kind"))
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "daily" | "weekly" | "monthly"))
+}
+
+async fn has_children_outside_types(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    allowed: &[&str],
+) -> Result<bool, sqlx::Error> {
+    let row: (bool,) = if allowed.is_empty() {
+        sqlx::query_as(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM fvoci.tasks
+                WHERE workspace_id = $1 AND parent_id = $2
+            )
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(task_id)
+        .fetch_one(&mut **tx)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM fvoci.tasks
+                WHERE workspace_id = $1 AND parent_id = $2
+                  AND type <> ALL($3::text[])
+            )
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(task_id)
+        .bind(allowed)
+        .fetch_one(&mut **tx)
+        .await?
+    };
+    Ok(row.0)
+}
+
+async fn assert_task_hierarchy(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    task_id: Uuid,
+    next_type: &str,
+    next_parent: Option<Uuid>,
+    parent_changed: bool,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Some(parent_id) = next_parent {
+        if parent_id == task_id {
+            return Ok(Err(ProjectDbError::Conflict));
+        }
+        type ParentRow = (Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String);
+        let parent: Option<ParentRow> = sqlx::query_as(
+                r#"
+                SELECT project_id, deleted_at, archived_at, type
+                FROM fvoci.tasks
+                WHERE workspace_id = $1 AND id = $2
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(parent_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+        let Some((parent_project, deleted, archived, parent_type)) = parent else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        if deleted.is_some() || parent_project != project_id {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if parent_changed && archived.is_some() {
+            return Ok(Err(ProjectDbError::TaskArchived));
+        }
+        if violates_task_hierarchy(next_type, &parent_type) {
+            return Ok(Err(ProjectDbError::Conflict));
+        }
+    } else if next_type == "subtask" {
+        return Ok(Err(ProjectDbError::Conflict));
+    }
+    if has_children_outside_types(tx, workspace_id, task_id, allowed_child_types(next_type)).await?
+    {
+        return Ok(Err(ProjectDbError::Conflict));
+    }
+    Ok(Ok(()))
+}
+
+async fn lock_status_for_transition(
+    tx: &mut Transaction<'_, Postgres>,
+    status_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(TASK_STATUS_LOCK_NAMESPACE)
+        .bind(lock_key_from_uuid(status_id))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn count_active_tasks_in_status(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    status_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as(
+        r#"
+        SELECT count(*)
+        FROM fvoci.tasks
+        WHERE workspace_id = $1
+          AND status_id = $2
+          AND deleted_at IS NULL
+          AND archived_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(status_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.0)
+}
+
+struct StatusInfo {
+    category: String,
+    wip_limit: Option<i32>,
+}
+
+async fn load_status_info(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    status_id: Uuid,
+) -> Result<Option<StatusInfo>, sqlx::Error> {
+    let row: Option<(String, Option<i32>)> = sqlx::query_as(
+        r#"
+        SELECT category, wip_limit
+        FROM fvoci.statuses
+        WHERE workspace_id = $1 AND project_id = $2 AND id = $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(status_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(category, wip_limit)| StatusInfo {
+        category,
+        wip_limit,
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -203,7 +382,7 @@ struct TaskRowRecord {
     start_date: Option<NaiveDate>,
     due_date: Option<NaiveDate>,
     due_at: Option<DateTime<Utc>>,
-    estimate: Option<f64>,
+    estimate: Option<String>,
     parent_id: Option<Uuid>,
     milestone_id: Option<Uuid>,
     sort_key: String,
@@ -444,7 +623,7 @@ pub async fn create_task(
         .await?;
         if valid.is_none() {
             tx.rollback().await?;
-            return Ok(Err(ProjectDbError::NotFound));
+            return Ok(Err(ProjectDbError::StatusNotInWorkflow));
         }
         status_id
     } else {
@@ -506,7 +685,7 @@ pub async fn create_task(
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
         )
         RETURNING id, project_id, number, title, type AS task_type, priority, status_id,
-                  start_date, due_date, due_at, estimate::double precision AS estimate, parent_id,
+                  start_date, due_date, due_at, estimate::text AS estimate, parent_id,
                   milestone_id, sort_key, schema_version, version, archived_at, created_by,
                   created_at, updated_at
         "#,
@@ -574,7 +753,7 @@ pub async fn get_task(
     let Some(raw) = sqlx::query(
         r#"
         SELECT t.id, t.project_id, t.number, t.title, t.type AS task_type, t.priority, t.status_id,
-               t.start_date, t.due_date, t.due_at, t.estimate::double precision AS estimate,
+               t.start_date, t.due_date, t.due_at, t.estimate::text AS estimate,
                t.parent_id, t.milestone_id, t.sort_key, t.schema_version, t.version,
                t.archived_at, t.created_by, t.created_at, t.updated_at
         FROM fvoci.tasks t
@@ -773,7 +952,7 @@ pub async fn list_project_tasks(
     let list_sql = format!(
         r#"
         SELECT t.id, t.project_id, t.number, t.title, t.type AS task_type, t.priority, t.status_id,
-               t.start_date, t.due_date, t.due_at, t.estimate::double precision AS estimate,
+               t.start_date, t.due_date, t.due_at, t.estimate::text AS estimate,
                t.parent_id, t.milestone_id, t.sort_key, t.schema_version, t.version,
                t.archived_at, t.created_by, t.created_at, t.updated_at, t.recurrence,
                (
@@ -1046,20 +1225,39 @@ struct TaskWriteRow {
     recurrence: Option<Value>,
 }
 
-async fn load_task_for_write(
+async fn task_project_id_for_write(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     task_id: Uuid,
-    allow_archived: bool,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT project_id
+        FROM fvoci.tasks
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(project_id,)| project_id))
+}
+
+async fn load_task_for_write_locked(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
 ) -> Result<Option<TaskWriteRow>, sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT id, project_id, number, title, type AS task_type, priority, status_id,
-               start_date, due_date, due_at, estimate::double precision AS estimate, parent_id,
+               start_date, due_date, due_at, estimate::text AS estimate, parent_id,
                milestone_id, sort_key, schema_version, version, archived_at, created_by, created_at,
                updated_at, recurrence
         FROM fvoci.tasks
         WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR NO KEY UPDATE
         "#,
     )
     .bind(workspace_id)
@@ -1070,9 +1268,6 @@ async fn load_task_for_write(
         return Ok(None);
     };
     let record = map_task_row(&row)?;
-    if !allow_archived && record.archived_at.is_some() {
-        return Ok(None);
-    }
     let recurrence = row.try_get::<Option<Value>, _>("recurrence").ok().flatten();
     Ok(Some(TaskWriteRow { record, recurrence }))
 }
@@ -1092,13 +1287,9 @@ async fn require_task_write_access(
     if !workspace_is_live(tx, workspace_id).await? {
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let Some(task) = load_task_for_write(tx, workspace_id, task_id, true).await? else {
+    let Some(project_id) = task_project_id_for_write(tx, workspace_id, task_id).await? else {
         return Ok(Err(ProjectDbError::NotFound));
     };
-    if !allow_archived && task.record.archived_at.is_some() {
-        return Ok(Err(ProjectDbError::TaskArchived));
-    }
-    let project_id = task.record.project_id;
     let locked = lock_project(tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         return Ok(Err(ProjectDbError::NotFound));
@@ -1110,6 +1301,12 @@ async fn require_task_write_access(
     if !permission.at_least(ProjectPermission::Edit) {
         return Ok(Err(ProjectDbError::NotFound));
     }
+    let Some(task) = load_task_for_write_locked(tx, workspace_id, task_id).await? else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    if !allow_archived && task.record.archived_at.is_some() {
+        return Ok(Err(ProjectDbError::TaskArchived));
+    }
     Ok(Ok(task))
 }
 
@@ -1119,16 +1316,19 @@ fn resolve_anchor_sort_key(
     after_id: Option<Uuid>,
 ) -> Result<String, ProjectDbError> {
     if before_id.is_some() && after_id.is_some() {
-        return Err(ProjectDbError::Conflict);
+        return Err(ProjectDbError::InvalidMoveAnchors);
     }
     if let Some(before_id) = before_id {
         let index = ordered.iter().position(|(id, _)| *id == before_id);
         let Some(index) = index else {
             return Err(ProjectDbError::InvalidAnchor);
         };
-        let left = ordered.get(index - 1).map(|(_, key)| key.as_str());
+        let left = index
+            .checked_sub(1)
+            .and_then(|i| ordered.get(i))
+            .map(|(_, key)| key.as_str());
         let right = ordered.get(index).map(|(_, key)| key.as_str());
-        return between(left, right).map_err(|_| ProjectDbError::Conflict);
+        return between(left, right).map_err(|_| ProjectDbError::InvalidAnchor);
     }
     if let Some(after_id) = after_id {
         let index = ordered.iter().position(|(id, _)| *id == after_id);
@@ -1137,10 +1337,10 @@ fn resolve_anchor_sort_key(
         };
         let left = ordered.get(index).map(|(_, key)| key.as_str());
         let right = ordered.get(index + 1).map(|(_, key)| key.as_str());
-        return between(left, right).map_err(|_| ProjectDbError::Conflict);
+        return between(left, right).map_err(|_| ProjectDbError::InvalidAnchor);
     }
     let last = ordered.last().map(|(_, key)| key.as_str());
-    between(last, None).map_err(|_| ProjectDbError::Conflict)
+    between(last, None).map_err(|_| ProjectDbError::InvalidAnchor)
 }
 
 async fn list_sorted_tasks_in_status(
@@ -1170,41 +1370,137 @@ async fn list_sorted_tasks_in_status(
         .collect())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TransitionResult {
+    status_changed: bool,
+}
+
+async fn spawn_recurring_next_task(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    task: &TaskWriteRow,
+    recurrence_kind: &str,
+) -> Result<(), sqlx::Error> {
+    let next_id = Uuid::now_v7();
+    let number: (i32,) = sqlx::query_as(
+        r#"
+        UPDATE fvoci.projects
+        SET next_number = next_number + 1, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2
+        RETURNING next_number - 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let target_status = default_backlog_status(tx, workspace_id, project_id).await?;
+    let Some(target_status) = target_status else {
+        return Ok(());
+    };
+    let siblings = list_sorted_tasks_in_status(tx, workspace_id, target_status, None).await?;
+    let sort_key = resolve_anchor_sort_key(&siblings, None, None).unwrap_or_else(|_| "m".into());
+    let next_start = task
+        .record
+        .start_date
+        .map(|date| shift_recurrence_date(date, recurrence_kind));
+    let next_due = task
+        .record
+        .due_date
+        .map(|date| shift_recurrence_date(date, recurrence_kind));
+    let recurrence = json!({ "kind": recurrence_kind });
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.tasks (
+            id, workspace_id, project_id, number, title, type, priority, status_id,
+            start_date, due_date, parent_id, milestone_id, recurrence, sort_key,
+            schema_version, content_json, created_by
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+        )
+        "#,
+    )
+    .bind(next_id)
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(number.0)
+    .bind(&task.record.title)
+    .bind(&task.record.task_type)
+    .bind(&task.record.priority)
+    .bind(target_status)
+    .bind(next_start)
+    .bind(next_due)
+    .bind(task.record.parent_id)
+    .bind(task.record.milestone_id)
+    .bind(recurrence)
+    .bind(sort_key)
+    .bind(DOCUMENT_SCHEMA_VERSION)
+    .bind(empty_document_json())
+    .bind(actor_user_id)
+    .execute(&mut **tx)
+    .await?;
+    record_task_event_and_audit(
+        tx,
+        TaskChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "task.created",
+            target_type: "task",
+            target_id: next_id,
+            payload: json!({
+                "taskId": next_id.to_string(),
+                "projectId": project_id.to_string(),
+                "number": number.0,
+                "statusId": target_status.to_string(),
+                "title": task.record.title,
+            }),
+            client_ip: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn transition_task_status(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,
-    task_id: Uuid,
+    actor_user_id: Uuid,
+    task: &TaskWriteRow,
     from_status_id: Uuid,
     to_status_id: Uuid,
     before_id: Option<Uuid>,
     after_id: Option<Uuid>,
-) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+) -> Result<Result<TransitionResult, ProjectDbError>, sqlx::Error> {
     if from_status_id == to_status_id && before_id.is_none() && after_id.is_none() {
-        return Ok(Ok(()));
+        return Ok(Ok(TransitionResult {
+            status_changed: false,
+        }));
     }
-    let valid: Option<(Uuid,)> = sqlx::query_as(
-        r#"
-        SELECT id FROM fvoci.statuses
-        WHERE workspace_id = $1 AND project_id = $2 AND id = $3
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(to_status_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if valid.is_none() {
-        return Ok(Err(ProjectDbError::NotFound));
+    let to_status = load_status_info(tx, workspace_id, project_id, to_status_id).await?;
+    let Some(to_status) = to_status else {
+        return Ok(Err(ProjectDbError::StatusNotInWorkflow));
+    };
+    let from_status = load_status_info(tx, workspace_id, project_id, from_status_id).await?;
+    let changing_column = from_status_id != to_status_id;
+    if changing_column && to_status.wip_limit.is_some() {
+        lock_status_for_transition(tx, to_status_id).await?;
+        let occupied = count_active_tasks_in_status(tx, workspace_id, to_status_id).await?;
+        let limit = to_status.wip_limit.unwrap_or(0) as i64;
+        if occupied >= limit {
+            return Ok(Err(ProjectDbError::WipLimitExceeded));
+        }
     }
     let siblings =
-        list_sorted_tasks_in_status(tx, workspace_id, to_status_id, Some(task_id)).await?;
+        list_sorted_tasks_in_status(tx, workspace_id, to_status_id, Some(task.record.id)).await?;
     let sort_key = match resolve_anchor_sort_key(&siblings, before_id, after_id) {
         Ok(key) => key,
         Err(err) => return Ok(Err(err)),
     };
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE fvoci.tasks
         SET status_id = $4, sort_key = $5, updated_at = now()
@@ -1212,13 +1508,38 @@ async fn transition_task_status(
         "#,
     )
     .bind(workspace_id)
-    .bind(task_id)
+    .bind(task.record.id)
     .bind(from_status_id)
     .bind(to_status_id)
-    .bind(sort_key)
+    .bind(&sort_key)
     .execute(&mut **tx)
     .await?;
-    Ok(Ok(()))
+    if result.rows_affected() == 0 {
+        return Ok(Err(ProjectDbError::VersionConflict));
+    }
+    if changing_column
+        && to_status.category == "done"
+        && from_status.as_ref().map(|s| s.category.as_str()) != Some("done")
+    {
+        if let Some(kind) = task.recurrence.as_ref().and_then(parse_recurrence_kind) {
+            sqlx::query(
+                r#"
+                UPDATE fvoci.tasks
+                SET recurrence = NULL, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(task.record.id)
+            .execute(&mut **tx)
+            .await?;
+            spawn_recurring_next_task(tx, workspace_id, project_id, actor_user_id, task, kind)
+                .await?;
+        }
+    }
+    Ok(Ok(TransitionResult {
+        status_changed: changing_column,
+    }))
 }
 
 fn dates_conflict(
@@ -1230,12 +1551,19 @@ fn dates_conflict(
     expected.start_date != start_date || expected.due_date != due_date || expected.due_at != due_at
 }
 
-fn format_estimate_for_numeric(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{:.0}", value)
-    } else {
-        value.to_string()
-    }
+fn patch_only_unarchives(input: &crate::tasks::patch::PatchTaskMetaInput) -> bool {
+    input.archived == Some(false)
+        && input.task_type.is_none()
+        && input.title.is_none()
+        && input.priority.is_none()
+        && input.status_id.is_none()
+        && input.start_date == crate::tasks::patch::FieldUpdate::Unchanged
+        && input.due_date == crate::tasks::patch::FieldUpdate::Unchanged
+        && input.due_at == crate::tasks::patch::FieldUpdate::Unchanged
+        && input.estimate == crate::tasks::patch::FieldUpdate::Unchanged
+        && input.parent_id == crate::tasks::patch::FieldUpdate::Unchanged
+        && input.recurrence == crate::tasks::patch::FieldUpdate::Unchanged
+        && input.expected_dates.is_none()
 }
 
 pub async fn patch_task_meta(
@@ -1247,18 +1575,7 @@ pub async fn patch_task_meta(
     input: crate::tasks::patch::PatchTaskMetaInput,
     client_ip: Option<&str>,
 ) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
-    let restores_archived = input.archived == Some(false)
-        && input.task_type.is_none()
-        && input.title.is_none()
-        && input.priority.is_none()
-        && input.status_id.is_none()
-        && input.start_date == crate::tasks::patch::FieldUpdate::Unchanged
-        && input.due_date == crate::tasks::patch::FieldUpdate::Unchanged
-        && input.due_at == crate::tasks::patch::FieldUpdate::Unchanged
-        && input.estimate == crate::tasks::patch::FieldUpdate::Unchanged
-        && input.parent_id == crate::tasks::patch::FieldUpdate::Unchanged
-        && input.recurrence == crate::tasks::patch::FieldUpdate::Unchanged
-        && input.expected_dates.is_none();
+    let restores_archived = patch_only_unarchives(&input);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     let task = match require_task_write_access(
@@ -1277,7 +1594,6 @@ pub async fn patch_task_meta(
             return Ok(Err(err));
         }
     };
-    let mut task = task;
     if let Some(expected) = &input.expected_dates {
         if dates_conflict(
             expected,
@@ -1296,176 +1612,280 @@ pub async fn patch_task_meta(
         crate::tasks::patch::FieldUpdate::Clear => None,
         crate::tasks::patch::FieldUpdate::Unchanged => task.record.parent_id,
     };
-    if input.task_type.is_some() || input.parent_id != crate::tasks::patch::FieldUpdate::Unchanged {
-        if next_type == "subtask" && next_parent.is_none() {
-            tx.rollback().await?;
-            return Ok(Err(ProjectDbError::Conflict));
-        }
-        if let Some(parent_id) = next_parent {
-            let parent: Option<(Uuid, Option<DateTime<Utc>>, String)> = sqlx::query_as(
-                r#"
-                SELECT project_id, deleted_at, type
-                FROM fvoci.tasks
-                WHERE workspace_id = $1 AND id = $2
-                "#,
-            )
-            .bind(workspace_id)
-            .bind(parent_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some((parent_project, deleted, parent_type)) = parent else {
+    let parent_changed = input.parent_id != crate::tasks::patch::FieldUpdate::Unchanged;
+    if input.task_type.is_some() || parent_changed {
+        match assert_task_hierarchy(
+            &mut tx,
+            workspace_id,
+            task.record.project_id,
+            task_id,
+            next_type,
+            next_parent,
+            parent_changed,
+        )
+        .await?
+        {
+            Ok(()) => {}
+            Err(err) => {
                 tx.rollback().await?;
-                return Ok(Err(ProjectDbError::NotFound));
-            };
-            if deleted.is_some() || parent_project != task.record.project_id {
-                tx.rollback().await?;
-                return Ok(Err(ProjectDbError::NotFound));
+                return Ok(Err(err));
             }
-            if violates_task_hierarchy(next_type, &parent_type) {
-                tx.rollback().await?;
-                return Ok(Err(ProjectDbError::Conflict));
-            }
-        } else if next_type == "subtask" {
-            tx.rollback().await?;
-            return Ok(Err(ProjectDbError::Conflict));
         }
     }
 
+    let mut status_changed = false;
+    let from_status_id = task.record.status_id;
     if let Some(status_id) = input.status_id {
         if status_id != task.record.status_id {
             let result = transition_task_status(
                 &mut tx,
                 workspace_id,
                 task.record.project_id,
-                task_id,
+                actor_user_id,
+                &task,
                 task.record.status_id,
                 status_id,
                 None,
                 None,
             )
             .await?;
-            if let Err(err) = result {
-                tx.rollback().await?;
-                return Ok(Err(err));
+            match result {
+                Ok(transition) => status_changed = transition.status_changed,
+                Err(err) => {
+                    tx.rollback().await?;
+                    return Ok(Err(err));
+                }
             }
-            task.record.status_id = status_id;
         }
     }
 
+    let mut sets = Vec::<String>::new();
+    let mut bind_idx = 3u32;
+    let mut bind_title: Option<String> = None;
+    let mut bind_type: Option<String> = None;
+    let mut bind_priority: Option<String> = None;
+    let mut bind_start_date: Option<Option<NaiveDate>> = None;
+    let mut bind_due_date: Option<Option<NaiveDate>> = None;
+    let mut bind_due_at: Option<Option<DateTime<Utc>>> = None;
+    let mut bind_estimate: Option<Option<String>> = None;
+    let mut bind_parent_id: Option<Option<Uuid>> = None;
+    let mut bind_recurrence: Option<Option<Value>> = None;
+    let mut bind_archived_at: Option<Option<DateTime<Utc>>> = None;
+
     let mut payload = serde_json::Map::new();
     payload.insert("taskId".to_string(), json!(task_id.to_string()));
+
     if let Some(title) = &input.title {
+        sets.push(format!("title = ${bind_idx}"));
+        bind_idx += 1;
+        bind_title = Some(title.clone());
         payload.insert("title".to_string(), json!(title));
     }
     if let Some(task_type) = &input.task_type {
+        sets.push(format!("type = ${bind_idx}"));
+        bind_idx += 1;
+        bind_type = Some(task_type.clone());
         payload.insert("type".to_string(), json!(task_type));
     }
     if let Some(priority) = &input.priority {
+        sets.push(format!("priority = ${bind_idx}"));
+        bind_idx += 1;
+        bind_priority = Some(priority.clone());
         payload.insert("priority".to_string(), json!(priority));
     }
+    if input.start_date != crate::tasks::patch::FieldUpdate::Unchanged {
+        sets.push(format!("start_date = ${bind_idx}"));
+        bind_idx += 1;
+        bind_start_date = Some(match input.start_date {
+            crate::tasks::patch::FieldUpdate::Clear => None,
+            crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
+            crate::tasks::patch::FieldUpdate::Unchanged => unreachable!(),
+        });
+        payload.insert(
+            "startDate".to_string(),
+            json!(bind_start_date.as_ref().unwrap()),
+        );
+    }
+    if input.due_date != crate::tasks::patch::FieldUpdate::Unchanged {
+        sets.push(format!("due_date = ${bind_idx}"));
+        bind_idx += 1;
+        bind_due_date = Some(match input.due_date {
+            crate::tasks::patch::FieldUpdate::Clear => None,
+            crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
+            crate::tasks::patch::FieldUpdate::Unchanged => unreachable!(),
+        });
+        payload.insert(
+            "dueDate".to_string(),
+            json!(bind_due_date.as_ref().unwrap()),
+        );
+    }
+    if input.due_at != crate::tasks::patch::FieldUpdate::Unchanged {
+        sets.push(format!("due_at = ${bind_idx}"));
+        bind_idx += 1;
+        bind_due_at = Some(match input.due_at {
+            crate::tasks::patch::FieldUpdate::Clear => None,
+            crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
+            crate::tasks::patch::FieldUpdate::Unchanged => unreachable!(),
+        });
+        payload.insert("dueAt".to_string(), json!(bind_due_at.as_ref().unwrap()));
+    }
+    if input.estimate != crate::tasks::patch::FieldUpdate::Unchanged {
+        sets.push(format!("estimate = ${bind_idx}::numeric"));
+        bind_idx += 1;
+        bind_estimate = Some(match &input.estimate {
+            crate::tasks::patch::FieldUpdate::Clear => None,
+            crate::tasks::patch::FieldUpdate::Set(value) => Some(value.clone()),
+            crate::tasks::patch::FieldUpdate::Unchanged => unreachable!(),
+        });
+        payload.insert(
+            "estimate".to_string(),
+            json!(bind_estimate.as_ref().unwrap()),
+        );
+    }
+    if input.parent_id != crate::tasks::patch::FieldUpdate::Unchanged {
+        sets.push(format!("parent_id = ${bind_idx}"));
+        bind_idx += 1;
+        bind_parent_id = Some(match input.parent_id {
+            crate::tasks::patch::FieldUpdate::Clear => None,
+            crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
+            crate::tasks::patch::FieldUpdate::Unchanged => unreachable!(),
+        });
+        payload.insert(
+            "parentId".to_string(),
+            json!(bind_parent_id.as_ref().unwrap().map(|id| id.to_string())),
+        );
+    }
+    if input.recurrence != crate::tasks::patch::FieldUpdate::Unchanged {
+        sets.push(format!("recurrence = ${bind_idx}"));
+        bind_idx += 1;
+        bind_recurrence = Some(match &input.recurrence {
+            crate::tasks::patch::FieldUpdate::Clear => None,
+            crate::tasks::patch::FieldUpdate::Set(value) => Some(value.clone()),
+            crate::tasks::patch::FieldUpdate::Unchanged => unreachable!(),
+        });
+        payload.insert(
+            "recurrence".to_string(),
+            json!(bind_recurrence.as_ref().unwrap()),
+        );
+    }
     if let Some(archived) = input.archived {
+        sets.push(format!("archived_at = ${bind_idx}"));
+        bind_archived_at = Some(if archived { Some(Utc::now()) } else { None });
         payload.insert("archived".to_string(), json!(archived));
     }
 
-    let title = input.title.as_deref().unwrap_or(task.record.title.as_str());
-    let task_type = input
-        .task_type
-        .as_deref()
-        .unwrap_or(task.record.task_type.as_str());
-    let priority = input
-        .priority
-        .as_deref()
-        .unwrap_or(task.record.priority.as_str());
-    let start_date = match input.start_date {
-        crate::tasks::patch::FieldUpdate::Unchanged => task.record.start_date,
-        crate::tasks::patch::FieldUpdate::Clear => None,
-        crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
-    };
-    let due_date = match input.due_date {
-        crate::tasks::patch::FieldUpdate::Unchanged => task.record.due_date,
-        crate::tasks::patch::FieldUpdate::Clear => None,
-        crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
-    };
-    let due_at = match input.due_at {
-        crate::tasks::patch::FieldUpdate::Unchanged => task.record.due_at,
-        crate::tasks::patch::FieldUpdate::Clear => None,
-        crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
-    };
-    let estimate = match input.estimate {
-        crate::tasks::patch::FieldUpdate::Unchanged => task
-            .record
-            .estimate
-            .map(format_estimate_for_numeric),
-        crate::tasks::patch::FieldUpdate::Clear => None,
-        crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
-    };
-    let parent_id = match input.parent_id {
-        crate::tasks::patch::FieldUpdate::Unchanged => task.record.parent_id,
-        crate::tasks::patch::FieldUpdate::Clear => None,
-        crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
-    };
-    let recurrence = match input.recurrence {
-        crate::tasks::patch::FieldUpdate::Unchanged => task.recurrence.clone(),
-        crate::tasks::patch::FieldUpdate::Clear => None,
-        crate::tasks::patch::FieldUpdate::Set(value) => Some(value),
-    };
-    let archived_at = match input.archived {
-        None => task.record.archived_at,
-        Some(true) => Some(Utc::now()),
-        Some(false) => None,
-    };
-
-    let row = map_task_row(
-        &sqlx::query(
+    let meta_changed = !sets.is_empty();
+    let row = if meta_changed {
+        sets.push("updated_at = now()".to_string());
+        let sql = format!(
             r#"
             UPDATE fvoci.tasks
-            SET title = $3,
-                type = $4,
-                priority = $5,
-                start_date = $6,
-                due_date = $7,
-                due_at = $8,
-                estimate = $9::numeric,
-                parent_id = $10,
-                recurrence = $11,
-                archived_at = $12,
-                updated_at = now()
+            SET {}
             WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
             RETURNING id, project_id, number, title, type AS task_type, priority, status_id,
-                      start_date, due_date, due_at, estimate::double precision AS estimate,
+                      start_date, due_date, due_at, estimate::text AS estimate,
                       parent_id, milestone_id, sort_key, schema_version, version, archived_at,
                       created_by, created_at, updated_at
+            "#,
+            sets.join(", ")
+        );
+        let mut query = sqlx::query(&sql).bind(workspace_id).bind(task_id);
+        if let Some(title) = bind_title {
+            query = query.bind(title);
+        }
+        if let Some(task_type) = bind_type {
+            query = query.bind(task_type);
+        }
+        if let Some(priority) = bind_priority {
+            query = query.bind(priority);
+        }
+        if let Some(start_date) = bind_start_date {
+            query = query.bind(start_date);
+        }
+        if let Some(due_date) = bind_due_date {
+            query = query.bind(due_date);
+        }
+        if let Some(due_at) = bind_due_at {
+            query = query.bind(due_at);
+        }
+        if let Some(estimate) = bind_estimate {
+            query = query.bind(estimate);
+        }
+        if let Some(parent_id) = bind_parent_id {
+            query = query.bind(parent_id);
+        }
+        if let Some(recurrence) = bind_recurrence {
+            query = query.bind(recurrence);
+        }
+        if let Some(archived_at) = bind_archived_at {
+            query = query.bind(archived_at);
+        }
+        let row = query.fetch_optional(&mut *tx).await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        map_task_row(&row)?
+    } else if status_changed {
+        let row = sqlx::query(
+            r#"
+            SELECT id, project_id, number, title, type AS task_type, priority, status_id,
+                   start_date, due_date, due_at, estimate::text AS estimate, parent_id,
+                   milestone_id, sort_key, schema_version, version, archived_at, created_by,
+                   created_at, updated_at
+            FROM fvoci.tasks
+            WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
             "#,
         )
         .bind(workspace_id)
         .bind(task_id)
-        .bind(title)
-        .bind(task_type)
-        .bind(priority)
-        .bind(start_date)
-        .bind(due_date)
-        .bind(due_at)
-        .bind(estimate)
-        .bind(parent_id)
-        .bind(recurrence.clone())
-        .bind(archived_at)
-        .fetch_one(&mut *tx)
-        .await?,
-    )?;
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        map_task_row(&row)?
+    } else {
+        tx.rollback().await?;
+        return Ok(Ok(row_to_meta(workspace_id, task.record, task.recurrence)));
+    };
 
-    record_task_event_and_audit(
-        &mut tx,
-        TaskChangeRecord {
-            workspace_id,
-            actor_user_id,
-            verb: "task.updated",
-            target_type: "task",
-            target_id: task_id,
-            payload: Value::Object(payload),
-            client_ip,
-        },
-    )
-    .await?;
+    let recurrence = load_task_recurrence(&mut tx, workspace_id, task_id).await?;
+    if status_changed {
+        record_task_event_and_audit(
+            &mut tx,
+            TaskChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "task.updated",
+                target_type: "task",
+                target_id: task_id,
+                payload: json!({
+                    "taskId": task_id.to_string(),
+                    "from": from_status_id.to_string(),
+                    "to": row.status_id.to_string(),
+                }),
+                client_ip,
+            },
+        )
+        .await?;
+    }
+    if meta_changed {
+        record_task_event_and_audit(
+            &mut tx,
+            TaskChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "task.updated",
+                target_type: "task",
+                target_id: task_id,
+                payload: Value::Object(payload),
+                client_ip,
+            },
+        )
+        .await?;
+    }
 
     tx.commit().await?;
     Ok(Ok(row_to_meta(workspace_id, row, recurrence)))
@@ -1481,7 +1901,7 @@ pub async fn move_task(
     client_ip: Option<&str>,
 ) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
     if input.before_id.is_some() && input.after_id.is_some() {
-        return Ok(Err(ProjectDbError::Conflict));
+        return Ok(Err(ProjectDbError::InvalidMoveAnchors));
     }
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -1507,54 +1927,64 @@ pub async fn move_task(
             return Ok(Err(ProjectDbError::VersionConflict));
         }
     }
+    let from_status_id = task.record.status_id;
     let result = transition_task_status(
         &mut tx,
         workspace_id,
         task.record.project_id,
-        task_id,
+        actor_user_id,
+        &task,
         task.record.status_id,
         input.status_id,
         input.before_id,
         input.after_id,
     )
     .await?;
-    if let Err(err) = result {
-        tx.rollback().await?;
-        return Ok(Err(err));
-    }
-    record_task_event_and_audit(
-        &mut tx,
-        TaskChangeRecord {
-            workspace_id,
-            actor_user_id,
-            verb: "task.updated",
-            target_type: "task",
-            target_id: task_id,
-            payload: json!({
-                "taskId": task_id.to_string(),
-                "from": task.record.status_id.to_string(),
-                "to": input.status_id.to_string(),
-            }),
-            client_ip,
-        },
-    )
-    .await?;
-    let row = map_task_row(
-        &sqlx::query(
-            r#"
-            SELECT id, project_id, number, title, type AS task_type, priority, status_id,
-                   start_date, due_date, due_at, estimate::double precision AS estimate,
-                   parent_id, milestone_id, sort_key, schema_version, version, archived_at,
-                   created_by, created_at, updated_at
-            FROM fvoci.tasks
-            WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-            "#,
+    let transition = match result {
+        Ok(value) => value,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+    if transition.status_changed {
+        record_task_event_and_audit(
+            &mut tx,
+            TaskChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "task.updated",
+                target_type: "task",
+                target_id: task_id,
+                payload: json!({
+                    "taskId": task_id.to_string(),
+                    "from": from_status_id.to_string(),
+                    "to": input.status_id.to_string(),
+                }),
+                client_ip,
+            },
         )
-        .bind(workspace_id)
-        .bind(task_id)
-        .fetch_one(&mut *tx)
-        .await?,
-    )?;
+        .await?;
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT id, project_id, number, title, type AS task_type, priority, status_id,
+               start_date, due_date, due_at, estimate::text AS estimate,
+               parent_id, milestone_id, sort_key, schema_version, version, archived_at,
+               created_by, created_at, updated_at
+        FROM fvoci.tasks
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    let row = map_task_row(&row)?;
     let recurrence = load_task_recurrence(&mut tx, workspace_id, task_id).await?;
     tx.commit().await?;
     Ok(Ok(row_to_meta(workspace_id, row, recurrence)))
