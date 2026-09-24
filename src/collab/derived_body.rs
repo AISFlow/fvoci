@@ -7,6 +7,10 @@
 //! Internal reference extraction is implemented for parity testing only; the
 //! references table is not wired — callers must not treat refs as persisted.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use serde::Deserialize;
 use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
@@ -136,8 +140,38 @@ fn is_uuid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok()
 }
 
+/// Matches `packages/editor/src/json.ts` `isTiptapDoc`.
 fn is_tiptap_doc(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("doc")
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    if obj.get("type").and_then(Value::as_str) != Some("doc") {
+        return false;
+    }
+    match obj.get("content") {
+        None => true,
+        Some(Value::Array(_)) => true,
+        Some(_) => false,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EmojiShortcodesFile {
+    shortcodes: HashMap<String, String>,
+}
+
+fn emoji_shortcode_lookup() -> &'static HashMap<String, String> {
+    static LOOKUP: OnceLock<HashMap<String, String>> = OnceLock::new();
+    LOOKUP.get_or_init(|| {
+        let raw = include_str!("emoji_shortcodes.json");
+        serde_json::from_str::<EmojiShortcodesFile>(raw)
+            .expect("emoji_shortcodes.json must parse")
+            .shortcodes
+    })
+}
+
+fn shortcode_to_emoji(name: &str) -> Option<&str> {
+    emoji_shortcode_lookup().get(name).map(String::as_str)
 }
 
 pub fn extract_text(root: &Value) -> String {
@@ -236,8 +270,8 @@ fn tiptap_text(node: &Value, depth: u32) -> String {
     }
 }
 
-/// Source `emojiGlyph` without `@tiptap/extension-emoji` shortcode resolution.
-/// Only `attrs.emoji` is honored; unknown names become `:name:` literals.
+/// Source `packages/editor/src/emoji-glyph.ts` using pinned `@tiptap/extension-emoji`
+/// shortcode data in `emoji_shortcodes.json`.
 fn emoji_glyph(node: &Value) -> String {
     let attrs = node.get("attrs").and_then(Value::as_object);
     if let Some(glyph) = attrs.and_then(|a| a.get("emoji")).and_then(Value::as_str) {
@@ -252,7 +286,9 @@ fn emoji_glyph(node: &Value) -> String {
     if name.is_empty() {
         return String::new();
     }
-    format!(":{name}:")
+    shortcode_to_emoji(name)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!(":{name}:"))
 }
 
 pub fn to_chosung(text: &str) -> String {
@@ -330,16 +366,64 @@ mod tests {
     }
 
     #[test]
-    fn emoji_without_glyph_falls_back_to_colon_name() {
-        let doc = json!({
-            "type": "doc",
-            "content": [{
-                "type": "paragraph",
-                "content": [{"type": "emoji", "attrs": {"name": "tada"}}]
-            }]
-        });
-        let prepared = prepare_derived_body(doc).expect("prepare");
-        assert_eq!(prepared.text, ":tada:");
+    fn emoji_shortcode_cases_match_js_oracle_fixture() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/collab-derived/emoji_glyph_expected.json");
+        let raw = fs::read_to_string(path).expect("fixture");
+        let cases: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        for case in cases["cases"].as_array().expect("cases") {
+            let id = case["id"].as_str().expect("id");
+            let node = &case["node"];
+            let expected = case["expected"].as_str().expect("expected");
+            assert_eq!(emoji_glyph(node), expected, "case {id}");
+            if let Some(context) = case["context"].as_str() {
+                let doc = json!({
+                    "type": "doc",
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": context},
+                            node
+                        ]
+                    }]
+                });
+                let prepared = prepare_derived_body(doc).expect("prepare");
+                assert_eq!(prepared.text, format!("{context}{expected}"), "case {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn is_tiptap_doc_matches_source_json_contract() {
+        assert!(is_tiptap_doc(&json!({"type": "doc"})));
+        assert!(is_tiptap_doc(&json!({"type": "doc", "content": []})));
+        assert!(!is_tiptap_doc(&json!([])));
+        assert!(!is_tiptap_doc(&json!({"type": "doc", "content": {}})));
+        assert!(!is_tiptap_doc(&json!({"type": "doc", "content": null})));
+        assert!(!is_tiptap_doc(&json!("doc")));
+        assert!(!is_tiptap_doc(&json!({"type":"paragraph"})));
+    }
+
+    #[test]
+    fn prepare_rejects_malformed_doc_content_shapes() {
+        for malformed in [
+            json!({"type": "doc", "content": null}),
+            json!({"type": "doc", "content": {}}),
+            json!({"type": "doc", "content": "paragraph"}),
+            json!([{"type": "paragraph"}]),
+        ] {
+            let err = prepare_derived_body(malformed).unwrap_err();
+            assert_eq!(
+                err,
+                DerivedBodyError::InvalidDocumentBody("contentJson must be a Tiptap doc".into())
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_accepts_doc_with_missing_or_empty_content() {
+        assert!(prepare_derived_body(json!({"type": "doc"})).is_ok());
+        assert!(prepare_derived_body(json!({"type": "doc", "content": []})).is_ok());
     }
 
     #[test]
@@ -349,6 +433,21 @@ mod tests {
             err,
             DerivedBodyError::InvalidDocumentBody("contentJson must be a Tiptap doc".into())
         );
+    }
+
+    #[test]
+    fn internal_ref_rejects_non_uuid_ids() {
+        let doc = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "content": [{
+                    "type": "mention",
+                    "attrs": {"entity": "document", "id": "not-a-uuid"}
+                }]
+            }]
+        });
+        assert!(extract_internal_refs(&doc).is_empty());
     }
 
     #[test]

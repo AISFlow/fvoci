@@ -1,0 +1,81 @@
+{
+  "source": {
+    "package": "@tiptap/extension-emoji",
+    "version": "3.31.3",
+    "license": "MIT",
+    "repository": "https://github.com/ueberdosis/tiptap/tree/main/packages/extension-emoji",
+    "generatedAt": "2026-09-24",
+    "entryCount": 2850
+  },
+  "cases": [
+    {
+      "id": "attrs_emoji_override",
+      "node": {
+        "type": "emoji",
+        "attrs": {
+          "name": "tada",
+          "emoji": "🎉"
+        }
+      },
+      "expected": "🎉",
+      "context": null
+    },
+    {
+      "id": "known_name",
+      "node": {
+        "type": "emoji",
+        "attrs": {
+          "name": "tada"
+        }
+      },
+      "expected": "🎉",
+      "context": null
+    },
+    {
+      "id": "known_alias",
+      "node": {
+        "type": "emoji",
+        "attrs": {
+          "name": "party_popper"
+        }
+      },
+      "expected": "🎉",
+      "context": null
+    },
+    {
+      "id": "unknown_shortcode",
+      "node": {
+        "type": "emoji",
+        "attrs": {
+          "name": "fvoci_unknown_emoji_xyz"
+        }
+      },
+      "expected": ":fvoci_unknown_emoji_xyz:",
+      "context": null
+    },
+    {
+      "id": "supplementary_plane_glyph",
+      "node": {
+        "type": "emoji",
+        "attrs": {
+          "name": "tada",
+          "emoji": "🫠"
+        }
+      },
+      "expected": "🫠",
+      "context": null
+    },
+    {
+      "id": "korean_with_known_emoji",
+      "node": {
+        "type": "emoji",
+        "attrs": {
+          "name": "tada",
+          "emoji": "🎉"
+        }
+      },
+      "expected": "🎉",
+      "context": "서버"
+    }
+  ]
+}
