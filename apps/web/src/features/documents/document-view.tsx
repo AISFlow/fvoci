@@ -1,4 +1,5 @@
 import { FvociEditor, type TiptapEditor } from "@fvoci/editor/fvoci-editor";
+import { AttachmentBlockContext } from "@fvoci/editor/react";
 import { formatPersonName, t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -15,6 +16,7 @@ import {
   documentMetaQuery,
   treeQuery,
 } from "@/lib/queries/documents";
+import { createAttachmentBridge } from "@/features/workspace/attachment-upload";
 import { bindBlockPresence, isBlockPresenceAwareness } from "./block-presence";
 import { collabBadge } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
@@ -68,6 +70,10 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
     setStatus(metaQuery.data.status);
   }, [metaQuery.data]);
 
+  const attachmentBridge = useMemo(
+    () => createAttachmentBridge(workspaceId, documentId),
+    [workspaceId, documentId],
+  );
   const collabUser = useMemo(() => {
     if (!me.data) return null;
     return collabUserOf(me.data.userId, formatPersonName(me.data, me.data.locale));
@@ -327,18 +333,20 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
         ) : null}
         {!ready && collabSession?.status !== "unauthorized" ? <QueryLoading /> : null}
         {ready && collabSession && collabUser ? (
-          <FvociEditor
-            ydoc={collabSession.doc}
-            provider={collabSession.provider}
-            user={collabUser}
-            editable={!readOnly}
-            ariaLabel={t("doc.body.a11y")}
-            workspaceSlug={slug}
-            gutterAddLabel={t("editor.gutter.add")}
-            gutterMoveLabel={t("editor.gutter.move")}
-            insertLabel={t("editor.mobile.insert")}
-            onReady={setEditor}
-          />
+          <AttachmentBlockContext.Provider value={attachmentBridge}>
+            <FvociEditor
+              ydoc={collabSession.doc}
+              provider={collabSession.provider}
+              user={collabUser}
+              editable={!readOnly}
+              ariaLabel={t("doc.body.a11y")}
+              workspaceSlug={slug}
+              gutterAddLabel={t("editor.gutter.add")}
+              gutterMoveLabel={t("editor.gutter.move")}
+              insertLabel={t("editor.mobile.insert")}
+              onReady={setEditor}
+            />
+          </AttachmentBlockContext.Provider>
         ) : null}
       </section>
     </article>

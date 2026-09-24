@@ -30,6 +30,7 @@ const CHILD_ENV_ALLOW = [
   "PASSWORD_PEPPER_KEYS",
   "PASSWORD_PEPPER_ACTIVE_KEY_ID",
   "FVOCI_STATIC_DIR",
+  "FVOCI_STORAGE_DIR",
   "FVOCI_COLLAB_ENGINE",
 ] as const;
 
@@ -149,6 +150,7 @@ export class OwnedServer {
   logs = "";
   logPath = "";
   runDir = "";
+  storageDir = "";
   lastGracefulLeftovers: ProcMember[] = [];
 
   static async start(bind = "127.0.0.1:0"): Promise<OwnedServer> {
@@ -271,18 +273,24 @@ export class OwnedServer {
       );
     }
     this.logs = "";
-    const root = process.env.FVOCI_E2E_RESULT_DIR ?? tmpdir();
-    mkdirSync(root, { recursive: true });
-    this.runDir = join(
-      root,
-      `collab-server-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    );
-    mkdirSync(this.runDir, { recursive: true, mode: 0o700 });
+    if (this.runDir === "") {
+      const root = process.env.FVOCI_E2E_RESULT_DIR ?? tmpdir();
+      mkdirSync(root, { recursive: true });
+      this.runDir = join(
+        root,
+        `collab-server-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      );
+      mkdirSync(this.runDir, { recursive: true, mode: 0o700 });
+      this.storageDir = join(this.runDir, "storage");
+      mkdirSync(this.storageDir, { recursive: true, mode: 0o700 });
+    }
     this.logPath = join(this.runDir, "server.log");
     writeFileSync(this.logPath, "", { mode: 0o600 });
 
+    const env = ownedServerChildEnv(bind);
+    env.FVOCI_STORAGE_DIR = this.storageDir;
     const child = spawn(bin, [], {
-      env: ownedServerChildEnv(bind),
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
