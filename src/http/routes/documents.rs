@@ -13,13 +13,15 @@ use uuid::Uuid;
 
 use crate::api::dto::{
     AncestorResponse, AncestorsResponse, BodyResponse, CreateDocumentBody, DocumentMetaResponse,
-    PatchDocumentBody, RequiredNullable, TreeNodeResponse, TreeResponse,
+    MoveDocumentBody, OkResponse, PatchDocumentBody, RequiredNullable, SortDocumentBody,
+    TrashItemResponse, TrashListResponse, TreeNodeResponse, TreeResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::db::documents::{
-    create_wiki_document, get_wiki_document, list_wiki_ancestors, list_wiki_tree,
-    update_wiki_document_meta, CreateDocumentInput, DocumentDbError, DocumentMeta,
-    UpdateDocumentMetaInput, MAX_TREE_DEPTH,
+    create_wiki_document, get_wiki_document, list_trashed_wiki_documents, list_wiki_ancestors,
+    list_wiki_tree, move_wiki_document, reorder_wiki_document, restore_wiki_document,
+    trash_wiki_document, update_wiki_document_meta, CreateDocumentInput, DocumentDbError,
+    DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
 };
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::guard::{check_origin, reject_bearer};
@@ -36,12 +38,31 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/workspaces/{workspace_id}/tree", get(list_tree))
         .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}",
-            get(get_document).patch(patch_document),
+            get(get_document)
+                .patch(patch_document)
+                .delete(trash_document),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/ancestors",
             get(get_ancestors),
         )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/move",
+            post(move_document),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/sort",
+            post(sort_document),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/trash",
+            post(trash_document),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore",
+            post(restore_document),
+        )
+        .route("/api/v1/workspaces/{workspace_id}/trash", get(list_trash))
         .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/body",
             get(get_body),
@@ -56,6 +77,11 @@ struct TreeQuery {
 #[derive(Deserialize)]
 struct BodyQuery {
     format: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TrashQuery {
+    children: Option<String>,
 }
 
 enum DocumentApiError {
@@ -303,6 +329,156 @@ async fn get_ancestors(
     }
 }
 
+async fn move_document(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<MoveDocumentBody>, JsonRejection>,
+) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = move_wiki_document(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        document_id,
+        body.new_parent_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(meta) => Ok(Json(meta_response(&meta, false))),
+        Err(err) => Err(map_document_error(err)),
+    }
+}
+
+async fn sort_document(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<SortDocumentBody>, JsonRejection>,
+) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = reorder_wiki_document(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        document_id,
+        body.after_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(meta) => Ok(Json(meta_response(&meta, false))),
+        Err(err) => Err(map_document_error(err)),
+    }
+}
+
+async fn trash_document(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<TrashQuery>,
+) -> Result<Json<OkResponse>, DocumentApiError> {
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    let children = parse_trash_children(query.children.as_deref())?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = trash_wiki_document(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        document_id,
+        children,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_document_error(err)),
+    }
+}
+
+async fn restore_document(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, DocumentApiError> {
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = restore_wiki_document(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        document_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_document_error(err)),
+    }
+}
+
+async fn list_trash(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<TrashListResponse>, DocumentApiError> {
+    reject_bearer(&headers)?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let user_id = parse_user_id(&user.user_id)?;
+    let result =
+        list_trashed_wiki_documents(&state.auth.db.pool, workspace_id, user_id, session_id)
+            .await
+            .map_err(internal)?;
+    match result {
+        Ok(items) => Ok(Json(TrashListResponse {
+            items: items
+                .into_iter()
+                .map(|item| TrashItemResponse {
+                    id: item.id.to_string(),
+                    title: item.title,
+                    deleted_at: item.deleted_at,
+                    project_id: item.project_id.map(|id| id.to_string()),
+                })
+                .collect(),
+        })),
+        Err(err) => Err(map_document_error(err)),
+    }
+}
+
 async fn get_body(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -359,6 +535,15 @@ fn meta_response(meta: &DocumentMeta, include_display_id: bool) -> DocumentMetaR
     }
 }
 
+fn parse_trash_children(value: Option<&str>) -> Result<TrashChildrenMode, DocumentApiError> {
+    match value {
+        None => Ok(TrashChildrenMode::Trash),
+        Some("trash") => Ok(TrashChildrenMode::Trash),
+        Some("reparent") => Ok(TrashChildrenMode::Reparent),
+        Some(_) => Err(AppError::from_code(ProblemCode::InvalidInput).into()),
+    }
+}
+
 fn map_document_error(err: DocumentDbError) -> DocumentApiError {
     match err {
         DocumentDbError::NotFound | DocumentDbError::Forbidden => {
@@ -375,6 +560,33 @@ fn map_document_error(err: DocumentDbError) -> DocumentApiError {
             code: "tree_depth_limit",
             title: format!("tree depth would exceed limit ({MAX_TREE_DEPTH})"),
             params: Some(json!({ "limit": MAX_TREE_DEPTH })),
+        },
+        DocumentDbError::Cycle => DocumentApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "document_cycle",
+            title:
+                "move would create a cycle (new parent is the document itself or its descendant)"
+                    .to_string(),
+            params: None,
+        },
+        DocumentDbError::TrashedParent => DocumentApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "restore_rejected",
+            title: "restore rejected".to_string(),
+            params: None,
+        },
+        DocumentDbError::RootDocumentTrash => DocumentApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "root_document_trash",
+            title: "cannot trash a project's root document (delete the project instead)"
+                .to_string(),
+            params: None,
+        },
+        DocumentDbError::RootDocumentMove => DocumentApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "root_document_move",
+            title: "cannot move a project's root document (not supported in v1)".to_string(),
+            params: None,
         },
         DocumentDbError::InvalidSortKey => AppError::internal().into(),
     }

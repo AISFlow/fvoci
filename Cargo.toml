@@ -80,6 +80,11 @@ path = "tests/document_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "document_collab_lifecycle"
+path = "tests/document_collab_lifecycle.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "collab_integration"
 path = "tests/collab_integration.rs"
 required-features = ["db-tests"]

@@ -430,6 +430,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
       __fvociCaretProbe?: Array<Record<string, unknown>>;
       __fvociCaretProbeInstalled?: boolean;
       __fvociCaretProbeEditor?: boolean;
+      __fvociCaretProbeView?: boolean;
       __fvociCaretSnapshot?: () => Record<string, unknown>;
     };
     if (host.__fvociCaretProbeInstalled) return;
@@ -438,7 +439,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
     host.__fvociCaretProbe = log;
     const push = (event: Record<string, unknown>) => {
       log.push(event);
-      if (log.length > 80) log.splice(0, log.length - 80);
+      if (log.length > 240) log.splice(0, log.length - 240);
     };
     const initialRoot = document.querySelector(".fvoci-editor .ProseMirror") as
       (HTMLElement & { editor?: unknown }) | null;
@@ -497,23 +498,38 @@ export async function installCaretProbe(page: Page): Promise<void> {
       push(snap("selectionchange"));
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Home" && event.key !== "Delete") return;
+      if (
+        event.key !== "Home" &&
+        event.key !== "Delete" &&
+        event.key !== "Backspace" &&
+        event.key !== "ArrowLeft"
+      ) {
+        return;
+      }
       push(snap(`${event.key.toLowerCase()}-keydown`, {
         shift: event.shiftKey,
         prevented: event.defaultPrevented,
       }));
     }, true);
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Delete") return;
-      push(snap("delete-keydown-bubble", { prevented: event.defaultPrevented }));
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      push(snap(`${event.key.toLowerCase()}-keydown-bubble`, { prevented: event.defaultPrevented }));
     });
     const attachEditor = () => {
       const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
         editor?: {
+          view: {
+            updateState: (state: unknown) => void;
+            posAtDOM(node: Node, offset: number): number;
+          };
           on(
             event: "transaction",
             cb: (props: {
-              transaction: { getMeta(key: string): unknown; docChanged: boolean };
+              transaction: {
+                getMeta(key: string): unknown;
+                docChanged: boolean;
+                selectionSet: boolean;
+              };
               editor: {
                 state: {
                   selection: { from: number; to: number; empty: boolean };
@@ -525,13 +541,45 @@ export async function installCaretProbe(page: Page): Promise<void> {
         };
       } | null;
       const live = root?.editor;
-      if (!live || host.__fvociCaretProbeEditor) return;
+      if (!live) return;
+      if (!host.__fvociCaretProbeView) {
+        host.__fvociCaretProbeView = true;
+        const origUpdate = live.view.updateState.bind(live.view);
+        live.view.updateState = (state: unknown) => {
+          const before = snap("updateState-before");
+          origUpdate(state);
+          const after = snap("updateState-after");
+          push({
+            ...after,
+            beforeNativePmPos: before.nativePmPos,
+            beforeFrom: before.from,
+            beforeTo: before.to,
+            nativeClobber:
+              before.nativePmPos !== null &&
+              after.nativePmPos !== before.nativePmPos &&
+              before.from === after.from &&
+              before.to === after.to,
+            wroteSelectionToDom:
+              before.nativePmPos !== after.nativePmPos ||
+              before.nativeOffset !== after.nativeOffset,
+          });
+        };
+      }
+      if (host.__fvociCaretProbeEditor) return;
       host.__fvociCaretProbeEditor = true;
       live.on("transaction", ({ transaction, editor: current }) => {
+        const cursorMeta = transaction.getMeta("yjs-cursor$") as
+          | { awarenessUpdated?: boolean }
+          | undefined;
+        const ySyncMeta = transaction.getMeta("y-sync$");
         push({
           ...snap("transaction"),
-          ySync: Boolean(transaction.getMeta("y-sync$")),
+          ySync: Boolean(ySyncMeta),
+          ySyncMeta: ySyncMeta ?? null,
           uniqueId: Boolean(transaction.getMeta("__uniqueIDTransaction")),
+          awarenessUpdated: Boolean(cursorMeta?.awarenessUpdated),
+          cursorMeta: cursorMeta ?? null,
+          selectionSet: transaction.selectionSet,
           from: current.state.selection.from,
           to: current.state.selection.to,
           empty: current.state.selection.empty,
@@ -561,8 +609,8 @@ export async function readCaretProbe(page: Page): Promise<unknown> {
 
 export async function placeContentCaret(page: Page, where: "start" | "end"): Promise<void> {
   const locator = editorLocator(page);
-  await locator.focus();
-  const position = await locator.evaluate((root, edge) => {
+  await locator.scrollIntoViewIfNeeded();
+  const target = await locator.evaluate((root, edge) => {
     const isDecoration = (node: Node) => {
       const el = node instanceof Element ? node : node.parentElement;
       return Boolean(el?.closest(".collaboration-carets__caret, .collaboration-carets__label"));
@@ -581,31 +629,72 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
       if (!first) first = node;
       last = node;
     }
-    const target = edge === "start" ? first : last;
-    if (!target) throw new Error("content caret requires an existing text node");
+    const text = edge === "start" ? first : last;
+    if (!text) throw new Error("content caret requires an existing text node");
     const editor = (root as HTMLElement & {
       editor?: { view: { posAtDOM(node: Node, offset: number): number } };
     }).editor;
     if (!editor) throw new Error("missing live editor for caret inspection");
-    const offset = edge === "start" ? 0 : target.length;
-    const position = editor.view.posAtDOM(target, offset);
+    const offset = edge === "start" ? 0 : text.length;
+    const position = editor.view.posAtDOM(text, offset);
+    text.parentElement?.scrollIntoView({ block: "center", inline: "nearest" });
     const range = document.createRange();
-    if (edge === "start") range.setStart(target, 0);
-    else range.setStart(target, target.length);
-    range.collapse(true);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    return position;
+    if (edge === "start") {
+      range.setStart(text, 0);
+      range.setEnd(text, Math.min(1, text.length));
+    } else {
+      range.setStart(text, Math.max(0, text.length - 1));
+      range.setEnd(text, text.length);
+    }
+    const rect = range.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) {
+      throw new Error("content caret target has an empty layout rect");
+    }
+    const inset = Math.max(1, rect.width * 0.2);
+    const x = edge === "start" ? rect.left + inset : rect.right - inset;
+    const y = rect.top + Math.max(rect.height / 2, 1);
+    const probeHost = globalThis as unknown as {
+      __fvociCaretProbe?: Array<Record<string, unknown>>;
+    };
+    probeHost.__fvociCaretProbe?.push({
+      kind: "place-click",
+      t: Date.now(),
+      where: edge,
+      position,
+      nativeOffset: offset,
+      nativeText: text.data,
+      nativeTextLen: text.length,
+      x,
+      y,
+    });
+    return { x, y, position };
   }, where);
-  // Browser selectionchange is asynchronous. Observe the real ProseMirror
-  // selection before typing; never dispatch a synthetic editor transaction.
+  // Click the first/last content glyph (PM pointer path). Control+Home/End then
+  // moves to the document edge if the click landed inside a table cell or wrap.
+  // Do not use locator.focus()+Range: that races PM's 20ms focus restore.
+  await page.mouse.click(target.x, target.y);
+  await expect.poll(() => locator.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: { view: { hasFocus(): boolean } };
+    }).editor;
+    const active = document.activeElement;
+    return (live?.view.hasFocus() ?? false) || (active != null && root.contains(active));
+  })).toBe(true);
+  const already = await locator.evaluate((root) => {
+    const editor = (root as HTMLElement & {
+      editor?: { state: { selection: { from: number; to: number } } };
+    }).editor;
+    return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
+  });
+  if (already?.[0] !== target.position || already[1] !== target.position) {
+    await page.keyboard.press(where === "start" ? "Control+Home" : "Control+End");
+  }
   await expect.poll(() => locator.evaluate((root) => {
     const editor = (root as HTMLElement & {
       editor?: { state: { selection: { from: number; to: number } } };
     }).editor;
     return editor ? [editor.state.selection.from, editor.state.selection.to] : null;
-  })).toEqual([position, position]);
+  })).toEqual([target.position, target.position]);
 }
 
 export function uniqueBlockIds(shape: EditorShape): string[] {
