@@ -278,11 +278,15 @@ impl LocalStorage {
     pub async fn discard_uncommitted_payload(&self, key: &str) -> Result<(), StorageError> {
         Self::assert_key(key)?;
         let dir = self.objects_dir(key);
-        match fs::metadata(&dir).await {
-            Ok(_) => {
-                fs::remove_dir_all(&dir).await?;
-                Ok(())
-            }
+        match fs::remove_dir_all(&dir).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(StorageError::Io(err)),
+        }
+        // Also sync on retry after an interrupted removal: absence in memory
+        // does not establish that the directory entry deletion is durable.
+        match fsync_dir(&self.root.join("objects")).await {
+            Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(StorageError::Io(err)),
         }
@@ -783,7 +787,18 @@ mod tests {
         fs::write(storage.object_path(&key), b"STALEOBJ")
             .await
             .unwrap();
+        let capture = fs::canonicalize(&storage.root).await.unwrap();
+        delayed_create::capture_fsyncs(capture.clone());
         storage.discard_uncommitted_payload(&key).await.unwrap();
+        storage.discard_uncommitted_payload(&key).await.unwrap();
+        let synced = delayed_create::take_fsyncs(&capture);
+        assert_eq!(
+            synced
+                .iter()
+                .filter(|p| **p == capture.join("objects"))
+                .count(),
+            2
+        );
         let size = storage
             .assemble_multipart(&key, &[(part.part_number, part.etag.clone())])
             .await

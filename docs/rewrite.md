@@ -1736,3 +1736,26 @@ PR10 첫 Web collaboration-flow는107580924016에서 TS5097(import .ts 확장자
 브라우저 시작 전 실패했다. 기존 bundler 규칙과 같은 확장자 없는 import로
 고쳤고 해당 tsc와 oracle1을 로컬에서 다시 통과했다. 이 첫 실행의 네이티브
 4job/fast는 성공했지만 전체 CI 성공으로 기록하지 않는다. 후속HEAD 재실행 필요.
+
+2026-09-24 10:06 UTC: PR10 head808fb429538d1cba692ffa11000ee94c2359dcd6,
+base59b6ecd, merge-test09058f7c119d876406eceaceb63bf7899d5ea363에서 실제11개
+CI job이 모두 성공했다. Rust35984045870/Web35984045816/Documents35984046047/
+Engine35984045800. PG x64/ARM64 각각 attachment20/collab30/auth-workspace66/
+document13, React workspace13/collaboration18 모두 실행·성공(no ignored).
+Opus5.5 medium task17f2b2984f34/ctxc35f3e137676은808 delta 차단없음으로
+완료·release했다. 이전ctx39428db60a34는 bare orca 빈 실행파일을 호출하여
+완료 등록 없이 종료했으므로 해당실행을 stop/release하고 같은task를 재시도했다.
+765의 검토 기록을 보존하고 restart/revoke E2E가6c54d8e에 이미 포함됐다는
+근거 정정을 받았다. 보고서 /tmp/fvoci-attachment-opus-808-delta.md.
+추가D5(오래된 payload 삭제 후 parent fsync 누락)는 낮은 우선순위였지만
+데이터 내구성상 머지 전에 수정한다. 삭제 재시도에서 이미 없는 경우에도
+존재하는 objects 디렉터리를 sync한다. 새HEAD 검사·delta 검토 전은 미수락.
+RUNNING에 ancestor read/search 권한 제한D1을 명시했다. 전원 손실 실험은 아니다.
+
+Native job Composer8a0b664 제출: DB12/native5 통과이나 즉시취소 검사는
+실행중 child 취소를, 같은 프로세스 job 재생성은 프로세스크래시 복원을
+증명하지 않는다. task176ee5558413/ctxe30d201209e5에 같은worktree/모델/소유권으로
+활성 child 종료·회수와 별도 프로세스 복원 검사를 보강 배정했다. heavy slot은
+이 워커가 보유한다. 누락된808 전체기준 정상merge도 명시승인했다. PR10과
+별개이며 아직 새PR 없음. 코디네이터의 D5 로컬검사는 cold compile이 시작되어
+중단(exit130)했고 통과로 기록하지 않는다. 최종원격에서 관련검사를 실행한다.
