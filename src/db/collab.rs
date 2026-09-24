@@ -55,6 +55,8 @@ pub const MAX_COLLAB_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COLLAB_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COLLAB_TAIL_UPDATES: i64 = 64;
 pub const MAX_COLLAB_LOAD_BYTES: i64 = 32 * 1024 * 1024;
+/// Product REST `DOCUMENT_MAX_BODY_BYTES` (1 MiB JSON).
+pub const DOCUMENT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Minimal fixed empty Yjs updateV1 bytes for the canonical empty Tiptap seed only.
 /// This layer does not parse CRDT payloads.
@@ -198,6 +200,26 @@ pub struct VerifyCollabInput<'a> {
     pub expected_payload_len: i64,
     pub expected_payload_sha256: &'a [u8],
     pub expected_actor_user_id: Uuid,
+}
+
+pub struct ProjectDerivedBodyInput {
+    pub workspace_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub session_id: Uuid,
+    pub document_id: Uuid,
+    pub writer_generation: i64,
+    pub expected_tail_seq: i64,
+    pub content_json: Value,
+    pub text: String,
+    pub chosung: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectDerivedBodyResult {
+    Updated,
+    Unchanged,
+    /// Empty Yjs seed at `tail_seq == 0` must not overwrite the paragraph seed JSON.
+    SkippedSeed,
 }
 
 type StateRow = (Vec<u8>, i16, i64, i64, i64, DateTime<Utc>);
@@ -436,6 +458,31 @@ async fn authorize_wiki_collab_read(
         return Ok(Err(CollabDbError::NotFound));
     }
     Ok(Ok(()))
+}
+
+async fn append_system_document_updated_event(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let payload = json!({
+        "documentId": document_id.to_string(),
+        "collab": true,
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (
+            id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel
+        ) VALUES ($1, $2, NULL, 'document.updated', 'document', $3, $4, 'system')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(payload)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn record_collab_event_and_audit(
@@ -1185,6 +1232,89 @@ pub async fn load_collab_readonly(
     let load = state_row_to_load(state, tail);
     tx.commit().await?;
     Ok(Ok(load))
+}
+
+pub async fn project_derived_body(
+    pool: &PgPool,
+    input: ProjectDerivedBodyInput,
+) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+    let ProjectDerivedBodyInput {
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        writer_generation,
+        expected_tail_seq,
+        content_json,
+        text,
+        chosung,
+    } = input;
+
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    match authorize_wiki_collab_write(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await?
+    {
+        Ok(_) => {}
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+
+    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let Some(state) = state else {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    };
+    if state.4 == 0 {
+        tx.rollback().await?;
+        return Ok(Ok(ProjectDerivedBodyResult::SkippedSeed));
+    }
+    if state.2 != writer_generation {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    if state.4 != expected_tail_seq {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleCutoff));
+    }
+
+    let updated: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        UPDATE fvoci.documents
+        SET content_json = $3,
+            text = $4,
+            chosung = $5,
+            updated_at = now()
+        WHERE workspace_id = $1
+          AND id = $2
+          AND content_json IS DISTINCT FROM $3::jsonb
+        RETURNING id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(&content_json)
+    .bind(&text)
+    .bind(&chosung)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if updated.is_none() {
+        tx.commit().await?;
+        return Ok(Ok(ProjectDerivedBodyResult::Unchanged));
+    }
+
+    append_system_document_updated_event(&mut tx, workspace_id, document_id).await?;
+    tx.commit().await?;
+    Ok(Ok(ProjectDerivedBodyResult::Updated))
 }
 
 #[cfg(test)]

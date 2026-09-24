@@ -5,6 +5,7 @@
 
 pub mod awareness;
 pub mod config;
+pub mod derived_body;
 pub mod engine_bridge;
 pub mod guard;
 pub mod hub;
