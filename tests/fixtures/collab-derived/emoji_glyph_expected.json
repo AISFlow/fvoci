@@ -3,8 +3,7 @@
     "package": "@tiptap/extension-emoji",
     "version": "3.31.3",
     "license": "MIT",
-    "repository": "https://github.com/ueberdosis/tiptap/tree/main/packages/extension-emoji",
-    "generatedAt": "2026-09-24",
+    "repository": "https://github.com/ueberdosis/tiptap",
     "entryCount": 2850
   },
   "cases": [

@@ -6,6 +6,10 @@
 //!
 //! Internal reference extraction is implemented for parity testing only; the
 //! references table is not wired — callers must not treat refs as persisted.
+//!
+//! Skip-if-equal in the DB boundary compares `content_json` only (source parity).
+//! If text extraction changes while JSON is unchanged, `text`/`chosung` can
+//! stay stale until the next projection that changes JSON.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -32,15 +36,32 @@ const SYLLABLES_PER_CHOSUNG: u32 = 21 * 28;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedBodyError {
     TooLarge,
-    NestingTooDeep,
     InvalidDocumentBody(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedDerivedBody {
-    pub content_json: Value,
-    pub text: String,
-    pub chosung: String,
+    content_json: Value,
+    text: String,
+    chosung: String,
+}
+
+impl PreparedDerivedBody {
+    pub fn content_json(&self) -> &Value {
+        &self.content_json
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn chosung(&self) -> &str {
+        &self.chosung
+    }
+
+    pub fn into_parts(self) -> (Value, String, String) {
+        (self.content_json, self.text, self.chosung)
+    }
 }
 
 /// Document/task block references extracted from Tiptap JSON. Not persisted in this slice.
@@ -64,8 +85,12 @@ pub fn prepare_derived_body_with_cap(
     content_json: Value,
     max_bytes: usize,
 ) -> Result<PreparedDerivedBody, DerivedBodyError> {
+    // Byte cap matches source `Buffer.byteLength(JSON.stringify(...))`. Depth is
+    // bounded by the engine Project op; serde_json does not recurse here.
     let byte_length = serde_json::to_vec(&content_json)
-        .map_err(|_| DerivedBodyError::NestingTooDeep)?
+        .map_err(|_| {
+            DerivedBodyError::InvalidDocumentBody("contentJson could not be serialized".into())
+        })?
         .len();
     if byte_length > max_bytes {
         return Err(DerivedBodyError::TooLarge);
@@ -341,8 +366,8 @@ mod tests {
     fn korean_chosung_matches_fixture() {
         let doc = fixture("korean_chosung.json");
         let prepared = prepare_derived_body(doc).expect("prepare");
-        assert_eq!(prepared.text, "한글 테스트");
-        assert_eq!(prepared.chosung, "ㅎㄱ ㅌㅅㅌ");
+        assert_eq!(prepared.text(), "한글 테스트");
+        assert_eq!(prepared.chosung(), "ㅎㄱ ㅌㅅㅌ");
     }
 
     #[test]
@@ -355,14 +380,14 @@ mod tests {
             }]
         });
         let prepared = prepare_derived_body(doc).expect("prepare");
-        assert_eq!(prepared.text, "각");
+        assert_eq!(prepared.text(), "각");
     }
 
     #[test]
     fn emoji_uses_attrs_glyph_only() {
         let doc = fixture("emoji_attrs.json");
         let prepared = prepare_derived_body(doc).expect("prepare");
-        assert_eq!(prepared.text, "서버🎉");
+        assert_eq!(prepared.text(), "서버🎉");
     }
 
     #[test]
@@ -388,7 +413,7 @@ mod tests {
                     }]
                 });
                 let prepared = prepare_derived_body(doc).expect("prepare");
-                assert_eq!(prepared.text, format!("{context}{expected}"), "case {id}");
+                assert_eq!(prepared.text(), format!("{context}{expected}"), "case {id}");
             }
         }
     }

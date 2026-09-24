@@ -39,12 +39,15 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::{
     empty_document_json, lock_membership_users, membership_role_for_update, recheck_session,
     wiki_can_edit, workspace_is_live,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+
+pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
 
 pub const COLLAB_INIT_LOCK_NAMESPACE: i32 = 1_907_004;
 /// Reserved for a future room-manager session lock held for the connection lifetime.
@@ -55,8 +58,6 @@ pub const MAX_COLLAB_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COLLAB_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COLLAB_TAIL_UPDATES: i64 = 64;
 pub const MAX_COLLAB_LOAD_BYTES: i64 = 32 * 1024 * 1024;
-/// Product REST `DOCUMENT_MAX_BODY_BYTES` (1 MiB JSON).
-pub const DOCUMENT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Minimal fixed empty Yjs updateV1 bytes for the canonical empty Tiptap seed only.
 /// This layer does not parse CRDT payloads.
@@ -209,9 +210,45 @@ pub struct ProjectDerivedBodyInput {
     pub document_id: Uuid,
     pub writer_generation: i64,
     pub expected_tail_seq: i64,
-    pub content_json: Value,
-    pub text: String,
-    pub chosung: String,
+    prepared: PreparedDerivedBody,
+}
+
+impl ProjectDerivedBodyInput {
+    pub fn new(
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        document_id: Uuid,
+        writer_generation: i64,
+        expected_tail_seq: i64,
+        prepared: PreparedDerivedBody,
+    ) -> Self {
+        Self {
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            writer_generation,
+            expected_tail_seq,
+            prepared,
+        }
+    }
+
+    pub fn prepared(&self) -> &PreparedDerivedBody {
+        &self.prepared
+    }
+
+    pub fn into_parts(self) -> (Uuid, Uuid, Uuid, Uuid, i64, i64, PreparedDerivedBody) {
+        (
+            self.workspace_id,
+            self.actor_user_id,
+            self.session_id,
+            self.document_id,
+            self.writer_generation,
+            self.expected_tail_seq,
+            self.prepared,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -313,6 +350,25 @@ async fn ensure_collab_state_row(
     .execute(&mut **tx)
     .await?;
     Ok(Ok(()))
+}
+
+async fn fetch_state_fence_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<Option<(i64, i64)>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT writer_generation, tail_seq
+        FROM fvoci.document_states
+        WHERE workspace_id = $1 AND document_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await
 }
 
 async fn fetch_state_for_update(
@@ -1245,10 +1301,11 @@ pub async fn project_derived_body(
         document_id,
         writer_generation,
         expected_tail_seq,
-        content_json,
-        text,
-        chosung,
+        prepared,
     } = input;
+    let content_json = prepared.content_json();
+    let text = prepared.text();
+    let chosung = prepared.chosung();
 
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -1268,20 +1325,20 @@ pub async fn project_derived_body(
         }
     };
 
-    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
-    let Some(state) = state else {
+    let state = fetch_state_fence_for_update(&mut tx, workspace_id, document_id).await?;
+    let Some((current_generation, current_tail_seq)) = state else {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
     };
-    if state.4 == 0 {
+    if current_tail_seq == 0 {
         tx.rollback().await?;
         return Ok(Ok(ProjectDerivedBodyResult::SkippedSeed));
     }
-    if state.2 != writer_generation {
+    if current_generation != writer_generation {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::StaleWriter));
     }
-    if state.4 != expected_tail_seq {
+    if current_tail_seq != expected_tail_seq {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::StaleCutoff));
     }
@@ -1301,9 +1358,9 @@ pub async fn project_derived_body(
     )
     .bind(workspace_id)
     .bind(document_id)
-    .bind(&content_json)
-    .bind(&text)
-    .bind(&chosung)
+    .bind(content_json)
+    .bind(text)
+    .bind(chosung)
     .fetch_optional(&mut *tx)
     .await?;
 

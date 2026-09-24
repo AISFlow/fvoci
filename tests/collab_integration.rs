@@ -358,17 +358,15 @@ fn project_input(
     expected_tail_seq: i64,
     prepared: &PreparedDerivedBody,
 ) -> ProjectDerivedBodyInput {
-    ProjectDerivedBodyInput {
-        workspace_id: session.workspace_id,
-        actor_user_id: session.user_id,
-        session_id: session.session_id,
+    ProjectDerivedBodyInput::new(
+        session.workspace_id,
+        session.user_id,
+        session.session_id,
         document_id,
         writer_generation,
         expected_tail_seq,
-        content_json: prepared.content_json.clone(),
-        text: prepared.text.clone(),
-        chosung: prepared.chosung.clone(),
-    }
+        prepared.clone(),
+    )
 }
 
 fn derived_doc_json(text: &str) -> Value {
@@ -559,6 +557,10 @@ async fn wait_for_advisory_xact_lock_blocked_by(admin: &PgPool, holder_pid: i32)
 
 async fn wait_for_document_states_for_update(admin: &PgPool, blocker_pid: i32) -> i32 {
     wait_for_lock_blocked_by(admin, blocker_pid, "%document_states%", "%FOR UPDATE%").await
+}
+
+async fn wait_for_documents_for_update(admin: &PgPool, blocker_pid: i32) -> i32 {
+    wait_for_lock_blocked_by(admin, blocker_pid, "%fvoci.documents%", "%FOR UPDATE%").await
 }
 
 async fn wait_for_session_revoke_blocked(admin: &PgPool, blocker_pid: i32) -> i32 {
@@ -2642,6 +2644,12 @@ async fn derived_body_denies_archived_and_trashed_documents() {
         .connect(&harness.admin_url)
         .await
         .unwrap();
+    let baseline: (Value, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT content_json, updated_at FROM fvoci.documents WHERE id = $1")
+            .bind(fixture.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
 
     sqlx::query(
         "UPDATE fvoci.documents SET status = 'archived' WHERE workspace_id = $1 AND id = $2",
@@ -2689,6 +2697,13 @@ async fn derived_body_denies_archived_and_trashed_documents() {
 
     let events = event_count(&admin, fixture.document_id, "document.updated").await;
     assert_eq!(events, 0);
+    let after: (Value, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT content_json, updated_at FROM fvoci.documents WHERE id = $1")
+            .bind(fixture.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(after, baseline);
     admin.close().await;
     fixture.session.pool.close().await;
     harness.cleanup().await;
@@ -2764,6 +2779,22 @@ async fn derived_body_event_failure_rolls_back_content_write() {
         .execute(&admin)
         .await
         .unwrap();
+
+    let retry = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(retry, ProjectDerivedBodyResult::Updated);
+
     admin.close().await;
     fixture.session.pool.close().await;
     harness.cleanup().await;
@@ -2836,19 +2867,18 @@ async fn derived_body_app_role_rls_and_system_channel_event() {
     assert!(event.0.is_none());
     assert_eq!(event.1, "system");
 
+    let prepared_cross = prepare_derived_body(derived_doc_json("cross tenant")).unwrap();
     let denied = project_derived_body(
         &other.pool,
-        ProjectDerivedBodyInput {
-            workspace_id: other.workspace_id,
-            actor_user_id: other.user_id,
-            session_id: other.session_id,
-            document_id: fixture.document_id,
-            writer_generation: claim.writer_generation,
-            expected_tail_seq: 1,
-            content_json: derived_doc_json("cross tenant"),
-            text: "cross tenant".into(),
-            chosung: "cross tenant".into(),
-        },
+        ProjectDerivedBodyInput::new(
+            other.workspace_id,
+            other.user_id,
+            other.session_id,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            prepared_cross,
+        ),
     )
     .await
     .unwrap();
@@ -2951,6 +2981,208 @@ async fn derived_body_acl_denies_guest_and_revoked_session() {
 
     admin.close().await;
     member.pool.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_denies_workspace_spoof_from_non_member() {
+    let harness = TestDb::bootstrap().await;
+    let victim = setup_wiki_doc(&harness).await;
+    let attacker = setup_owner_session(&harness).await;
+    let claim = claim_writer_and_load(
+        &victim.session.pool,
+        victim.session.workspace_id,
+        victim.session.user_id,
+        victim.session.session_id,
+        victim.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &victim.session.pool,
+        append_input(
+            &victim.session,
+            victim.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"victim",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let baseline: (Value, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT content_json, updated_at FROM fvoci.documents WHERE id = $1")
+            .bind(victim.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+
+    let prepared = prepare_derived_body(derived_doc_json("spoofed")).unwrap();
+    let denied = project_derived_body(
+        &attacker.pool,
+        ProjectDerivedBodyInput::new(
+            victim.session.workspace_id,
+            attacker.user_id,
+            attacker.session_id,
+            victim.document_id,
+            claim.writer_generation,
+            1,
+            prepared,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(denied, Err(CollabDbError::Forbidden));
+
+    let after: (Value, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT content_json, updated_at FROM fvoci.documents WHERE id = $1")
+            .bind(victim.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(after, baseline);
+    let events = event_count(&admin, victim.document_id, "document.updated").await;
+    assert_eq!(events, 0);
+
+    admin.close().await;
+    attacker.pool.close().await;
+    victim.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_stale_projection_race_denies_after_newer_append() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &fixture.session.pool,
+        append_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"first",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let mut doc_barrier = admin.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *doc_barrier)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+        .bind(fixture.session.workspace_id)
+        .bind(fixture.document_id)
+        .execute(&mut *doc_barrier)
+        .await
+        .unwrap();
+
+    let prepared = prepare_derived_body(derived_doc_json("stale race")).unwrap();
+    let append = tokio::spawn({
+        let pool = fixture.session.pool.clone();
+        let workspace_id = fixture.session.workspace_id;
+        let actor_user_id = fixture.session.user_id;
+        let session_id = fixture.session.session_id;
+        let document_id = fixture.document_id;
+        let writer_generation = claim.writer_generation;
+        async move {
+            append_collab_update(
+                &pool,
+                AppendCollabInput {
+                    workspace_id,
+                    actor_user_id,
+                    session_id,
+                    document_id,
+                    writer_generation,
+                    expected_tail_seq: 1,
+                    op_id: Uuid::now_v7(),
+                    payload: b"second",
+                    client_ip: None,
+                },
+            )
+            .await
+        }
+    });
+    let append_pid = wait_for_documents_for_update(&admin, blocker_pid).await;
+
+    let project = tokio::spawn({
+        let pool = fixture.session.pool.clone();
+        let workspace_id = fixture.session.workspace_id;
+        let actor_user_id = fixture.session.user_id;
+        let session_id = fixture.session.session_id;
+        let document_id = fixture.document_id;
+        let writer_generation = claim.writer_generation;
+        let prepared = prepared.clone();
+        async move {
+            project_derived_body(
+                &pool,
+                ProjectDerivedBodyInput::new(
+                    workspace_id,
+                    actor_user_id,
+                    session_id,
+                    document_id,
+                    writer_generation,
+                    1,
+                    prepared,
+                ),
+            )
+            .await
+        }
+    });
+    wait_for_lock_blocked_by_any(
+        &admin,
+        &[blocker_pid, append_pid],
+        "%fvoci.documents%",
+        "%FOR UPDATE%",
+    )
+    .await;
+    doc_barrier.commit().await.unwrap();
+
+    let append_result = tokio::time::timeout(Duration::from_secs(10), append)
+        .await
+        .expect("append did not finish after documents release")
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(append_result, AppendCollabResult::Committed { seq: 2 });
+
+    let project_result = tokio::time::timeout(Duration::from_secs(10), project)
+        .await
+        .expect("project did not finish after documents release")
+        .unwrap()
+        .unwrap();
+    assert_eq!(project_result, Err(CollabDbError::StaleCutoff));
+
+    admin.close().await;
     fixture.session.pool.close().await;
     harness.cleanup().await;
 }
