@@ -1,12 +1,14 @@
 #![cfg(feature = "db-tests")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
+use futures_util::stream;
+use futures_util::StreamExt;
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::hash_token;
 use fvoci_server::auth::AuthService;
@@ -14,7 +16,6 @@ use fvoci_server::db::attachments::{
     authorize_upload_part, commit_upload_part, test_barrier, AttachmentDbError,
 };
 use fvoci_server::db::{migrate, pool, Db};
-use futures_util::stream;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
 use rand::RngCore;
@@ -29,11 +30,11 @@ const PEPPER: &str =
 
 // PNG magic bytes + minimal payload
 const PNG_BYTES: &[u8] = &[
-    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-    0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-    0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-    0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-    0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
 ];
 
 fn test_peer() -> std::net::SocketAddr {
@@ -329,15 +330,13 @@ async fn create_user_with_role(
     .execute(&admin)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, $3)",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(role)
-    .execute(&admin)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, $3)")
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(role)
+        .execute(&admin)
+        .await
+        .unwrap();
     admin.close().await;
 
     let pool = pool::connect_app(&harness.app_url).await.unwrap();
@@ -521,6 +520,23 @@ async fn wiki_attachment_round_trip_download_and_meta() {
     assert_eq!(meta["scanStatus"], "skipped");
     assert_eq!(meta["preview"], Value::Null);
     assert!(meta["completedAt"].is_string());
+    assert!(meta["createdAt"].is_string());
+    assert_eq!(meta["id"], uploaded.attachment_id);
+
+    let (status, replay, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{}/complete",
+            uploaded.attachment_id
+        ),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": uploaded.etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["id"], uploaded.attachment_id);
+    assert_eq!(replay["preview"], Value::Null);
 
     let (status, body, headers) = request(
         app.clone(),
@@ -541,7 +557,26 @@ async fn wiki_attachment_round_trip_download_and_meta() {
         headers.get("content-type").unwrap().to_str().unwrap(),
         "application/octet-stream"
     );
-    assert!(headers.get("content-disposition").unwrap().to_str().unwrap().contains("pixel.png"));
+    assert!(headers
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("pixel.png"));
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'attachment.completed' AND target_id = $1",
+    )
+    .bind(Uuid::parse_str(&uploaded.attachment_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 1, "successful complete replays the event once");
+    admin.close().await;
     harness.cleanup().await;
 }
 
@@ -739,13 +774,12 @@ async fn hwp_upload_sets_pending_extract_status() {
         .connect(&harness.admin_url)
         .await
         .unwrap();
-    let row: (String, String) = sqlx::query_as(
-        "SELECT extract_status, extract_text FROM fvoci.attachments WHERE id = $1",
-    )
-    .bind(Uuid::parse_str(&uploaded.attachment_id).unwrap())
-    .fetch_one(&admin)
-    .await
-    .unwrap();
+    let row: (String, String) =
+        sqlx::query_as("SELECT extract_status, extract_text FROM fvoci.attachments WHERE id = $1")
+            .bind(Uuid::parse_str(&uploaded.attachment_id).unwrap())
+            .fetch_one(&admin)
+            .await
+            .unwrap();
     assert_eq!(row.0, "pending");
     assert_eq!(row.1, "");
     admin.close().await;
@@ -755,7 +789,7 @@ async fn hwp_upload_sets_pending_extract_status() {
 #[tokio::test]
 async fn revoked_session_cannot_complete_upload() {
     let harness = TestDb::bootstrap().await;
-    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let (status, created, _) = json_request(
         app.clone(),
@@ -781,17 +815,15 @@ async fn revoked_session_cannot_complete_upload() {
     assert_eq!(status, StatusCode::OK);
     let etag = headers.get("etag").unwrap().to_str().unwrap();
 
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&harness.admin_url)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
-        .bind(owner_id)
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/logout",
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, _, _) = json_request(
         app.clone(),
@@ -896,12 +928,11 @@ async fn attachment_app_role_rls_two_tenant_isolation() {
         .execute(&mut *tx)
         .await
         .unwrap();
-    let hidden: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM fvoci.attachments WHERE id = $1")
-            .bind(foreign_att)
-            .fetch_optional(&mut *tx)
-            .await
-            .unwrap();
+    let hidden: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM fvoci.attachments WHERE id = $1")
+        .bind(foreign_att)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap();
     assert!(hidden.is_none());
     let foreign_insert = sqlx::query(
         r#"
@@ -965,8 +996,15 @@ async fn put_stream_revocation_blocks_part_publication() {
     admin.close().await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let payload = b"stage-me";
-    let (attachment_id, _part_url, _) =
-        begin_upload(&app, &cookie, workspace_id, &document_id, "stage.bin", payload).await;
+    let (attachment_id, _part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "stage.bin",
+        payload,
+    )
+    .await;
     let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
     let session_id = session_id_for_cookie(&harness, &cookie).await;
     let pool = pool::connect_app(&harness.app_url).await.unwrap();
@@ -982,7 +1020,7 @@ async fn put_stream_revocation_blocks_part_publication() {
     .unwrap()
     .unwrap()
     .0;
-    let staged = state
+    let mut staged = state
         .storage
         .stage_part_stream(
             &storage_key,
@@ -994,17 +1032,15 @@ async fn put_stream_revocation_blocks_part_publication() {
         )
         .await
         .unwrap();
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&harness.admin_url)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
-        .bind(owner_id)
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/logout",
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     let denied = commit_upload_part(
         &pool,
         &state.storage,
@@ -1013,7 +1049,7 @@ async fn put_stream_revocation_blocks_part_publication() {
         owner_id,
         session_id,
         1,
-        &staged,
+        &mut staged,
     )
     .await
     .unwrap()
@@ -1031,8 +1067,15 @@ async fn mid_assembly_revocation_denies_stored_publication() {
     let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let payload = b"assembly";
-    let (attachment_id, part_url, _) =
-        begin_upload(&app, &cookie, workspace_id, &document_id, "asm.bin", payload).await;
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "asm.bin",
+        payload,
+    )
+    .await;
     let (status, _, headers) = request(
         app.clone(),
         "PUT",
@@ -1067,17 +1110,15 @@ async fn mid_assembly_revocation_denies_stored_publication() {
         .await
         .expect("complete should reach pre-mark barrier")
         .expect("barrier entered");
-    let admin = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&harness.admin_url)
-        .await
-        .unwrap();
-    let token_hash = hash_token(&cookie);
-    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE token_hash = $1")
-        .bind(&token_hash)
-        .execute(&admin)
-        .await
-        .unwrap();
+    let (logout_status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/logout",
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(logout_status, StatusCode::NO_CONTENT);
     barrier.proceed();
     let (status, _, _) = complete.await.unwrap();
     assert_eq!(
@@ -1085,6 +1126,11 @@ async fn mid_assembly_revocation_denies_stored_publication() {
         StatusCode::NOT_FOUND,
         "revoked session must be denied at final publication recheck"
     );
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
     let row: (String,) = sqlx::query_as("SELECT status FROM fvoci.attachments WHERE id = $1")
         .bind(attachment_uuid)
         .fetch_one(&admin)
@@ -1121,12 +1167,11 @@ async fn attachment_event_and_audit_failures_roll_back_and_retry() {
         .connect(&harness.admin_url)
         .await
         .unwrap();
-    let workspace_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM fvoci.workspaces WHERE slug = 'rollback'",
-    )
-    .fetch_one(&admin_ws)
-    .await
-    .unwrap();
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'rollback'")
+            .fetch_one(&admin_ws)
+            .await
+            .unwrap();
     admin_ws.close().await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let payload = b"rollback";
@@ -1220,8 +1265,15 @@ async fn concurrent_duplicate_complete_is_idempotent() {
     let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let payload = b"concurrent";
-    let (attachment_id, part_url, _) =
-        begin_upload(&app, &cookie, workspace_id, &document_id, "dup.bin", payload).await;
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "dup.bin",
+        payload,
+    )
+    .await;
     let (status, _, headers) = request(
         app.clone(),
         "PUT",
@@ -1302,8 +1354,15 @@ async fn aborted_complete_releases_lock_for_retry_on_same_pool() {
     let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let payload = b"cancel-retry";
-    let (attachment_id, part_url, _) =
-        begin_upload(&app, &cookie, workspace_id, &document_id, "cancel.bin", payload).await;
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "cancel.bin",
+        payload,
+    )
+    .await;
     let (status, _, headers) = request(
         app.clone(),
         "PUT",
@@ -1487,12 +1546,11 @@ async fn stored_original_survives_service_recreation() {
         .connect(&harness.admin_url)
         .await
         .unwrap();
-    let workspace_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM fvoci.workspaces WHERE slug = 'persist'",
-    )
-    .fetch_one(&admin)
-    .await
-    .unwrap();
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'persist'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
     admin.close().await;
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let payload = b"persist-bytes";
@@ -1524,4 +1582,496 @@ async fn stored_original_survives_service_recreation() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, payload);
     harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn strict_dto_unknown_null_filename_and_preview_query() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let create_path = format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads");
+
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &create_path,
+        Some(json!({ "name": "a.bin", "sizeBytes": 1, "extra": true })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &create_path,
+        Some(json!({ "name": "a.bin", "sizeBytes": 1, "declaredMime": null })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+
+    let too_long = "한".repeat(256);
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &create_path,
+        Some(json!({ "name": too_long, "sizeBytes": 1 })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+
+    let name = "첨부😀.png";
+    let uploaded = upload_bytes(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        name,
+        PNG_BYTES,
+        Some("image/png"),
+    )
+    .await;
+    let (status, meta, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{}",
+            uploaded.attachment_id
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta["name"], name);
+    assert_eq!(meta["preview"], Value::Null);
+    assert!(meta["createdAt"].is_string());
+
+    let (status, body, headers) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{}/download",
+            uploaded.attachment_id
+        ),
+        None,
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, PNG_BYTES);
+    let disposition = headers
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        disposition,
+        fvoci_server::attachments::content_disposition_attachment(name)
+    );
+
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{}/complete",
+            uploaded.attachment_id
+        ),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": uploaded.etag }], "extra": true })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{}/complete",
+            uploaded.attachment_id
+        ),
+        Some(json!({ "parts": [{ "partNumber": 0, "etag": uploaded.etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+
+    let download = format!(
+        "/api/v1/workspaces/{workspace_id}/attachments/{}/download",
+        uploaded.attachment_id
+    );
+    let (status, _, _) = request(
+        app.clone(),
+        "GET",
+        &format!("{download}?variant=preview"),
+        None,
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body, _) = request(
+        app.clone(),
+        "GET",
+        &format!("{download}?variant=thumb"),
+        None,
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    assert_eq!(json["code"], "invalid_input");
+
+    let (status, body, _) = request(
+        app.clone(),
+        "GET",
+        &format!("{download}?foo=1"),
+        None,
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    assert_eq!(json["code"], "invalid_input");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn product_role_and_member_revoke_deny_upload() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let document_id = create_document(&app, &owner_cookie, workspace_id).await;
+    let (member_id, member_cookie) =
+        create_user_with_role(&harness, "writer@example.com", workspace_id, "member").await;
+    let payload = b"member-bytes";
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &member_cookie,
+        workspace_id,
+        &document_id,
+        "member.bin",
+        payload,
+    )
+    .await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&member_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+
+    let (status, body, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{workspace_id}/members/{member_id}"),
+        Some(json!({ "role": "guest" })),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "demote: {:?}", body);
+    assert_eq!(body["role"], "guest");
+
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&member_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (removed_id, removed_cookie) =
+        create_user_with_role(&harness, "removed@example.com", workspace_id, "member").await;
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &removed_cookie,
+        workspace_id,
+        &document_id,
+        "removed.bin",
+        payload,
+    )
+    .await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&removed_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+    let (status, _, _) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{workspace_id}/members/{removed_id}"),
+        None,
+        Some("application/json"),
+        Some(&owner_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&removed_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let missing_doc = Uuid::now_v7();
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{missing_doc}/uploads"),
+        Some(json!({ "name": "gone.bin", "sizeBytes": 4 })),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn aborted_put_removes_writing_and_keeps_valid_part() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-abort-{}", Uuid::now_v7()));
+    let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
+    let app = app_router(state);
+    let (_, _, cookie_hdr) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "abort@example.com",
+            "password": "supersecret1",
+            "givenName": "Abort",
+            "workspaceSlug": "abort",
+            "workspaceName": "Abort"
+        })),
+        None,
+    )
+    .await;
+    let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'abort'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    admin.close().await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let keep = b"keep-part";
+    let (attachment_id, part_url, _) =
+        begin_upload(&app, &cookie, workspace_id, &document_id, "abort.bin", keep).await;
+    let (status, _, _) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(keep.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let hanging = stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
+        bytes::Bytes::from_static(b"xx"),
+    )])
+    .chain(futures_util::stream::pending());
+    let builder = Request::builder()
+        .method("PUT")
+        .uri(part_url.clone())
+        .header("cookie", format!("fvoci_session={cookie}"))
+        .header("content-type", "application/octet-stream");
+    let mut request = builder.body(Body::from_stream(hanging)).unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let aborted = tokio::spawn(app.clone().oneshot(request));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if writing_temps(&storage_root).await > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("in-flight PUT should create a .writing file");
+    aborted.abort();
+    let _ = aborted.await;
+    assert_eq!(
+        writing_temps(&storage_root).await,
+        0,
+        "aborted PUT must remove staged .writing"
+    );
+
+    let (status, resume, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resume["uploadedParts"].as_array().unwrap().len(), 1);
+    assert_eq!(resume["attachmentId"], attachment_id);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn aborted_put_before_publish_removes_staged_and_keeps_part() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-prepub-{}", Uuid::now_v7()));
+    let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
+    let app = app_router(state);
+    let (_, _, cookie_hdr) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "prepub@example.com",
+            "password": "supersecret1",
+            "givenName": "Prepub",
+            "workspaceSlug": "prepub",
+            "workspaceName": "Prepub"
+        })),
+        None,
+    )
+    .await;
+    let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'prepub'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    admin.close().await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let keep = b"keep-part";
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "prepub.bin",
+        keep,
+    )
+    .await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(keep.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let original_etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    let mut barrier = test_barrier::arm_pre_publish(attachment_uuid);
+    let aborted = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let part_url = part_url.clone();
+        async move {
+            request(
+                app,
+                "PUT",
+                &part_url,
+                Some(b"overwrite".to_vec()),
+                Some("application/octet-stream"),
+                Some(&cookie),
+                &[],
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+        .await
+        .expect("PUT should reach pre-publish barrier")
+        .expect("barrier entered");
+    aborted.abort();
+    let _ = aborted.await;
+    test_barrier::disarm_pre_publish(attachment_uuid);
+    assert_eq!(
+        writing_temps(&storage_root).await,
+        0,
+        "cancelled staged part must not leave .writing"
+    );
+    let (status, resume, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resume["uploadedParts"][0]["etag"], original_etag);
+    harness.cleanup().await;
+}
+
+async fn writing_temps(root: &Path) -> usize {
+    let mut count = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".writing"))
+            {
+                count += 1;
+            }
+        }
+    }
+    count
 }

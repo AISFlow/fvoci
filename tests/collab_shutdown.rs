@@ -448,6 +448,9 @@ fn spawn_server_process_with_auth_wait(
 ) -> (OwnedChild, SocketAddr, Arc<Mutex<Vec<String>>>) {
     let engine = fvoci_server::collab::config::require_collab_engine_for_tests();
     let logs = Arc::new(Mutex::new(Vec::new()));
+    let storage_root =
+        std::env::temp_dir().join(format!("fvoci-collab-shutdown-store-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("collab shutdown storage root");
     let mut command = Command::new(server_bin());
     command
         .env("DATABASE_URL", &harness.admin_url)
@@ -458,6 +461,7 @@ fn spawn_server_process_with_auth_wait(
         .env("FVOCI_PUBLIC_ORIGIN", PUBLIC_ORIGIN)
         .env("FVOCI_COOKIE_SECURE", "0")
         .env("FVOCI_COLLAB_ENGINE", &engine)
+        .env("FVOCI_STORAGE_DIR", &storage_root)
         .env("FVOCI_SHUTDOWN_DEADLINE_MS", deadline_ms.to_string())
         .env("FVOCI_COLLAB_IDLE_MS", "60000")
         .stdin(Stdio::null())
