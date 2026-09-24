@@ -449,7 +449,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
           view: { posAtDOM(node: Node, offset: number): number };
           state: {
             selection: { from: number; to: number; empty: boolean };
-            doc: { textContent: string };
+            doc: { textContent: string; content: { size: number } };
           };
         };
       } | null;
@@ -482,6 +482,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
         to: live?.state.selection.to ?? null,
         empty: live?.state.selection.empty ?? null,
         pmText: live?.state.doc.textContent ?? null,
+        pmContentSize: live?.state.doc.content.size ?? null,
         ySync: false,
         uniqueId: false,
         ...extra,
@@ -496,23 +497,27 @@ export async function installCaretProbe(page: Page): Promise<void> {
       push(snap("selectionchange"));
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Home") return;
-      push(snap("home-keydown", {
+      if (event.key !== "Home" && event.key !== "Delete") return;
+      push(snap(`${event.key.toLowerCase()}-keydown`, {
         shift: event.shiftKey,
         prevented: event.defaultPrevented,
       }));
     }, true);
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Delete") return;
+      push(snap("delete-keydown-bubble", { prevented: event.defaultPrevented }));
+    });
     const attachEditor = () => {
       const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
         editor?: {
           on(
             event: "transaction",
             cb: (props: {
-              transaction: { getMeta(key: string): unknown };
+              transaction: { getMeta(key: string): unknown; docChanged: boolean };
               editor: {
                 state: {
                   selection: { from: number; to: number; empty: boolean };
-                  doc: { textContent: string };
+                  doc: { textContent: string; content: { size: number } };
                 };
               };
             }) => void,
@@ -531,6 +536,8 @@ export async function installCaretProbe(page: Page): Promise<void> {
           to: current.state.selection.to,
           empty: current.state.selection.empty,
           pmText: current.state.doc.textContent,
+          pmContentSize: current.state.doc.content.size,
+          docChanged: transaction.docChanged,
         });
       });
     };
@@ -618,19 +625,17 @@ export function uniqueBlockIds(shape: EditorShape): string[] {
   return ids;
 }
 
-/** Display convenience only. Structural acceptance uses editorShape, not these. */
+/** Read actual document text, excluding awareness decorations; structure is checked separately. */
 export async function expectTokens(page: Page, tokens: string[]): Promise<void> {
-  const editor = editorLocator(page);
   for (const token of tokens) {
-    await expect(editor).toContainText(token, { timeout: 15_000 });
+    await expect.poll(async () => (await editorShape(page)).text, { timeout: 15_000 }).toContain(token);
   }
 }
 
-/** Display convenience only. Structural acceptance uses editorShape, not these. */
+/** Read actual document text, excluding awareness decorations; structure is checked separately. */
 export async function expectTokensAbsent(page: Page, tokens: string[]): Promise<void> {
-  const editor = editorLocator(page);
   for (const token of tokens) {
-    await expect(editor).not.toContainText(token);
+    await expect.poll(async () => (await editorShape(page)).text).not.toContain(token);
   }
 }
 
