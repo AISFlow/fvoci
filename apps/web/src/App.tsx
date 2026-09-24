@@ -6,6 +6,7 @@ import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { ProjectTasksPage } from "@/pages/ProjectTasksPage";
+import { TrashPage } from "@/pages/TrashPage";
 import { WikiPage } from "@/pages/WikiPage";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
 import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
@@ -52,6 +53,7 @@ export function App() {
           >
             <Route path="projects" element={<ProjectsPage />} />
             <Route path="wiki" element={<WikiPage />} />
+            <Route path="trash" element={<TrashPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
             <Route path=":ref/tasks" element={<ProjectTasksPage />} />
             <Route path=":ref" element={<WorkspaceRefPage />} />

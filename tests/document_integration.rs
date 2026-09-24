@@ -1,5 +1,7 @@
 #![cfg(feature = "db-tests")]
 
+mod support;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1867,4 +1869,661 @@ async fn migration_001_003_upgrades_to_004_documents() {
         role_name,
     };
     cleanup.cleanup().await;
+}
+
+async fn create_doc(
+    app: &axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    parent_id: Option<&str>,
+    title: &str,
+) -> Value {
+    let body = match parent_id {
+        Some(parent) => json!({"parentId": parent, "title": title}),
+        None => json!({"parentId": null, "title": title}),
+    };
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(body),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    body
+}
+
+#[tokio::test]
+async fn document_move_sort_trash_restore_and_trash_list() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let root = create_doc(&app, &cookie, workspace_id, None, "Root").await;
+    let root_id = root["id"].as_str().unwrap();
+    let child = create_doc(&app, &cookie, workspace_id, Some(root_id), "Child").await;
+    let child_id = child["id"].as_str().unwrap();
+    let sibling = create_doc(&app, &cookie, workspace_id, None, "Sibling").await;
+    let sibling_id = sibling["id"].as_str().unwrap();
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{root_id}"),
+        Some(json!({"title": "Renamed root"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["title"], "Renamed root");
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/move"),
+        Some(json!({"newParentId": sibling_id})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["parentId"], sibling_id);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/sort"),
+        Some(json!({"afterId": null})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let first_sort = body["sortKey"].as_str().unwrap();
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/trash"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/tree"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["id"] == child_id));
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/trash"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["items"][0]["id"], child_id);
+    assert_eq!(body["items"][0]["title"], "Child");
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/restore"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["sortKey"], first_sort);
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let moved_events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'document.moved' AND workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(moved_events.0 >= 2);
+    let trashed_events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'document.trashed' AND workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(trashed_events.0, 1);
+    let restored_events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'document.restored' AND workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(restored_events.0, 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_move_cycle_and_depth_are_rejected() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let root = create_doc(&app, &cookie, workspace_id, None, "Root").await;
+    let root_id = root["id"].as_str().unwrap();
+    let child = create_doc(&app, &cookie, workspace_id, Some(root_id), "Child").await;
+    let child_id = child["id"].as_str().unwrap();
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{root_id}/move"),
+        Some(json!({"newParentId": child_id})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "document_cycle");
+
+    let mut deepest_id = root_id.to_string();
+    for index in 0..19 {
+        let deepest = create_doc(
+            &app,
+            &cookie,
+            workspace_id,
+            Some(&deepest_id),
+            &format!("Deep {index}"),
+        )
+        .await;
+        deepest_id = deepest["id"].as_str().unwrap().to_string();
+    }
+
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/move"),
+        Some(json!({"newParentId": deepest_id})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "tree_depth_limit");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_restore_rejects_trashed_parent() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let parent = create_doc(&app, &cookie, workspace_id, None, "Parent").await;
+    let parent_id = parent["id"].as_str().unwrap();
+    let child = create_doc(&app, &cookie, workspace_id, Some(parent_id), "Child").await;
+    let child_id = child["id"].as_str().unwrap();
+
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{parent_id}/trash"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/restore"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "restore_rejected");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_lifecycle_denies_guest_and_non_member() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let doc = create_doc(&app, &owner_cookie, workspace_id, None, "Secret").await;
+    let doc_id = doc["id"].as_str().unwrap();
+    let (guest_id, guest_cookie) =
+        create_second_user_session(&harness, "guest2@example.com", "Guest").await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    fvoci_server::db::workspace::add_membership_for_test(
+        &app_pool,
+        workspace_id,
+        guest_id,
+        fvoci_server::db::workspace::WorkspaceRole::Guest,
+    )
+    .await
+    .unwrap();
+    app_pool.close().await;
+
+    for (method, path, body) in [
+        (
+            "POST",
+            format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/trash"),
+            None,
+        ),
+        (
+            "POST",
+            format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/move"),
+            Some(json!({"newParentId": doc_id})),
+        ),
+        (
+            "GET",
+            format!("/api/v1/workspaces/{workspace_id}/trash"),
+            None,
+        ),
+    ] {
+        let (status, body_json, _, _) =
+            json_request(app.clone(), method, &path, body, Some(&guest_cookie), &[]).await;
+        if method == "GET" {
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body_json["items"].as_array().unwrap().len(), 0);
+        } else {
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body_json["code"], "not_found");
+        }
+    }
+
+    let (other_id, other_cookie) =
+        create_second_user_session(&harness, "other@example.com", "Other").await;
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}"),
+        None,
+        Some(&other_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+    assert_ne!(other_id, guest_id);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_lifecycle_denies_other_workspace_and_revoked_session() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let doc = create_doc(&app, &owner_cookie, workspace_id, None, "Locked").await;
+    let doc_id = doc["id"].as_str().unwrap();
+
+    let (foreign_id, foreign_cookie) =
+        create_second_user_session(&harness, "foreign@example.com", "Foreign").await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let foreign_workspace = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(foreign_workspace)
+        .bind(fvoci_server::db::workspace::personal_workspace_slug(
+            foreign_id,
+        ))
+        .bind("Foreign")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(foreign_workspace)
+    .bind(foreign_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/trash"),
+        None,
+        Some(&foreign_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/move"),
+        Some(json!({"newParentId": doc_id})),
+        Some(&owner_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "authentication_required");
+    assert_ne!(foreign_id, owner_id);
+    harness.cleanup().await;
+}
+
+mod document_collab_lifecycle {
+    use std::net::SocketAddr;
+    use std::panic::{resume_unwind, AssertUnwindSafe};
+    use std::time::Duration;
+
+    use crate::support::{
+        auth_and_join, complete_sync_handshake, connect_member, engine_fixture, setup_wiki_doc,
+        sync_update_frame, test_collab_config, wait_for_ws_close_code, TestDb, TestRun,
+    };
+    use futures_util::future::BoxFuture;
+    use futures_util::{FutureExt, SinkExt};
+    use fvoci_server::collab::config::CollabConfig;
+    use fvoci_server::collab::wire::{CollabKind, CollabRoomName};
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
+    use uuid::Uuid;
+
+    const COLLAB_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+    const ACL_POLL_MS: u64 = 500;
+
+    fn routing_key(workspace_id: Uuid, document_id: Uuid) -> String {
+        CollabRoomName {
+            workspace_id,
+            kind: CollabKind::Document,
+            resource_id: document_id,
+        }
+        .routing_key()
+    }
+
+    fn sample_update() -> Vec<u8> {
+        engine_fixture("utf8_korean.v1")
+    }
+
+    fn collab_config_fast_acl() -> CollabConfig {
+        let mut cfg = test_collab_config(4, 30_000);
+        cfg.revoke_poll_ms = ACL_POLL_MS;
+        cfg
+    }
+
+    async fn run_collab_test<F>(name: &str, case: F)
+    where
+        F: for<'a> FnOnce(&'a mut TestRun) -> BoxFuture<'a, ()>,
+    {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let case_fut = case(&mut run);
+        let case_outcome = tokio::time::timeout(
+            COLLAB_TEST_TIMEOUT,
+            AssertUnwindSafe(case_fut).catch_unwind(),
+        )
+        .await;
+        let cleanup_outcome = run.finish().await;
+        match (case_outcome, cleanup_outcome) {
+            (Ok(Ok(())), Ok(())) => {}
+            (Ok(Ok(())), Err(cleanup_err)) => {
+                panic!("{name} cleanup failed after success: {cleanup_err}");
+            }
+            (Ok(Err(panic_payload)), cleanup) => {
+                if let Err(cleanup_err) = cleanup {
+                    eprintln!("{name} cleanup also failed: {cleanup_err}");
+                }
+                resume_unwind(panic_payload);
+            }
+            (Err(_elapsed), Ok(())) => {
+                panic!("{name} hung (>{COLLAB_TEST_TIMEOUT:?}); cleanup completed");
+            }
+            (Err(_elapsed), Err(cleanup_err)) => {
+                panic!("{name} hung (>{COLLAB_TEST_TIMEOUT:?}); cleanup error: {cleanup_err}");
+            }
+        }
+    }
+
+    async fn http_trash(
+        addr: SocketAddr,
+        session_token: &str,
+        workspace_id: Uuid,
+        document_id: Uuid,
+    ) {
+        let client = reqwest::Client::new();
+        let url =
+            format!("http://{addr}/api/v1/workspaces/{workspace_id}/documents/{document_id}/trash");
+        let resp = client
+            .post(url)
+            .header("cookie", format!("fvoci_session={session_token}"))
+            .send()
+            .await
+            .expect("trash request");
+        assert_eq!(
+            resp.status(),
+            200,
+            "trash: {}",
+            resp.text().await.unwrap_or_default()
+        );
+    }
+
+    async fn http_move(
+        addr: SocketAddr,
+        session_token: &str,
+        workspace_id: Uuid,
+        document_id: Uuid,
+        new_parent_id: Uuid,
+    ) {
+        let client = reqwest::Client::new();
+        let url =
+            format!("http://{addr}/api/v1/workspaces/{workspace_id}/documents/{document_id}/move");
+        let resp = client
+            .post(url)
+            .header("cookie", format!("fvoci_session={session_token}"))
+            .json(&json!({"newParentId": new_parent_id.to_string()}))
+            .send()
+            .await
+            .expect("move request");
+        assert_eq!(
+            resp.status(),
+            200,
+            "move: {}",
+            resp.text().await.unwrap_or_default()
+        );
+    }
+
+    async fn http_create_project(
+        addr: SocketAddr,
+        session_token: &str,
+        workspace_id: Uuid,
+    ) -> Uuid {
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/api/v1/workspaces/{workspace_id}/projects");
+        let resp = client
+            .post(url)
+            .header("cookie", format!("fvoci_session={session_token}"))
+            .json(&json!({"key": "LAB", "name": "Lab", "visibility": "workspace"}))
+            .send()
+            .await
+            .expect("create project");
+        assert_eq!(resp.status(), 201);
+        let body: serde_json::Value = resp.json().await.expect("project json");
+        Uuid::parse_str(body["rootDocumentId"].as_str().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn document_trash_rejects_collab_append_after_commit() {
+        run_collab_test("document_trash_rejects_collab_append_after_commit", |run| {
+            Box::pin(async move {
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let app_url = run.harness.app_url.clone();
+                let addr = run
+                    .spawn_router(&app_url, test_collab_config(4, 30_000))
+                    .await;
+                let routing_key = routing_key(wiki.session.workspace_id, wiki.document_id);
+
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 101).await;
+                complete_sync_handshake(&mut writer, &routing_key).await;
+
+                let mut peer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut peer, &routing_key, 102).await;
+                complete_sync_handshake(&mut peer, &routing_key).await;
+
+                http_trash(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+
+                let update = sample_update();
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &update).into(),
+                    ))
+                    .await
+                    .unwrap();
+                let within = Duration::from_secs(5);
+                wait_for_ws_close_code(&mut writer, 1008, within, true, Some("permission revoked"))
+                    .await;
+                wait_for_ws_close_code(&mut peer, 1008, within, false, Some("permission revoked"))
+                    .await;
+            })
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn document_trash_closes_two_collab_sockets_within_acl_poll() {
+        run_collab_test(
+            "document_trash_closes_two_collab_sockets_within_acl_poll",
+            |run| {
+                Box::pin(async move {
+                    let wiki = setup_wiki_doc(&run.harness).await;
+                    let app_url = run.harness.app_url.clone();
+                    let addr = run.spawn_router(&app_url, collab_config_fast_acl()).await;
+                    let routing_key = routing_key(wiki.session.workspace_id, wiki.document_id);
+
+                    let mut peer_a = connect_member(addr, &wiki.session.session_token).await;
+                    auth_and_join(&mut peer_a, &routing_key, 201).await;
+                    complete_sync_handshake(&mut peer_a, &routing_key).await;
+
+                    let mut peer_b = connect_member(addr, &wiki.session.session_token).await;
+                    auth_and_join(&mut peer_b, &routing_key, 202).await;
+                    complete_sync_handshake(&mut peer_b, &routing_key).await;
+
+                    http_trash(
+                        addr,
+                        &wiki.session.session_token,
+                        wiki.session.workspace_id,
+                        wiki.document_id,
+                    )
+                    .await;
+
+                    let within = Duration::from_millis(ACL_POLL_MS + 400);
+                    wait_for_ws_close_code(
+                        &mut peer_a,
+                        1008,
+                        within,
+                        false,
+                        Some("permission revoked"),
+                    )
+                    .await;
+                    wait_for_ws_close_code(
+                        &mut peer_b,
+                        1008,
+                        within,
+                        false,
+                        Some("permission revoked"),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn document_move_into_project_closes_collab_room() {
+        run_collab_test("document_move_into_project_closes_collab_room", |run| {
+            Box::pin(async move {
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let app_url = run.harness.app_url.clone();
+                let addr = run.spawn_router(&app_url, collab_config_fast_acl()).await;
+                let routing_key = routing_key(wiki.session.workspace_id, wiki.document_id);
+                let project_root = http_create_project(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                )
+                .await;
+
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 301).await;
+                complete_sync_handshake(&mut writer, &routing_key).await;
+
+                http_move(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                    project_root,
+                )
+                .await;
+
+                let within = Duration::from_millis(ACL_POLL_MS + 400);
+                wait_for_ws_close_code(
+                    &mut writer,
+                    1008,
+                    within,
+                    false,
+                    Some("permission revoked"),
+                )
+                .await;
+            })
+        })
+        .await;
+    }
 }

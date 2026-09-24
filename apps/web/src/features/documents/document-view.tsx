@@ -3,11 +3,11 @@ import { AttachmentBlockContext } from "@fvoci/editor/react";
 import { formatPersonName, t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { documentPath, wikiDisplayId, wikiPath } from "@/lib/href";
+import { documentPath, trashPath, wikiDisplayId, wikiPath } from "@/lib/href";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import type { components } from "@/generated/api";
 import { meQuery } from "@/lib/queries";
@@ -49,6 +49,7 @@ interface DocumentViewProps {
 }
 
 export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProps) {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const me = useQuery(meQuery);
   const metaQuery = useQuery(documentMetaQuery(workspaceId, documentId));
@@ -62,6 +63,8 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
   const [persistError, setPersistError] = useState<string | null>(null);
   const [persisting, setPersisting] = useState(false);
   const [editor, setEditor] = useState<TiptapEditor | null>(null);
+  const [moveParentId, setMoveParentId] = useState("");
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!metaQuery.data) return;
@@ -85,6 +88,47 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
     if (!editor || !isBlockPresenceAwareness(awareness)) return;
     return bindBlockPresence(editor, awareness);
   }, [editor, collabSession?.provider.awareness]);
+
+  const trashDoc = useMutation({
+    mutationFn: async () =>
+      ensureOk(
+        await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/trash", {
+          params: {
+            path: { workspace_id: workspaceId, document_id: documentId },
+          },
+        }),
+      ),
+    onSuccess: async () => {
+      setLifecycleError(null);
+      await navigate(trashPath(slug));
+      await queryClient.invalidateQueries({ queryKey: ["tree", workspaceId] });
+    },
+    onError: (error: unknown) => {
+      setLifecycleError(loadErrorMessage(error));
+    },
+  });
+
+  const moveDoc = useMutation({
+    mutationFn: async (newParentId: string) =>
+      ensureOk(
+        await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/move", {
+          params: {
+            path: { workspace_id: workspaceId, document_id: documentId },
+          },
+          body: { newParentId },
+        }),
+      ),
+    onSuccess: async () => {
+      setLifecycleError(null);
+      setMoveParentId("");
+      await queryClient.invalidateQueries({ queryKey: ["tree", workspaceId] });
+      await queryClient.invalidateQueries({ queryKey: ["document", workspaceId, documentId] });
+      await queryClient.invalidateQueries({ queryKey: ["ancestors", workspaceId, documentId] });
+    },
+    onError: (error: unknown) => {
+      setLifecycleError(loadErrorMessage(error));
+    },
+  });
 
   const patchMeta = useMutation({
     mutationFn: async (body: PatchDocumentBody) =>
@@ -293,6 +337,64 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
               <span className="document-page__badge">{t("doc.readOnly")}</span>
             ) : null}
           </div>
+          {!readOnly ? (
+            <div className="document-page__lifecycle" aria-label={t("doc.move.title")}>
+              <label className="document-page__field">
+                <span className="sr-only">{t("doc.move.parentLabel")}</span>
+                <select
+                  className="document-page__field-select"
+                  value={moveParentId}
+                  aria-label={t("doc.move.parentLabel")}
+                  disabled={moveDoc.isPending || trashDoc.isPending}
+                  onChange={(event) => setMoveParentId(event.target.value)}
+                >
+                  <option value="">{t("doc.move.parentLabel")}</option>
+                  {(tree.data?.items ?? [])
+                    .filter(
+                      (node) =>
+                        node.id !== documentId &&
+                        node.projectId === null &&
+                        !crumbAncestors.some((crumb) => crumb.id === node.id),
+                    )
+                    .map((node) => (
+                      <option key={node.id} value={node.id}>
+                        {node.title}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!moveParentId || moveDoc.isPending || trashDoc.isPending}
+                onClick={() => {
+                  if (!moveParentId) return;
+                  moveDoc.mutate(moveParentId);
+                }}
+              >
+                {moveDoc.isPending ? t("doc.move.pending") : t("doc.move.submit")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={trashDoc.isPending || moveDoc.isPending}
+                aria-label={t("doc.trash.action")}
+                onClick={() => {
+                  if (!window.confirm(`${t("doc.trash.confirm.title")}\n${t("doc.trash.confirm.body")}`)) {
+                    return;
+                  }
+                  trashDoc.mutate();
+                }}
+              >
+                {trashDoc.isPending ? t("doc.create.pending") : t("doc.trash.action")}
+              </Button>
+            </div>
+          ) : null}
+          {lifecycleError ? (
+            <p role="alert" className="document-page__error">{lifecycleError}</p>
+          ) : null}
           <div className="document-page__collab">
             {badge ? (
               <span

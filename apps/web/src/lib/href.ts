@@ -68,7 +68,11 @@ export function parseRef(raw: string): ParsedRef | null {
 }
 
 export function wikiPath(slug: string): string {
-  return `/w/${slug.toLowerCase()}/wiki`;
+    return `/w/${slug.toLowerCase()}/wiki`;
+}
+
+export function trashPath(slug: string): string {
+    return `/w/${slug.toLowerCase()}/trash`;
 }
 
 export function documentPath(slug: string, displayId: string): string {
