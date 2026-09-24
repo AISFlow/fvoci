@@ -702,15 +702,7 @@ pub async fn list_project_tasks(
             return Ok(Err(ProjectDbError::InvalidCursor));
         };
         let key = cursor_key_for_row(
-            &sort,
-            id,
-            created_at,
-            updated_at,
-            number,
-            &title,
-            &sort_key,
-            &priority,
-            status_id,
+            &sort, id, created_at, updated_at, number, &title, &sort_key, &priority, status_id,
             due_date,
         );
         if key != cursor.key {

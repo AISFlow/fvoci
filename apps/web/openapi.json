@@ -4064,6 +4064,10 @@
       "description": "Project and workflow management"
     },
     {
+      "name": "search",
+      "description": "Display id lookup"
+    },
+    {
       "name": "tasks",
       "description": "Project task operations"
     },

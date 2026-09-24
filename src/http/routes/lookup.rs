@@ -59,10 +59,7 @@ async fn lookup_display_id_route(
     let actor_user_id = parse_user_id(&user.user_id)?;
     if let Err(retry_after) = state
         .rate_limiter
-        .allow(
-            &format!("lookup:user:{actor_user_id}"),
-            LOOKUP_USER_LIMIT,
-        )
+        .allow(&format!("lookup:user:{actor_user_id}"), LOOKUP_USER_LIMIT)
         .await
     {
         return Err(AppError::rate_limited(retry_after));
@@ -90,11 +87,9 @@ async fn lookup_display_id_route(
                 })
                 .collect(),
         })),
-        Err(LookupDbError::NotFound) | Err(LookupDbError::Forbidden) => {
-            Err(map_project_error(
-                crate::db::projects::ProjectDbError::NotFound,
-            ))
-        }
+        Err(LookupDbError::NotFound) | Err(LookupDbError::Forbidden) => Err(map_project_error(
+            crate::db::projects::ProjectDbError::NotFound,
+        )),
     }
 }
 

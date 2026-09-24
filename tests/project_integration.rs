@@ -41,20 +41,17 @@ async fn migration_007_upgrades_to_008_projects() {
     let user_id = Uuid::now_v7();
     let doc_id = Uuid::now_v7();
     let path = doc_id.simple().to_string();
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'Owner')")
+        .bind(user_id)
+        .bind(format!("owner-{user_id}@example.com"))
+        .execute(&admin)
+        .await
+        .unwrap();
     sqlx::query(
-        "INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'Owner')",
-    )
-    .bind(user_id)
-    .bind(format!("owner-{user_id}@example.com"))
-    .execute(&admin)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO fvoci.workspaces (id, slug, name, next_document_number, created_by)
-         VALUES ($1, 'acme', 'Acme', 1, $2)",
+        "INSERT INTO fvoci.workspaces (id, slug, name, next_document_number)
+         VALUES ($1, 'acme', 'Acme', 1)",
     )
     .bind(workspace_id)
-    .bind(user_id)
     .execute(&admin)
     .await
     .unwrap();
@@ -1369,10 +1366,7 @@ async fn run_patch_private_vs_workspace_remove_project_lock_race(
     let lab = create_project(app.clone(), &lead.cookie, workspace_id, "LAB", "workspace").await;
     let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
     let project_path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}");
-    let remove_path = format!(
-        "/api/v1/workspaces/{workspace_id}/members/{}",
-        lead.user_id
-    );
+    let remove_path = format!("/api/v1/workspaces/{workspace_id}/members/{}", lead.user_id);
 
     let mut barrier = admin.begin().await.unwrap();
     sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
@@ -1456,14 +1450,13 @@ async fn run_patch_private_vs_workspace_remove_project_lock_race(
     assert_eq!(patch_status, expected_patch, "patch status");
     assert_eq!(remove_status, expected_remove, "remove status");
 
-    let visibility: (String,) = sqlx::query_as(
-        "SELECT visibility FROM fvoci.projects WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .fetch_one(&admin)
-    .await
-    .unwrap();
+    let visibility: (String,) =
+        sqlx::query_as("SELECT visibility FROM fvoci.projects WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace_id)
+            .bind(project_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
     let lead_count: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM fvoci.project_members
          WHERE workspace_id = $1 AND project_id = $2 AND role = 'lead'",
@@ -1484,12 +1477,24 @@ async fn run_patch_private_vs_workspace_remove_project_lock_race(
 
     if expected_patch == StatusCode::OK {
         assert_eq!(visibility.0, "private");
-        assert!(lead_count.0 >= 1, "private project must retain at least one lead");
-        assert_eq!(member_count.0, 1, "blocked remove must keep workspace membership");
+        assert!(
+            lead_count.0 >= 1,
+            "private project must retain at least one lead"
+        );
+        assert_eq!(
+            member_count.0, 1,
+            "blocked remove must keep workspace membership"
+        );
     } else {
         assert_eq!(visibility.0, "workspace");
-        assert_eq!(lead_count.0, 0, "removed lead must drop project lead membership");
-        assert_eq!(member_count.0, 0, "successful remove must drop workspace membership");
+        assert_eq!(
+            lead_count.0, 0,
+            "removed lead must drop project lead membership"
+        );
+        assert_eq!(
+            member_count.0, 0,
+            "successful remove must drop workspace membership"
+        );
     }
 
     admin.close().await;

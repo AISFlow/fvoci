@@ -72,9 +72,7 @@ async fn create_project_route(
     if body.visibility != "private" && body.visibility != "workspace" {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
-    if !description_is_valid(body.description.as_deref())
-        || !icon_is_valid(body.icon.as_deref())
-    {
+    if !description_is_valid(body.description.as_deref()) || !icon_is_valid(body.icon.as_deref()) {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     let (user, session_id) = require_session(&state, &jar).await?;
@@ -129,10 +127,7 @@ async fn list_projects_route(
                     description: item.project.description,
                     icon: item.project.icon,
                     visibility: item.project.visibility,
-                    root_document_id: item
-                        .project
-                        .root_document_id
-                        .map(|id| id.to_string()),
+                    root_document_id: item.project.root_document_id.map(|id| id.to_string()),
                     status: item.project.status,
                     created_by: item.project.created_by.to_string(),
                     created_at: item.project.created_at,
@@ -410,9 +405,7 @@ fn project_output(project: crate::db::projects::ProjectRow, include_counts: bool
         description: project.description,
         icon: project.icon,
         visibility: project.visibility,
-        root_document_id: project
-            .root_document_id
-            .map(|id| id.to_string()),
+        root_document_id: project.root_document_id.map(|id| id.to_string()),
         status: project.status,
         created_by: project.created_by.to_string(),
         created_at: project.created_at,

@@ -592,7 +592,7 @@ async fn task_create_rejects_unsupported_milestone_and_recurrence_blob() {
 #[tokio::test]
 async fn concurrent_visibility_private_vs_task_create_under_project_lock() {
     let harness = TestDb::bootstrap().await;
-    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let (app, _owner_cookie, _, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
     let lead = add_workspace_user(&admin, workspace_id, "member", "lead").await;
     let other = add_workspace_user(&admin, workspace_id, "member", "other").await;
