@@ -1944,6 +1944,14 @@ Grok dispatch release, 자원 없음. Composer project/task checkpointbc8a0ad는
 - React 첫 제출 `8783817f864beaf24d629ffcbf467dc5d4d53b69`(basee39bacd): TS/순수70 성공, 실제E2E 미실행. lookup 미연결 상태는 수락 아님. 같은 Grok terminal에서 후속 task_a6e39d4da2c9/ctx_9d279276ae60로 생성 계약/lookup/상세/페이지네이션 연결 계속. 원래 ctx_f58abad014f3 완료·재사용 처리.
 - 다음: PR14 실제 CI/진단 및 Opus 확인; Composer 새 계약 SHA를 Grok에 전달 후 PR13 순차 통합·관련 실제 PG/React 원격 검사. 로컬 무거운 slot은 Composer 단독, 다른 소유 불명 프로세스/PG를 정리하지 않았다.
 
+### 2026-09-24 PR14 본문 oracle 및 이모지 Delete 회귀
+
+main3fa의 Web35993127793에서 workspace는 성공, 협업은16/18(본문 토큰 검사에 awareness 이름 포함, 별도 이모지 Delete 미반영) 실패했다. PR14 최초abea392는 원격11job 성공(Web35994282132: 협업18/18) 및 Opus5.5medium(task492921f07a01/ctxad0764f20bf5) 본문 oracle 수정 검토를 통과했다. 다만 진단의 CDP 왕복이 타이밍을 바꾸므로 그 성공을 이모지 결함 해결로 취급하지 않는다.
+
+Opus는 동일 경계의 삽입 도착 순서와 Yjs 상대 위치 assoc=-1 때문에 기존 이모지 검사 기대값 자체도 순서 의존적임을 지적했다. 후속 diff는 삽입 위치를 분리하고, 원격 caret가 이모지 바로 앞에 있는 경우/문서 시작에 있는 대조군을 독립적으로 검사한다. 실제 native 화살표/Delete는 유지하며, DOM/PM 선택 일치는 읽기 전용으로 관찰하고 synthetic 편집/선택 복구를 하지 않는다. 정확한 구조·고유 ID·이모지 삭제 검사, retry0, 기존 timeout을 유지한다. 새 diff는 별도 원격·Opus 검토 전 미수락이다. 로그 `/tmp/fvoci-main3fa-collab-failure.log`, `/tmp/fvoci-pr14-abea-collab.log`, 검토 `/tmp/fvoci-presence-opus-abea-review.md`.
+
+PR14 a813b55의 11개 원격 job 및 협업20/20은 성공했고 Opus delta 검토도 비차단이었다. 다만 emoji는 leaf atom이라 실제 키 이벤트를 ProseMirror가 처리하며, 당시 정지한 선택에서만 삭제를 검증했다. 이전 빠른 키 입력에서 PM 선택이 늦게 반영되어 Delete가 무시됐다는 가설은 미확정이다. 이를 숨기지 않도록 후속 diff는 동시 편집 검사에서 Delete 직전 CDP 조회를 제거하고, keydown capture/bubble의 선택·prevented와 atom을 포함한 content.size/docChanged를 읽기 전용으로 기록한다. 실패 시 늦은 y-sync까지 마지막 probe를 남긴다. 선택을 복구하거나 timeout/retry를 늘리지 않는다. a813의 성공은 이 후속 diff의 검증을 대신하지 않는다.
+
 ### 2026-09-24 11:59Z 통합 상태
 
 - PR14 merged: 검토·원격11job 성공 HEAD `8173b71377ed933f8b631f7447ab2b5180cb735d`, merge/main `b5ab024e85aa3532538e15f828aa6f4fc87b5118`. 기대HEAD로 squash했고 REST merged/main을 확인했다. Web35995698669 실제 협업20/20(2.3분), workspace 성공; Rust35995698631/NativeDocuments35995698806/NativeEngine35995698705 성공. Opus 최종 delta task_efd15b3bd807/ctx_7c234820cc1a 보고 `/tmp/fvoci-presence-opus-8173-review.md`; 검토자가 실행한 테스트는 없다. 과거 빠른 Delete 무반응 원인은 미확정이며 이번 run에서는 재현되지 않았다. post-merge CI는 아직 확인 전.

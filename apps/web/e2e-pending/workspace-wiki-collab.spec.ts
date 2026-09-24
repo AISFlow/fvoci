@@ -169,11 +169,11 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
     await expectTokens(pageA, ["안녕🙂세계"]);
     await expectTokens(pageB, ["안녕🙂세계"]);
     await expectConverged(pageA, pageB);
+    await Promise.all([installCaretProbe(pageA), installCaretProbe(pageB)]);
     const beforeIds = uniqueBlockIds(await editorShape(pageA));
     await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
     await Promise.all([
       (async () => {
-        await pageA.keyboard.press("ArrowRight");
         await pageA.keyboard.press("ArrowRight");
         await pageA.keyboard.type("중간");
       })(),
@@ -182,20 +182,98 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
         await pageB.keyboard.press("ArrowLeft");
         await pageB.keyboard.press("ArrowLeft");
         await pageB.keyboard.press("Delete");
+        console.info("emoji after Delete", await readCaretProbe(pageB));
       })(),
     ]);
-    await expectTokens(pageA, ["안녕", "중간", "세계"]);
-    await expectTokens(pageB, ["안녕", "중간", "세계"]);
+    await expectTokens(pageA, ["안중간녕세계"]);
+    await expectTokens(pageB, ["안중간녕세계"]);
     await expectTokensAbsent(pageA, ["🙂"]);
     await expectTokensAbsent(pageB, ["🙂"]);
     await expectConverged(pageA, pageB);
     expect(uniqueBlockIds(await editorShape(pageA))).toEqual(beforeIds);
     expect(uniqueBlockIds(await editorShape(pageB))).toEqual(beforeIds);
+  } catch (error) {
+    console.info("concurrent emoji Delete failure", {
+      a: await readCaretProbe(pageA).catch(() => null),
+      b: await readCaretProbe(pageB).catch(() => null),
+    });
+    throw error;
   } finally {
     await ctxA.close();
     await ctxB.close();
   }
 });
+
+// Keep the insertion/deletion race above independent of caret association at the
+// same boundary. Separately exercise native Delete beside a remote caret, with
+// an otherwise identical control whose remote caret is at the document start.
+// These two cases observe settled selection; the unpaced race above does not.
+// Delete is a real key event; ProseMirror performs the emoji atom deletion.
+for (const remotePosition of ["adjacent", "start"] as const) {
+  test(`native emoji Delete with remote caret ${remotePosition}`, async ({ browser, collabApp }) => {
+    const ctxA = await newCollabContext(browser, collabApp.baseUrl);
+    const ctxB = await newCollabContext(browser, collabApp.baseUrl);
+    const pageA = await ctxA.newPage();
+    const pageB = await ctxB.newPage();
+    let failed = true;
+    try {
+      await login(pageA, member.email, member.password);
+      await login(pageB, member.email, member.password);
+      const doc = await createWikiDoc(pageA, `이모지 삭제 커서 ${remotePosition}`);
+      const editorA = await openEditor(pageA, doc.url);
+      await editorA.click();
+      await pageA.keyboard.type("안녕🙂세계");
+      await openEditor(pageB, doc.url);
+      await expectTokens(pageB, ["안녕🙂세계"]);
+      await expectConverged(pageA, pageB);
+      const ids = uniqueBlockIds(await editorShape(pageA));
+      await Promise.all([installCaretProbe(pageA), installCaretProbe(pageB)]);
+      await placeContentCaret(pageA, "start");
+      if (remotePosition === "adjacent") {
+        await pageA.keyboard.press("ArrowRight");
+        await pageA.keyboard.press("ArrowRight");
+      }
+      const remoteCaretPosition = remotePosition === "adjacent" ? 3 : 1;
+      await expect.poll(() => editorLocator(pageB).evaluate((root) => {
+        const live = (root as HTMLElement & {
+          editor?: { view: { posAtDOM(node: Node, offset: number): number } };
+        }).editor;
+        const caret = root.querySelector(".collaboration-carets__caret");
+        return live && caret ? live.view.posAtDOM(caret, 0) : null;
+      })).toBe(remoteCaretPosition);
+      await placeContentCaret(pageB, "end");
+      await pageB.keyboard.press("ArrowLeft");
+      await pageB.keyboard.press("ArrowLeft");
+      await pageB.keyboard.press("ArrowLeft");
+      // Observe the requested native selection; do not repair it or dispatch a
+      // Tiptap transaction. The emoji is an atom, so PM textContent omits it.
+      await expect.poll(async () => {
+        const probe = await readCaretProbe(pageB) as {
+          current?: { from: number; to: number; nativePmPos: number; focused: boolean };
+        };
+        const selection = probe.current;
+        return selection && [selection.from, selection.to, selection.nativePmPos, selection.focused];
+      }).toEqual([3, 3, 3, true]);
+      await pageB.keyboard.press("Delete");
+      await expectTokensAbsent(pageB, ["🙂"]);
+      await expectTokensAbsent(pageA, ["🙂"]);
+      await expectTokens(pageA, ["안녕세계"]);
+      await expectTokens(pageB, ["안녕세계"]);
+      await expectConverged(pageA, pageB);
+      expect(uniqueBlockIds(await editorShape(pageA))).toEqual(ids);
+      expect(uniqueBlockIds(await editorShape(pageB))).toEqual(ids);
+      failed = false;
+    } finally {
+      if (failed) {
+        console.info("native emoji Delete failure", remotePosition, {
+          a: await readCaretProbe(pageA).catch(() => null),
+          b: await readCaretProbe(pageB).catch(() => null),
+        });
+      }
+      await Promise.all([closeCollabContext(ctxA, failed), closeCollabContext(ctxB, failed)]);
+    }
+  });
+}
 
 test("offline typing reconnects with unsent text and without a persist ack", async ({
   page,
