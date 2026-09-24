@@ -430,6 +430,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
       __fvociCaretProbe?: Array<Record<string, unknown>>;
       __fvociCaretProbeInstalled?: boolean;
       __fvociCaretProbeEditor?: boolean;
+      __fvociCaretProbeView?: boolean;
       __fvociCaretSnapshot?: () => Record<string, unknown>;
     };
     if (host.__fvociCaretProbeInstalled) return;
@@ -438,7 +439,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
     host.__fvociCaretProbe = log;
     const push = (event: Record<string, unknown>) => {
       log.push(event);
-      if (log.length > 80) log.splice(0, log.length - 80);
+      if (log.length > 240) log.splice(0, log.length - 240);
     };
     const initialRoot = document.querySelector(".fvoci-editor .ProseMirror") as
       (HTMLElement & { editor?: unknown }) | null;
@@ -497,23 +498,38 @@ export async function installCaretProbe(page: Page): Promise<void> {
       push(snap("selectionchange"));
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Home" && event.key !== "Delete") return;
+      if (
+        event.key !== "Home" &&
+        event.key !== "Delete" &&
+        event.key !== "Backspace" &&
+        event.key !== "ArrowLeft"
+      ) {
+        return;
+      }
       push(snap(`${event.key.toLowerCase()}-keydown`, {
         shift: event.shiftKey,
         prevented: event.defaultPrevented,
       }));
     }, true);
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Delete") return;
-      push(snap("delete-keydown-bubble", { prevented: event.defaultPrevented }));
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      push(snap(`${event.key.toLowerCase()}-keydown-bubble`, { prevented: event.defaultPrevented }));
     });
     const attachEditor = () => {
       const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
         editor?: {
+          view: {
+            updateState: (state: unknown) => void;
+            posAtDOM(node: Node, offset: number): number;
+          };
           on(
             event: "transaction",
             cb: (props: {
-              transaction: { getMeta(key: string): unknown; docChanged: boolean };
+              transaction: {
+                getMeta(key: string): unknown;
+                docChanged: boolean;
+                selectionSet: boolean;
+              };
               editor: {
                 state: {
                   selection: { from: number; to: number; empty: boolean };
@@ -525,13 +541,45 @@ export async function installCaretProbe(page: Page): Promise<void> {
         };
       } | null;
       const live = root?.editor;
-      if (!live || host.__fvociCaretProbeEditor) return;
+      if (!live) return;
+      if (!host.__fvociCaretProbeView) {
+        host.__fvociCaretProbeView = true;
+        const origUpdate = live.view.updateState.bind(live.view);
+        live.view.updateState = (state: unknown) => {
+          const before = snap("updateState-before");
+          origUpdate(state);
+          const after = snap("updateState-after");
+          push({
+            ...after,
+            beforeNativePmPos: before.nativePmPos,
+            beforeFrom: before.from,
+            beforeTo: before.to,
+            nativeClobber:
+              before.nativePmPos !== null &&
+              after.nativePmPos !== before.nativePmPos &&
+              before.from === after.from &&
+              before.to === after.to,
+            wroteSelectionToDom:
+              before.nativePmPos !== after.nativePmPos ||
+              before.nativeOffset !== after.nativeOffset,
+          });
+        };
+      }
+      if (host.__fvociCaretProbeEditor) return;
       host.__fvociCaretProbeEditor = true;
       live.on("transaction", ({ transaction, editor: current }) => {
+        const cursorMeta = transaction.getMeta("yjs-cursor$") as
+          | { awarenessUpdated?: boolean }
+          | undefined;
+        const ySyncMeta = transaction.getMeta("y-sync$");
         push({
           ...snap("transaction"),
-          ySync: Boolean(transaction.getMeta("y-sync$")),
+          ySync: Boolean(ySyncMeta),
+          ySyncMeta: ySyncMeta ?? null,
           uniqueId: Boolean(transaction.getMeta("__uniqueIDTransaction")),
+          awarenessUpdated: Boolean(cursorMeta?.awarenessUpdated),
+          cursorMeta: cursorMeta ?? null,
+          selectionSet: transaction.selectionSet,
           from: current.state.selection.from,
           to: current.state.selection.to,
           empty: current.state.selection.empty,
@@ -596,6 +644,33 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
+    let livePos: number | null = null;
+    let liveOffset: number | null = null;
+    let liveText: string | null = null;
+    try {
+      const live = window.getSelection();
+      const anchor = live?.anchorNode;
+      liveOffset = live?.anchorOffset ?? null;
+      liveText = anchor instanceof Text ? anchor.data : anchor ? anchor.nodeName : null;
+      if (anchor) livePos = editor.view.posAtDOM(anchor, live?.anchorOffset ?? 0);
+    } catch {
+      livePos = null;
+    }
+    const probeHost = globalThis as unknown as {
+      __fvociCaretProbe?: Array<Record<string, unknown>>;
+    };
+    probeHost.__fvociCaretProbe?.push({
+      kind: "place-range",
+      t: Date.now(),
+      where: edge,
+      position,
+      nativeOffset: offset,
+      nativeText: target.data,
+      nativeTextLen: target.length,
+      livePos,
+      liveOffset,
+      liveText,
+    });
     return position;
   }, where);
   // Browser selectionchange is asynchronous. Observe the real ProseMirror

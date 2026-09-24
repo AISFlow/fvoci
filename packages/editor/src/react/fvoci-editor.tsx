@@ -6,6 +6,7 @@ import {
 } from "@tiptap/core";
 import Collaboration, { isChangeOrigin } from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
+import { yCursorPluginKey } from "@tiptap/y-tiptap";
 import { FileHandler } from "@tiptap/extension-file-handler";
 import {
 	AllSelection,
@@ -13,6 +14,7 @@ import {
 	Plugin,
 	PluginKey,
 	TextSelection,
+	type Transaction,
 } from "@tiptap/pm/state";
 import { CellSelection } from "@tiptap/pm/tables";
 import type { EditorView } from "@tiptap/pm/view";
@@ -59,6 +61,10 @@ import {
 	MathNodeView,
 	MermaidNodeView,
 } from "./node-views.js";
+import {
+	shouldAdoptNativeOnAwareness,
+	shouldWriteSelectionToDom,
+} from "./awareness-selection-guard.js";
 import { isNativeOwnedDeleteKey } from "./native-delete-owner.js";
 import { overlayOwner } from "./overlay-owner.js";
 import { parseWorkspaceUrl, resolvePastedEmbed } from "./paste-embed.js";
@@ -115,8 +121,8 @@ export function collabCaretRender(peer: {
  * caret the user sees. The native caret is mapped like PM's selectionFromDOM
  * (bias 1, TextSelection.between normalisation) and skipped inside
  * non-editable leaf DOM, where PM would pick a different position or a
- * NodeSelection. placeContentCaret's [1,1] case is a different writer and is not
- * handled here. */
+ * NodeSelection. Awareness decoration updates are a second writer; they go
+ * through createAwarenessSelectionGuardPlugin. */
 function handleNativeOwnedDeleteKeyDown(
 	view: EditorView,
 	event: KeyboardEvent,
@@ -159,6 +165,162 @@ function handleNativeOwnedDeleteKeyDown(
 	if (aligned.eq(selection)) return false;
 	view.dispatch(view.state.tr.setSelection(aligned));
 	return false;
+}
+
+/* WHY: awareness-only yCursorPlugin transactions rebuild caret widgets. PM then
+ * calls selectionToDOM because inner decorations changed, even when
+ * state.selection did not. The 20ms-after-focus timeout in prosemirror-view
+ * 1.42.x does the same write without a transaction. Probe: place-range livePos 5,
+ * then selectionchange pos 1 with no updateState. Skip that DOM write unless
+ * PM set the selection (or force). A capture-phase selectionchange listener
+ * that always adopted native remounted the format bubble (링크 button detached)
+ * and a post-skip microtask adopt typed `/표` into the previous paragraph.
+ * Skip the clobber only when the current dispatch did not setSelection
+ * (view.dispatch wrap). Enter/split therefore still writes. PM adopts via
+ * appendTransaction on awareness and via its own selectionchange flush once
+ * suppress is cleared. Mapping matches handleNativeOwnedDeleteKeyDown.
+ * Do not patch y-tiptap. docView/domObserver are not in prosemirror-view's
+ * .d.ts; this targets the pinned @tiptap/pm view (prosemirror-view 1.42.x). */
+const awarenessSelectionGuardKey = new PluginKey("fvociAwarenessSelectionGuard");
+
+type ProseMirrorDomObserver = {
+	suppressingSelectionUpdates: boolean;
+};
+
+type GuardedDocView = {
+	setSelection: (
+		anchor: number,
+		head: number,
+		view: EditorView,
+		force?: boolean,
+	) => void;
+	__fvociCaretWriteGuard?: boolean;
+};
+
+function clearAwarenessSelectionSuppress(view: EditorView): void {
+	const observer = (view as EditorView & { domObserver?: ProseMirrorDomObserver })
+		.domObserver;
+	if (observer) observer.suppressingSelectionUpdates = false;
+}
+
+function nativeTextSelectionFromDom(
+	view: EditorView,
+	doc: EditorState["doc"],
+): TextSelection | null {
+	const domSel = view.dom.ownerDocument.defaultView?.getSelection();
+	const anchorNode = domSel?.anchorNode;
+	const focusNode = domSel?.focusNode;
+	if (!domSel || !anchorNode || !focusNode) return null;
+	if (!view.dom.contains(anchorNode) || !view.dom.contains(focusNode)) {
+		return null;
+	}
+	for (const node of [anchorNode, focusNode]) {
+		const element = node instanceof Element ? node : node.parentElement;
+		const leaf = element?.closest('[contenteditable="false"]');
+		if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return null;
+	}
+	try {
+		return TextSelection.between(
+			doc.resolve(view.posAtDOM(anchorNode, domSel.anchorOffset, 1)),
+			doc.resolve(view.posAtDOM(focusNode, domSel.focusOffset, 1)),
+		) as TextSelection;
+	} catch {
+		return null;
+	}
+}
+
+function guardSelectionWritesToDom(
+	view: EditorView,
+	selectionSet: () => boolean,
+): void {
+	const docView = (view as EditorView & { docView?: GuardedDocView }).docView;
+	if (!docView || docView.__fvociCaretWriteGuard) return;
+	docView.__fvociCaretWriteGuard = true;
+	const orig = docView.setSelection.bind(docView);
+	docView.setSelection = (anchor, head, currentView, force = false) => {
+		const native = nativeTextSelectionFromDom(currentView, currentView.state.doc);
+		if (
+			!shouldWriteSelectionToDom({
+				force,
+				selectionSet: selectionSet(),
+				native: native ? { from: native.from, to: native.to } : null,
+				writeFrom: anchor,
+				writeTo: head,
+			})
+		) {
+			return;
+		}
+		orig(anchor, head, currentView, force);
+	};
+}
+
+function createAwarenessSelectionGuardPlugin(): Plugin {
+	let view: EditorView | null = null;
+	let clearSuppressAfterUpdate = false;
+	let selectionSetThisDispatch = false;
+	return new Plugin({
+		key: awarenessSelectionGuardKey,
+		view: (editorView) => {
+			view = editorView;
+			guardSelectionWritesToDom(editorView, () => selectionSetThisDispatch);
+			const origDispatch = editorView.dispatch.bind(editorView);
+			editorView.dispatch = (tr: Transaction) => {
+				if (tr.selectionSet) selectionSetThisDispatch = true;
+				origDispatch(tr);
+				selectionSetThisDispatch = false;
+			};
+			return {
+				update(currentView) {
+					guardSelectionWritesToDom(
+						currentView,
+						() => selectionSetThisDispatch,
+					);
+					if (!clearSuppressAfterUpdate) return;
+					clearSuppressAfterUpdate = false;
+					clearAwarenessSelectionSuppress(currentView);
+				},
+				destroy() {
+					view = null;
+				},
+			};
+		},
+		appendTransaction(
+			transactions: readonly Transaction[],
+			_old: EditorState,
+			state: EditorState,
+		) {
+			const current = view;
+			if (!current) return null;
+			const selectionSet = transactions.some((tr) => tr.selectionSet);
+			if (selectionSet) selectionSetThisDispatch = true;
+			const awarenessUpdated = transactions.some((tr) => {
+				const meta = tr.getMeta(yCursorPluginKey) as
+					| { awarenessUpdated?: boolean }
+					| undefined;
+				return Boolean(meta?.awarenessUpdated);
+			});
+			const docChanged = transactions.some((tr) => tr.docChanged);
+			if (awarenessUpdated && !docChanged) {
+				clearSuppressAfterUpdate = true;
+			}
+			if (
+				!shouldAdoptNativeOnAwareness({
+					awarenessUpdated,
+					docChanged,
+					selectionSet,
+					composing: current.composing,
+					editable: current.editable,
+					pmIsTextSelection: state.selection instanceof TextSelection,
+				})
+			) {
+				return null;
+			}
+			const aligned = nativeTextSelectionFromDom(current, state.doc);
+			if (!aligned || !aligned.empty || aligned.eq(state.selection)) return null;
+			selectionSetThisDispatch = true;
+			return state.tr.setSelection(aligned);
+		},
+	});
 }
 
 export type MentionHit = {
@@ -510,7 +672,14 @@ export const FvociEditor = memo(function FvociEditor({
 			}),
 			...(provider && user
 				? [
-						CollaborationCaret.configure({
+						CollaborationCaret.extend({
+							addProseMirrorPlugins() {
+								return [
+									...(this.parent?.() ?? []),
+									createAwarenessSelectionGuardPlugin(),
+								];
+							},
+						}).configure({
 							provider,
 							user,
 							render: collabCaretRender,

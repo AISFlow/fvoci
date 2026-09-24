@@ -120,6 +120,7 @@ test("insert and delete conflict keeps the insertion and applies the deletion", 
   const pageA = await ctxA.newPage();
   const pageB = await ctxB.newPage();
   try {
+    await ensureCollabFixture(pageA);
     await login(pageA, member.email, member.password);
     await login(pageB, member.email, member.password);
     const doc = await createWikiDoc(pageA, "삽입 삭제 충돌");
@@ -129,7 +130,19 @@ test("insert and delete conflict keeps the insertion and applies the deletion", 
     await expectTokens(pageA, ["한글본문"]);
     const editorB = await openEditor(pageB, doc.url);
     await expectTokens(pageB, ["한글본문"]);
-    await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
+    await Promise.all([installCaretProbe(pageA), installCaretProbe(pageB)]);
+    try {
+      await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
+    } catch (error) {
+      console.info(
+        "placeContentCaret failure",
+        JSON.stringify({
+          a: await readCaretProbe(pageA).catch(() => null),
+          b: await readCaretProbe(pageB).catch(() => null),
+        }),
+      );
+      throw error;
+    }
     await Promise.all([
       (async () => {
         await pageA.keyboard.type("앞쪽삽입");
@@ -217,6 +230,7 @@ for (const remotePosition of ["adjacent", "start"] as const) {
     const pageB = await ctxB.newPage();
     let failed = true;
     try {
+      await ensureCollabFixture(pageA);
       await login(pageA, member.email, member.password);
       await login(pageB, member.email, member.password);
       const doc = await createWikiDoc(pageA, `이모지 삭제 커서 ${remotePosition}`);
