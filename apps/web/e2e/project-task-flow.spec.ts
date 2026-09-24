@@ -1,0 +1,210 @@
+import { expect, test, type Page } from "@playwright/test";
+import { createE2eUser, login } from "./helpers";
+
+test.describe.configure({ mode: "serial" });
+
+const admin = {
+  email: "Admin@Example.COM",
+  password: "supersecret1",
+  familyName: "김",
+  givenName: "관리자",
+  workspaceSlug: "acme",
+  workspaceName: "Acme 워크스페이스",
+};
+
+const member = {
+  email: "pt-member@example.com",
+  password: "memberpass1",
+  givenName: "멤버",
+  familyName: "박",
+};
+
+const guest = {
+  email: "pt-guest@example.com",
+  password: "guestpass1",
+  givenName: "게스트",
+  familyName: "최",
+};
+
+const other = {
+  email: "pt-other@example.com",
+  password: "otherpass1",
+  givenName: "다른",
+  familyName: "한",
+};
+
+async function workspaceId(page: Page, slug: string): Promise<string> {
+  const workspacesRes = await page.request.get("/api/v1/me/workspaces");
+  expect(workspacesRes.ok()).toBe(true);
+  const workspacesBody = await workspacesRes.json();
+  const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
+  expect(workspace).toBeTruthy();
+  return workspace.id;
+}
+
+async function ensureSetup(page: Page): Promise<void> {
+  await page.goto("/");
+  if (page.url().includes("/setup")) {
+    await page.getByLabel("성").fill(admin.familyName);
+    await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
+    await page.getByLabel("이메일").fill(admin.email);
+    await page.getByLabel("비밀번호").fill(admin.password);
+    await page.getByLabel("워크스페이스 이름").fill(admin.workspaceName);
+    await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
+    await page.getByRole("button", { name: "시작하기" }).click();
+    await expect(page).toHaveURL(/\/$/);
+    return;
+  }
+  if (page.url().includes("/login")) {
+    await login(page, admin.email, admin.password);
+  }
+}
+
+test("member creates a workspace project, task, and sees counts after reload", async ({ page }) => {
+  await ensureSetup(page);
+  createE2eUser(member.email, member.password, member.givenName, {
+    familyName: member.familyName,
+    workspaceSlug: admin.workspaceSlug,
+    membershipRole: "member",
+  });
+
+  if ((await page.getByRole("button", { name: "로그아웃" }).count()) > 0) {
+    await page.getByRole("button", { name: "로그아웃" }).click();
+    await expect(page).toHaveURL(/\/login$/);
+  }
+  await login(page, member.email, member.password);
+
+  await page.goto("/w/acme/projects");
+  await expect(page.getByRole("heading", { name: "프로젝트" })).toBeVisible();
+  await page.getByRole("button", { name: "새 프로젝트" }).click();
+  await page.getByLabel("키").fill("lab");
+  await expect(page.getByLabel("키")).toHaveValue("LAB");
+  await page.getByLabel("이름", { exact: true }).fill("Lab");
+  await page.getByLabel("공개 범위").selectOption("workspace");
+  await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
+
+  await expect(page).toHaveURL(/\/w\/acme\/LAB\/tasks$/);
+  await expect(page.getByRole("heading", { name: "Lab" })).toBeVisible();
+
+  await page.getByRole("button", { name: "새 태스크" }).click();
+  await page.getByLabel("제목").fill("첫 일");
+  await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
+
+  await expect(page).toHaveURL(/\/w\/acme\/LAB-2$/);
+  await expect(page.getByRole("heading", { name: "첫 일" })).toBeVisible();
+  await expect(page.getByText("LAB-2")).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "첫 일" })).toBeVisible();
+
+  await page.goto("/w/acme/projects");
+  await expect(page.getByRole("link", { name: /Lab/ })).toBeVisible();
+  await expect(page.getByText("미완료 태스크 1개")).toBeVisible();
+
+  const id = await workspaceId(page, "acme");
+  const listRes = await page.request.get(`/api/v1/workspaces/${id}/projects`);
+  expect(listRes.ok()).toBe(true);
+  const lab = (await listRes.json()).items.find((item: { key: string }) => item.key === "LAB");
+  expect(lab).toBeTruthy();
+  expect(lab.taskCount).toBe(1);
+  expect(lab.openTaskCount).toBe(1);
+
+  await page.goto("/w/acme/wiki");
+  await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
+});
+
+test("guest create is rejected with a visible error and wiki still loads", async ({ page }) => {
+  createE2eUser(guest.email, guest.password, guest.givenName, {
+    familyName: guest.familyName,
+    workspaceSlug: admin.workspaceSlug,
+    membershipRole: "guest",
+  });
+
+  await login(page, guest.email, guest.password);
+  await page.goto("/w/acme/projects");
+  await expect(page.getByRole("heading", { name: "프로젝트" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Lab/ })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "새 프로젝트" }).click();
+  await page.getByLabel("키").fill("GST");
+  await page.getByLabel("이름", { exact: true }).fill("Guest project");
+  await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page).toHaveURL(/\/w\/acme\/projects$/);
+
+  await page.goto("/w/acme/wiki");
+  await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
+});
+
+test("private project is absent for non-members and viewer writes fail visibly", async ({ page }) => {
+  createE2eUser(other.email, other.password, other.givenName, {
+    familyName: other.familyName,
+    workspaceSlug: admin.workspaceSlug,
+    membershipRole: "member",
+  });
+
+  await login(page, member.email, member.password);
+  await page.goto("/w/acme/projects");
+  await page.getByRole("button", { name: "새 프로젝트" }).click();
+  await page.getByLabel("키").fill("HID");
+  await page.getByLabel("이름", { exact: true }).fill("Hidden");
+  await page.getByLabel("공개 범위").selectOption("private");
+  await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
+  await expect(page).toHaveURL(/\/w\/acme\/HID\/tasks$/);
+
+  const id = await workspaceId(page, "acme");
+
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await login(page, admin.email, admin.password);
+  const adminMe = await page.request.get("/api/v1/auth/me");
+  expect(adminMe.ok()).toBe(true);
+  const adminId = (await adminMe.json()).userId;
+
+  await page.goto("/w/acme/projects");
+  await expect(page.getByRole("heading", { name: "프로젝트" })).toBeVisible();
+  await expect(page.getByText("Hidden")).toHaveCount(0);
+  await page.goto("/w/acme/HID/tasks");
+  await expect(page.getByRole("alert")).toContainText("프로젝트를 찾을 수 없습니다");
+
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await login(page, other.email, other.password);
+  await page.goto("/w/acme/projects");
+  await expect(page.getByText("Hidden")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await login(page, member.email, member.password);
+  const projectsRes = await page.request.get(`/api/v1/workspaces/${id}/projects`);
+  const hid = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "HID");
+  expect(hid).toBeTruthy();
+  const addRes = await page.request.post(`/api/v1/workspaces/${id}/projects/${hid.id}/members`, {
+    data: { userId: adminId, role: "viewer" },
+  });
+  expect(addRes.status()).toBe(201);
+
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await login(page, admin.email, admin.password);
+  await page.goto("/w/acme/projects");
+  await expect(page.getByRole("link", { name: /Hidden/ })).toBeVisible();
+  await page.getByRole("link", { name: /Hidden/ }).click();
+  await expect(page).toHaveURL(/\/w\/acme\/HID\/tasks$/);
+  await page.getByRole("button", { name: "새 태스크" }).click();
+  await page.getByLabel("제목").fill("비밀 일");
+  await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+  await expect(page).toHaveURL(/\/w\/acme\/HID\/tasks$/);
+});
+
+test("duplicate and reserved keys keep the form and show errors", async ({ page }) => {
+  await login(page, member.email, member.password);
+  await page.goto("/w/acme/projects");
+  await page.getByRole("button", { name: "새 프로젝트" }).click();
+  await page.getByLabel("키").fill("LAB");
+  await page.getByLabel("이름", { exact: true }).fill("Lab copy");
+  await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+  await expect(page).toHaveURL(/\/w\/acme\/projects$/);
+
+  await page.getByLabel("키").fill("WIKI");
+  await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("예약된 키");
+});

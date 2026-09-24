@@ -4,12 +4,18 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { settingsPath, wikiPath } from "@/lib/href";
+import { projectsPath, settingsPath, wikiPath } from "@/lib/href";
 import { api, ProblemError, problemMessage } from "@/lib/api";
 import { workspacesQuery } from "@/lib/queries";
 import "@/features/workspace/workspace-aux.css";
 
-export type WorkspaceNav = "wiki" | "settings";
+export type WorkspaceNav = "wiki" | "settings" | "projects";
+
+function landingPath(slug: string, activeNav: WorkspaceNav): string {
+  if (activeNav === "settings") return settingsPath(slug);
+  if (activeNav === "projects") return projectsPath(slug);
+  return wikiPath(slug);
+}
 
 interface WorkspaceShellProps {
   slug: string;
@@ -75,6 +81,13 @@ export function WorkspaceShell({
               {t("nav.wiki")}
             </Link>
             <Link
+              to={projectsPath(slug)}
+              className={activeNav === "projects" ? "workspace-shell__nav-link is-active" : "workspace-shell__nav-link"}
+              aria-current={activeNav === "projects" ? "page" : undefined}
+            >
+              {t("nav.projects")}
+            </Link>
+            <Link
               to={settingsPath(slug)}
               className={activeNav === "settings" ? "workspace-shell__nav-link is-active" : "workspace-shell__nav-link"}
               aria-current={activeNav === "settings" ? "page" : undefined}
@@ -96,7 +109,7 @@ export function WorkspaceShell({
                 onChange={(event) => {
                   const next = items.find((item) => item.id === event.target.value);
                   if (!next) return;
-                  void navigate(activeNav === "settings" ? settingsPath(next.slug) : wikiPath(next.slug));
+                  void navigate(landingPath(next.slug, activeNav));
                 }}
               >
                 {items.map((item) => (
