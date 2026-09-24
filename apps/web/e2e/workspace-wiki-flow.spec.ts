@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page, type Response, type Route } from "@playwright/test";
 import { createE2eUser, login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
@@ -22,13 +22,76 @@ const guest = {
   familyName: "위키",
 };
 
-async function workspaceId(page: import("@playwright/test").Page, slug: string): Promise<string> {
+function documentResourcePath(workspaceId: string, documentId: string): string {
+  return `/api/v1/workspaces/${workspaceId}/documents/${documentId}`;
+}
+
+function patchBodyHas(
+  request: { postDataJSON: () => unknown },
+  expected: Record<string, unknown>,
+): boolean {
+  try {
+    const body = request.postDataJSON();
+    if (body === null || typeof body !== "object") return false;
+    const record = body as Record<string, unknown>;
+    return Object.entries(expected).every(([key, value]) => Object.is(record[key], value));
+  } catch {
+    return false;
+  }
+}
+
+function isMatchingDocumentPatch(
+  response: Response,
+  workspaceId: string,
+  documentId: string,
+  expected: Record<string, unknown>,
+): boolean {
+  const request = response.request();
+  return (
+    request.method() === "PATCH" &&
+    response.ok() &&
+    new URL(response.url()).pathname === documentResourcePath(workspaceId, documentId) &&
+    patchBodyHas(request, expected)
+  );
+}
+
+async function persistedDocument(
+  page: Page,
+  workspaceId: string,
+  documentId: string,
+): Promise<{ title: string; icon: string | null; status: string }> {
+  const res = await page.request.get(documentResourcePath(workspaceId, documentId));
+  expect(res.ok()).toBe(true);
+  return res.json();
+}
+
+async function workspaceId(page: Page, slug: string): Promise<string> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   expect(workspacesRes.ok()).toBe(true);
   const workspacesBody = await workspacesRes.json();
   const workspace = workspacesBody.items.find((item: { slug: string }) => item.slug === slug);
   expect(workspace).toBeTruthy();
   return workspace.id;
+}
+
+async function documentIdFromOpenWikiPage(page: Page, wsId: string): Promise<string> {
+  const match = /\/WIKI-(\d+)$/.exec(new URL(page.url()).pathname);
+  expect(match).toBeTruthy();
+  const treeRes = await page.request.get(`/api/v1/workspaces/${wsId}/tree`);
+  expect(treeRes.ok()).toBe(true);
+  const document = (await treeRes.json()).items.find(
+    (item: { number: number }) => item.number === Number(match![1]),
+  );
+  expect(document).toBeTruthy();
+  return document.id;
+}
+
+async function documentIdByTitle(page: Page, wsId: string, title: string): Promise<string> {
+  const treeRes = await page.request.get(`/api/v1/workspaces/${wsId}/tree`);
+  expect(treeRes.ok()).toBe(true);
+  const document = (await treeRes.json()).items.find((item: { title: string }) => item.title === title);
+  expect(document).toBeTruthy();
+  return document.id;
 }
 
 test("member creates wiki document and edits title metadata", async ({ page }) => {
@@ -47,10 +110,38 @@ test("member creates wiki document and edits title metadata", async ({ page }) =
   await expect(page).toHaveURL(/\/w\/acme\/WIKI-\d+$/);
   await expect(page.getByLabel("문서 제목")).toHaveValue("제목 없음");
 
+  const wsId = await workspaceId(page, "acme");
+  const docId = await documentIdFromOpenWikiPage(page, wsId);
   const renamed = "연구 노트";
+  const expected = { title: renamed };
+  let releaseHold!: () => void;
+  const held = new Promise<void>((resolve) => {
+    releaseHold = resolve;
+  });
+  const matchUrl = (url: URL) => url.pathname === documentResourcePath(wsId, docId);
+  const holdPatch = async (route: Route) => {
+    const request = route.request();
+    if (request.method() === "PATCH" && patchBodyHas(request, expected)) {
+      await held;
+    }
+    await route.continue();
+  };
+  await page.route(matchUrl, holdPatch);
+
   await page.getByLabel("문서 제목").fill(renamed);
   await page.getByLabel("문서 제목").blur();
   await expect(page.getByLabel("문서 제목")).toHaveValue(renamed);
+  expect((await persistedDocument(page, wsId, docId)).title).toBe("제목 없음");
+
+  const saved = page.waitForResponse((response) =>
+    isMatchingDocumentPatch(response, wsId, docId, expected),
+  );
+  releaseHold();
+  const patch = await saved;
+  expect((await patch.json()).title).toBe(renamed);
+  await page.unroute(matchUrl, holdPatch);
+
+  expect((await persistedDocument(page, wsId, docId)).title).toBe(renamed);
 
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("link", { name: renamed })).toBeVisible();
@@ -61,16 +152,42 @@ test("document metadata supports icon set/clear and status changes", async ({ pa
   await page.goto("/w/acme/wiki");
   await page.getByRole("link", { name: "연구 노트" }).click();
 
+  const wsId = await workspaceId(page, "acme");
+  const docId = await documentIdByTitle(page, wsId, "연구 노트");
+
+  const iconSaved = page.waitForResponse((response) =>
+    isMatchingDocumentPatch(response, wsId, docId, { icon: "📚" }),
+  );
   await page.getByLabel("아이콘").fill("📚");
   await page.getByLabel("아이콘").blur();
   await expect(page.getByLabel("아이콘")).toHaveValue("📚");
+  expect((await (await iconSaved).json()).icon).toBe("📚");
+  expect((await persistedDocument(page, wsId, docId)).icon).toBe("📚");
 
+  const statusSaved = page.waitForResponse((response) =>
+    isMatchingDocumentPatch(response, wsId, docId, { status: "published" }),
+  );
   await page.getByLabel("문서 상태").selectOption("published");
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
+  expect((await (await statusSaved).json()).status).toBe("published");
+  expect((await persistedDocument(page, wsId, docId)).status).toBe("published");
 
+  const iconCleared = page.waitForResponse((response) =>
+    isMatchingDocumentPatch(response, wsId, docId, { icon: null }),
+  );
   await page.getByLabel("아이콘").fill("");
   await page.getByLabel("아이콘").blur();
   await expect(page.getByLabel("아이콘")).toHaveValue("");
+  expect((await (await iconCleared).json()).icon).toBeNull();
+  const persisted = await persistedDocument(page, wsId, docId);
+  expect(persisted.title).toBe("연구 노트");
+  expect(persisted.icon).toBeNull();
+  expect(persisted.status).toBe("published");
+
+  await page.reload();
+  await expect(page.getByLabel("문서 제목")).toHaveValue("연구 노트");
+  await expect(page.getByLabel("아이콘")).toHaveValue("");
+  await expect(page.getByLabel("문서 상태")).toHaveValue("published");
 });
 
 test("document metadata save failure keeps the previous status", async ({ page }) => {
@@ -78,6 +195,9 @@ test("document metadata save failure keeps the previous status", async ({ page }
   await page.goto("/w/acme/wiki");
   await page.getByRole("link", { name: "연구 노트" }).click();
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
+
+  const wsId = await workspaceId(page, "acme");
+  const docId = await documentIdByTitle(page, wsId, "연구 노트");
 
   await page.route("**/api/v1/workspaces/*/documents/*", async (route) => {
     if (route.request().method() === "PATCH") {
@@ -90,6 +210,7 @@ test("document metadata save failure keeps the previous status", async ({ page }
   await page.getByLabel("문서 상태").selectOption("archived");
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
+  expect((await persistedDocument(page, wsId, docId)).status).toBe("published");
 });
 
 test("member create transport failure shows an error without navigation", async ({ page }) => {
