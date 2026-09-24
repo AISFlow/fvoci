@@ -14,7 +14,7 @@
 PR7 https://github.com/AISFlow/fvoci/pull/7 은 검토 HEAD04f67ae,
 CI 합성merge5a8d0aa(baseba19932)에서11job 성공 후 squash merge했다.
 PR7의 실제 merged/main 반영과 post-merge11job 성공을 확인했다.
-PR8 native client 분리도 merged이며 해당 post-merge CI는 진행 중이다.
+PR8 native client 분리도 merged이며 해당 post-merge11job 성공을 확인했다.
 협업은 검증된 opt-in 범위만 수락했다. 실제 OS IME, 과거 단발 브라우저 timeout의
 원인 및 전체 제품 동등성은 미완료다. 다음은 기존 wiki의 인가된 첨부 흐름이다.
 
@@ -1569,6 +1569,8 @@ Opus task7b0a6bc6e4b9/ctx6402be6b82ec 읽기 전용 delta 차단0, 검토자는
 비차단 metadata pin 일치/README·VERIFY counts/default clippy는 다음 native
 수명주기 작업에 포함한다. 첨부 HTTP/추출 상태 제품 연결은 아직 미수락이다.
 
+main125ef25 post-merge Rust35974249019/Web35974248905/
+Documents35974249117/Engine35974249020 모두 성공했다.
 현재 코디네이터 통합은 rust-attachment-integration, base125ef25다.
 Composer task3a54b691e844/ctx1ebeaac1d3ac (rust-wiki-attachments)는 실제
 wiki 첨부 backend+006migration+root 계약/설정, Grok task68ef73d3089d/
@@ -1579,3 +1581,45 @@ heavy slot을 소유하고 Grok은 native 검사 전 인계 요청한다. fronte
 다음 명령: 검증된 orca-ide orchestration check로 두 dispatch 제출/질문 처리,
 고정 제출 SHA를 이 통합 branch에 하나씩 반영하고 관련 검사/Opus/PR 진행.
 원본/이전 retained 자원은 정리하지 않았고 완료 리뷰어는 모두 release했다.
+
+첨부 backend 첫 dispatch ctx1ebeaac1d3ac는 final 응답 후 worker_done 없이
+멈췄다. 7개 기초 DB 검사는006등록 누락으로 실패했으며, 이후 compile-only는
+테스트 성공이 아니다. coordinator checkpoint 이후 중단했다는 보고와 달리
+소유 attachment_integration PID3807895가 남아 있어 cwd/exe를 대조한 뒤
+SIGTERM했다. wrapper trap 뒤 해당worktree 프로세스와 run-labeledPG가 모두
+종료됨을 확인했다. 원래 kinesisPG/다른 runner는 건드리지 않았다.
+Orca worker-stop 후 같은 task3a54b691e844를 ctxf173b6bd05cb Composer2.5로
+재개했다. 미커밋 구현은 전부 보존했고, critical lock/publication/rollback/RLS
+수정과 실제 경합 검사까지 기존 task의 책임이다. 통합 수락 없음.
+Opus taske5043ec0cbfe/ctx776ee9d7c456는 narrow extraction claim/finish DB
+경계 자문 중이며 고정 코드 수락 검토가 아니다.
+
+추출 DB 자문 파일 /tmp/fvoci-attachment-extraction-db-advice.md는 생성됐지만
+Opus ctx776ee9d7c456의 종료 명령이 빈 bare `orca`를 호출해 실제 worker_done은
+전달되지 않았다. transcript의 final 응답과 명령을 대조 후 worker-stop했다.
+내용은 자문으로만 사용하며 코드 수락/정상 dispatch 완료로 기록하지 않는다.
+coordinator 결정: tenant-only attachments RLS, 좁은 pending claim 기능과
+현재 lease token 조건의 결과 확정, upload 세션과 독립적인 파생 작업을 사용한다.
+구현 전 고정 함수 권한/부모 live 재검사/취소·재시작 경계를 실제 검사한다.
+앞으로 task spec은 bare orca 대신 /home/kinesis/.local/bin/orca-ide를 명시한다.
+
+2026-09-24 첨부 수락 checkpoint: Composer1686be7의 기본7개 검사는 성공했으나
+필수 보안/취소/복구 검사가 빠져 제품 수락하지 않았다. 동일 검증된 Composer
+terminal을 taskda62c97fce34/ctx6c0f2c26304a로 재사용해 누락 검사와 실제 결함을
+이어 수정한다. PUT auth commit 뒤 rename 경합, session lock 취소 누출, 대용량
+download 전체 Vec, 임시 파일 오류 정리 및 원본 durable publication을 차단으로
+전달했다. 동일 파일 소유권이며 root/006/DTO는 해당 worker에 단독 위임 중이다.
+Grok ctxba282929dad4가 native 취소/parent-death 검사의 로컬 heavy slot을 가진다.
+이전 Composer 소유 test PID3844827은 cwd/exe 확인 후 SIGTERM했고 cargo3844720
+종료도 확인했다. fvoci-att-worker-pg는 worker 소유 확인 전 보존; 기존 kinesisPG는
+무관하므로 건드리지 않았다. 새 task는 명시적 wrapper 실행과 자원 반납을 요구한다.
+
+Native cancellation worker c75cb82(base125ef25)을 이 통합 branch에 반영했다.
+client8×2, native default51/test-hang54 및 양 feature clippy를 worker가 실제
+실행했다. 정상 취소는 child kill+reap와 IO join을 확인하며 부모 SIGKILL 검사는
+helper termination(gone 또는 zombie)까지의 증거다. Linux PDEATHSIG는 생성
+thread 수명에 연결되므로 synchronous process caller가 완료까지 살아 있어야 한다.
+공식 근거: https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html
+원격 CI/Opus 수락 전이며 HTTP 추출 job은 아직 없다. coordinator는 documents CI에
+default feature clippy를 추가했다. worker는 release했고 target/vendor만 보존했다.
+로컬 heavy slot은 Composer ctx6c0f2c26304a에 반환했다.

@@ -56,6 +56,7 @@ jobs:
         run: |
           cargo fetch --locked
           cargo fmt --check
+          cargo clippy --locked --offline --all-targets -- -D warnings
           cargo clippy --locked --offline --all-targets --features test-hang -- -D warnings
           cargo test --locked --offline --all-targets
           cargo test --locked --offline --all-targets --features test-hang
@@ -76,6 +77,7 @@ jobs:
       - name: Fetch locked dependencies before offline validation
         run: cargo fetch --locked
       - run: cargo fmt --check
+      - run: cargo clippy --locked --offline --all-targets -- -D warnings
       - run: cargo clippy --locked --offline --all-targets --features test-hang -- -D warnings
       - name: Native fixtures and process termination
         run: cargo test --locked --offline --all-targets --features test-hang
