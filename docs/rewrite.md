@@ -1721,3 +1721,18 @@ DB/native 미실행·미커밋인 부분 구현이므로 수락하지 않았다.
 terminal을 task68c510eee6b0/ctx6d15a07f0517로 재사용해 실제 앱 역할 DB/native
 HTTP 검사, 부모 삭제 경합과 종료 join을 끝까지 수행하게 했다. 기존 diff는
 보존했고 worker가 checkpoint commit 후 최종 storage 기준을 병합한다.
+
+PR10 https://github.com/AISFlow/fvoci/pull/10 생성(Draft, 미merged).
+head7653280d39b1094b56b142cfce3e29c6ded52541, base59b6ecd, CI 합성
+deb87d366e58928284111f8e8c4add9c02156c84. Rust35983576221,
+Web35983576153, Documents35983576184, Engine35983576182의 실제job이
+시작됐다. 아직 성공이 아니다. Claude Code Opus5.5 medium task17f2b2984f34/
+ctx39428db60a34의 requested/effective와 turnStart observed를 대조했다.
+검토는7653280 고정이며 sourcec40305a 이후 delta와 남은 차단 해소만 확인한다.
+로컬 heavy slot은 Composer ctx6d15a07f0517에 인계했다. native-job은 현재
+미수락이며 PR10에는 포함하지 않는다. 검증 중인HEAD는 상태 기록으로 재push하지 않는다.
+
+PR10 첫 Web collaboration-flow는107580924016에서 TS5097(import .ts 확장자)로
+브라우저 시작 전 실패했다. 기존 bundler 규칙과 같은 확장자 없는 import로
+고쳤고 해당 tsc와 oracle1을 로컬에서 다시 통과했다. 이 첫 실행의 네이티브
+4job/fast는 성공했지만 전체 CI 성공으로 기록하지 않는다. 후속HEAD 재실행 필요.
