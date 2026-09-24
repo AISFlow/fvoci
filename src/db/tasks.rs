@@ -275,16 +275,16 @@ async fn assert_task_hierarchy(
         }
         type ParentRow = (Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String);
         let parent: Option<ParentRow> = sqlx::query_as(
-                r#"
+            r#"
                 SELECT project_id, deleted_at, archived_at, type
                 FROM fvoci.tasks
                 WHERE workspace_id = $1 AND id = $2
                 "#,
-            )
-            .bind(workspace_id)
-            .bind(parent_id)
-            .fetch_optional(&mut **tx)
-            .await?;
+        )
+        .bind(workspace_id)
+        .bind(parent_id)
+        .fetch_optional(&mut **tx)
+        .await?;
         let Some((parent_project, deleted, archived, parent_type)) = parent else {
             return Ok(Err(ProjectDbError::NotFound));
         };

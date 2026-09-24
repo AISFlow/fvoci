@@ -2462,9 +2462,14 @@ async fn workflow_status_ids(
 async fn task_patch_lost_update_preserves_concurrent_priority_under_project_lock() {
     let (harness, app, _cookie, ws, admin, project_id, pid) = review_setup().await;
     let other = add_workspace_user(&admin, ws, "member", "other").await;
-    let task =
-        create_task_with_title(app.clone(), &other.cookie, ws, &project_id, json!({"title": "T"}))
-            .await;
+    let task = create_task_with_title(
+        app.clone(),
+        &other.cookie,
+        ws,
+        &project_id,
+        json!({"title": "T"}),
+    )
+    .await;
     let task_id = task["id"].as_str().unwrap().to_string();
     let tid = Uuid::parse_str(&task_id).unwrap();
     let mut holder = admin.begin().await.unwrap();
@@ -2492,11 +2497,12 @@ async fn task_patch_lost_update_preserves_concurrent_priority_under_project_lock
         .unwrap();
     holder.commit().await.unwrap();
     let (st, _) = patch.await.unwrap();
-    let row: (String, String) = sqlx::query_as("SELECT title, priority FROM fvoci.tasks WHERE id=$1")
-        .bind(tid)
-        .fetch_one(&admin)
-        .await
-        .unwrap();
+    let row: (String, String) =
+        sqlx::query_as("SELECT title, priority FROM fvoci.tasks WHERE id=$1")
+            .bind(tid)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
     assert_eq!(st, StatusCode::OK);
     assert_eq!(row.0, "Renamed");
     assert_eq!(row.1, "high");
@@ -2509,9 +2515,14 @@ async fn task_patch_lost_update_preserves_concurrent_priority_under_project_lock
 async fn task_patch_rejects_concurrently_archived_task_under_project_lock() {
     let (harness, app, _cookie, ws, admin, project_id, pid) = review_setup().await;
     let other = add_workspace_user(&admin, ws, "member", "other").await;
-    let task =
-        create_task_with_title(app.clone(), &other.cookie, ws, &project_id, json!({"title": "T"}))
-            .await;
+    let task = create_task_with_title(
+        app.clone(),
+        &other.cookie,
+        ws,
+        &project_id,
+        json!({"title": "T"}),
+    )
+    .await;
     let task_id = task["id"].as_str().unwrap().to_string();
     let tid = Uuid::parse_str(&task_id).unwrap();
     let mut holder = admin.begin().await.unwrap();
@@ -2550,9 +2561,14 @@ async fn task_patch_rejects_concurrently_archived_task_under_project_lock() {
 async fn task_patch_vs_trash_race_returns_not_found() {
     let (harness, app, _cookie, ws, admin, project_id, pid) = review_setup().await;
     let other = add_workspace_user(&admin, ws, "member", "other").await;
-    let task =
-        create_task_with_title(app.clone(), &other.cookie, ws, &project_id, json!({"title": "T"}))
-            .await;
+    let task = create_task_with_title(
+        app.clone(),
+        &other.cookie,
+        ws,
+        &project_id,
+        json!({"title": "T"}),
+    )
+    .await;
     let task_id = task["id"].as_str().unwrap().to_string();
     let tid = Uuid::parse_str(&task_id).unwrap();
     let mut holder = admin.begin().await.unwrap();
@@ -2591,9 +2607,14 @@ async fn task_move_stale_expected_status_returns_version_conflict() {
     let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
     let other = add_workspace_user(&admin, ws, "member", "other").await;
     let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
-    let task =
-        create_task_with_title(app.clone(), &other.cookie, ws, &project_id, json!({"title": "T"}))
-            .await;
+    let task = create_task_with_title(
+        app.clone(),
+        &other.cookie,
+        ws,
+        &project_id,
+        json!({"title": "T"}),
+    )
+    .await;
     let task_id = task["id"].as_str().unwrap().to_string();
     let tid = Uuid::parse_str(&task_id).unwrap();
     let from = task["statusId"].as_str().unwrap().to_string();
@@ -2670,8 +2691,14 @@ async fn task_patch_rejects_hierarchy_cycle_via_type_change() {
     )
     .await;
     let tid = t["id"].as_str().unwrap();
-    let (st, body) =
-        patch_task(app, ws, &eid, json!({"type": "subtask", "parentId": tid}), &cookie).await;
+    let (st, body) = patch_task(
+        app,
+        ws,
+        &eid,
+        json!({"type": "subtask", "parentId": tid}),
+        &cookie,
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["code"], "task_hierarchy_violation");
 
@@ -2710,22 +2737,10 @@ async fn task_patch_rejects_type_change_that_orphans_children() {
 #[tokio::test]
 async fn task_move_before_first_item_succeeds_without_panic() {
     let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
-    let a = create_task_with_title(
-        app.clone(),
-        &cookie,
-        ws,
-        &project_id,
-        json!({"title": "A"}),
-    )
-    .await;
-    let b = create_task_with_title(
-        app.clone(),
-        &cookie,
-        ws,
-        &project_id,
-        json!({"title": "B"}),
-    )
-    .await;
+    let a =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "A"})).await;
+    let b =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "B"})).await;
     let (aid, bid, sid) = (
         a["id"].as_str().unwrap(),
         b["id"].as_str().unwrap(),
@@ -2774,22 +2789,10 @@ async fn task_patch_rejects_invalid_recurrence_preset() {
 async fn task_move_enforces_wip_limit() {
     let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
     let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
-    let a = create_task_with_title(
-        app.clone(),
-        &cookie,
-        ws,
-        &project_id,
-        json!({"title": "A"}),
-    )
-    .await;
-    let b = create_task_with_title(
-        app.clone(),
-        &cookie,
-        ws,
-        &project_id,
-        json!({"title": "B"}),
-    )
-    .await;
+    let a =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "A"})).await;
+    let b =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "B"})).await;
     let target = statuses
         .iter()
         .find(|(id, _)| id != a["statusId"].as_str().unwrap())
@@ -2894,11 +2897,12 @@ async fn task_patch_unrelated_fields_do_not_rewrite_estimate_precision() {
             .await
             .unwrap();
     patch_task(app, ws, tid, json!({"title": "unrelated"}), &cookie).await;
-    let after: (String,) = sqlx::query_as("SELECT estimate::text FROM fvoci.tasks WHERE id=$1::uuid")
-        .bind(tid)
-        .fetch_one(&admin)
-        .await
-        .unwrap();
+    let after: (String,) =
+        sqlx::query_as("SELECT estimate::text FROM fvoci.tasks WHERE id=$1::uuid")
+            .bind(tid)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
     assert_eq!(before, after);
 
     admin.close().await;
@@ -2909,10 +2913,10 @@ async fn task_patch_unrelated_fields_do_not_rewrite_estimate_precision() {
 async fn task_move_and_patch_reject_cross_project_status() {
     let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
     let other = create_project(app.clone(), &cookie, ws, "OTH", "workspace").await;
-    let other_status =
-        workflow_status_ids(app.clone(), &cookie, ws, other["id"].as_str().unwrap()).await[0]
-            .0
-            .clone();
+    let other_status = workflow_status_ids(app.clone(), &cookie, ws, other["id"].as_str().unwrap())
+        .await[0]
+        .0
+        .clone();
     let t =
         create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "T"})).await;
     let tid = t["id"].as_str().unwrap();
