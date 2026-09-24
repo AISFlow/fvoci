@@ -1141,7 +1141,7 @@ async fn collab_ws_writer_stale_lock_closes_1011_then_join_after_release() {
             held.release().await;
             let mut recovered = connect_member(addr, &wiki.session.session_token).await;
             auth_and_join(&mut recovered, &routing_key, 32).await;
-    server.shutdown().await;
+            server.shutdown().await;
             harness.cleanup().await;
         },
     )
@@ -1171,7 +1171,7 @@ async fn collab_ws_pending_room_writer_stale_closes_1011() {
             .unwrap();
         wait_for_unavailable_close_without_auth_denied(&mut ws, Duration::from_secs(5)).await;
         held.release().await;
-    server.shutdown().await;
+        server.shutdown().await;
         harness.cleanup().await;
     })
     .await;
@@ -1189,10 +1189,8 @@ async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
                 std::env::temp_dir().join(format!("fvoci-f7-missing-engine-{}", Uuid::now_v7()));
             let mut cfg = test_collab_config(4, 30_000);
             cfg.engine_bin = missing;
-            let server = start_test_server(
-                collab_app_state_with_config(&harness.app_url, cfg).await,
-            )
-            .await;
+            let server =
+                start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
             let addr = server.addr;
             let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
             let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -1201,7 +1199,8 @@ async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
                 .unwrap();
             wait_for_unavailable_close_without_auth_denied(&mut ws, Duration::from_secs(5)).await;
 
-            let healthy_server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+            let healthy_server =
+                start_test_server(collab_app_state(&harness.app_url, true).await).await;
             let healthy_addr = healthy_server.addr;
             let other_key = room_key(other.session.workspace_id, other.document_id);
             let mut recovered = connect_member(healthy_addr, &other.session.session_token).await;
@@ -1223,8 +1222,9 @@ async fn collab_ws_room_full_closes_1011_without_auth_denied() {
             let docs = setup_wiki_doc_batch(&harness, 2).await;
             let mut cfg = test_collab_config(1, 30_000);
             cfg.max_collab_sockets = 8;
-            let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
-    let addr = server.addr;
+            let server =
+                start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+            let addr = server.addr;
             let first_key = room_key(docs[0].session.workspace_id, docs[0].document_id);
             let mut first = connect_member(addr, &docs[0].session.session_token).await;
             auth_and_join(&mut first, &first_key, 51).await;
@@ -1237,7 +1237,7 @@ async fn collab_ws_room_full_closes_1011_without_auth_denied() {
             wait_for_unavailable_close_without_auth_denied(&mut second, Duration::from_secs(5))
                 .await;
             drop(first);
-    server.shutdown().await;
+            server.shutdown().await;
             harness.cleanup().await;
         },
     )
@@ -3765,8 +3765,9 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
         drop(held);
         assert_eq!(hub.available_collab_sockets(), 1);
 
-        let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
-    let addr = server.addr;
+        let server =
+            start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+        let addr = server.addr;
         let mut ws1 = connect_member(addr, &wiki.session.session_token).await;
         assert!(
             try_connect_member(addr, &wiki.session.session_token)
@@ -3782,7 +3783,7 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
             "released socket permit must allow a new upgrade"
         );
         hub.shutdown().await;
-    server.shutdown().await;
+        server.shutdown().await;
         harness.cleanup().await;
     })
     .await;
@@ -3797,8 +3798,9 @@ async fn collab_session_socket_cap_rejects_same_session_allows_other() {
         cfg.max_collab_sockets = 4;
         cfg.max_collab_sockets_per_session = 1;
         let other = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
-        let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
-    let addr = server.addr;
+        let server =
+            start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+        let addr = server.addr;
         let mut ws1 = connect_member(addr, &wiki.session.session_token).await;
         assert!(
             try_connect_member(addr, &wiki.session.session_token)
@@ -3811,7 +3813,7 @@ async fn collab_session_socket_cap_rejects_same_session_allows_other() {
             "a different session must still obtain a global socket"
         );
         ws1.close(None).await.unwrap();
-    server.shutdown().await;
+        server.shutdown().await;
         harness.cleanup().await;
     })
     .await;
