@@ -284,12 +284,18 @@ owner `DATABASE_URL`. The stack fails if init exits nonzero; `server` starts onl
 after init succeeds. Request handling uses `DATABASE_APP_URL` only (owner URL is for
 migrations/grants). Preserve the `storage` and `pgdata` volumes across restarts.
 
+The server is published on `FVOCI_PUBLISH_ADDR:FVOCI_PUBLISH_PORT` (default
+`127.0.0.1`, loopback only). `FVOCI_PUBLIC_ORIGIN` must be the exact origin browsers
+use. Beyond local evaluation, terminate TLS in a reverse proxy, set
+`FVOCI_PUBLIC_ORIGIN=https://…` and `FVOCI_COOKIE_SECURE=true`.
+
 ### Verification
 
 `scripts/install-smoke.sh` builds the image, starts an isolated Compose project
 (unique name, ephemeral published port, run-owned volumes), exercises setup/login,
 wiki collab body projection, HWPX upload + extraction, `/collab` availability,
-graceful `docker compose restart server` (exit code 0), and post-restart reads.
+a graceful `docker compose stop server` (stopped container must report exit code 0),
+a recreated server container on the same volumes, and post-recreate reads.
 CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
 `.github/workflows/install.yml` (no secrets, no image publish).
 
