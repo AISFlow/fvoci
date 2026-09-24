@@ -115,3 +115,11 @@ Astra 코디네이터 행은 **과거** 기록으로 보존한다. 독립 자문
 `claude-opus-5-5`/medium이며 launch requested/effective를 대조한다. 첫 재개 dispatch:
 Grok `ctx_c97ebb20c9b0`(requested/effective `cursor-grok-4.6-high`), Composer
 `ctx_cfdccc3dbce5`/`ctx_a796df4ecf21`(requested/effective `composer-2.5`).
+
+## 상시 코디네이터 자문 (2026-09-25)
+
+사용자 지시로 PR 검토와 별개인 상시 자문 세션을 둔다: Orca task `task_20fbb8c98686` /
+dispatch `ctx_cd611507a373`, Claude Code `claude-opus-5-5` medium(requested/effective 일치), 읽기 전용.
+코디네이터가 dispatch로 질문을 보내고 필요하면 terminal로 깨운다. 답은 Run 메일(`ADVICE:`)과
+`/tmp/fvoci-advisor/*.md`. 워커·검토자 완료 전송은 반드시 `/home/kinesis/.local/bin/orca-ide`
+절대 경로로 한다(PATH의 bare `orca`는 빈 파일이라 메시지가 조용히 유실된다).
