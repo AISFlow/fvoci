@@ -2209,6 +2209,7 @@ async fn collab_reload_failure_after_commit_preserves_durable_tail() {
     auth_and_join(&mut writer, &routing_key, 92).await;
     arm_force_primary_apply_fail(wiki.document_id).await;
     arm_force_primary_load_fail(wiki.document_id).await;
+    let (reached_rx, proceed_tx) = arm_delivery_read_barrier(wiki.session.session_id);
     writer
         .send(Message::Binary(
             sync_update_frame(&routing_key, &update).into(),
@@ -2222,39 +2223,64 @@ async fn collab_reload_failure_after_commit_preserves_durable_tail() {
         .await
         .unwrap();
 
+    tokio::time::timeout(Duration::from_secs(2), reached_rx)
+        .await
+        .expect(
+            "writer Data delivery auth must reach barrier after durable commit (echo or Applied)",
+        )
+        .expect("barrier signal");
+    proceed_tx.send(()).expect("release delivery read");
+    disarm_delivery_read_barrier(wiki.session.session_id);
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut saw_applied = false;
     let mut saw_persisted = false;
-    while tokio::time::Instant::now() < deadline {
+    let mut saw_close_1011 = false;
+    while tokio::time::Instant::now() < deadline && !saw_close_1011 {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match recv_document_frame_within(&mut writer, remaining.min(Duration::from_millis(200)))
-            .await
-        {
-            Some(WireFrame::Document {
-                message: DocumentMessage::SyncStatus { applied: true },
-                ..
-            }) => saw_applied = true,
-            Some(WireFrame::Document {
-                message: DocumentMessage::Stateless(body),
-                ..
-            }) if body.starts_with("persisted:") => {
-                saw_persisted = true;
-                break;
+        match tokio::time::timeout(remaining.min(Duration::from_millis(200)), writer.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = ws_close_code(&frame);
+                assert_eq!(
+                    code, 1011,
+                    "reload failure CloseFrame {code} ({:?}), expected 1011; reason {:?}",
+                    frame.code, frame.reason
+                );
+                saw_close_1011 = true;
             }
-            _ => {}
-        }
-        if saw_applied && saw_persisted {
-            break;
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("Close without code after reload failure, expected CloseFrame 1011");
+            }
+            Ok(None) => {
+                panic!("bare TCP EOF after reload failure, expected CloseFrame 1011");
+            }
+            Ok(Some(Err(err))) => {
+                panic!("websocket error before CloseFrame 1011: {err}");
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                match fvoci_server::collab::wire::decode(&bytes) {
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::SyncStatus { applied: true },
+                        ..
+                    }) => saw_applied = true,
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Stateless(body),
+                        ..
+                    }) if body.starts_with("persisted:") => saw_persisted = true,
+                    _ => {}
+                }
+            }
+            Ok(Some(Ok(_))) | Err(_) => {}
         }
     }
     assert!(
         saw_applied,
-        "durable commit must ack even when primary reload fails"
+        "durable commit must ack Applied before 1011 when primary reload fails; saw_close_1011={saw_close_1011}"
     );
     assert!(!saw_persisted, "stale primary must not emit persisted ack");
     assert!(
-        wait_for_ws_close(&mut writer, Duration::from_secs(3)).await,
-        "primary reload failure must close the writer with 1011"
+        saw_close_1011,
+        "primary reload failure must CloseFrame 1011 after Applied"
     );
     disarm_force_primary_load_fail(wiki.document_id).await;
     disarm_force_primary_apply_fail(wiki.document_id).await;
@@ -4206,9 +4232,11 @@ async fn collab_authenticated_peer_fanout_records_observed_delivery() {
         "all {PEER_COUNT} distinct authenticated peers must receive the update; latencies_ms={latencies_ms:?}"
     );
     let observed_reads = delivery_read_count(wiki.document_id);
+    // Writer echo is also Data (broadcast_update to every connection). No-cache
+    // therefore has at least one delivery read per reader plus the writer.
     assert!(
-        observed_reads >= PEER_COUNT,
-        "current ACL/no-cache must run a delivery read per peer Data frame, got {observed_reads}"
+        observed_reads >= PEER_COUNT + 1,
+        "current ACL/no-cache must run a delivery read per peer plus writer echo, got {observed_reads}"
     );
 
     let query_started = std::time::Instant::now();
