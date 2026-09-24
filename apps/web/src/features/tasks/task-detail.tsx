@@ -13,7 +13,7 @@ export function TaskDetailView({
   projectName,
   task,
   statuses,
-  parentCandidates,
+  parentItems,
   readOnly,
   canEdit,
   pending,
@@ -21,15 +21,12 @@ export function TaskDetailView({
   actionError,
   archivePending,
   trashPending,
+  formEpoch,
   onTitleBlur,
   onStatusChange,
   onPriorityChange,
-  onTypeChange,
-  onParentChange,
-  onStartDateBlur,
+  onHierarchySave,
   onDueDateBlur,
-  onEstimateBlur,
-  onRecurrenceChange,
   onArchiveToggle,
   onTrash,
 }: {
@@ -38,7 +35,7 @@ export function TaskDetailView({
   projectName?: string;
   task: TaskDetail;
   statuses: readonly WorkflowStatus[];
-  parentCandidates: readonly Pick<TaskListItem, "id" | "type" | "number" | "title">[];
+  parentItems: readonly Pick<TaskListItem, "id" | "type" | "number" | "title">[];
   readOnly: boolean;
   canEdit: boolean;
   pending?: boolean;
@@ -46,15 +43,12 @@ export function TaskDetailView({
   actionError?: string | null;
   archivePending?: boolean;
   trashPending?: boolean;
+  formEpoch?: number;
   onTitleBlur: (title: string) => void | Promise<void>;
   onStatusChange: (statusId: string) => void | Promise<void>;
   onPriorityChange: (priority: string) => void | Promise<void>;
-  onTypeChange: (type: string) => void | Promise<void>;
-  onParentChange: (parentId: string | null) => void | Promise<void>;
-  onStartDateBlur: (value: string) => void | Promise<void>;
+  onHierarchySave: (type: string, parentId: string | null) => void | Promise<void>;
   onDueDateBlur: (value: string) => void | Promise<void>;
-  onEstimateBlur: (value: string) => void | Promise<void>;
-  onRecurrenceChange: (kind: string) => void | Promise<void>;
   onArchiveToggle: (archived: boolean) => void | Promise<void>;
   onTrash: () => void | Promise<void>;
 }) {
@@ -65,12 +59,14 @@ export function TaskDetailView({
         <span aria-hidden="true"> / </span>
         <span>{task.title}</span>
       </nav>
+      <h1 className="task-detail__title">{task.title}</h1>
       <TaskDetailForm
+        key={`${task.id}:${formEpoch ?? 0}`}
         slug={slug}
         projectKey={projectKey}
         task={task}
         statuses={statuses}
-        parentCandidates={parentCandidates}
+        parentItems={parentItems}
         readOnly={readOnly}
         canEdit={canEdit}
         pending={pending}
@@ -81,12 +77,8 @@ export function TaskDetailView({
         onTitleBlur={onTitleBlur}
         onStatusChange={onStatusChange}
         onPriorityChange={onPriorityChange}
-        onTypeChange={onTypeChange}
-        onParentChange={onParentChange}
-        onStartDateBlur={onStartDateBlur}
+        onHierarchySave={onHierarchySave}
         onDueDateBlur={onDueDateBlur}
-        onEstimateBlur={onEstimateBlur}
-        onRecurrenceChange={onRecurrenceChange}
         onArchiveToggle={onArchiveToggle}
         onTrash={onTrash}
       />

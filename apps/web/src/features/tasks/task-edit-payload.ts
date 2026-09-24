@@ -101,6 +101,11 @@ export function eligibleParentCandidates(
   });
 }
 
+/** Source `HierarchyForm` type-change: epic or crossing the subtask boundary clears parent. */
+export function clearsHierarchyParent(previousType: string, nextType: string): boolean {
+  return nextType === "epic" || (nextType === "subtask") !== (previousType === "subtask");
+}
+
 export type TitlePatchIssue = "title";
 export type DatePatchIssue = "startDate" | "dueDate";
 export type EstimatePatchIssue = "estimate";
@@ -117,7 +122,7 @@ export function patchDateBody(
   task: Pick<TaskDetail, "startDate" | "dueDate" | "dueAt">,
   field: DatePatchIssue,
   raw: string,
-): { ok: true; body: Pick<PatchTaskBody, "startDate" | "dueDate" | "expectedDates"> } | { ok: false; issue: DatePatchIssue } {
+): { ok: true; body: Pick<PatchTaskBody, "startDate" | "dueDate" | "dueAt" | "expectedDates"> } | { ok: false; issue: DatePatchIssue } {
   const next = raw === "" ? null : raw;
   if (next !== null && !isIsoDate(next)) {
     return { ok: false, issue: field };
@@ -130,7 +135,8 @@ export function patchDateBody(
   if (field === "startDate") {
     return { ok: true, body: { startDate: next, expectedDates } };
   }
-  return { ok: true, body: { dueDate: next, expectedDates } };
+  /* Source collection/calendar dueDate writes also send dueAt:null so a timed due does not linger. */
+  return { ok: true, body: { dueDate: next, dueAt: null, expectedDates } };
 }
 
 export function patchEstimateBody(
@@ -143,6 +149,7 @@ export function patchEstimateBody(
   return { ok: true, body: { estimate: next } };
 }
 
+/** Source `HierarchyForm` submit: one PATCH with type and parent together. */
 export function patchTypeBody(
   type: string,
   parentId: string | null,

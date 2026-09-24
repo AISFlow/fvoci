@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  clearsHierarchyParent,
   eligibleParentCandidates,
   isEstimateValid,
   isIsoDate,
@@ -43,6 +44,7 @@ test("patchDateBody sends expectedDates for optimistic locking", () => {
   if (parsed.ok) {
     assert.deepEqual(parsed.body, {
       dueDate: "2026-02-01",
+      dueAt: null,
       expectedDates: {
         startDate: "2026-01-01",
         dueDate: "2026-01-15",
@@ -58,12 +60,33 @@ test("patchEstimateBody accepts blank to clear and rejects malformed values", ()
   assert.equal(patchEstimateBody("not-a-number").ok, false);
 });
 
-test("patchTypeBody requires parent for subtasks", () => {
+test("patchTypeBody sends type and parent together like source HierarchyForm", () => {
   assert.deepEqual(patchTypeBody("task", null), {
     ok: true,
     body: { type: "task", parentId: null },
   });
+  assert.deepEqual(patchTypeBody("subtask", "parent-1"), {
+    ok: true,
+    body: { type: "subtask", parentId: "parent-1" },
+  });
+  assert.deepEqual(patchTypeBody("task", "parent-1"), {
+    ok: true,
+    body: { type: "task", parentId: "parent-1" },
+  });
+  assert.deepEqual(patchTypeBody("epic", "parent-1"), {
+    ok: true,
+    body: { type: "epic", parentId: null },
+  });
   assert.deepEqual(patchTypeBody("subtask", null), { ok: false, issue: "parent" });
+});
+
+test("clearsHierarchyParent matches source type-boundary rules", () => {
+  assert.equal(clearsHierarchyParent("task", "subtask"), true);
+  assert.equal(clearsHierarchyParent("subtask", "task"), true);
+  assert.equal(clearsHierarchyParent("subtask", "bug"), true);
+  assert.equal(clearsHierarchyParent("task", "bug"), false);
+  assert.equal(clearsHierarchyParent("task", "epic"), true);
+  assert.equal(clearsHierarchyParent("epic", "task"), false);
 });
 
 test("hierarchy helpers filter eligible parents", () => {
@@ -78,4 +101,13 @@ test("hierarchy helpers filter eligible parents", () => {
     ],
   );
   assert.deepEqual(candidates.map((item) => item.id), ["epic"]);
+  const subtaskParents = eligibleParentCandidates(
+    { id: "self", type: "subtask" },
+    [
+      { id: "self", type: "task", number: 1, title: "Self" },
+      { id: "epic", type: "epic", number: 2, title: "Epic" },
+      { id: "bug", type: "bug", number: 3, title: "Bug" },
+    ],
+  );
+  assert.deepEqual(subtaskParents.map((item) => item.id), ["bug"]);
 });

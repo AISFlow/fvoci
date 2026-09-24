@@ -21,6 +21,28 @@ async function workspaceId(page: Page, slug: string): Promise<string> {
   return workspace.id;
 }
 
+async function taskIdFor(page: Page, wsId: string, displayId: string): Promise<string> {
+  const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/${displayId}`);
+  expect(lookup.ok()).toBe(true);
+  const taskId = (await lookup.json()).items.find((item: { kind: string }) => item.kind === "task")?.id;
+  expect(taskId).toBeTruthy();
+  return taskId;
+}
+
+async function taskDetail(page: Page, wsId: string, taskId: string): Promise<{
+  title: string;
+  type: string;
+  parentId: string | null;
+  priority: string;
+  dueDate: string | null;
+  dueAt: string | null;
+  statusId: string;
+}> {
+  const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
+  expect(detailRes.ok()).toBe(true);
+  return detailRes.json();
+}
+
 async function ensureSetup(page: Page): Promise<void> {
   await page.goto("/");
   await expect(
@@ -64,7 +86,7 @@ async function workflowStatusId(
   return status.id;
 }
 
-test("task edit flow covers fields, conflicts, recurrence, trash and restore", async ({
+test("task edit flow covers fields, hierarchy, conflicts, trash and restore", async ({
   page,
   context,
 }) => {
@@ -78,9 +100,17 @@ test("task edit flow covers fields, conflicts, recurrence, trash and restore", a
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/EDT/tasks$`));
 
   await page.getByRole("button", { name: "새 태스크" }).click();
-  await page.getByLabel("제목").fill("편집 대상");
+  await page.getByLabel("제목").fill("부모 일");
   await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/EDT-2$`));
+  await expect(page.getByRole("heading", { name: "부모 일" })).toBeVisible();
+
+  await page.goto(`/w/${admin.workspaceSlug}/EDT/tasks`);
+  await page.getByRole("button", { name: "새 태스크" }).click();
+  await page.getByLabel("제목").fill("편집 대상");
+  await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
+  await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/EDT-3$`));
+  await expect(page.getByRole("heading", { name: "편집 대상" })).toBeVisible();
 
   const wsId = await workspaceId(page, admin.workspaceSlug);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
@@ -88,50 +118,45 @@ test("task edit flow covers fields, conflicts, recurrence, trash and restore", a
   expect(project).toBeTruthy();
   const doneStatusId = await workflowStatusId(page, wsId, project.id, "done");
   const todoStatusId = await workflowStatusId(page, wsId, project.id, "todo");
+  const parentTaskId = await taskIdFor(page, wsId, "EDT-2");
+  const taskId = await taskIdFor(page, wsId, "EDT-3");
 
   await page.getByTestId("task-edit-title").fill("반복 일감");
   await page.getByTestId("task-edit-title").blur();
   await expect(page.getByTestId("task-edit-title")).toHaveValue("반복 일감");
+  await expect.poll(async () => (await taskDetail(page, wsId, taskId)).title).toBe("반복 일감");
+  await expect(page.getByRole("heading", { name: "반복 일감" })).toBeVisible();
 
   await page.getByTestId("task-edit-priority").selectOption("high");
-  await page.getByTestId("task-edit-start-date").fill("2026-01-31");
-  await page.getByTestId("task-edit-start-date").blur();
   await page.getByTestId("task-edit-due-date").fill("2026-01-31");
   await page.getByTestId("task-edit-due-date").blur();
-  await page.getByTestId("task-edit-estimate").fill("3.5");
-  await page.getByTestId("task-edit-estimate").blur();
-  await page.getByTestId("task-edit-recurrence").selectOption("daily");
+
   await expect.poll(async () => {
-    const lookupRes = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/EDT-2`);
-    if (!lookupRes.ok()) return null;
-    const taskEntry = (await lookupRes.json()).items.find(
-      (item: { kind: string }) => item.kind === "task",
-    );
-    if (!taskEntry) return null;
-    const detailRes = await page.request.get(
-      `/api/v1/workspaces/${wsId}/tasks/${taskEntry.id}`,
-    );
-    if (!detailRes.ok()) return null;
-    const detail = await detailRes.json();
-    return detail.recurrence?.kind ?? null;
-  }).toBe("daily");
+    const detail = await taskDetail(page, wsId, taskId);
+    return `${detail.priority}:${detail.dueDate}:${detail.dueAt}`;
+  }).toBe("high:2026-01-31:null");
 
-  const lookup = await page.request.get(`/api/v1/workspaces/${wsId}/lookup/EDT-2`);
-  const taskId = lookup
-    .ok()
-    ? (await lookup.json()).items.find((item: { kind: string }) => item.kind === "task")?.id
-    : null;
-  expect(taskId).toBeTruthy();
+  await page.getByTestId("task-edit-type").selectOption("subtask");
+  await expect(page.getByTestId("task-edit-parent")).toHaveValue("");
+  await expect(page.getByTestId("task-edit-parent").locator(`option[value="${parentTaskId}"]`)).toHaveCount(1);
+  await page.getByTestId("task-edit-parent").selectOption(parentTaskId);
+  await page.getByTestId("task-edit-hierarchy-save").click();
+  await expect.poll(async () => {
+    const detail = await taskDetail(page, wsId, taskId);
+    return `${detail.type}:${detail.parentId}`;
+  }).toBe(`subtask:${parentTaskId}`);
+  await expect(page.getByTestId("task-edit-type")).toHaveValue("subtask");
 
-  const detailAfterPatch = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
-  expect(detailAfterPatch.ok()).toBe(true);
-  const detailBody = await detailAfterPatch.json();
-  expect(detailBody.title).toBe("반복 일감");
-  expect(detailBody.priority).toBe("high");
-  expect(detailBody.estimate).toBe("3.5");
-  expect(detailBody.recurrence).toEqual({ kind: "daily" });
+  await page.getByTestId("task-edit-type").selectOption("task");
+  await expect(page.getByTestId("task-edit-parent")).toHaveValue("");
+  await page.getByTestId("task-edit-hierarchy-save").click();
+  await expect.poll(async () => {
+    const detail = await taskDetail(page, wsId, taskId);
+    return `${detail.type}:${detail.parentId}`;
+  }).toBe("task:null");
+  await expect(page.getByTestId("task-edit-type")).toHaveValue("task");
 
-  const initialStatusId = detailBody.statusId;
+  const initialStatusId = (await taskDetail(page, wsId, taskId)).statusId;
   const secondTab = await openSecondTab(context, page.url());
   const staleMove = await page.request.post(`/api/v1/workspaces/${wsId}/tasks/${taskId}/move`, {
     data: { statusId: todoStatusId, expectedStatusId: initialStatusId },
@@ -144,29 +169,10 @@ test("task edit flow covers fields, conflicts, recurrence, trash and restore", a
   await secondTab.close();
   await page.reload();
   await expect(page.getByTestId("task-edit-title")).toHaveValue("반복 일감");
+  await expect(page.getByRole("heading", { name: "반복 일감" })).toBeVisible();
 
   await page.getByTestId("task-edit-status").selectOption(doneStatusId);
-  await expect.poll(async () => {
-    const detailRes = await page.request.get(`/api/v1/workspaces/${wsId}/tasks/${taskId}`);
-    if (!detailRes.ok()) return "";
-    return (await detailRes.json()).statusId;
-  }).toBe(doneStatusId);
-  await expect.poll(async () => {
-    const listRes = await page.request.get(
-      `/api/v1/workspaces/${wsId}/projects/${project.id}/tasks?limit=50`,
-    );
-    if (!listRes.ok()) return 0;
-    const listBody = await listRes.json();
-    return listBody.items.length;
-  }).toBe(2);
-
-  const listRes = await page.request.get(
-    `/api/v1/workspaces/${wsId}/projects/${project.id}/tasks?limit=50`,
-  );
-  const spawned = (await listRes.json()).items.find(
-    (item: { title: string; id: string }) => item.title === "반복 일감" && item.id !== taskId,
-  );
-  expect(spawned).toBeTruthy();
+  await expect.poll(async () => (await taskDetail(page, wsId, taskId)).statusId).toBe(doneStatusId);
 
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByTestId("task-edit-trash").click();
@@ -180,8 +186,9 @@ test("task edit flow covers fields, conflicts, recurrence, trash and restore", a
   );
   expect(restoreRes.ok()).toBe(true);
 
-  await page.goto(`/w/${admin.workspaceSlug}/EDT-2`);
+  await page.goto(`/w/${admin.workspaceSlug}/EDT-3`);
   await expect(page.getByTestId("task-edit-title")).toHaveValue("반복 일감");
+  await expect(page.getByRole("heading", { name: "반복 일감" })).toBeVisible();
 });
 
 async function openSecondTab(context: BrowserContext, url: string): Promise<Page> {

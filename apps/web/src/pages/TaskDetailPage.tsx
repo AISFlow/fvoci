@@ -6,13 +6,9 @@ import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-s
 import { findProjectByKey, projectsQuery, workflowQuery } from "@/features/projects/queries";
 import { invalidateTaskCaches } from "@/features/tasks/task-cache";
 import {
-  eligibleParentCandidates,
-  isRecurrenceKind,
   patchDateBody,
-  patchEstimateBody,
   patchTitleBody,
   patchTypeBody,
-  recurrenceBody,
   type PatchTaskBody,
 } from "@/features/tasks/task-edit-payload";
 import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features/tasks/task-errors";
@@ -36,6 +32,7 @@ export function TaskDetailPage() {
   const displayId = item?.displayId ?? "";
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [formEpoch, setFormEpoch] = useState(0);
 
   const projects = useQuery(projectsQuery(workspace?.id ?? ""));
   const project = findProjectByKey(projects.data?.items, item?.prefix ?? "");
@@ -53,9 +50,7 @@ export function TaskDetailPage() {
   const taskPages = useInfiniteQuery(
     taskListQuery(workspace?.id ?? "", project?.id ?? task.data?.projectId ?? ""),
   );
-  const parentCandidates = task.data
-    ? eligibleParentCandidates(task.data, mergeTaskListPages(taskPages.data?.pages ?? [])?.items ?? [])
-    : [];
+  const parentItems = mergeTaskListPages(taskPages.data?.pages ?? [])?.items ?? [];
 
   const workspaceId = workspace?.id ?? "";
   const taskId = task.data?.id ?? "";
@@ -127,10 +122,22 @@ export function TaskDetailPage() {
   const pending =
     patchTask.isPending || moveTask.isPending || trashTask.isPending;
 
+  const refetchAfterConflict = async (err: unknown) => {
+    if (err instanceof ProblemError && err.status === 409) {
+      await afterMutation();
+      setFormEpoch((n) => n + 1);
+    }
+  };
+
   const runPatch = async (body: PatchTaskBody) => {
     if (!task.data?.canEdit) return;
+    setFieldError(null);
     setActionError(null);
-    await patchTask.mutateAsync(body);
+    try {
+      await patchTask.mutateAsync(body);
+    } catch (err) {
+      await refetchAfterConflict(err);
+    }
   };
 
   if (!workspace) return null;
@@ -207,7 +214,7 @@ export function TaskDetailPage() {
           projectName={project?.name}
           task={task.data}
           statuses={workflow.data?.statuses ?? []}
-          parentCandidates={parentCandidates}
+          parentItems={parentItems}
           readOnly={!task.data.canEdit || task.data.archivedAt !== null}
           canEdit={task.data.canEdit}
           pending={pending}
@@ -215,6 +222,7 @@ export function TaskDetailPage() {
           actionError={actionError}
           archivePending={patchTask.isPending}
           trashPending={trashTask.isPending}
+          formEpoch={formEpoch}
           onTitleBlur={async (title) => {
             const parsedTitle = patchTitleBody(title);
             if (!parsedTitle.ok) {
@@ -226,40 +234,28 @@ export function TaskDetailPage() {
           onStatusChange={async (statusId) => {
             if (!task.data || statusId === task.data.statusId) return;
             setActionError(null);
-            await moveTask.mutateAsync({
-              statusId,
-              expectedStatusId: task.data.statusId,
-            });
+            /* Source task-detail PATCHes statusId; collections and this rewrite use MOVE
+             * with expectedStatusId so a stale status change 409s instead of overwriting. */
+            try {
+              await moveTask.mutateAsync({
+                statusId,
+                expectedStatusId: task.data.statusId,
+              });
+            } catch (err) {
+              await refetchAfterConflict(err);
+            }
           }}
           onPriorityChange={async (priority) => {
             if (!task.data || priority === task.data.priority) return;
             await runPatch({ priority });
           }}
-          onTypeChange={async (type) => {
-            if (!task.data || type === task.data.type) return;
-            const parsedType = patchTypeBody(type, task.data.parentId);
+          onHierarchySave={async (type, parentId) => {
+            const parsedType = patchTypeBody(type, parentId);
             if (!parsedType.ok) {
               setFieldError(taskFieldValidationMessage(parsedType.issue));
               return;
             }
             await runPatch(parsedType.body);
-          }}
-          onParentChange={async (parentId) => {
-            if (!task.data || parentId === task.data.parentId) return;
-            if (task.data.type === "subtask" && parentId === null) {
-              setFieldError(taskFieldValidationMessage("parent"));
-              return;
-            }
-            await runPatch({ parentId });
-          }}
-          onStartDateBlur={async (value) => {
-            if (!task.data) return;
-            const parsedDate = patchDateBody(task.data, "startDate", value);
-            if (!parsedDate.ok) {
-              setFieldError(taskFieldValidationMessage(parsedDate.issue));
-              return;
-            }
-            await runPatch(parsedDate.body);
           }}
           onDueDateBlur={async (value) => {
             if (!task.data) return;
@@ -270,24 +266,6 @@ export function TaskDetailPage() {
             }
             await runPatch(parsedDate.body);
           }}
-          onEstimateBlur={async (value) => {
-            const parsedEstimate = patchEstimateBody(value);
-            if (!parsedEstimate.ok) {
-              setFieldError(taskFieldValidationMessage(parsedEstimate.issue));
-              return;
-            }
-            await runPatch(parsedEstimate.body);
-          }}
-          onRecurrenceChange={async (kind) => {
-            const next = kind === "" ? null : isRecurrenceKind(kind) ? kind : null;
-            const current = task.data?.recurrence;
-            const currentKind =
-              current && typeof current === "object" && "kind" in current
-                ? String((current as { kind: unknown }).kind)
-                : "";
-            if ((next ?? "") === currentKind) return;
-            await runPatch({ recurrence: recurrenceBody(next) });
-          }}
           onArchiveToggle={async (archived) => {
             await runPatch({ archived });
           }}
@@ -295,7 +273,11 @@ export function TaskDetailPage() {
             if (!window.confirm(`${t("task.trash.confirm.title")}\n${t("task.trash.confirm.body")}`)) {
               return;
             }
-            await trashTask.mutateAsync();
+            try {
+              await trashTask.mutateAsync();
+            } catch {
+              /* trashTask.onError already mapped the failure. */
+            }
           }}
         />
       ) : null}
