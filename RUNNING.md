@@ -208,3 +208,59 @@ import/export, and deletion surfaces are shown as unavailable rather than faked.
 별도 `document-extract` native helper가 필요하며 클라이언트만으로 지원 완료가 아니다.
 협업 Live actor의 비정상 완료를 복구했더라도 해당 hub의 수명 동안 실패 기록이
 유지되어 이후 정상 종료 요청의 프로세스 exit가 non-zero가 될 수 있다.
+
+## Native attachment text extraction
+
+After applying migration 007, rerun `scripts/grant-app-role.sql` with the existing
+app-role procedure. The no-argument claim function has a fixed search path and
+PUBLIC execution revoked. Its migration owner needs table-owner access; the
+runtime role remains non-superuser without BYPASSRLS.
+
+Build the production helper separately from the server:
+
+```sh
+(cd crates/document-extract && bash fetch-rhwp.sh && cargo fetch --locked)
+cargo fetch --locked
+cargo build --manifest-path crates/document-extract/Cargo.toml --locked --offline --bin document-extract
+cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
+export FVOCI_EXTRACTOR_BIN="$PWD/crates/document-extract/target/debug/document-extract"
+```
+
+Use the default helper build for deployment; `test-hang`, `extract-native-tests`
+and `extract-job-driver` are test-only. The helper must be installed alongside
+the server at the configured executable path. No Node or browser process is used
+for server-side extraction. Final deployment packaging is not yet provided.
+
+When `FVOCI_EXTRACTOR_BIN` is absent, extraction is explicitly disabled and stored
+HWP/HWPX attachments remain pending. An invalid configured path fails startup.
+`FVOCI_EXTRACT_POLL_SECS` defaults to 30 and must be positive. One job is in flight
+per server, with a 1-second interval after work; upload completion does not wake
+the poller immediately. Upload success confirms the original file and its DB
+metadata, independently of later text extraction success. Original downloads
+remain byte-preserving if extraction fails.
+
+The durable queue uses a 300-second token lease and at most 2 crash/I/O attempts.
+Missing source files, read failures or failed result commits leave the lease for
+expiry; a second exhausted attempt becomes `worker_failure`. Cooperative shutdown
+cancels and joins the helper before closing the DB pool and releases its attempt.
+A stale token cannot overwrite a newer claim. Extraction only publishes while
+the workspace and parent document remain live; deletion and finish share the
+workspace→document→attachment lock order. Future deletion paths must preserve it.
+
+The native boundary limits input to 20 MiB, output to 500k characters, helper time
+to 120 seconds and memory to the native component's configured limits. Oversized
+originals can remain valid attachments while their extraction ends with
+`resource_limit`. Results distinguish `ok`, `empty`, `partial`, `unsupported`,
+`corrupt`, `resource_limit` and `worker_failure`; bounded warnings and the pinned
+rhwp revision accompany extracted text. Results are stored for subsequent product
+consumers. Search indexing and search permission-revocation propagation are not
+connected by this slice. S3, other attachment parents and thumbnails remain out
+of this slice's acceptance.
+
+The Native documents CI runs actual PostgreSQL product tests on x64 and ARM64.
+Its ordinary helper checks authenticated HWP/HWPX input, then a separately built
+test helper exercises cancellation and process recovery. Local preparation and
+offline test commands are in `scripts/prepare-extract-helper.sh` and
+`scripts/run-extract-tests.sh`; the latter must fail if required DB/helper inputs
+are absent. These integration commands are being wired with the pending native
+job submission and are not yet a released support claim.

@@ -28,7 +28,7 @@ PR8 native client 분리도 merged이며 해당 post-merge11job 성공을 확인
 | HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component PR2 + 얇은 client PR8/취소 PR9 수락 | native default51/test-hang54·client8×2 양 아키텍처·CI·독립 검토 | 첨부 추출 job/검색/썸네일 미연결 |
 | 기본 위키 문서 | domains/documents | 생성·조회·metadata·현재 문서 권한 | 첫 backend/React 수락, PR5 merged | 실제 앱 역할DB13·UI·CI·독립 검토 | 댓글·공유·리비전·확장 문서 기능 |
 | 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 opt-in 수락 | x64/ARM64 lifecycle20/product56/projection19/shutdown7·React14·Opus 검토 | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계 추가 검증, 과거 단발 timeout 원인 미확정. 명시적 opt-in이며 전체 협업 수락 아님 |
-| 위키 첨부 local | domains/attachments, packages/storage | 현재 부모 권한·원본 bytes·원자 완료·취소 | backend791199d/React6c54d8e 통합, 미수락 | 앱 역할DB20·React 첨부5/전체18 성공; Opus 후속 수정 중 | HTTP416·저장/취소 보강 및 최종 CI/검토, 추출 job/S3/썸네일 |
+| 위키 첨부 local | domains/attachments, packages/storage | 현재 부모 권한·원본 bytes·원자 완료·취소 | PR10 수락·merged0582c29 | 최종2f4fc7c 실제11CI·x64/ARM64 DB20·React18·Opus 후속 검토 통과 | 추출 job/S3/썸네일·다른 부모·GC 미완료 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
@@ -54,7 +54,7 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
 | 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata PR5 수락; 본문 협업 PR7 opt-in 수락 | PR5/7 실제DB/UI/CI·독립 검토 | 댓글·공유·리비전, 협업 최종 수락 미완료 |
 | 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine PR6 수락; 실제 제품/2UI PR7 opt-in 수락 | provider/native/DB/2UI 회귀·CI·Opus | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계, 과거 단발 timeout 원인 미확정 |
-| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | rhwp native/얇은 client PR2/8/9 수락; wiki local 첨부 통합 미수락 | native CI·독립 검토; 첨부DB20/React18 component 성공 | 첨부 최종 CI/검토, 추출 job·S3·다른 부모·썸네일 |
+| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | rhwp native/얇은 client PR2/8/9 수락; wiki local 첨부 PR10 수락 | native CI·독립 검토; 첨부DB20/React18 component 성공 | 추출 job·S3·다른 부모·썸네일 |
 | 검색·색인·AI | server domains/search, packages/search, routes.ts ai | 검색에서도 인가·철회·색인 복구 | 재작성 미착수 | 미실행 | 전체 |
 | 알림·메일·webhook·연동 | server domains/notifications, packages/jobs, routes.ts github/webhooks | outbox·커밋 후 전달·중복/재시도 | 재작성 미착수 | 미실행 | 전체 |
 | 동의·감사·사용권 | routes.ts legal/auth.consents/admin.audit, packages/ee | 동의 gate·증거·서명·권한 | 재작성 미착수 | 미실행 | 프로필 감사 강화 외 전체 |
@@ -1759,3 +1759,63 @@ Native job Composer8a0b664 제출: DB12/native5 통과이나 즉시취소 검사
 이 워커가 보유한다. 누락된808 전체기준 정상merge도 명시승인했다. PR10과
 별개이며 아직 새PR 없음. 코디네이터의 D5 로컬검사는 cold compile이 시작되어
 중단(exit130)했고 통과로 기록하지 않는다. 최종원격에서 관련검사를 실행한다.
+
+2026-09-24 10:13 UTC: PR10 실제merged, merge/main0582c293ca40997ab3994e8ef4dd895b4d99d5f3.
+수락HEAD2f4fc7c288eb6e03ff926042d8f5c1294f93da22, base59b6ecd,
+검사mergec6b14239a2b95bc4637898ebf7fe595753dbdeb9. Rust35985342220/
+Web35985342210/Documents35985342172/Engine35985342222의 실제11job 성공.
+x64 PG20/30/66/13 각각28.40/48.62/122.76/25.23초, ARM동일범위성공.
+React18(2.2분)/workspace13 성공. CodeRabbit는 manual-review-required로
+skip했고 독립검토 증거로 쓰지 않았다. Opus808검토 이후D5/D5a를 각각
+12cf805/2f4fc7c에서 재검토하여 삭제재시도 fsync 호출누락까지 해결했다.
+최종taskcfdedabb884a/ctx2389dc29b3f8, 보고서/tmp/fvoci-attachment-opus-d5a-final.md.
+branchprotection404·rulesets없음을 확인했으나 위실제검사를 모두완료한뒤
+기대HEAD를 지정해 squash했다. post-merge CI는 별도 확인 중이다.
+
+최신main에서 코디네이터통합 rust-attachment-extraction-product를 생성했다.
+worker rust-attachment-native-job2458efe는 DB12/native9 제출했으나
+전역helperPID witness의 병렬충돌/단순5초생존확인 등의 검증빈틈을 보강한다.
+task70996a16dea4의 기존terminal readiness2회실패는 입력이 배정되지 않은
+실패이며 기존완료worker를 release하고 같은task retry ctx3df6b75794e6로
+Composer2.5 새실행을 확인했다. 코드·커밋 보존, 현재단독작성자·heavyslot 소유.
+Opus fixed8a0b664 DB/claim/CAS/락순서 예비검토 차단없음, lifecycle변경과
+통합CI는 미수락. Grok taskdca4d6671d45/ctx207f905c079d는 다음project/task의
+원본계약만 조사한다(저장소쓰기없음). 코디네이터는 후속native CI에 실제
+PG와 productionhelper HWP/HWPX 및 test-only취소검사를 병렬runner별연결 중.
+아직추출PR미생성, 제품추출미수락, 검색연결없음. 전체포팅미완료.
+
+2026-09-24 10:24 UTC: main0582c29 post-merge Rust35985930512 및 native2workflow는
+성공했으나 Web35985930227 collaboration-flow가17/18에서실패했다.
+workspace-wiki-collab.spec.ts334의 delete-only후굵은링크 Shift+Home 선택이
+DOM/editor모두빈값이었고본문은존재했다. 무작정재실행하지않는다.
+로그/tmp/fvoci-main058-web-failed.log, error-context artifact10801389478.
+Grok task02ef291a2891/ctx4a1b94234068, rust-collab-selection-regression
+0582c29기준에서 관련editor/브라우저회귀만단독소유, heavy slot인계.
+고정원본project/task계약은/tmp/fvoci-next-project-task-contract.md에보존했고
+연구taskdca4d6671d45/ctx207f905c079d 완료release. 프로젝트구현은아직미배정.
+
+Native lifecycle추가제출은코디네이터가3765249로보존한뒤2f4fc7c와정상merge
+a0a6bb0, 최신main통합branch에서bb1c9fc로통합했다. 검토대상부모혼동에따른
+8개충돌은실제diff대조: commonmanifest/권한/migration/module/첨부count는
+worker의007을보존, CI/docs는코디네이터수락기록을보존했다. 기존7개count가
+여전히6인것을발견하여7로수정했고새assertion삭제없다. 첫통합fmt가테스트
+2파일에서실패해해당파일만format했다. 이후fmt/actionlint/bash-n/offline
+metadata성공. heavy slot은Grok이므로통합전체build/DB는원격으로수행한다.
+Worker실행은DB12/native9/noignored/all-targetextract-native-testsclippy성공,
+/tmp/fvoci-native-job-extract-tests.log 및 final-lifecycle-corrections보고서참조.
+추출CI에서는생산helper의authenticated2개와test-helper전체9개를구분한다.
+공유target경로해석을고치고prepare단계에서고정source검증/fetch명시,검사는
+offline으로분리했다. source경로의존없이제품build가가능해야한다.
+최종Opusdelta/원격CI전추출미수락이며main회귀도별도해결전이다.
+
+2026-09-24 10:29 UTC: native 추출 PR11 https://github.com/AISFlow/fvoci/pull/11
+Draft생성, HEAD9cf3f02ba910de494535beb4e936de12b07111c5, base0582c29,
+검사mergea4d8388053381268e9ab88cab803e39a25bbdf80. Rust35987164200/
+Web35987164257/Documents35987164226/Engine35987164229 실제실행.
+x64 native107592441075에서생산helper authenticated2와전체lifecycle9가
+실행·성공했다. 단Opus taskd43aab7cf4da/ctxb749794097de의 B1: absent-env
+기동검사가부모FVOCI_EXTRACTOR_BIN을상속하여실제로enabled경로를검사했다.
+해당9개통과를disabled경로증거로쓰지않는다. fixture의child환경에서helper와
+poll변수를먼저제거한뒤명시값만추가하도록수정한다. 제품/보안차단은없었고
+앱역할실제grant와2/9/12 CI연결을검토했다. 새HEAD원격검사전은미수락.
+관련보고서/tmp/fvoci-native-job-opus-final-9cf3f02.md.
