@@ -782,19 +782,15 @@ async fn complete_owned_inner(
     let storage_key = att.storage_key.clone();
     let att_name = att.name.clone();
     let document_id = att.document_id;
-    let payload_exists = storage
-        .payload_exists(&storage_key)
-        .await
-        .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     let needs_assembly = if att.status == "assembling" {
         true
     } else if att.status == "uploading" {
-        if payload_exists {
-            storage
-                .discard_uncommitted_payload(&storage_key)
-                .await
-                .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
-        }
+        // Retry must durably finish a removal even if a previous attempt
+        // already unlinked the payload before cancellation or an IO error.
+        storage
+            .discard_uncommitted_payload(&storage_key)
+            .await
+            .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
         let rows = sqlx::query(
             "UPDATE fvoci.attachments SET status = 'assembling' WHERE workspace_id = $1 AND id = $2 AND status = 'uploading'",
         )
