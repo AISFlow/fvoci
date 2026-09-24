@@ -97,3 +97,11 @@ receipt와 실제 검토 반환은 아래 후속 기록으로 확인하며, 아�
 term582f3fbb-7a5a-416d-921b-3ee6e6ebb2ac의 해당 고정 SHA 읽기 전용 검토만
 재개했다. 이전 Fable-only task 문구는 이 검증된 사용자 승인 fallback으로
 명시적으로 대체 전달했다. 검토 완료 여부는 docs/rewrite 최신 결과를 따른다.
+
+## 현재 자문 배정 — 사용자 전체 교체 지시
+
+기존 Fable 역할을 모두 Claude Code Opus5.5 medium (`claude-opus-5-5`)으로
+교체한다. 주간 한도 확인은 더 이상 전환 조건이 아니다. 기존 검토의 모델·결과
+이력은 변경하지 않는다. 실행 경로는 검증된 Claude Code2.1.281이며, 앞선
+ctx9edaf2220d96 및 ctx2297b3adb75a의 요청·유효 Opus/medium 검증을 유지한다.
+새 검토도 실제 dispatch 설정을 대조한다. 코디네이터·구현·조사 역할은 불변이다.
