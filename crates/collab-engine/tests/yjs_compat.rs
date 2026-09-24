@@ -965,6 +965,11 @@ fn project_followup_and_typed_marks_ychange_empty_para() {
         ("typed_attrs.v1", "/typed_attrs/prosemirror_json"),
         ("marks_link_bold.v1", "/marks_link_bold/prosemirror_json"),
         ("ychange_strip.v1", "/ychange_strip/prosemirror_json"),
+        ("ychange_only.v1", "/ychange_only/prosemirror_json"),
+        (
+            "ychange_retained_nested.v1",
+            "/ychange_retained_nested/prosemirror_json",
+        ),
     ] {
         let mut engine = CollabEngine::new(Limits::for_tests());
         assert_ok_applied(&engine.handle(&Request::Load {

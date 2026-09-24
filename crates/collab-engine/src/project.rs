@@ -4,6 +4,9 @@
 //! `yXmlFragmentToProsemirrorJSON` and FVOCI source SHA
 //! `393795261322b916e588043cf94feca999175843` `packages/editor/src/collab-tiptap.ts`.
 //! Traversal is over Yrs XmlFragment / XmlText delta, never XML strings.
+//! Mark order follows y-tiptap `Object.keys` (Yrs HashMap iteration; never sorted).
+
+use std::io::{self, Write};
 
 use serde_json::{Map, Value};
 use yrs::any::Number;
@@ -20,16 +23,7 @@ pub fn project_prosemirror<T: ReadTxn>(txn: &T, limits: &Limits) -> Result<Value
         None => empty_doc(),
     };
     let json = without_ychange(&json);
-    let bytes = serde_json::to_vec(&json).map_err(|err| EngineStatus::Malformed {
-        detail: format!("project json encode: {err}"),
-    })?;
-    if bytes.len() as u64 > limits.max_project_json_bytes {
-        return Err(output_limit(
-            "content_json",
-            bytes.len() as u64,
-            limits.max_project_json_bytes,
-        ));
-    }
+    bound_json_bytes(&json, limits.max_project_json_bytes)?;
     Ok(json)
 }
 
@@ -97,12 +91,73 @@ impl Budget {
         }
         Ok(())
     }
+
+    /// Refuse before `Vec`/`Map` allocation when `extra` nested values cannot fit.
+    fn ensure_nodes(&self, extra: usize) -> Result<(), EngineStatus> {
+        let extra = u32::try_from(extra).unwrap_or(u32::MAX);
+        if extra > self.max_nodes.saturating_sub(self.nodes) {
+            return Err(EngineStatus::ResourceLimit {
+                kind: LimitKind::Memory,
+                detail: format!(
+                    "project node count {} reached max {}",
+                    self.nodes, self.max_nodes
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 fn output_limit(what: &str, len: u64, max: u64) -> EngineStatus {
     EngineStatus::ResourceLimit {
         kind: LimitKind::Output,
         detail: format!("{what} {len} bytes exceeds {max}-byte project json limit"),
+    }
+}
+
+/// Serialize with a counting writer so an oversized document never gets a full output buffer.
+fn bound_json_bytes(json: &Value, max: u64) -> Result<(), EngineStatus> {
+    let mut writer = CountingWriter {
+        written: 0,
+        max,
+        hit_cap: false,
+    };
+    match serde_json::to_writer(&mut writer, json) {
+        Ok(()) => Ok(()),
+        Err(_) if writer.hit_cap => Err(output_limit(
+            "content_json",
+            writer.written.saturating_add(1),
+            max,
+        )),
+        Err(_) => Err(EngineStatus::Malformed {
+            detail: "project json encode".into(),
+        }),
+    }
+}
+
+struct CountingWriter {
+    written: u64,
+    max: u64,
+    hit_cap: bool,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = buf.len() as u64;
+        match self.written.checked_add(n) {
+            Some(total) if total <= self.max => {
+                self.written = total;
+                Ok(buf.len())
+            }
+            _ => {
+                self.hit_cap = true;
+                Err(io::Error::new(io::ErrorKind::WriteZero, "project json cap"))
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -134,7 +189,9 @@ fn serialize<T: ReadTxn>(
     budget: &mut Budget,
 ) -> Result<Serialized, EngineStatus> {
     match item {
-        XmlOut::Text(text) => Ok(Serialized::Nodes(serialize_xml_text(txn, &text, budget)?)),
+        XmlOut::Text(text) => Ok(Serialized::Nodes(serialize_xml_text(
+            txn, &text, depth, budget,
+        )?)),
         XmlOut::Element(el) => Ok(Serialized::Node(serialize_xml_element(
             txn, &el, depth, budget,
         )?)),
@@ -169,7 +226,7 @@ fn serialize_xml_element<T: ReadTxn>(
         if matches!(&value, Out::Any(Any::Undefined)) {
             continue;
         }
-        let json = out_to_json(txn, value, budget)?;
+        let json = out_to_json(value, depth.saturating_add(1), budget)?;
         attrs.insert(key.to_string(), json);
     }
     if !attrs.is_empty() {
@@ -192,16 +249,22 @@ fn serialize_xml_element<T: ReadTxn>(
 fn serialize_xml_text<T: ReadTxn>(
     txn: &T,
     text: &XmlTextRef,
+    depth: u32,
     budget: &mut Budget,
 ) -> Result<Vec<Value>, EngineStatus> {
     let mut nodes = Vec::new();
+    // `YChange` stays on `Diff.ychange`; y-tiptap `toDelta()` has no snapshot, so ignore it.
     for diff in text.diff(txn, YChange::identity) {
+        budget.check_depth(depth)?;
         budget.add_node()?;
         let insert = match diff.insert {
             Out::Any(Any::String(s)) => s.to_string(),
             other => {
                 return Err(EngineStatus::Malformed {
-                    detail: format!("project: XmlText insert is not a string ({other:?})"),
+                    detail: format!(
+                        "project: XmlText insert is not a string ({})",
+                        out_kind(&other)
+                    ),
                 });
             }
         };
@@ -210,21 +273,32 @@ fn serialize_xml_text<T: ReadTxn>(
         node.insert("type".into(), Value::String("text".into()));
         node.insert("text".into(), Value::String(insert));
         if let Some(attrs) = diff.attributes {
-            let mut marks = Vec::new();
-            let mut keys: Vec<_> = attrs.keys().cloned().collect();
-            keys.sort();
-            for key in keys {
-                let value = attrs.get(&key).expect("attrs key");
-                budget.add_string(key.as_ref(), "mark type")?;
-                let type_name = yattr2markname(key.as_ref());
-                let mut mark = Map::new();
-                mark.insert("type".into(), Value::String(type_name.to_string()));
-                // y-tiptap: `if (Object.keys(attrs)) { mark.attrs = attrs; }` is always
-                // true for objects/arrays/boxed primitives, including `{}`.
-                mark.insert("attrs".into(), any_to_json(value, budget)?);
-                marks.push(Value::Object(mark));
+            // Yjs `toDelta()` (no snapshot) never puts the reserved key `ychange` on
+            // attributes; y-tiptap therefore omits `marks` when that was the only attr.
+            // Hashed `ychange--xxxxxxxx` is a real mark name and is kept.
+            let mark_attrs: Vec<_> = attrs
+                .iter()
+                .filter(|(key, _)| key.as_ref() != "ychange")
+                .collect();
+            if !mark_attrs.is_empty() {
+                budget.ensure_nodes(mark_attrs.len())?;
+                let mut marks = Vec::with_capacity(mark_attrs.len());
+                // y-tiptap uses `Object.keys` insertion order, not alphabetical sort.
+                for (key, value) in mark_attrs {
+                    budget.add_string(key.as_ref(), "mark type")?;
+                    let type_name = yattr2markname(key.as_ref());
+                    let mut mark = Map::new();
+                    mark.insert("type".into(), Value::String(type_name.to_string()));
+                    // y-tiptap: `if (Object.keys(attrs)) { mark.attrs = attrs; }` is always
+                    // true for objects/arrays/boxed primitives, including `{}`.
+                    mark.insert(
+                        "attrs".into(),
+                        any_to_json(value, depth.saturating_add(1), budget)?,
+                    );
+                    marks.push(Value::Object(mark));
+                }
+                node.insert("marks".into(), Value::Array(marks));
             }
-            node.insert("marks".into(), Value::Array(marks));
         }
         nodes.push(Value::Object(node));
     }
@@ -252,52 +326,90 @@ pub fn yattr2markname(attr_name: &str) -> &str {
     attr_name
 }
 
-fn out_to_json<T: ReadTxn>(
-    _txn: &T,
-    value: Out,
-    budget: &mut Budget,
-) -> Result<Value, EngineStatus> {
+fn out_kind(value: &Out) -> &'static str {
     match value {
-        Out::Any(any) => any_to_json(&any, budget),
+        Out::Any(Any::Null) => "null",
+        Out::Any(Any::Undefined) => "undefined",
+        Out::Any(Any::Bool(_)) => "bool",
+        Out::Any(Any::Number(_)) => "number",
+        Out::Any(Any::String(_)) => "string",
+        Out::Any(Any::Buffer(_)) => "buffer",
+        Out::Any(Any::Array(_)) => "array",
+        Out::Any(Any::Map(_)) => "map",
+        Out::YText(_) => "text",
+        Out::YArray(_) => "array-ref",
+        Out::YMap(_) => "map-ref",
+        Out::YXmlElement(_) => "xml-element",
+        Out::YXmlFragment(_) => "xml-fragment",
+        Out::YXmlText(_) => "xml-text",
+        Out::YDoc(_) => "doc",
+        Out::UndefinedRef(_) => "undefined-ref",
+    }
+}
+
+fn out_to_json(value: Out, depth: u32, budget: &mut Budget) -> Result<Value, EngineStatus> {
+    match value {
+        Out::Any(any) => any_to_json(&any, depth, budget),
         other => Err(EngineStatus::Malformed {
-            detail: format!("project: non-JSON XML attribute ({other:?})"),
+            detail: format!("project: non-JSON XML attribute ({})", out_kind(&other)),
         }),
     }
 }
 
-fn any_to_json(any: &Any, budget: &mut Budget) -> Result<Value, EngineStatus> {
+fn any_to_json(any: &Any, depth: u32, budget: &mut Budget) -> Result<Value, EngineStatus> {
+    budget.check_depth(depth)?;
     match any {
-        Any::Null => Ok(Value::Null),
         Any::Undefined => Err(EngineStatus::Malformed {
             detail: "project: undefined JSON value".into(),
         }),
-        Any::Bool(b) => Ok(Value::Bool(*b)),
-        Any::Number(n) => number_to_json(*n),
+        Any::Buffer(_) => Err(EngineStatus::Malformed {
+            detail: "project: binary attribute is unsupported".into(),
+        }),
+        Any::Null => {
+            budget.add_node()?;
+            Ok(Value::Null)
+        }
+        Any::Bool(b) => {
+            budget.add_node()?;
+            Ok(Value::Bool(*b))
+        }
+        Any::Number(n) => {
+            budget.add_node()?;
+            number_to_json(*n)
+        }
         Any::String(s) => {
+            budget.add_node()?;
             budget.add_string(s, "json string")?;
             Ok(Value::String(s.to_string()))
         }
         Any::Array(items) => {
+            budget.add_node()?;
+            budget.ensure_nodes(items.len())?;
             let mut out = Vec::with_capacity(items.len());
+            let child_depth = depth.saturating_add(1);
             for item in items.iter() {
-                out.push(any_to_json(item, budget)?);
+                out.push(any_to_json(item, child_depth, budget)?);
             }
             Ok(Value::Array(out))
         }
         Any::Map(entries) => {
+            budget.add_node()?;
+            let defined = entries
+                .values()
+                .filter(|v| !matches!(v, Any::Undefined))
+                .count();
+            budget.ensure_nodes(defined)?;
             let mut map = Map::new();
+            let child_depth = depth.saturating_add(1);
             for (k, v) in entries.iter() {
                 if matches!(v, Any::Undefined) {
                     continue;
                 }
                 budget.add_string(k, "json key")?;
-                map.insert(k.clone(), any_to_json(v, budget)?);
+                map.insert(k.clone(), any_to_json(v, child_depth, budget)?);
             }
             Ok(Value::Object(map))
         }
-        Any::Buffer(_) => Err(EngineStatus::Malformed {
-            detail: "project: binary attribute is unsupported".into(),
-        }),
     }
 }
 
@@ -317,7 +429,9 @@ fn number_to_json(n: Number) -> Result<Value, EngineStatus> {
     }
 }
 
-/// Source `withoutYChange`: drop `ychange` keys and marks with `type === "ychange"`.
+/// Source `withoutYChange`: drop `ychange` keys; filter marks with `type === "ychange"`
+/// without recursing into survivors (nested ychange in retained mark attrs stays).
+/// Empty `marks: []` is retained.
 fn without_ychange(value: &Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.iter().map(without_ychange).collect()),
@@ -336,13 +450,9 @@ fn without_ychange(value: &Value) -> Value {
                                     m.get("type").and_then(Value::as_str) == Some("ychange")
                                 })
                             })
-                            .map(without_ychange)
+                            .cloned()
                             .collect();
-                        // y-tiptap omits `marks` when the run has no remaining
-                        // attributes after ychange-only formatting is stripped.
-                        if !kept.is_empty() {
-                            out.insert(key.clone(), Value::Array(kept));
-                        }
+                        out.insert(key.clone(), Value::Array(kept));
                         continue;
                     }
                 }
@@ -364,6 +474,7 @@ mod tests {
         assert_eq!(yattr2markname("link"), "link");
         assert_eq!(yattr2markname("bold--abcdEFG="), "bold");
         assert_eq!(yattr2markname("link--////++++"), "link");
+        assert_eq!(yattr2markname("ychange--abcd1234"), "ychange");
         assert_eq!(yattr2markname("short--ab"), "short--ab");
     }
 
@@ -397,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn without_ychange_omits_empty_marks() {
+    fn without_ychange_retains_empty_marks() {
         let raw = json!({
             "type": "text",
             "text": "원문",
@@ -405,7 +516,91 @@ mod tests {
         });
         assert_eq!(
             super::without_ychange(&raw),
-            json!({ "type": "text", "text": "원문" })
+            json!({ "type": "text", "text": "원문", "marks": [] })
         );
+    }
+
+    #[test]
+    fn without_ychange_keeps_nested_ychange_in_surviving_marks() {
+        let raw = json!({
+            "type": "text",
+            "text": "한글",
+            "marks": [{
+                "type": "link",
+                "attrs": { "href": "https://x.invalid", "ychange": { "type": "nested" } }
+            }]
+        });
+        assert_eq!(super::without_ychange(&raw), raw);
+    }
+
+    #[test]
+    fn any_to_json_budgets_numeric_array_before_alloc() {
+        let items: Vec<yrs::Any> = (0..32).map(|_| yrs::Any::from(1)).collect();
+        let any = yrs::Any::from(items);
+        let mut limits = crate::limits::Limits::for_tests();
+        limits.max_project_nodes = 4;
+        let mut budget = super::Budget::new(&limits);
+        let err = super::any_to_json(&any, 1, &mut budget).expect_err("node cap");
+        assert!(
+            matches!(
+                err,
+                crate::outcome::EngineStatus::ResourceLimit {
+                    kind: crate::outcome::LimitKind::Memory,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn any_to_json_budgets_bool_array_and_deep_map() {
+        let bools: Vec<yrs::Any> = (0..8).map(|_| yrs::Any::from(true)).collect();
+        let mut limits = crate::limits::Limits::for_tests();
+        limits.max_project_nodes = 3;
+        let mut budget = super::Budget::new(&limits);
+        let err = super::any_to_json(&yrs::Any::from(bools), 1, &mut budget)
+            .expect_err("bool array node cap");
+        assert!(matches!(
+            err,
+            crate::outcome::EngineStatus::ResourceLimit {
+                kind: crate::outcome::LimitKind::Memory,
+                ..
+            }
+        ));
+
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("k".into(), yrs::Any::from(1));
+        let mut nested = yrs::Any::Map(std::sync::Arc::new(inner));
+        for _ in 0..6 {
+            let mut map = std::collections::HashMap::new();
+            map.insert("n".into(), nested);
+            nested = yrs::Any::Map(std::sync::Arc::new(map));
+        }
+        let mut shallow = crate::limits::Limits::for_tests();
+        shallow.max_project_depth = 3;
+        let mut budget = super::Budget::new(&shallow);
+        let err = super::any_to_json(&nested, 1, &mut budget).expect_err("map depth");
+        assert!(matches!(
+            err,
+            crate::outcome::EngineStatus::ResourceLimit {
+                kind: crate::outcome::LimitKind::Stack,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bound_json_bytes_fails_before_storing_output() {
+        let json = json!({ "type": "doc", "content": [] });
+        let err = super::bound_json_bytes(&json, 8).expect_err("cap");
+        assert!(matches!(
+            err,
+            crate::outcome::EngineStatus::ResourceLimit {
+                kind: crate::outcome::LimitKind::Output,
+                ..
+            }
+        ));
+        super::bound_json_bytes(&json, 10_000).expect("fits");
     }
 }

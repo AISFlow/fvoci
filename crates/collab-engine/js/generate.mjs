@@ -415,6 +415,36 @@ writeBin("ychange_strip.v1", Y.encodeStateAsUpdate(ychangeDoc));
 const ychangePmRaw = yDocToProsemirrorJSON(ychangeDoc, FRAGMENT);
 const ychangePm = withoutYChange(ychangePmRaw);
 
+/** Y.Text reserves the key `ychange`; y-tiptap emits type "ychange" via hashedMarkNameRegex. */
+const ychangeOnly = docWithClient(80);
+{
+  const frag = ychangeOnly.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-yc-only-001");
+  const t = new Y.XmlText();
+  t.insert(0, "원문", { "ychange--abcd1234": { type: "added" } });
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+}
+writeBin("ychange_only.v1", Y.encodeStateAsUpdate(ychangeOnly));
+const ychangeOnlyRaw = yDocToProsemirrorJSON(ychangeOnly, FRAGMENT);
+const ychangeOnlyPm = withoutYChange(ychangeOnlyRaw);
+
+const ychangeNested = docWithClient(81);
+{
+  const frag = ychangeNested.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-yc-nested-001");
+  const t = new Y.XmlText();
+  t.insert(0, "한글", {
+    link: { href: "https://x.invalid", ychange: { type: "nested" } },
+  });
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+}
+writeBin("ychange_retained_nested.v1", Y.encodeStateAsUpdate(ychangeNested));
+const ychangeNestedPm = projectJson(ychangeNested);
+
 const delBeforePm = projectJson(
   (() => {
     const d = new Y.Doc({ gc: false });
@@ -519,6 +549,13 @@ const expectations = {
     raw_has_ychange: JSON.stringify(ychangePmRaw).includes("ychange"),
     prosemirror_json: ychangePm,
   },
+  ychange_only: {
+    raw_has_ychange_mark: JSON.stringify(ychangeOnlyRaw).includes('"type":"ychange"'),
+    prosemirror_json: ychangeOnlyPm,
+  },
+  ychange_retained_nested: {
+    prosemirror_json: ychangeNestedPm,
+  },
 };
 
 writeFileSync(
@@ -551,6 +588,8 @@ console.log(
         "typed_attrs.v1",
         "marks_link_bold.v1",
         "ychange_strip.v1",
+        "ychange_only.v1",
+        "ychange_retained_nested.v1",
         "expectations.json",
       ],
       delete_only_sv_unchanged: expectations.delete_only.state_vector_unchanged,

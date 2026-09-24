@@ -598,5 +598,56 @@
         }
       ]
     }
+  },
+  "ychange_only": {
+    "raw_has_ychange_mark": true,
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-yc-only-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "원문",
+              "marks": []
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "ychange_retained_nested": {
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-yc-nested-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "한글",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.invalid",
+                    "ychange": {
+                      "type": "nested"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
   }
 }

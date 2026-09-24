@@ -30,7 +30,15 @@ set), `snapshot` (completeV1 including pending/delete set), `inspect`,
 `content_json` on `ok`; never overloads `update_b64`). `project` counts toward
 `max_ops` and does not set `mutated`. JSON is capped at 1 MiB
 (`DOCUMENT_MAX_BODY_BYTES`); depth 128 / 100k nodes / per-string 1 MiB.
-Unsupported CRDT shape → `malformed`. Over-limit → `resource_limit`.
+Nested Any arrays/maps (including numeric/bool leaves) count toward the node
+and depth caps before allocation. Output is size-checked with a counting
+serializer, not a full `to_vec` then reject. Source `withoutYChange` keeps
+empty `marks: []` and does not rewrite surviving marks (nested `ychange` in
+retained mark attrs stays). Mark order is y-tiptap `Object.keys`, not sorted.
+Yjs reserves the text attribute name `ychange`; fixtures `ychange_only.v1`
+and `ychange_retained_nested.v1` use hashed `ychange--xxxxxxxx` plus a
+surviving mark whose attrs contain `ychange`. Unsupported CRDT shape →
+`malformed`. Over-limit → `resource_limit`.
 `encoding != 1` → `unsupported/encoding_v2`.
 
 Response `EngineReport.outcome`: `ok` (`applied`, `pending`, **`durable: false`**,
