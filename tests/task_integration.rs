@@ -1221,6 +1221,326 @@ async fn task_list_rejects_cursor_with_different_filters() {
     harness.cleanup().await;
 }
 
+async fn all_task_ids_unpaginated(
+    app: axum::Router,
+    workspace_id: Uuid,
+    project_id: &str,
+    cookie: &str,
+    query: &str,
+) -> Vec<String> {
+    let (status, page) =
+        list_tasks_page(app, workspace_id, project_id, cookie, query, 100, None).await;
+    assert_eq!(status, StatusCode::OK, "{page:?}");
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+async fn assert_pagination_walk_matches_unpaginated(
+    app: axum::Router,
+    workspace_id: Uuid,
+    project_id: &str,
+    cookie: &str,
+    query: &str,
+) {
+    let expected =
+        all_task_ids_unpaginated(app.clone(), workspace_id, project_id, cookie, query).await;
+    for limit in [1, 2] {
+        let walked =
+            walk_task_list_ids(app.clone(), workspace_id, project_id, cookie, query, limit).await;
+        assert_eq!(walked, expected, "query {query} limit {limit}");
+        assert_eq!(
+            walked.len(),
+            walked.iter().collect::<HashSet<_>>().len(),
+            "query {query} limit {limit}"
+        );
+    }
+}
+
+async fn create_task_with_title(
+    app: axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    project_id: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let (status, task) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(body),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task:?}");
+    task
+}
+
+#[tokio::test]
+async fn task_list_title_sort_pagination_matches_unpaginated() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    for title in ["E", "D", "C", "B", "A"] {
+        create_task_with_title(
+            app.clone(),
+            &cookie,
+            workspace_id,
+            project_id,
+            json!({"title": title}),
+        )
+        .await;
+    }
+
+    let query = r#"{"sort":[{"field":"title","direction":"asc"}]}"#;
+    assert_pagination_walk_matches_unpaginated(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+    )
+    .await;
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_priority_tie_pagination_matches_unpaginated() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    for title in ["One", "Two", "Three", "Four"] {
+        create_task_with_title(
+            app.clone(),
+            &cookie,
+            workspace_id,
+            project_id,
+            json!({"title": title, "priority": "high"}),
+        )
+        .await;
+    }
+
+    let query = r#"{"sort":[{"field":"priority","direction":"asc"}]}"#;
+    assert_pagination_walk_matches_unpaginated(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+    )
+    .await;
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_priority_rank_order_matches_source() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    for (title, priority) in [
+        ("Urgent", "urgent"),
+        ("High", "high"),
+        ("Medium", "medium"),
+        ("Low", "low"),
+        ("None", "none"),
+    ] {
+        create_task_with_title(
+            app.clone(),
+            &cookie,
+            workspace_id,
+            project_id,
+            json!({"title": title, "priority": priority}),
+        )
+        .await;
+    }
+
+    for query in [
+        r#"{"sort":[{"field":"priority","direction":"asc"}]}"#,
+        r#"{"sort":[{"field":"priority","direction":"desc"}]}"#,
+    ] {
+        assert_pagination_walk_matches_unpaginated(
+            app.clone(),
+            workspace_id,
+            project_id,
+            &cookie,
+            query,
+        )
+        .await;
+    }
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_created_desc_pagination_handles_created_at_and_id_inversion() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let mut ids = Vec::new();
+    for title in ["One", "Two", "Three", "Four", "Five"] {
+        let task = create_task_with_title(
+            app.clone(),
+            &cookie,
+            workspace_id,
+            project_id,
+            json!({"title": title}),
+        )
+        .await;
+        ids.push(task["id"].as_str().unwrap().to_string());
+    }
+
+    sqlx::query(
+        "UPDATE fvoci.tasks SET created_at = TIMESTAMPTZ '2026-01-01 12:00:00+00' WHERE workspace_id = $1 AND id = $2::uuid",
+    )
+    .bind(workspace_id)
+    .bind(&ids[0])
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.tasks SET created_at = TIMESTAMPTZ '2026-01-01 12:00:00+00' WHERE workspace_id = $1 AND id = $2::uuid",
+    )
+    .bind(workspace_id)
+    .bind(&ids[1])
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.tasks SET created_at = TIMESTAMPTZ '2026-01-05 12:00:00+00' WHERE workspace_id = $1 AND id = $2::uuid",
+    )
+    .bind(workspace_id)
+    .bind(&ids[2])
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.tasks SET created_at = TIMESTAMPTZ '2026-01-02 12:00:00+00' WHERE workspace_id = $1 AND id = $2::uuid",
+    )
+    .bind(workspace_id)
+    .bind(&ids[3])
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.tasks SET created_at = TIMESTAMPTZ '2026-01-03 12:00:00+00' WHERE workspace_id = $1 AND id = $2::uuid",
+    )
+    .bind(workspace_id)
+    .bind(&ids[4])
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    let query = r#"{"sort":[{"field":"created","direction":"desc"}]}"#;
+    assert_pagination_walk_matches_unpaginated(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+    )
+    .await;
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_create_assigns_distinct_increasing_sort_keys_within_status() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let first = create_task_with_title(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        project_id,
+        json!({"title": "First"}),
+    )
+    .await;
+    let second = create_task_with_title(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        project_id,
+        json!({"title": "Second"}),
+    )
+    .await;
+    let first_key = first["sortKey"].as_str().unwrap();
+    let second_key = second["sortKey"].as_str().unwrap();
+    assert_ne!(first_key, second_key);
+    assert!(first_key < second_key);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_pagination_preserves_status_counts() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    for title in ["E", "D", "C", "B", "A"] {
+        create_task_with_title(
+            app.clone(),
+            &cookie,
+            workspace_id,
+            project_id,
+            json!({"title": title}),
+        )
+        .await;
+    }
+
+    let query = r#"{"sort":[{"field":"title","direction":"asc"}]}"#;
+    let (status, first_page) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        2,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let baseline_counts = first_page["statusCounts"].clone();
+    let cursor = first_page["nextCursor"].as_str().unwrap();
+    let (status, second_page) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        2,
+        Some(cursor),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second_page["statusCounts"], baseline_counts);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn task_list_rejects_malformed_cursor() {
     let harness = TestDb::bootstrap().await;

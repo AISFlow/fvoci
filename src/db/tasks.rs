@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
-use crate::db::documents::{empty_document_json, DOCUMENT_SCHEMA_VERSION};
+use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission, ProjectDbError};
 use crate::projects::ProjectPermission;
@@ -469,17 +469,31 @@ pub async fn create_task(
     .fetch_one(&mut *tx)
     .await?;
 
-    let (sort_key,): (String,) = sqlx::query_as(
+    let last_sort: Option<(String,)> = sqlx::query_as(
         r#"
-        SELECT sort_key FROM fvoci.statuses
-        WHERE workspace_id = $1 AND project_id = $2 AND id = $3
+        SELECT sort_key
+        FROM fvoci.tasks
+        WHERE workspace_id = $1
+          AND project_id = $2
+          AND status_id = $3
+          AND deleted_at IS NULL
+        ORDER BY sort_key COLLATE "C" DESC
+        LIMIT 1
         "#,
     )
     .bind(workspace_id)
     .bind(project_id)
     .bind(status_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let sort_key = match between(last_sort.as_ref().map(|(key,)| key.as_str()), None) {
+        Ok(key) => key,
+        Err(err) => {
+            tracing::error!("task sort_key allocation failed: {err}");
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::Conflict));
+        }
+    };
 
     let row = map_task_row(
         &sqlx::query(
@@ -632,6 +646,7 @@ type TaskListCursorAnchor = (
     String,
     Uuid,
     Option<NaiveDate>,
+    String,
 );
 
 pub async fn list_project_tasks(
@@ -678,7 +693,14 @@ pub async fn list_project_tasks(
     if let Some(cursor) = &query.cursor {
         let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(
             r#"
-            SELECT t.created_at, t.updated_at, t.id, t.number, t.title, t.sort_key, t.priority, t.status_id, t.due_date
+            SELECT t.created_at, t.updated_at, t.id, t.number, t.title, t.sort_key, t.priority, t.status_id, t.due_date,
+                   (
+                       SELECT st.sort_key
+                       FROM fvoci.statuses st
+                       WHERE st.workspace_id = t.workspace_id
+                         AND st.project_id = t.project_id
+                         AND st.id = t.status_id
+                   ) AS status_sort_key
             FROM fvoci.tasks t
             WHERE t.workspace_id = $1 AND t.project_id = $2 AND t.id = $3 AND t.deleted_at IS NULL
             "#,
@@ -696,15 +718,24 @@ pub async fn list_project_tasks(
             title,
             sort_key,
             priority,
-            status_id,
+            _status_id,
             due_date,
+            status_sort_key,
         )) = anchor
         else {
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::InvalidCursor));
         };
         let key = cursor_key_for_row(
-            &sort, id, created_at, updated_at, number, &title, &sort_key, &priority, status_id,
+            &sort,
+            id,
+            created_at,
+            updated_at,
+            number,
+            &title,
+            &sort_key,
+            &priority,
+            &status_sort_key,
             due_date,
         );
         if key != cursor.key {
@@ -722,7 +753,7 @@ pub async fn list_project_tasks(
                 &title,
                 &sort_key,
                 &priority,
-                status_id,
+                &status_sort_key,
                 due_date,
             ));
         }
@@ -738,7 +769,14 @@ pub async fn list_project_tasks(
         SELECT t.id, t.project_id, t.number, t.title, t.type AS task_type, t.priority, t.status_id,
                t.start_date, t.due_date, t.due_at, t.estimate, t.parent_id, t.milestone_id,
                t.sort_key, t.schema_version, t.version, t.archived_at, t.created_by, t.created_at,
-               t.updated_at, t.recurrence
+               t.updated_at, t.recurrence,
+               (
+                   SELECT st.sort_key
+                   FROM fvoci.statuses st
+                   WHERE st.workspace_id = t.workspace_id
+                     AND st.project_id = t.project_id
+                     AND st.id = t.status_id
+               ) AS status_sort_key
         FROM fvoci.tasks t
         WHERE {list_where_sql}
         ORDER BY {order_sql}
@@ -779,6 +817,7 @@ pub async fn list_project_tasks(
         let created_at: DateTime<Utc> = last.try_get("created_at")?;
         let updated_at: DateTime<Utc> = last.try_get("updated_at")?;
         let due_date: Option<NaiveDate> = last.try_get("due_date")?;
+        let status_sort_key: String = last.try_get("status_sort_key")?;
         let key = cursor_key_for_row(
             &sort,
             record.id,
@@ -788,7 +827,7 @@ pub async fn list_project_tasks(
             &record.title,
             &record.sort_key,
             &record.priority,
-            record.status_id,
+            &status_sort_key,
             due_date,
         );
         Some(encode_cursor(&TaskListCursor {
@@ -882,19 +921,37 @@ fn effective_sort(sort: &[ViewSort]) -> Vec<ViewSort> {
     }
 }
 
+/// Due-date sort uses UTC; the source uses the request time zone.
+fn sort_expression_sql(field: SortField) -> &'static str {
+    match field {
+        SortField::Priority => {
+            "CASE t.priority WHEN 'none' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'urgent' THEN 4 END"
+        }
+        SortField::Due => "COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date)",
+        SortField::Updated => "t.updated_at",
+        SortField::Created => "t.created_at",
+        SortField::Rank => r#"t.sort_key COLLATE "C""#,
+        SortField::Title => r#"t.title COLLATE "C""#,
+        SortField::Status => {
+            "(SELECT st.sort_key FROM fvoci.statuses st WHERE st.workspace_id = t.workspace_id AND st.project_id = t.project_id AND st.id = t.status_id)"
+        }
+        SortField::Number => "t.number",
+    }
+}
+
+fn sort_anchor_ref(field: SortField, bind_index: usize) -> String {
+    match field {
+        SortField::Created | SortField::Updated => format!("${bind_index}::timestamptz"),
+        SortField::Number | SortField::Priority => format!("${bind_index}::int"),
+        SortField::Due => format!("NULLIF(${bind_index}, 'null')::date"),
+        SortField::Title | SortField::Rank | SortField::Status => format!("${bind_index}"),
+    }
+}
+
 fn order_clause(sort: &[ViewSort]) -> String {
     let mut parts = Vec::new();
     for entry in sort {
-        let column = match entry.field {
-            SortField::Priority => "t.priority",
-            SortField::Due => "COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date)",
-            SortField::Updated => "t.updated_at",
-            SortField::Created => "t.created_at",
-            SortField::Rank => "t.sort_key COLLATE \"C\"",
-            SortField::Title => "t.title COLLATE \"C\"",
-            SortField::Status => "t.status_id",
-            SortField::Number => "t.number",
-        };
+        let column = sort_expression_sql(entry.field);
         let dir = if entry.direction == SortDirection::Asc {
             "ASC"
         } else {
@@ -902,63 +959,50 @@ fn order_clause(sort: &[ViewSort]) -> String {
         };
         parts.push(format!("{column} {dir} NULLS LAST"));
     }
-    parts.push("t.id DESC".to_string());
+    parts.push("t.id ASC".to_string());
     parts.join(", ")
 }
 
 fn cursor_clause(sort: &[ViewSort], bind_start: usize) -> String {
     let id_bind = bind_start + sort.len();
-    let mut branches = Vec::with_capacity(sort.len());
+    let mut branches = Vec::with_capacity(sort.len() + 1);
     for (index, entry) in sort.iter().enumerate() {
-        let mut parts = Vec::with_capacity(index + 2);
+        let mut parts = Vec::with_capacity(index + 1);
         for (prior_index, prior) in sort[..index].iter().enumerate() {
             parts.push(sort_equality_sql(prior.field, bind_start + prior_index));
         }
-        let cmp = sort_compare_op(entry.direction);
-        parts.push(sort_compare_sql(entry.field, bind_start + index, cmp));
-        if index + 1 == sort.len() {
-            parts.push(format!("t.id {cmp} ${id_bind}::uuid"));
-        }
+        parts.push(sort_strict_after_sql(
+            entry.field,
+            bind_start + index,
+            entry.direction,
+        ));
         branches.push(format!("({})", parts.join(" AND ")));
     }
+    let mut equal_parts: Vec<String> = sort
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| sort_equality_sql(entry.field, bind_start + index))
+        .collect();
+    equal_parts.push(format!("t.id > ${id_bind}::uuid"));
+    branches.push(format!("({})", equal_parts.join(" AND ")));
     format!("({})", branches.join(" OR "))
 }
 
-fn sort_compare_op(direction: SortDirection) -> &'static str {
-    match direction {
-        SortDirection::Asc => ">",
-        SortDirection::Desc => "<",
-    }
-}
-
 fn sort_equality_sql(field: SortField, bind_index: usize) -> String {
-    match field {
-        SortField::Created => format!("t.created_at = ${bind_index}::timestamptz"),
-        SortField::Updated => format!("t.updated_at = ${bind_index}::timestamptz"),
-        SortField::Number => format!("t.number = ${bind_index}::int"),
-        SortField::Title => format!("t.title COLLATE \"C\" = ${bind_index}"),
-        SortField::Rank => format!("t.sort_key COLLATE \"C\" = ${bind_index}"),
-        SortField::Priority => format!("t.priority = ${bind_index}"),
-        SortField::Status => format!("t.status_id = ${bind_index}::uuid"),
-        SortField::Due => format!(
-            "COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date) IS NOT DISTINCT FROM NULLIF(${bind_index}, 'null')::date"
-        ),
-    }
+    let expr = sort_expression_sql(field);
+    let anchor = sort_anchor_ref(field, bind_index);
+    format!("{expr} IS NOT DISTINCT FROM {anchor}")
 }
 
-fn sort_compare_sql(field: SortField, bind_index: usize, op: &str) -> String {
-    match field {
-        SortField::Created => format!("t.created_at {op} ${bind_index}::timestamptz"),
-        SortField::Updated => format!("t.updated_at {op} ${bind_index}::timestamptz"),
-        SortField::Number => format!("t.number {op} ${bind_index}::int"),
-        SortField::Title => format!("t.title COLLATE \"C\" {op} ${bind_index}"),
-        SortField::Rank => format!("t.sort_key COLLATE \"C\" {op} ${bind_index}"),
-        SortField::Priority => format!("t.priority {op} ${bind_index}"),
-        SortField::Status => format!("t.status_id {op} ${bind_index}::uuid"),
-        SortField::Due => format!(
-            "COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date) {op} NULLIF(${bind_index}, 'null')::date"
-        ),
-    }
+fn sort_strict_after_sql(field: SortField, bind_index: usize, direction: SortDirection) -> String {
+    let expr = sort_expression_sql(field);
+    let anchor = sort_anchor_ref(field, bind_index);
+    let op = if direction == SortDirection::Asc {
+        ">"
+    } else {
+        "<"
+    };
+    format!("({expr} IS NULL AND {anchor} IS NOT NULL OR {expr} {op} {anchor})")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -970,7 +1014,7 @@ fn cursor_bind_value(
     title: &str,
     sort_key: &str,
     priority: &str,
-    status_id: Uuid,
+    status_sort_key: &str,
     due_date: Option<NaiveDate>,
 ) -> String {
     match field {
@@ -979,10 +1023,21 @@ fn cursor_bind_value(
         SortField::Number => number.to_string(),
         SortField::Title => title.to_string(),
         SortField::Rank => sort_key.to_string(),
-        SortField::Priority => priority.to_string(),
-        SortField::Status => status_id.to_string(),
+        SortField::Priority => priority_rank(priority).to_string(),
+        SortField::Status => status_sort_key.to_string(),
         SortField::Due => due_date
             .map(|date| date.to_string())
             .unwrap_or_else(|| "null".to_string()),
+    }
+}
+
+fn priority_rank(priority: &str) -> i32 {
+    match priority {
+        "none" => 0,
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "urgent" => 4,
+        _ => 0,
     }
 }

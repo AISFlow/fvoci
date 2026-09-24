@@ -410,7 +410,7 @@ pub fn cursor_key_for_row(
     title: &str,
     sort_key: &str,
     priority: &str,
-    status_id: Uuid,
+    status_sort_key: &str,
     due_date: Option<NaiveDate>,
 ) -> String {
     let sort = effective_sort_entries(sort);
@@ -427,7 +427,7 @@ pub fn cursor_key_for_row(
                 title,
                 sort_key,
                 priority,
-                status_id,
+                status_sort_key,
                 due_date,
             )
         ));
@@ -456,7 +456,7 @@ fn sort_value_token(
     title: &str,
     sort_key: &str,
     priority: &str,
-    status_id: Uuid,
+    status_sort_key: &str,
     due_date: Option<NaiveDate>,
 ) -> String {
     match field {
@@ -465,11 +465,22 @@ fn sort_value_token(
         SortField::Number => number.to_string(),
         SortField::Title => title.to_string(),
         SortField::Rank => sort_key.to_string(),
-        SortField::Priority => priority.to_string(),
-        SortField::Status => status_id.to_string(),
+        SortField::Priority => priority_rank(priority).to_string(),
+        SortField::Status => status_sort_key.to_string(),
         SortField::Due => due_date
             .map(|date| date.to_string())
             .unwrap_or_else(|| "null".to_string()),
+    }
+}
+
+fn priority_rank(priority: &str) -> i32 {
+    match priority {
+        "none" => 0,
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "urgent" => 4,
+        _ => 0,
     }
 }
 
