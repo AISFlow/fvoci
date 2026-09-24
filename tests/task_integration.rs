@@ -3069,3 +3069,348 @@ async fn task_move_trash_restore_denied_for_private_non_member_and_viewer() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn task_move_to_done_spawns_recurring_occurrence_with_source_parity() {
+    let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
+    let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
+    let done = statuses
+        .iter()
+        .find(|(_, c)| c == "done")
+        .unwrap()
+        .0
+        .clone();
+    let t = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({
+            "title": "R",
+            "priority": "high",
+            "recurrence": {"kind": "monthly"},
+            "startDate": "2026-01-31",
+            "dueDate": "2026-01-31"
+        }),
+    )
+    .await;
+    let tid = t["id"].as_str().unwrap();
+    patch_task(app.clone(), ws, tid, json!({"estimate": "3.5"}), &cookie).await;
+    let (st, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{tid}/move"),
+        Some(json!({"statusId": done})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let rows: Vec<(
+        uuid::Uuid,
+        String,
+        String,
+        Option<chrono::NaiveDate>,
+        Option<chrono::NaiveDate>,
+        Option<serde_json::Value>,
+        Option<String>,
+        uuid::Uuid,
+    )> = sqlx::query_as(
+        "SELECT t.id, t.title, t.priority, t.start_date, t.due_date, t.recurrence, t.estimate::text, t.status_id FROM fvoci.tasks t WHERE t.project_id=$1 ORDER BY number",
+    )
+    .bind(pid)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].5.is_none(), "original recurrence cleared");
+    let next = &rows[1];
+    assert_eq!(next.1, "R");
+    assert_eq!(next.2, "high");
+    assert_eq!(
+        next.3,
+        Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 3).unwrap())
+    );
+    assert_eq!(
+        next.4,
+        Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 3).unwrap())
+    );
+    assert_eq!(next.5, Some(json!({"kind": "monthly"})));
+    assert!(
+        next.6.is_none(),
+        "estimate is not copied to spawned occurrence"
+    );
+    let ev: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT verb, payload FROM fvoci.events WHERE target_id=$1")
+            .bind(next.0)
+            .fetch_all(&admin)
+            .await
+            .unwrap();
+    let au: Vec<(String,)> = sqlx::query_as("SELECT verb FROM fvoci.audit_log WHERE target_id=$1")
+        .bind(next.0)
+        .fetch_all(&admin)
+        .await
+        .unwrap();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].0, "task.created");
+    assert_eq!(ev[0].1["recurrenceOf"], json!(tid));
+    assert_eq!(au.len(), 1);
+    assert_eq!(au[0].0, "task.created");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_move_to_done_recurrence_spawn_failure_rolls_back_move() {
+    let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
+    let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
+    let done = statuses
+        .iter()
+        .find(|(_, c)| c == "done")
+        .unwrap()
+        .0
+        .clone();
+    let t = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "R", "recurrence": {"kind": "daily"}}),
+    )
+    .await;
+    let tid = t["id"].as_str().unwrap();
+    let events_before = count_rows(&admin, "events").await;
+    let next_before: (i32,) = sqlx::query_as("SELECT next_number FROM fvoci.projects WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    install_insert_fail_trigger(&admin, "tasks", "dprobe_task_insert_fail").await;
+    let (st, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{tid}/move"),
+        Some(json!({"statusId": done})),
+        Some(&cookie),
+    )
+    .await;
+    drop_insert_fail_trigger(&admin, "tasks", "dprobe_task_insert_fail").await;
+    let row: (String, Option<serde_json::Value>) =
+        sqlx::query_as("SELECT status_id::text, recurrence FROM fvoci.tasks WHERE id=$1::uuid")
+            .bind(tid)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let next_after: (i32,) = sqlx::query_as("SELECT next_number FROM fvoci.projects WHERE id=$1")
+        .bind(pid)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(row.0, t["statusId"].as_str().unwrap());
+    assert!(row.1.is_some());
+    assert_eq!(next_before, next_after);
+    assert_eq!(count_rows(&admin, "events").await, events_before);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_wip_limit_concurrent_moves_allow_only_one() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
+    let a =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "A"})).await;
+    let b =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "B"})).await;
+    let target = statuses
+        .iter()
+        .find(|(id, _)| id != a["statusId"].as_str().unwrap())
+        .unwrap()
+        .0
+        .clone();
+    sqlx::query("UPDATE fvoci.statuses SET wip_limit=1 WHERE id=$1::uuid")
+        .bind(&target)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mv = |id: String| {
+        let app = app.clone();
+        let c = cookie.clone();
+        let target = target.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/tasks/{id}/move"),
+                Some(json!({"statusId": target})),
+                Some(&c),
+            )
+            .await
+        }
+    };
+    let (r1, r2) = tokio::join!(
+        mv(a["id"].as_str().unwrap().to_string()),
+        mv(b["id"].as_str().unwrap().to_string())
+    );
+    let n: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.tasks WHERE status_id=$1::uuid AND deleted_at IS NULL AND archived_at IS NULL",
+    )
+    .bind(&target)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let statuses = [r1.0, r2.0];
+    let ok_count = statuses
+        .iter()
+        .filter(|status| **status == StatusCode::OK)
+        .count();
+    let conflict_count = statuses
+        .iter()
+        .filter(|status| **status == StatusCode::CONFLICT)
+        .count();
+    assert_eq!(ok_count, 1);
+    assert_eq!(conflict_count, 1);
+    assert_eq!(n.0, 1);
+
+    let (winner, loser) = if r1.0 == StatusCode::OK {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    patch_task(
+        app.clone(),
+        ws,
+        winner["id"].as_str().unwrap(),
+        json!({"statusId": winner["statusId"]}),
+        &cookie,
+    )
+    .await;
+    let c =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "C"})).await;
+    let (s4, _) = patch_task(
+        app.clone(),
+        ws,
+        c["id"].as_str().unwrap(),
+        json!({"statusId": target}),
+        &cookie,
+    )
+    .await;
+    let (s5, b5) = patch_task(
+        app.clone(),
+        ws,
+        loser["id"].as_str().unwrap(),
+        json!({"statusId": target}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(s4, StatusCode::OK);
+    assert_eq!(s5, StatusCode::CONFLICT);
+    assert_eq!(b5["code"], "wip_limit_exceeded");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_patch_status_done_with_type_change_spawns_post_patch_values() {
+    let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
+    let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
+    let done = statuses
+        .iter()
+        .find(|(_, c)| c == "done")
+        .unwrap()
+        .0
+        .clone();
+    let t = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({
+            "title": "R",
+            "type": "task",
+            "recurrence": {"kind": "weekly"}
+        }),
+    )
+    .await;
+    let tid = t["id"].as_str().unwrap();
+    let (st, body) = patch_task(
+        app.clone(),
+        ws,
+        tid,
+        json!({
+            "statusId": done,
+            "type": "bug",
+            "recurrence": {"kind": "daily"}
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let rows: Vec<(String, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT type, recurrence FROM fvoci.tasks WHERE project_id=$1 ORDER BY number",
+    )
+    .bind(pid)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "bug");
+    assert_eq!(rows[1].0, "bug");
+    assert_eq!(rows[1].1, Some(json!({"kind": "weekly"})));
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_concurrent_move_to_done_on_recurring_task_spawns_once() {
+    let (harness, app, cookie, ws, admin, project_id, pid) = review_setup().await;
+    let statuses = workflow_status_ids(app.clone(), &cookie, ws, &project_id).await;
+    let done = statuses
+        .iter()
+        .find(|(_, c)| c == "done")
+        .unwrap()
+        .0
+        .clone();
+    let t = create_task_with_title(
+        app.clone(),
+        &cookie,
+        ws,
+        &project_id,
+        json!({"title": "R", "recurrence": {"kind": "daily"}}),
+    )
+    .await;
+    let tid = t["id"].as_str().unwrap().to_string();
+    let before = count_rows(&admin, "tasks").await;
+    let mv = |tid: String| {
+        let app = app.clone();
+        let c = cookie.clone();
+        let done = done.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/tasks/{tid}/move"),
+                Some(json!({"statusId": done})),
+                Some(&c),
+            )
+            .await
+        }
+    };
+    let (r1, r2) = tokio::join!(mv(tid.clone()), mv(tid.clone()));
+    let after: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.tasks WHERE project_id=$1 AND deleted_at IS NULL",
+    )
+    .bind(pid)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(r1.0 == StatusCode::OK || r2.0 == StatusCode::OK);
+    assert_eq!(after.0, before + 1, "only one recurring spawn must succeed");
+
+    admin.close().await;
+    harness.cleanup().await;
+}

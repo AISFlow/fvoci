@@ -2096,6 +2096,12 @@ Composer 보고서의 “accepted review cc48112” 표기는 잘못된 라벨�
 - 워커 완료 전송 주의: bare `orca`는 빈 파일이라 worker_done이 조용히 유실됐다. 이후 명세에
   `/home/kinesis/.local/bin/orca-ide` 절대 경로를 명시한다.
 
+### PR #19 태스크 수정·전환·반복 회차 (진행 중)
+
+| 항목 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
+| --- | --- | --- | --- | --- | --- |
+| 태스크 PATCH/move·WIP·반복 회차 | `packages/core/src/task.ts` transitionTaskStatus, updateTaskMeta; `workflow.ts` | done 전환 시 recurrence null·다음 회차 원자 생성·`task.created` payload `recurrenceOf`·월말 `shiftDate` 롤오버·PATCH 동시 type/parent는 전환 후 값으로 spawn | PR19 `fvoci/rust-task-edit` 진행 중 | `task_integration` 회귀·dprobe 승격 | **미이식(명시)**: spawn 시 assignee/label 복사(`task.ts:585-596`, `task_assignees`/`task_labels` 테이블 없음); `recordTaskActivity` channel `system`(`task.ts:612`); 날짜 PATCH 시 `dependency_contradiction` 검사(`updateTaskMeta` 의존성 루프). assignee/label 이식 시 recurrence spawn 복사 경로 포함 필요 |
+
 ### 설치 산출물 (컨테이너) — 2026-09-25
 
 - Composer ctx_d6ac049d1a5d 4451237 + 코디네이터 보완: `infra/rust/Dockerfile`(digest 고정, 비root uid1000,

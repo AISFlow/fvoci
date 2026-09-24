@@ -33,6 +33,7 @@ pub enum ProjectDbError {
     StatusNotInWorkflow,
     WipLimitExceeded,
     InvalidMoveAnchors,
+    WorkflowHasNoStatuses,
 }
 
 #[derive(Debug, Clone)]

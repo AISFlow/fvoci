@@ -203,13 +203,50 @@ fn allowed_child_types(task_type: &str) -> &'static [&'static str] {
     }
 }
 
+fn days_in_month(year: i32, month: u32) -> u32 {
+    use chrono::Datelike;
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|d| d.pred_opt())
+        .map(|d| d.day())
+        .expect("valid month length")
+}
+
+/// Matches source `shiftDate` monthly rollover (e.g. 2026-01-31 → 2026-03-03).
+fn shift_recurrence_date_monthly(date: NaiveDate) -> NaiveDate {
+    use chrono::Datelike;
+    let year = date.year();
+    let month = date.month();
+    let day = date.day();
+    let (new_year, new_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let days_in_target = days_in_month(new_year, new_month);
+    if day <= days_in_target {
+        NaiveDate::from_ymd_opt(new_year, new_month, day).expect("valid monthly shift")
+    } else {
+        let overflow = day - days_in_target;
+        let (overflow_year, overflow_month) = if new_month == 12 {
+            (new_year + 1, 1)
+        } else {
+            (new_year, new_month + 1)
+        };
+        NaiveDate::from_ymd_opt(overflow_year, overflow_month, overflow)
+            .expect("valid monthly overflow shift")
+    }
+}
+
 fn shift_recurrence_date(date: NaiveDate, kind: &str) -> NaiveDate {
     match kind {
         "daily" => date + chrono::Duration::days(1),
         "weekly" => date + chrono::Duration::days(7),
-        "monthly" => date
-            .checked_add_months(chrono::Months::new(1))
-            .unwrap_or(date),
+        "monthly" => shift_recurrence_date_monthly(date),
         _ => date,
     }
 }
@@ -1375,6 +1412,12 @@ struct TransitionResult {
     status_changed: bool,
 }
 
+#[derive(Debug, Clone)]
+struct RecurrenceSpawnFields {
+    task_type: String,
+    parent_id: Option<Uuid>,
+}
+
 async fn spawn_recurring_next_task(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -1382,7 +1425,8 @@ async fn spawn_recurring_next_task(
     actor_user_id: Uuid,
     task: &TaskWriteRow,
     recurrence_kind: &str,
-) -> Result<(), sqlx::Error> {
+    spawn_fields: Option<&RecurrenceSpawnFields>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
     let next_id = Uuid::now_v7();
     let number: (i32,) = sqlx::query_as(
         r#"
@@ -1396,12 +1440,21 @@ async fn spawn_recurring_next_task(
     .bind(project_id)
     .fetch_one(&mut **tx)
     .await?;
-    let target_status = default_backlog_status(tx, workspace_id, project_id).await?;
-    let Some(target_status) = target_status else {
-        return Ok(());
+    let target_status = match default_backlog_status(tx, workspace_id, project_id).await? {
+        Some(status_id) => status_id,
+        None => return Ok(Err(ProjectDbError::WorkflowHasNoStatuses)),
     };
     let siblings = list_sorted_tasks_in_status(tx, workspace_id, target_status, None).await?;
-    let sort_key = resolve_anchor_sort_key(&siblings, None, None).unwrap_or_else(|_| "m".into());
+    let sort_key = match resolve_anchor_sort_key(&siblings, None, None) {
+        Ok(key) => key,
+        Err(err) => return Ok(Err(err)),
+    };
+    let task_type = spawn_fields
+        .map(|fields| fields.task_type.as_str())
+        .unwrap_or(&task.record.task_type);
+    let parent_id = spawn_fields
+        .map(|fields| fields.parent_id)
+        .unwrap_or(task.record.parent_id);
     let next_start = task
         .record
         .start_date
@@ -1427,12 +1480,12 @@ async fn spawn_recurring_next_task(
     .bind(project_id)
     .bind(number.0)
     .bind(&task.record.title)
-    .bind(&task.record.task_type)
+    .bind(task_type)
     .bind(&task.record.priority)
     .bind(target_status)
     .bind(next_start)
     .bind(next_due)
-    .bind(task.record.parent_id)
+    .bind(parent_id)
     .bind(task.record.milestone_id)
     .bind(recurrence)
     .bind(sort_key)
@@ -1455,12 +1508,13 @@ async fn spawn_recurring_next_task(
                 "number": number.0,
                 "statusId": target_status.to_string(),
                 "title": task.record.title,
+                "recurrenceOf": task.record.id.to_string(),
             }),
             client_ip: None,
         },
     )
     .await?;
-    Ok(())
+    Ok(Ok(()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1474,6 +1528,7 @@ async fn transition_task_status(
     to_status_id: Uuid,
     before_id: Option<Uuid>,
     after_id: Option<Uuid>,
+    spawn_fields: Option<&RecurrenceSpawnFields>,
 ) -> Result<Result<TransitionResult, ProjectDbError>, sqlx::Error> {
     if from_status_id == to_status_id && before_id.is_none() && after_id.is_none() {
         return Ok(Ok(TransitionResult {
@@ -1533,8 +1588,20 @@ async fn transition_task_status(
             .bind(task.record.id)
             .execute(&mut **tx)
             .await?;
-            spawn_recurring_next_task(tx, workspace_id, project_id, actor_user_id, task, kind)
-                .await?;
+            match spawn_recurring_next_task(
+                tx,
+                workspace_id,
+                project_id,
+                actor_user_id,
+                task,
+                kind,
+                spawn_fields,
+            )
+            .await?
+            {
+                Ok(()) => {}
+                Err(err) => return Ok(Err(err)),
+            }
         }
     }
     Ok(Ok(TransitionResult {
@@ -1633,6 +1700,11 @@ pub async fn patch_task_meta(
         }
     }
 
+    let recurrence_spawn_fields = RecurrenceSpawnFields {
+        task_type: next_type.to_string(),
+        parent_id: next_parent,
+    };
+
     let mut status_changed = false;
     let from_status_id = task.record.status_id;
     if let Some(status_id) = input.status_id {
@@ -1647,6 +1719,7 @@ pub async fn patch_task_meta(
                 status_id,
                 None,
                 None,
+                Some(&recurrence_spawn_fields),
             )
             .await?;
             match result {
@@ -1938,6 +2011,7 @@ pub async fn move_task(
         input.status_id,
         input.before_id,
         input.after_id,
+        None,
     )
     .await?;
     let transition = match result {

@@ -460,6 +460,13 @@ pub fn map_project_error(err: ProjectDbError) -> AppError {
             params: Some(json!({"code":"wip_limit_exceeded"})),
             retry_after: None,
         },
+        ProjectDbError::WorkflowHasNoStatuses => AppError {
+            status: StatusCode::BAD_REQUEST,
+            code: ProblemCode::InvalidInput,
+            source: None,
+            params: Some(json!({"code":"workflow_has_no_statuses"})),
+            retry_after: None,
+        },
         ProjectDbError::InvalidMoveAnchors => AppError::from_code(ProblemCode::InvalidInput),
         ProjectDbError::InvalidCursor => AppError {
             status: StatusCode::BAD_REQUEST,

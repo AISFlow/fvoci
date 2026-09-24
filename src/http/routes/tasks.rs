@@ -424,6 +424,11 @@ fn map_task_db_error(err: ProjectDbError) -> TaskApiError {
             code: "wip_limit_exceeded",
             title: "wip limit exceeded".to_string(),
         },
+        ProjectDbError::WorkflowHasNoStatuses => TaskApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "workflow_has_no_statuses",
+            title: "workflow has no statuses".to_string(),
+        },
         ProjectDbError::InvalidMoveAnchors => AppError::from_code(ProblemCode::InvalidInput).into(),
         other => map_project_error(other).into(),
     }
