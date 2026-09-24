@@ -591,11 +591,6 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
     }
 }
 
-/// `PR_SET_PDEATHSIG` from `linux/prctl.h`. libc 0.2.189 exports this constant
-/// and `prctl` only on L4Re/Android, not gnu Linux.
-#[cfg(target_os = "linux")]
-const PR_SET_PDEATHSIG: libc::c_int = 1;
-
 /// Ask the kernel to SIGKILL this child if the forking thread dies, including
 /// the fork-to-prctl race where that thread is already gone. Linux
 /// `PR_SET_PDEATHSIG` is tied to the spawning thread, not to an arbitrary
@@ -607,11 +602,11 @@ fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> 
     unsafe {
         let rc = libc::syscall(
             libc::SYS_prctl,
-            PR_SET_PDEATHSIG as libc::c_long,
+            libc::PR_SET_PDEATHSIG as libc::c_long,
             libc::SIGKILL as libc::c_long,
-            0,
-            0,
-            0,
+            0 as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
         );
         if rc != 0 {
             return Err(std::io::Error::last_os_error());

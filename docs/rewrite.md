@@ -1623,3 +1623,22 @@ thread 수명에 연결되므로 synchronous process caller가 완료까지 살�
 원격 CI/Opus 수락 전이며 HTTP 추출 job은 아직 없다. coordinator는 documents CI에
 default feature clippy를 추가했다. worker는 release했고 target/vendor만 보존했다.
 로컬 heavy slot은 Composer ctx6c0f2c26304a에 반환했다.
+
+PR9 https://github.com/AISFlow/fvoci/pull/9 수락: head b0c954b19b65a8e98bc74d0f49d139cae7222b99,
+base125ef25, CI 합성7e3e234. Rust35976794257/Web35976794253/
+Documents35976794259/Engine35976794258 총11job 성공을 로그로 확인했다.
+x64/ARM native client8×2 및 parser default51/test-hang54 실제 실행, React13/14,
+PG30/66/13와 협업20/56/19/7 회귀 성공. native job x64 2m48s/ARM 3m21s.
+Opus taskab5a433216ec/ctx663d96da5e9f는 동일HEAD 읽기 전용 검토 차단0,
+테스트를 실행하지 않았다. expected-head squash merge59b6ecd90e5ff42da576c6d0d5336fb78c2c8859
+및 main 반영 확인, auto-merge 미사용. post-merge CI는 아직 실행 중이다.
+리뷰 비차단 N1/N2(variadic zero 폭/libc export 주석)는 다음 제품 통합에서
+코디네이터가 최소 수정한다. 기존 wait-error 관측 개선과 완료/취소 경합 의미는
+제품 worker 연결 시 검토한다. 부모 종료의 증거는 termination이며 reap 보장이 아니다.
+
+현재 통합 worktree rust-wiki-attachment-product는 main59b6ecd에서 만들었다.
+Composer taskda62c97fce34/ctx6c0f2c26304a의 backend+006+DTO+검사는 계속
+진행 중이며 미수락이다. 경합 검사에서 초기401만 보는 테스트/다른 pool 검사/
+checked-out conn2를 가진 pool.close 교착을 확인해 실제 제품 경계 검사로 수정을
+요청했다. 해당 낡은 검사 프로세스 종료는 확인됐고 재시도 성공으로 포장하지 않는다.
+frontend와 durable extraction job은 후속 연결이며 아직 없고, 두 작성자 한도를 유지한다.
