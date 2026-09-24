@@ -30,7 +30,7 @@ pub struct TestDb {
 
 impl TestDb {
     pub async fn bootstrap() -> Self {
-        Self::bootstrap_through(8).await
+        Self::bootstrap_through(migrate::latest_migration_version()).await
     }
 
     pub async fn bootstrap_through(max_migration_version: i32) -> Self {
@@ -121,28 +121,23 @@ fn join_db_url(server_url: &str, db_name: &str) -> String {
 }
 
 async fn apply_grants(pool: &PgPool, role_name: &str) {
-    apply_grants_through(pool, role_name, 8).await;
+    apply_grants_through(pool, role_name, migrate::latest_migration_version()).await;
 }
 
 async fn apply_grants_through(pool: &PgPool, role_name: &str, max_migration_version: i32) {
-    if max_migration_version >= 8 {
+    if max_migration_version >= 9 {
         fvoci_server::db::migrate::apply_app_role_grants(pool, role_name)
             .await
             .expect("grant");
         return;
     }
-    // Seeding a pre-008 installation: drop the statements for tables that do
-    // not exist yet, but still apply the rest atomically like the real command.
+    // Seeding a pre-009 (or pre-008) installation: drop statements for objects
+    // that do not exist yet, but still apply the rest atomically.
     let grants: Vec<String> = fvoci_server::db::migrate::app_role_grant_sql(role_name)
         .split(';')
         .map(str::trim)
         .filter(|statement| {
-            !statement.is_empty()
-                && !(statement.contains("fvoci.projects")
-                    || statement.contains("fvoci.project_members")
-                    || statement.contains("fvoci.workflows")
-                    || statement.contains("fvoci.statuses")
-                    || statement.contains("fvoci.tasks"))
+            !statement.is_empty() && !grant_needs_later_migration(statement, max_migration_version)
         })
         .map(|statement| format!("{statement};"))
         .collect();
@@ -150,8 +145,20 @@ async fn apply_grants_through(pool: &PgPool, role_name: &str, max_migration_vers
     sqlx::raw_sql(&grants.join("\n"))
         .execute(&mut *tx)
         .await
-        .expect("grant through v7");
+        .expect("grant through partial schema");
     tx.commit().await.expect("commit grants");
+}
+
+fn grant_needs_later_migration(statement: &str, max_migration_version: i32) -> bool {
+    let needs_008 = statement.contains("fvoci.projects")
+        || statement.contains("fvoci.project_members")
+        || statement.contains("fvoci.workflows")
+        || statement.contains("fvoci.statuses")
+        || statement.contains("fvoci.tasks");
+    let needs_009 = statement.contains("app_invitation_token_hash")
+        || statement.contains("app_quota_billable_users")
+        || statement.contains("fvoci.invitations");
+    (needs_008 && max_migration_version < 8) || (needs_009 && max_migration_version < 9)
 }
 
 async fn app_state(app_url: &str) -> AppState {

@@ -23,6 +23,7 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::setup::router())
         .merge(routes::auth::router())
         .merge(routes::workspaces::router())
+        .merge(routes::invitations::router())
         .merge(routes::projects::router())
         .merge(routes::lookup::router())
         .merge(routes::tasks::router())

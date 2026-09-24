@@ -155,6 +155,148 @@
         ]
       }
     },
+    "/api/v1/invitations/{token}": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "get_invitation",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Invitation token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Invitation preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationPublicResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invitation not found or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/invitations/{token}/accept": {
+      "post": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "accept_invitation",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Invitation token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvitationAcceptBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Invitation accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Cannot accept invitation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Seat or guest limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired or already accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Consent required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/me/personal-workspace": {
       "post": {
         "tags": [
@@ -1612,6 +1754,92 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/invitations": {
+      "post": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "create_invitation",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvitationCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Invitation created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/lookup/{display_id}": {
       "get": {
         "tags": [
@@ -1670,6 +1898,62 @@
           },
           "404": {
             "description": "Not a workspace member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/members": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "list_members",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembersResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
             "content": {
               "application/json": {
                 "schema": {
@@ -2647,6 +2931,284 @@
             "fvoci_session": []
           }
         ]
+      },
+      "patch": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "patch_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskMetaOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "move_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Moved task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskMetaOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/restore": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "restore_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "trash_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task trashed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
       }
     },
     "/api/v1/workspaces/{workspace_id}/trash": {
@@ -3243,6 +3805,167 @@
           }
         }
       },
+      "ExpectedDatesBody": {
+        "type": "object",
+        "required": [
+          "startDate",
+          "dueDate",
+          "dueAt"
+        ],
+        "properties": {
+          "dueAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "startDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InvitationAcceptBody": {
+        "type": "object",
+        "properties": {
+          "consents": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/InvitationConsentItem"
+            }
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "familyName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "givenName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "InvitationConsentItem": {
+        "type": "object",
+        "required": [
+          "kind",
+          "version"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InvitationCreateBody": {
+        "type": "object",
+        "required": [
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InvitationCreateResponse": {
+        "type": "object",
+        "required": [
+          "acceptUrl"
+        ],
+        "properties": {
+          "acceptUrl": {
+            "type": "string"
+          }
+        }
+      },
+      "InvitationLegalDocument": {
+        "type": "object",
+        "required": [
+          "kind",
+          "version",
+          "title"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "InvitationPublicResponse": {
+        "type": "object",
+        "required": [
+          "workspaceName",
+          "emailMasked",
+          "role",
+          "requiredLegal"
+        ],
+        "properties": {
+          "emailMasked": {
+            "type": "string"
+          },
+          "requiredLegal": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InvitationLegalDocument"
+            }
+          },
+          "role": {
+            "type": "string"
+          },
+          "workspaceName": {
+            "type": "string"
+          }
+        }
+      },
       "LoginBody": {
         "type": "object",
         "required": [
@@ -3356,6 +4079,20 @@
         },
         "additionalProperties": false
       },
+      "MembersResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberResponse"
+            }
+          }
+        }
+      },
       "MoveDocumentBody": {
         "type": "object",
         "required": [
@@ -3363,6 +4100,40 @@
         ],
         "properties": {
           "newParentId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MoveTaskBody": {
+        "type": "object",
+        "required": [
+          "statusId"
+        ],
+        "properties": {
+          "afterId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "beforeId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "expectedStatusId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "statusId": {
             "type": "string",
             "format": "uuid"
           }
@@ -3458,6 +4229,115 @@
           },
           "visibility": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PatchTaskBody": {
+        "type": "object",
+        "properties": {
+          "archived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "assigneeIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "dueAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedDates": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpectedDatesBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "labelIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "milestoneId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "parentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recurrence": {},
+          "startDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "statusId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false

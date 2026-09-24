@@ -42,16 +42,36 @@ fn deserialize_optional_non_null_uuid<'de, D: Deserializer<'de>>(
     }
 }
 
+fn strict_date<E: serde::de::Error>(value: String) -> Result<NaiveDate, E> {
+    crate::tasks::parse_iso_date(&value).ok_or_else(|| {
+        serde::de::Error::invalid_value(serde::de::Unexpected::Str(&value), &"YYYY-MM-DD date")
+    })
+}
+
 fn deserialize_optional_non_null_date<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<NaiveDate>, D::Error> {
-    match Option::<NaiveDate>::deserialize(deserializer)? {
-        Some(value) => Ok(Some(value)),
+    match Option::<String>::deserialize(deserializer)? {
+        Some(value) => strict_date(value).map(Some),
         None => Err(serde::de::Error::invalid_type(
             serde::de::Unexpected::Unit,
             &"date",
         )),
     }
+}
+
+fn deserialize_nullable_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NaiveDate>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(strict_date)
+        .transpose()
+}
+
+fn deserialize_double_option_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<NaiveDate>>, D::Error> {
+    deserialize_nullable_date(deserializer).map(Some)
 }
 
 fn deserialize_optional_recurrence<'de, D: Deserializer<'de>>(
@@ -240,6 +260,71 @@ pub struct PatchWorkspaceBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct MemberRoleBody {
     pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MembersResponse {
+    pub items: Vec<MemberResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationCreateBody {
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationCreateResponse {
+    pub accept_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationLegalDocument {
+    pub kind: String,
+    pub version: i32,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationPublicResponse {
+    pub workspace_name: String,
+    pub email_masked: String,
+    pub role: String,
+    pub required_legal: Vec<InvitationLegalDocument>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationConsentItem {
+    pub kind: String,
+    pub version: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationAcceptBody {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    pub email: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    pub given_name: Option<String>,
+    #[serde(default)]
+    pub family_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub consents: Option<Vec<InvitationConsentItem>>,
 }
 
 /// Source `parentId` is `uuid.nullable()`: present and null is allowed, omitted is not.
@@ -657,6 +742,66 @@ fn default_task_type() -> String {
 
 fn default_task_priority() -> String {
     "none".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ExpectedDatesBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    #[serde(deserialize_with = "deserialize_nullable_date")]
+    pub start_date: Option<NaiveDate>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    #[serde(deserialize_with = "deserialize_nullable_date")]
+    pub due_date: Option<NaiveDate>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub due_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchTaskBody {
+    pub expected_dates: Option<ExpectedDatesBody>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    #[serde(rename = "type")]
+    pub task_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    pub title: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    pub priority: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub status_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_double_option_date")]
+    pub start_date: Option<Option<NaiveDate>>,
+    #[serde(default, deserialize_with = "deserialize_double_option_date")]
+    pub due_date: Option<Option<NaiveDate>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub due_at: Option<Option<DateTime<Utc>>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub estimate: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub parent_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub milestone_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub recurrence: Option<Option<Value>>,
+    pub archived: Option<bool>,
+    pub assignee_ids: Option<Vec<Uuid>>,
+    pub label_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MoveTaskBody {
+    pub status_id: Uuid,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub expected_status_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub before_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub after_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

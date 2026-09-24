@@ -1,0 +1,261 @@
+use std::net::SocketAddr;
+
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use axum_extra::extract::CookieJar;
+use uuid::Uuid;
+
+use crate::api::dto::{
+    InvitationAcceptBody, InvitationCreateBody, InvitationCreateResponse, InvitationPublicResponse,
+    LoginResponse,
+};
+use crate::auth::session::SessionUser;
+use crate::auth::token::hash_token;
+use crate::db::invitations::InvitationDbError;
+use crate::db::workspace::WorkspaceRole;
+use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
+use crate::http::cookie::set_session_cookie;
+use crate::http::guard::{check_origin, reject_bearer};
+use crate::http::rate_limit::peer_ip;
+use crate::http::state::AppState;
+use crate::validate::{
+    normalize_email, validate_family_name, validate_given_name, validate_password_length,
+};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/workspaces/{workspace_id}/invitations",
+            post(create_invitation),
+        )
+        .route("/api/v1/invitations/{token}", get(get_invitation))
+        .route(
+            "/api/v1/invitations/{token}/accept",
+            post(accept_invitation),
+        )
+}
+
+async fn create_invitation(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    body: Result<Json<InvitationCreateBody>, JsonRejection>,
+) -> Result<(axum::http::StatusCode, Json<InvitationCreateResponse>), AppError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    let email = normalize_email(&body.email)?;
+    let role = WorkspaceRole::parse(&body.role)
+        .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput))?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let user_id = parse_user_id(&user.user_id)?;
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(&format!("invite-create:{user_id}"), 30)
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
+    let ip = peer_ip(peer.ip());
+    let result = crate::db::invitations::create_invitation(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        &email,
+        role,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(created) => {
+            let origin = state.public_origin.trim_end_matches('/');
+            Ok((
+                axum::http::StatusCode::CREATED,
+                Json(InvitationCreateResponse {
+                    accept_url: format!("{origin}/invite/{}", created.accept_path_token),
+                }),
+            ))
+        }
+        Err(err) => Err(map_create_error(err)),
+    }
+}
+
+async fn get_invitation(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(token): Path<String>,
+) -> Result<Json<InvitationPublicResponse>, AppError> {
+    if token.is_empty() {
+        return Err(AppError::from_code(
+            ProblemCode::InvitationNotFoundOrExpired,
+        ));
+    }
+    let ip = peer_ip(peer.ip());
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(&format!("invite-read:{ip}"), 60)
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
+    let result = crate::db::invitations::get_invitation_public(&state.auth.db.pool, &token)
+        .await
+        .map_err(internal)?;
+    match result {
+        Ok(preview) => Ok(Json(InvitationPublicResponse {
+            workspace_name: preview.workspace_name,
+            email_masked: preview.email_masked,
+            role: preview.role.as_str().to_string(),
+            required_legal: Vec::new(),
+        })),
+        Err(InvitationDbError::Expired | InvitationDbError::AlreadyAccepted) => Err(
+            AppError::from_code(ProblemCode::InvitationNotFoundOrExpired),
+        ),
+        Err(err) => Err(map_preview_error(err)),
+    }
+}
+
+async fn accept_invitation(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+    body: Result<Json<InvitationAcceptBody>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    if token.is_empty() {
+        return Err(AppError::from_code(ProblemCode::NotFound));
+    }
+    let ip = peer_ip(peer.ip());
+    let hash_prefix: String = hash_token(&token).chars().take(8).collect();
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(&format!("invite-accept:{ip}:{hash_prefix}"), 30)
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
+    if let Some(password) = body.password.as_deref() {
+        validate_password_length(password)?;
+    }
+    let email = match body.email.as_deref() {
+        Some(value) => Some(normalize_email(value)?),
+        None => None,
+    };
+    if let Some(given_name) = body.given_name.as_deref() {
+        validate_given_name(given_name)?;
+    }
+    if let Some(family_name) = body.family_name.as_deref() {
+        validate_family_name(family_name)?;
+    }
+    let result = crate::db::invitations::accept_invitation(
+        &state.auth.db.pool,
+        &state.auth.password_keys,
+        &token,
+        crate::db::invitations::AcceptInvitationRequest {
+            email: email.as_deref(),
+            given_name: body.given_name.as_deref().map(str::trim),
+            family_name: body.family_name.as_deref(),
+            password: body.password.as_deref(),
+            client_ip: Some(&ip),
+        },
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok((user_id, session_token)) => {
+            let cookie = set_session_cookie(state.cookie_secure, &session_token);
+            let mut response = (
+                axum::http::StatusCode::OK,
+                Json(LoginResponse {
+                    user_id: user_id.to_string(),
+                }),
+            )
+                .into_response();
+            response
+                .headers_mut()
+                .append(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
+            Ok(response)
+        }
+        Err(err) => Err(map_accept_error(err)),
+    }
+}
+
+fn map_create_error(err: InvitationDbError) -> AppError {
+    match err {
+        InvitationDbError::NotFound => AppError::from_code(ProblemCode::NotFound),
+        InvitationDbError::Forbidden => AppError::from_code(ProblemCode::InsufficientPermissions),
+        InvitationDbError::PersonalImmutable => {
+            AppError::from_code(ProblemCode::PersonalWorkspaceImmutable)
+        }
+        InvitationDbError::RoleCap => {
+            AppError::from_code(ProblemCode::CannotInviteARoleAboveYourOwn)
+        }
+        other => map_accept_error(other),
+    }
+}
+
+fn map_preview_error(err: InvitationDbError) -> AppError {
+    match err {
+        InvitationDbError::Expired
+        | InvitationDbError::AlreadyAccepted
+        | InvitationDbError::NotFound => {
+            AppError::from_code(ProblemCode::InvitationNotFoundOrExpired)
+        }
+        _ => AppError::from_code(ProblemCode::InvitationNotFoundOrExpired),
+    }
+}
+
+fn map_accept_error(err: InvitationDbError) -> AppError {
+    match err {
+        InvitationDbError::NotFound => AppError::from_code(ProblemCode::NotFound),
+        InvitationDbError::Expired => AppError::from_code(ProblemCode::Expired),
+        InvitationDbError::AlreadyAccepted => AppError::from_code(ProblemCode::AlreadyAccepted),
+        InvitationDbError::Unauthorized | InvitationDbError::Forbidden => {
+            AppError::from_code(ProblemCode::CannotAcceptInvitation)
+        }
+        InvitationDbError::ConsentRequired => AppError::from_code(ProblemCode::ConsentRequired),
+        InvitationDbError::SeatLimit => AppError::from_code(ProblemCode::LimitSeats),
+        InvitationDbError::GuestLimit => AppError::from_code(ProblemCode::LimitGuests),
+        InvitationDbError::PersonalImmutable | InvitationDbError::RoleCap => {
+            AppError::from_code(ProblemCode::NotFound)
+        }
+    }
+}
+
+async fn require_session(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<(SessionUser, Uuid), AppError> {
+    let token = jar
+        .get(SESSION_COOKIE)
+        .map(|c| c.value().to_string())
+        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
+    let user = state
+        .auth
+        .session_user(&token)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
+    let session_id = Uuid::parse_str(&user.session_id)
+        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
+    Ok((user, session_id))
+}
+
+fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
+    Uuid::parse_str(value).map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))
+}
+
+fn internal(err: sqlx::Error) -> AppError {
+    tracing::error!("database error: {}", err);
+    AppError::internal()
+}

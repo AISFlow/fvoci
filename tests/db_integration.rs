@@ -804,7 +804,7 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .await
         .unwrap();
     sqlx::query(
-        "DROP FUNCTION IF EXISTS public.app_tenant_id(), public.app_system_ctx_on(), public.app_self_user_id()",
+        "DROP FUNCTION IF EXISTS public.app_tenant_id(), public.app_system_ctx_on(), public.app_self_user_id(), public.app_invitation_token_hash()",
     )
     .execute(&admin)
     .await
@@ -850,7 +850,10 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions, 8);
+    assert_eq!(
+        versions,
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
+    );
     admin.close().await;
     harness.cleanup().await;
 }
@@ -873,7 +876,10 @@ async fn versioned_migrations_are_idempotent_on_rerun() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 8);
+    assert_eq!(
+        versions.0,
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
+    );
     admin.close().await;
     harness.cleanup().await;
 }
@@ -2159,7 +2165,10 @@ async fn migration_001_002_database_upgrades_to_003() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 8);
+    assert_eq!(
+        versions.0,
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
+    );
     reapply_app_grants(&harness.admin_url, &harness.role_name).await;
     let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
     let mut tx = app_pool.begin().await.unwrap();
@@ -4125,6 +4134,29 @@ fn server_process_env(app_url: &str, storage_root: &std::path::Path) -> std::pro
     command
 }
 
+/// Runs a server that is expected to refuse startup. Bounded: a server that
+/// unexpectedly starts serving is killed and the test fails instead of hanging.
+fn run_gated_server(mut command: std::process::Command) -> std::process::Output {
+    let mut child = command.spawn().expect("spawn fvoci-server");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.try_wait().expect("wait fvoci-server").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .expect("collect fvoci-server output");
+            panic!(
+                "fvoci-server kept running instead of refusing startup: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child
+        .wait_with_output()
+        .expect("collect fvoci-server output")
+}
+
 fn assert_schema_gate_process_failure(output: &std::process::Output, expected_phrases: &[&str]) {
     assert!(
         !output.status.success(),
@@ -4152,7 +4184,8 @@ async fn server_exits_when_schema_is_behind() {
         .connect(&harness.admin_url)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM fvoci.schema_migrations WHERE version = 8")
+    sqlx::query("DELETE FROM fvoci.schema_migrations WHERE version = $1")
+        .bind(migrate::latest_migration_version())
         .execute(&admin)
         .await
         .unwrap();
@@ -4160,9 +4193,7 @@ async fn server_exits_when_schema_is_behind() {
 
     let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    let output = server_process_env(&harness.app_url, &storage_root)
-        .output()
-        .expect("spawn fvoci-server");
+    let output = run_gated_server(server_process_env(&harness.app_url, &storage_root));
     assert_schema_gate_process_failure(
         &output,
         &[
@@ -4190,9 +4221,7 @@ async fn server_exits_when_schema_is_newer_than_binary() {
 
     let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    let output = server_process_env(&harness.app_url, &storage_root)
-        .output()
-        .expect("spawn fvoci-server");
+    let output = run_gated_server(server_process_env(&harness.app_url, &storage_root));
     assert_schema_gate_process_failure(
         &output,
         &["newer than this binary", "deploy a matching fvoci-server"],
@@ -4226,9 +4255,7 @@ async fn server_exits_when_no_migrations_applied() {
 
     let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    let output = server_process_env(&harness.app_url, &storage_root)
-        .output()
-        .expect("spawn fvoci-server");
+    let output = run_gated_server(server_process_env(&harness.app_url, &storage_root));
     assert_schema_gate_process_failure(
         &output,
         &["no applied migrations", migrate::SCHEMA_GATE_OPERATOR_HINT],
@@ -4278,9 +4305,7 @@ async fn server_exits_on_unmigrated_database() {
 
     let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    let output = server_process_env(&app_url, &storage_root)
-        .output()
-        .expect("spawn fvoci-server");
+    let output = run_gated_server(server_process_env(&app_url, &storage_root));
     assert_schema_gate_process_failure(
         &output,
         &[
@@ -4317,9 +4342,7 @@ async fn server_exits_when_app_grants_are_missing() {
     let db = migrated_db_without_grants().await;
     let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    let output = server_process_env(&db.app_url, &storage_root)
-        .output()
-        .expect("spawn fvoci-server");
+    let output = run_gated_server(server_process_env(&db.app_url, &storage_root));
     assert_schema_gate_process_failure(
         &output,
         &[

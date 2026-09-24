@@ -27,6 +27,13 @@ pub enum ProjectDbError {
     LeadNotMember,
     Archived,
     InvalidCursor,
+    VersionConflict,
+    TaskArchived,
+    InvalidAnchor,
+    StatusNotInWorkflow,
+    WipLimitExceeded,
+    InvalidMoveAnchors,
+    WorkflowHasNoStatuses,
 }
 
 #[derive(Debug, Clone)]
