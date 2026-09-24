@@ -1163,7 +1163,7 @@ pub async fn wait_for_committed_update_then_close(
     );
 }
 
-pub async fn join_denied(
+pub async fn join_unavailable(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
@@ -1180,16 +1180,9 @@ pub async fn join_denied(
         .expect("timeout")
         .expect("stream")
         .expect("frame");
-    let frame = fvoci_server::collab::wire::decode(&msg.into_data()).expect("decode");
     assert!(
-        matches!(
-            frame,
-            WireFrame::Document {
-                message: DocumentMessage::Auth(AuthMessage::PermissionDenied { .. }),
-                ..
-            }
-        ),
-        "join must be denied when room engine is unavailable, got {frame:?}"
+        matches!(&msg, Message::Close(Some(frame)) if u16::from(frame.code) == 1011),
+        "unavailable room must close 1011 without reporting an authentication failure, got {msg:?}"
     );
 }
 

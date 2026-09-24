@@ -4561,9 +4561,28 @@ async fn collab_delivery_cancel_and_error_reset_pool_tenant_context() {
     let doc = wiki.document_id;
 
     let (reached_rx, proceed_tx) = arm_delivery_read_barrier(session);
+    // Force the ACL-sweep call to run first. It must neither consume nor wait
+    // on the outbound transport barrier, otherwise cancellation tests can
+    // accidentally stall the very actor that must revoke the socket.
+    let sweep = tokio::time::timeout(
+        Duration::from_secs(2),
+        check_delivery_admission(&pool, ws, user, session, doc),
+    )
+    .await
+    .expect("ACL sweep must not consume the outbound barrier")
+    .expect("ACL sweep query");
+    assert!(matches!(
+        sweep,
+        DeliveryAdmission::Allowed { read_only: false }
+    ));
     let handle = tokio::spawn({
         let pool = pool.clone();
-        async move { check_delivery_admission(&pool, ws, user, session, doc).await }
+        async move {
+            fvoci_server::db::collab_delivery::authorize_outbound_delivery(
+                &pool, ws, user, session, doc,
+            )
+            .await
+        }
     });
     tokio::time::timeout(Duration::from_secs(2), reached_rx)
         .await

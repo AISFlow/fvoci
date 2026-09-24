@@ -24,7 +24,7 @@ use support::{
     assert_peer_still_connected, auth_and_join, complete_sync_handshake, connect_member,
     delete_only_base_update, delete_only_json_after, delete_only_json_before, delete_only_update,
     engine_fixture, expectations, get_document_body, huge_varint_memory_candidate,
-    invalid_utf8_update_candidate, join_denied, persist_barrier, recv_document_frame,
+    invalid_utf8_update_candidate, join_unavailable, persist_barrier, recv_document_frame,
     setup_wiki_doc, stateless_frame, sync_step1_frame, sync_update_frame, test_collab_config,
     test_collab_config_with_engine, tiny_output_project_collab_config,
     wait_for_committed_update_then_close, wait_for_policy_rejection_close,
@@ -749,7 +749,7 @@ async fn collab_projection_recovery_failure_closes_room() {
             .await;
 
             let mut denied = connect_member(addr, &wiki.session.session_token).await;
-            join_denied(&mut denied, &routing_key, 86).await;
+            join_unavailable(&mut denied, &routing_key, 86).await;
 
             disarm_force_primary_load_fail(wiki.document_id).await;
 
@@ -1135,7 +1135,7 @@ async fn collab_join_catchup_recovery_failure_denies_join() {
             arm_force_primary_load_fail_after(wiki.document_id, 1).await;
 
             let mut denied = connect_member(addr, &wiki.session.session_token).await;
-            join_denied(&mut denied, &routing_key, 112).await;
+            join_unavailable(&mut denied, &routing_key, 112).await;
 
             assert_eq!(
                 test_join_catchup_projection_attempt_count(wiki.document_id).await,

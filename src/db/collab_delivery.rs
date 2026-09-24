@@ -115,7 +115,8 @@ static FORCE_DELIVERY_TX_ERROR: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<Uuid>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-/// Pause `check_delivery_admission` after `set_tenant` for `session_id`.
+/// Pause outbound delivery authorization after `set_tenant` for `session_id`.
+/// Periodic actor ACL sweeps must not consume this transport-only barrier.
 #[cfg(feature = "db-tests")]
 pub fn arm_delivery_read_barrier(
     session_id: Uuid,
@@ -194,13 +195,35 @@ pub async fn check_delivery_admission(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<DeliveryAdmission, sqlx::Error> {
+    check_delivery_admission_inner(
+        pool,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        #[cfg(feature = "db-tests")]
+        false,
+    )
+    .await
+}
+
+async fn check_delivery_admission_inner(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    #[cfg(feature = "db-tests")] outbound_barrier: bool,
+) -> Result<DeliveryAdmission, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *tx)
         .await?;
     set_tenant(&mut tx, workspace_id).await?;
     #[cfg(feature = "db-tests")]
-    pause_for_delivery_read_barrier(session_id).await;
+    if outbound_barrier {
+        pause_for_delivery_read_barrier(session_id).await;
+    }
     #[cfg(feature = "db-tests")]
     if take_force_delivery_tx_error(session_id) {
         sqlx::query("SELECT 1 / 0").execute(&mut *tx).await?;
@@ -279,7 +302,16 @@ pub async fn authorize_outbound_delivery(
             return OutboundDeliveryAuth::DbError;
         }
     }
-    match check_delivery_admission(pool, workspace_id, actor_user_id, session_id, document_id).await
+    match check_delivery_admission_inner(
+        pool,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        #[cfg(feature = "db-tests")]
+        true,
+    )
+    .await
     {
         Ok(DeliveryAdmission::Allowed { read_only }) => OutboundDeliveryAuth::Allowed { read_only },
         Ok(DeliveryAdmission::Denied) => OutboundDeliveryAuth::Denied,

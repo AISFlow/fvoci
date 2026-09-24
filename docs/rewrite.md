@@ -1458,3 +1458,15 @@ hub 및 RoomHandle/관련 hooks/lifecycle 검사 단독 소유로 dead-slot recl
 Closing 경합 구현. Composer ctx3811075aeb40은 browser spec/helpers 단독
 소유 및 로컬 무거운 슬롯을 인계받았다. 이전 워커들은 release, 커밋/worktree
 보존. 다음 통합은 두 결과와 고정 SHA delta 검토; 전체 포팅은 미완료다.
+
+ec93e7f 원격: Web35969707238 두 job 성공, Documents35969707303와
+Engine35969707278 성공. Rust35969707296은 fast/PG x64/ARM64 성공이나
+collaboration 두 job 실패다. ARM product55/56의 송신 취소 검사는 actor ACL
+sweep도 소비하는 테스트 barrier 때문에 정지 주체가 비결정적이었다. 코디네이터는
+barrier를 outbound 경로에 한정하고, sweep을 먼저 실행한 뒤 송신을 정지시키는
+실제 DB 회귀를 추가했다. timeout은 유지한다. x64 product56/56 이후 projection
+17/19 실패는 장애 Close1011을 AuthDenied로 decode하던 기존 기대값이며,
+명시적인 1011 Close 검사로 변경했다. 두 job의 후속 미실행 target을 성공으로
+표시하지 않는다. 새 diff all-target/db-tests clippy 성공3.41s; 첫 check의 helper
+rename import 누락을 수정했다. DB 실행은 새 원격 SHA에서 확인할 예정이며,
+기존 32-thread 로컬 실패 전체의 원인을 해결했다는 주장은 하지 않는다.
