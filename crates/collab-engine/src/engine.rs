@@ -75,6 +75,7 @@ impl CollabEngine {
             } => self.sync(state_vector_b64),
             Request::Snapshot => self.complete_snapshot(),
             Request::Inspect => self.inspect(),
+            Request::Project { .. } => self.project(),
         }
     }
 
@@ -233,6 +234,35 @@ impl CollabEngine {
             state_vector_b64: Some(b64::encode(&sv)),
             xml_string: Some(xml_string),
             xml_len: Some(xml_len),
+            content_json: None,
+            yrs: Some(crate::YRS_VERSION.into()),
+        }
+    }
+
+    /// Read-only Tiptap JSON. Does not set `mutated`, so a later `load` is still allowed.
+    pub fn project(&mut self) -> EngineStatus {
+        if let Err(st) = self.bump_op() {
+            return st;
+        }
+        let txn = self.doc.transact();
+        let pending = txn.has_missing_updates();
+        let content_json = match crate::project::project_prosemirror(&txn, &self.limits) {
+            Ok(json) => json,
+            Err(st) => return st,
+        };
+        EngineStatus::Ok {
+            applied: false,
+            pending,
+            durable: false,
+            skip_gc: true,
+            offset_kind: "utf16".into(),
+            encoding: 1,
+            fragment: FRAGMENT.into(),
+            update_b64: None,
+            state_vector_b64: None,
+            xml_string: None,
+            xml_len: None,
+            content_json: Some(content_json),
             yrs: Some(crate::YRS_VERSION.into()),
         }
     }
@@ -284,6 +314,7 @@ impl CollabEngine {
             state_vector_b64: None,
             xml_string: None,
             xml_len: None,
+            content_json: None,
             yrs: Some(crate::YRS_VERSION.into()),
         }
     }

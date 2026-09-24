@@ -535,6 +535,110 @@ fn delivered_frame_survives_child_exit() {
     assert_fully_reaped(pid);
 }
 
+#[test]
+fn project_empty_success_keeps_child() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut session = spawn(Limits::for_tests());
+    let pid = session.pid().expect("pid");
+    let report = session.call(&Request::Project { encoding: 1 });
+    match report.outcome {
+        EngineStatus::Ok {
+            applied: false,
+            pending: false,
+            content_json: Some(json),
+            update_b64: None,
+            ..
+        } => {
+            assert_eq!(json, serde_json::json!({"type":"doc","content":[]}));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(session.pid(), Some(pid));
+}
+
+#[test]
+fn project_output_bound_reaps_child() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut limits = Limits::for_tests();
+    limits.max_project_json_bytes = 8;
+    let mut session = spawn(limits);
+    let pid = session.pid().expect("pid");
+    let report = session.call(&Request::Project { encoding: 1 });
+    assert!(
+        matches!(
+            report.outcome,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Output,
+                ..
+            }
+        ),
+        "{:?}",
+        report.outcome
+    );
+    assert!(
+        session.pid().is_none(),
+        "project oversize must recycle child"
+    );
+    assert_fully_reaped(pid);
+}
+
+#[test]
+fn project_depth_bound_reaps_child() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let nested = nested_project_elements(6);
+    let mut limits = Limits::for_tests();
+    limits.max_project_depth = 2;
+    let mut session = spawn(limits);
+    let pid = session.pid().expect("pid");
+    assert!(matches!(
+        session
+            .call(&Request::Load {
+                snapshot_b64: Some(nested),
+                tail_b64: Vec::new(),
+                encoding: 1,
+            })
+            .outcome,
+        EngineStatus::Ok { .. }
+    ));
+    let report = session.call(&Request::Project { encoding: 1 });
+    assert!(
+        matches!(
+            report.outcome,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Stack,
+                ..
+            }
+        ),
+        "{:?}",
+        report.outcome
+    );
+    assert!(session.pid().is_none(), "project depth must recycle child");
+    assert_fully_reaped(pid);
+}
+
+fn nested_project_elements(depth: usize) -> Vec<u8> {
+    use yrs::types::xml::XmlIn;
+    use yrs::{XmlElementPrelim, XmlFragment, XmlTextPrelim};
+    let doc = collab_engine::engine::new_doc();
+    let xml = doc.get_or_insert_xml_fragment(collab_engine::FRAGMENT);
+    let mut node = XmlIn::from(XmlElementPrelim::new(
+        "paragraph",
+        [XmlIn::from(XmlTextPrelim::new("x"))],
+    ));
+    for _ in 1..depth {
+        node = XmlIn::from(XmlElementPrelim::new("paragraph", [node]));
+    }
+    {
+        let mut txn = doc.transact_mut();
+        let XmlIn::Element(el) = node else {
+            panic!("expected element");
+        };
+        xml.push_back(&mut txn, el);
+    }
+    let txn = doc.transact();
+    txn.encode_state_as_update_v1(&yrs::StateVector::default())
+}
+
 fn assert_fully_reaped(pid: u32) {
     let path = format!("/proc/{pid}");
     if !std::path::Path::new(&path).exists() {

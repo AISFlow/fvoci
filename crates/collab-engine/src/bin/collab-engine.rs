@@ -34,6 +34,18 @@ fn main() {
                 limits.max_observed_rss_bytes = parse_u64(&require_arg(&mut args))
             }
             "--max-stack" => limits.max_child_stack_bytes = parse_u64(&require_arg(&mut args)),
+            "--max-project-json" => {
+                limits.max_project_json_bytes = parse_u64(&require_arg(&mut args))
+            }
+            "--max-project-depth" => {
+                limits.max_project_depth = parse_u64(&require_arg(&mut args)) as u32
+            }
+            "--max-project-nodes" => {
+                limits.max_project_nodes = parse_u64(&require_arg(&mut args)) as u32
+            }
+            "--max-project-string" => {
+                limits.max_project_string_bytes = parse_u64(&require_arg(&mut args))
+            }
             #[cfg(feature = "test-hang")]
             "--test-hang-ms" => {
                 let ms = parse_u64(&require_arg(&mut args));
@@ -217,7 +229,7 @@ fn hang_until_killed() -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: collab-engine [--max-input N] [--max-output N] [--max-load N] [--max-frame N] [--max-tail N] [--max-ops N] [--timeout-ms N] [--max-as N] [--max-observed-rss N] [--max-stack N]"
+        "usage: collab-engine [--max-input N] [--max-output N] [--max-load N] [--max-frame N] [--max-tail N] [--max-ops N] [--timeout-ms N] [--max-as N] [--max-observed-rss N] [--max-stack N] [--max-project-json N] [--max-project-depth N] [--max-project-nodes N] [--max-project-string N]"
     );
     std::process::exit(2);
 }

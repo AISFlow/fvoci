@@ -45,6 +45,19 @@ pub const MAX_CHILD_STACK_BYTES: u64 = 8 * 1024 * 1024;
 /// Bounded stderr retained from the child for crash classification.
 pub const MAX_CHILD_STDERR_BYTES: u64 = 64 * 1024;
 
+/// Product REST `DOCUMENT_MAX_BODY_BYTES` (1 MiB). Project JSON must fit this
+/// smaller cap; the 8 MiB CRDT output cap is unchanged.
+pub const MAX_PROJECT_JSON_BYTES: u64 = 1024 * 1024;
+
+/// Nesting cap for XmlElement traversal (source `RangeError` "nesting too deep").
+pub const MAX_PROJECT_DEPTH: u32 = 128;
+
+/// Maximum serialized element and text nodes visited by Project.
+pub const MAX_PROJECT_NODES: u32 = 100_000;
+
+/// Maximum UTF-8 bytes of one text run or string attribute during Project.
+pub const MAX_PROJECT_STRING_BYTES: u64 = MAX_PROJECT_JSON_BYTES;
+
 /// Modest global live-child cap. Distinct document rooms may run together.
 /// Per-document uniqueness is the future parent room map, not this crate.
 /// Admission is immediate [`crate::outcome::EngineStatus::ResourceLimit`], not a wait.
@@ -84,6 +97,11 @@ pub struct Limits {
     pub max_frame_bytes: u64,
     pub max_tail_updates: usize,
     pub max_ops: u32,
+    /// Serialized Tiptap JSON cap for [`crate::protocol::Request::Project`].
+    pub max_project_json_bytes: u64,
+    pub max_project_depth: u32,
+    pub max_project_nodes: u32,
+    pub max_project_string_bytes: u64,
     pub timeout_ms: u64,
     /// `RLIMIT_AS` virtual-size ceiling.
     pub max_child_as_bytes: u64,
@@ -101,6 +119,10 @@ impl Default for Limits {
             max_frame_bytes: MAX_FRAME_BYTES,
             max_tail_updates: MAX_TAIL_UPDATES,
             max_ops: MAX_OPS,
+            max_project_json_bytes: MAX_PROJECT_JSON_BYTES,
+            max_project_depth: MAX_PROJECT_DEPTH,
+            max_project_nodes: MAX_PROJECT_NODES,
+            max_project_string_bytes: MAX_PROJECT_STRING_BYTES,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             max_child_as_bytes: MAX_CHILD_AS_BYTES,
             max_observed_rss_bytes: MAX_OBSERVED_RSS_BYTES,
@@ -157,6 +179,33 @@ impl Limits {
         }
         if self.max_ops == 0 || self.max_ops > MAX_OPS {
             return Err(format!("max_ops {} outside 1..={}", self.max_ops, MAX_OPS));
+        }
+        if self.max_project_json_bytes == 0 || self.max_project_json_bytes > MAX_PROJECT_JSON_BYTES
+        {
+            return Err(format!(
+                "max_project_json_bytes {} outside 1..={}",
+                self.max_project_json_bytes, MAX_PROJECT_JSON_BYTES
+            ));
+        }
+        if self.max_project_depth == 0 || self.max_project_depth > MAX_PROJECT_DEPTH {
+            return Err(format!(
+                "max_project_depth {} outside 1..={}",
+                self.max_project_depth, MAX_PROJECT_DEPTH
+            ));
+        }
+        if self.max_project_nodes == 0 || self.max_project_nodes > MAX_PROJECT_NODES {
+            return Err(format!(
+                "max_project_nodes {} outside 1..={}",
+                self.max_project_nodes, MAX_PROJECT_NODES
+            ));
+        }
+        if self.max_project_string_bytes == 0
+            || self.max_project_string_bytes > MAX_PROJECT_STRING_BYTES
+        {
+            return Err(format!(
+                "max_project_string_bytes {} outside 1..={}",
+                self.max_project_string_bytes, MAX_PROJECT_STRING_BYTES
+            ));
         }
         if self.max_child_as_bytes < MIN_CHILD_AS_BYTES
             || self.max_child_as_bytes > MAX_CHILD_AS_BYTES

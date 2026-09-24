@@ -21,7 +21,164 @@
       "mention_entity": "user",
       "href": "https://example.invalid/wiki/안녕"
     },
-    "prosemirror_type": "doc"
+    "prosemirror_type": "doc",
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-alpha-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "안녕 본문 "
+            },
+            {
+              "type": "text",
+              "text": "링크",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.invalid/wiki/안녕",
+                    "target": "_blank",
+                    "rel": "noopener noreferrer nofollow",
+                    "class": null,
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " 🚀"
+            },
+            {
+              "type": "mention",
+              "attrs": {
+                "entity": "user",
+                "id": "user-42",
+                "label": "영희"
+              }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "id": "tbl-001"
+          },
+          "content": [
+            {
+              "type": "tableRow",
+              "attrs": {
+                "id": "tr-001"
+              },
+              "content": [
+                {
+                  "type": "tableHeader",
+                  "attrs": {
+                    "id": "th-001",
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "id": "th-p-001"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "열"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tableHeader",
+                  "attrs": {
+                    "id": "th-002",
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "id": "th-p-002"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "값"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tableRow",
+              "attrs": {
+                "id": "tr-002"
+              },
+              "content": [
+                {
+                  "type": "tableCell",
+                  "attrs": {
+                    "id": "td-001",
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "id": "td-p-001"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "한글셀"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tableCell",
+                  "attrs": {
+                    "id": "td-002",
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "id": "td-p-002"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "✨"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
   },
   "korean_emoji": {
     "after_mid_and_delete_includes": [
@@ -33,16 +190,117 @@
     "after_mid_and_delete_excludes": [
       "나다"
     ],
-    "prosemirror_text": "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"attrs\":{\"id\":\"p-ko-001\"},\"content\":[{\"type\":\"text\",\"text\":\"가중🚀마바사\"}]}]}"
+    "prosemirror_text": "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"attrs\":{\"id\":\"p-ko-001\"},\"content\":[{\"type\":\"text\",\"text\":\"가중🚀마바사\"}]}]}",
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-ko-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "가중🚀마바사"
+            }
+          ]
+        }
+      ]
+    }
   },
   "delete_only": {
     "state_vector_unchanged": true,
     "sv_before_b64": "AR8K",
-    "sv_after_b64": "AR8K"
+    "sv_after_b64": "AR8K",
+    "prosemirror_json_before": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-del-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "유지한글🚀끝"
+            }
+          ]
+        }
+      ]
+    },
+    "prosemirror_json_after": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-del-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "유지🚀끝"
+            }
+          ]
+        }
+      ]
+    }
   },
   "pending": {
     "u1_has": "one",
-    "u2_has": "two한글"
+    "u2_has": "two한글",
+    "prosemirror_json_u1": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-seq-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "one"
+            }
+          ]
+        }
+      ]
+    },
+    "prosemirror_json_u2_only": {
+      "type": "doc",
+      "content": []
+    },
+    "prosemirror_json_both": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-seq-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "one"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-follow-1"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "two한글"
+            }
+          ]
+        }
+      ]
+    }
   },
   "revision": {
     "before": [
@@ -57,7 +315,288 @@
       "후속편집한글✨",
       "안녕 본문"
     ],
-    "prosemirror_type": "doc"
+    "prosemirror_type": "doc",
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-alpha-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "안녕 본문 "
+            },
+            {
+              "type": "text",
+              "text": "링크",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.invalid/wiki/안녕",
+                    "target": "_blank",
+                    "rel": "noopener noreferrer nofollow",
+                    "class": null,
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " 🚀"
+            },
+            {
+              "type": "mention",
+              "attrs": {
+                "entity": "user",
+                "id": "user-42",
+                "label": "영희"
+              }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "id": "tbl-001"
+          },
+          "content": [
+            {
+              "type": "tableRow",
+              "attrs": {
+                "id": "tr-001"
+              },
+              "content": [
+                {
+                  "type": "tableHeader",
+                  "attrs": {
+                    "id": "th-001",
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "id": "th-p-001"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "열"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tableHeader",
+                  "attrs": {
+                    "id": "th-002",
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "id": "th-p-002"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "값"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tableRow",
+              "attrs": {
+                "id": "tr-002"
+              },
+              "content": [
+                {
+                  "type": "tableCell",
+                  "attrs": {
+                    "id": "td-001",
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "id": "td-p-001"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "한글셀"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tableCell",
+                  "attrs": {
+                    "id": "td-002",
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "id": "td-p-002"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "✨"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-follow-2"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "후속편집한글✨"
+            }
+          ]
+        }
+      ]
+    }
   },
-  "utf8_marker": "안녕"
+  "utf8_marker": "안녕",
+  "empty_doc": {
+    "prosemirror_json": {
+      "type": "doc",
+      "content": []
+    }
+  },
+  "empty_paragraph": {
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-empty-001"
+          }
+        }
+      ]
+    }
+  },
+  "typed_attrs": {
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "h-typed-001",
+            "level": 2,
+            "checked": false,
+            "highlightLines": [],
+            "nullable": null,
+            "flag": true
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "typed한글"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "marks_link_bold": {
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-marks-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "굵게",
+              "marks": [
+                {
+                  "type": "bold",
+                  "attrs": {}
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " "
+            },
+            {
+              "type": "text",
+              "text": "링크",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.invalid/b",
+                    "target": "_blank",
+                    "rel": "noopener noreferrer nofollow",
+                    "class": null,
+                    "title": null
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "ychange_strip": {
+    "raw_has_ychange": true,
+    "prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-ychange-001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "원문"
+            },
+            {
+              "type": "text",
+              "text": "한글"
+            }
+          ]
+        }
+      ]
+    }
+  }
 }

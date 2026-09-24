@@ -826,6 +826,245 @@ fn xml_fragment_update(client_id: u64, target: usize, token: &str, payload_len: 
     encoded
 }
 
+fn project_of(engine: &mut CollabEngine) -> Value {
+    match engine.handle(&Request::Project { encoding: 1 }) {
+        EngineStatus::Ok {
+            applied: false,
+            content_json: Some(json),
+            update_b64: None,
+            ..
+        } => json,
+        other => panic!("project: {other:?}"),
+    }
+}
+
+#[test]
+fn project_fresh_empty_doc() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    let json = project_of(&mut engine);
+    assert_eq!(json, expectations()["empty_doc"]["prosemirror_json"]);
+}
+
+#[test]
+fn project_structured_matches_pinned_js() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("structured.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let json = project_of(&mut engine);
+    assert_eq!(json, expectations()["structured"]["prosemirror_json"]);
+}
+
+#[test]
+fn project_korean_emoji_after_mid_and_delete() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("korean_emoji_base.v1")),
+        tail_b64: vec![
+            load_bytes("korean_emoji_mid_edit.v1"),
+            load_bytes("korean_emoji_delete.v1"),
+        ],
+        encoding: 1,
+    }));
+    let json = project_of(&mut engine);
+    assert_eq!(json, expectations()["korean_emoji"]["prosemirror_json"]);
+}
+
+#[test]
+fn project_delete_only_changes_json_not_state_vector() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("delete_only_base.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let before = project_of(&mut engine);
+    let sv_before = match engine.handle(&Request::Inspect) {
+        EngineStatus::Ok {
+            state_vector_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("sv"),
+        other => panic!("{other:?}"),
+    };
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: load_bytes("delete_only.v1"),
+        encoding: 1,
+    }));
+    let after = project_of(&mut engine);
+    let sv_after = match engine.handle(&Request::Inspect) {
+        EngineStatus::Ok {
+            state_vector_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("sv"),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(sv_before, sv_after);
+    assert_eq!(sv_before, load_bytes("sv_before_delete.bin"));
+    assert_eq!(
+        before,
+        expectations()["delete_only"]["prosemirror_json_before"]
+    );
+    assert_eq!(
+        after,
+        expectations()["delete_only"]["prosemirror_json_after"]
+    );
+    assert_ne!(before, after);
+}
+
+#[test]
+fn project_pending_then_dependency() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: load_bytes("pending_u2.v1"),
+        encoding: 1,
+    }));
+    match engine.handle(&Request::Project { encoding: 1 }) {
+        EngineStatus::Ok {
+            pending: true,
+            content_json: Some(json),
+            ..
+        } => {
+            assert_eq!(json, expectations()["pending"]["prosemirror_json_u2_only"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: load_bytes("pending_u1.v1"),
+        encoding: 1,
+    }));
+    match engine.handle(&Request::Project { encoding: 1 }) {
+        EngineStatus::Ok {
+            pending: false,
+            content_json: Some(json),
+            ..
+        } => {
+            assert_eq!(json, expectations()["pending"]["prosemirror_json_both"]);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn project_followup_and_typed_marks_ychange_empty_para() {
+    let exp = expectations();
+    let mut structured = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&structured.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("structured.v1")),
+        tail_b64: vec![load_bytes("followup_edit.v1")],
+        encoding: 1,
+    }));
+    assert_eq!(
+        project_of(&mut structured),
+        exp["followup"]["prosemirror_json"]
+    );
+
+    for (file, path) in [
+        ("empty_paragraph.v1", "/empty_paragraph/prosemirror_json"),
+        ("typed_attrs.v1", "/typed_attrs/prosemirror_json"),
+        ("marks_link_bold.v1", "/marks_link_bold/prosemirror_json"),
+        ("ychange_strip.v1", "/ychange_strip/prosemirror_json"),
+    ] {
+        let mut engine = CollabEngine::new(Limits::for_tests());
+        assert_ok_applied(&engine.handle(&Request::Load {
+            snapshot_b64: Some(load_bytes(file)),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        }));
+        let got = project_of(&mut engine);
+        let expected = exp.pointer(path).unwrap_or_else(|| panic!("{path}"));
+        assert_eq!(&got, expected, "{file}");
+    }
+}
+
+#[test]
+fn project_does_not_block_later_load_and_counts_ops() {
+    let mut limits = Limits::for_tests();
+    limits.max_ops = 3;
+    let mut engine = CollabEngine::new(limits);
+    let _ = project_of(&mut engine);
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("utf8_korean.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let _ = project_of(&mut engine);
+    let refused = engine.handle(&Request::Project { encoding: 1 });
+    assert!(
+        matches!(
+            refused,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Ops,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn project_output_and_depth_caps() {
+    let mut tiny = Limits::for_tests();
+    tiny.max_project_json_bytes = 8;
+    let mut engine = CollabEngine::new(tiny);
+    let over = engine.handle(&Request::Project { encoding: 1 });
+    assert!(
+        matches!(
+            over,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Output,
+                ..
+            }
+        ),
+        "{over:?}"
+    );
+
+    let nested = nested_project_update(5);
+    let mut shallow = Limits::for_tests();
+    shallow.max_project_depth = 2;
+    let mut engine = CollabEngine::new(shallow);
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(nested),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let deep = engine.handle(&Request::Project { encoding: 1 });
+    assert!(
+        matches!(
+            deep,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Stack,
+                ..
+            }
+        ),
+        "{deep:?}"
+    );
+}
+
+fn nested_project_update(depth: usize) -> Vec<u8> {
+    use yrs::types::xml::XmlIn;
+    use yrs::{XmlElementPrelim, XmlFragment, XmlTextPrelim};
+    let doc = new_doc();
+    let xml = doc.get_or_insert_xml_fragment(collab_engine::FRAGMENT);
+    let mut node = XmlIn::from(XmlElementPrelim::new(
+        "paragraph",
+        [XmlIn::from(XmlTextPrelim::new("x"))],
+    ));
+    for _ in 1..depth {
+        node = XmlIn::from(XmlElementPrelim::new("paragraph", [node]));
+    }
+    {
+        let mut txn = doc.transact_mut();
+        let XmlIn::Element(el) = node else {
+            panic!("expected element");
+        };
+        xml.push_back(&mut txn, el);
+    }
+    let txn = doc.transact();
+    txn.encode_state_as_update_v1(&yrs::StateVector::default())
+}
+
 fn assert_fully_reaped(pid: u32) {
     let path = format!("/proc/{pid}");
     if !Path::new(&path).exists() {

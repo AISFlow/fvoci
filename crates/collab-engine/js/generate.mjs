@@ -311,6 +311,149 @@ function b64(u8) {
   return Buffer.from(u8).toString("base64");
 }
 
+/** Source packages/editor/src/collab-tiptap.ts withoutYChange (3937952). */
+function withoutYChange(value) {
+  if (Array.isArray(value)) return value.map(withoutYChange);
+  if (typeof value !== "object" || value === null) return value;
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "ychange") continue;
+    if (key === "marks" && Array.isArray(child)) {
+      out.marks = child.filter(
+        (mark) => !(typeof mark === "object" && mark !== null && mark.type === "ychange"),
+      );
+      continue;
+    }
+    out[key] = withoutYChange(child);
+  }
+  return out;
+}
+
+function projectJson(doc) {
+  return withoutYChange(yDocToProsemirrorJSON(doc, FRAGMENT));
+}
+
+const emptyPm = projectJson(new Y.Doc({ gc: false }));
+
+const emptyPara = docWithClient(71);
+{
+  const frag = emptyPara.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-empty-001");
+  frag.insert(0, [p]);
+}
+writeBin("empty_paragraph.v1", Y.encodeStateAsUpdate(emptyPara));
+const emptyParaPm = projectJson(emptyPara);
+
+const typed = docWithClient(72);
+{
+  const frag = typed.getXmlFragment(FRAGMENT);
+  const heading = new Y.XmlElement("heading");
+  heading.setAttribute("id", "h-typed-001");
+  heading.setAttribute("level", 2);
+  heading.setAttribute("checked", false);
+  heading.setAttribute("highlightLines", []);
+  heading.setAttribute("nullable", null);
+  heading.setAttribute("flag", true);
+  const t = new Y.XmlText();
+  t.insert(0, "typed한글");
+  heading.insert(0, [t]);
+  frag.insert(0, [heading]);
+}
+writeBin("typed_attrs.v1", Y.encodeStateAsUpdate(typed));
+const typedPm = projectJson(typed);
+
+const marksDoc = seedJson(
+  {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "p-marks-001" },
+        content: [
+          { type: "text", marks: [{ type: "bold" }], text: "굵게" },
+          { type: "text", text: " " },
+          {
+            type: "text",
+            marks: [
+              {
+                type: "link",
+                attrs: { href: "https://example.invalid/b", target: "_blank" },
+              },
+            ],
+            text: "링크",
+          },
+        ],
+      },
+    ],
+  },
+  73,
+);
+writeBin("marks_link_bold.v1", Y.encodeStateAsUpdate(marksDoc));
+const marksPm = projectJson(marksDoc);
+
+const ychangeDoc = seedJson(
+  {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "p-ychange-001" },
+        content: [{ type: "text", text: "원문한글" }],
+      },
+    ],
+  },
+  74,
+);
+{
+  const para = ychangeDoc.getXmlFragment(FRAGMENT).get(0);
+  para.setAttribute("ychange", { type: "added" });
+  const xmlText = para.get(0);
+  xmlText.format(0, 2, { ychange: { type: "added" } });
+}
+writeBin("ychange_strip.v1", Y.encodeStateAsUpdate(ychangeDoc));
+const ychangePmRaw = yDocToProsemirrorJSON(ychangeDoc, FRAGMENT);
+const ychangePm = withoutYChange(ychangePmRaw);
+
+const delBeforePm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, delFull);
+    return d;
+  })(),
+);
+const delAfterPm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, delFull);
+    Y.applyUpdate(d, deleteOnly);
+    return d;
+  })(),
+);
+
+const pendingU1Pm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, pendingU1);
+    return d;
+  })(),
+);
+const pendingU2OnlyPm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, pendingU2);
+    return d;
+  })(),
+);
+const pendingBothPm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, pendingU2);
+    Y.applyUpdate(d, pendingU1);
+    return d;
+  })(),
+);
+
 const expectations = {
   yjs: "13.6.32",
   fragment: FRAGMENT,
@@ -328,20 +471,27 @@ const expectations = {
       href: "https://example.invalid/wiki/안녕",
     },
     prosemirror_type: structuredPm.type,
+    prosemirror_json: projectJson(structured),
   },
   korean_emoji: {
     after_mid_and_delete_includes: ["가", "중", "🚀", "마바사"],
     after_mid_and_delete_excludes: ["나다"],
     prosemirror_text: JSON.stringify(koAfterPm),
+    prosemirror_json: withoutYChange(koAfterPm),
   },
   delete_only: {
     state_vector_unchanged: Buffer.from(svBefore).equals(Buffer.from(svAfter)),
     sv_before_b64: b64(svBefore),
     sv_after_b64: b64(svAfter),
+    prosemirror_json_before: delBeforePm,
+    prosemirror_json_after: delAfterPm,
   },
   pending: {
     u1_has: "one",
     u2_has: "two한글",
+    prosemirror_json_u1: pendingU1Pm,
+    prosemirror_json_u2_only: pendingU2OnlyPm,
+    prosemirror_json_both: pendingBothPm,
   },
   revision: {
     before: ["스냅샷-본문"],
@@ -350,8 +500,25 @@ const expectations = {
   followup: {
     must_include: ["후속편집한글✨", "안녕 본문"],
     prosemirror_type: followPm.type,
+    prosemirror_json: projectJson(follow),
   },
   utf8_marker: "안녕",
+  empty_doc: {
+    prosemirror_json: emptyPm,
+  },
+  empty_paragraph: {
+    prosemirror_json: emptyParaPm,
+  },
+  typed_attrs: {
+    prosemirror_json: typedPm,
+  },
+  marks_link_bold: {
+    prosemirror_json: marksPm,
+  },
+  ychange_strip: {
+    raw_has_ychange: JSON.stringify(ychangePmRaw).includes("ychange"),
+    prosemirror_json: ychangePm,
+  },
 };
 
 writeFileSync(
@@ -380,6 +547,10 @@ console.log(
         "revision_snapshot.bin",
         "followup_edit.v1",
         "utf8_korean.v1",
+        "empty_paragraph.v1",
+        "typed_attrs.v1",
+        "marks_link_bold.v1",
+        "ychange_strip.v1",
         "expectations.json",
       ],
       delete_only_sv_unchanged: expectations.delete_only.state_vector_unchanged,

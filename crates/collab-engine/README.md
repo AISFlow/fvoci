@@ -25,10 +25,16 @@ Length-prefixed frames: `u32 LE` + JSON. One in-flight op per `EngineSession`.
 
 Requests: `ping`, `load` (committed snapshot + tail), `apply` (candidate),
 `sync` (state vector → `encode_state_as_update_v1` including pending/delete
-set), `snapshot` (completeV1 including pending/delete set), `inspect`.
+set), `snapshot` (completeV1 including pending/delete set), `inspect`,
+`project` (read-only Tiptap JSON of the `prosemirror` fragment; optional
+`content_json` on `ok`; never overloads `update_b64`). `project` counts toward
+`max_ops` and does not set `mutated`. JSON is capped at 1 MiB
+(`DOCUMENT_MAX_BODY_BYTES`); depth 128 / 100k nodes / per-string 1 MiB.
+Unsupported CRDT shape → `malformed`. Over-limit → `resource_limit`.
 `encoding != 1` → `unsupported/encoding_v2`.
 
-Response `EngineReport.outcome`: `ok` (`applied`, `pending`, **`durable: false`**),
+Response `EngineReport.outcome`: `ok` (`applied`, `pending`, **`durable: false`**,
+optional `content_json`),
 `malformed`, `unsupported`, `resource_limit`, `worker_failure`.
 `applied` is this child's Doc only. Parent FIFO/DB; broadcast after durable
 commit. Denied/uncertain → `kill_and_reap` and reload committed bytes. Never
