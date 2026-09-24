@@ -122,12 +122,9 @@ fn join_db_url(server_url: &str, db_name: &str) -> String {
 }
 
 async fn apply_grants(pool: &PgPool, role_name: &str) {
-    let quoted_role = format!("\"{}\"", role_name);
-    let grants =
-        include_str!("../scripts/grant-app-role.sql").replace(":\"app_role\"", &quoted_role);
-    for statement in grants.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        sqlx::query(statement).execute(pool).await.expect("grant");
-    }
+    fvoci_server::db::migrate::apply_app_role_grants(pool, role_name)
+        .await
+        .expect("grant");
 }
 
 impl TestDb {

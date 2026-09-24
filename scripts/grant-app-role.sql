@@ -1,5 +1,9 @@
 -- Apply after migrations using a dedicated app role (not the migration owner).
--- Usage: psql "$DATABASE_URL" -v app_role=fvoci_app_xxx -f scripts/grant-app-role.sql
+-- Usage: DATABASE_URL=<owner url> fvoci-migrate --grant-app-role fvoci_app_xxx
+-- The command runs this file as one transaction: the broad table grant below is
+-- only committed together with the narrowing revokes that follow it.
+-- Manual psql must be equivalent: psql -X -v ON_ERROR_STOP=1 --single-transaction
+--   -v app_role=fvoci_app_xxx -f scripts/grant-app-role.sql
 
 GRANT USAGE ON SCHEMA fvoci TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA fvoci TO :"app_role";

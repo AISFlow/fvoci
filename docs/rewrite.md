@@ -9,23 +9,19 @@
 
 ## 현재 수락 지점
 
-전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
-최신 수락 main `3fa41bc97fad21cb7f5abf0b6be1bf6f0ca88557`는 PR1–12의 결과다.
-PR10의 인가된 위키 첨부와 PR11의 rhwp 네이티브 추출 제품 연결을 수락했다.
-PR11 검토 HEAD180f597과 원격 합성merge01e780bd의 11개 job이 모두 통과했고,
-실제 squash merge006943bc의 제품 tree가 검토 HEAD와 같음을 확인했다.
-단 post-merge Web35990319929에서 제목 변경 직후 hard navigation 검사가 실패했다.
-협업18개는 통과했지만 workspace7개 통과/1개 실패/5개 미실행으로, main 전체 CI 성공이 아니다.
-Grok task8eab69af119e/ctx8edfffe068e9가 실제 PATCH 저장과 검사 순서를 조사·수정 중이다.
-PR12의 선택영역 진단 HEAD5f3710c는 실제11개 job 및 workspace13/협업18 검사를 통과했다.
-과거 선택영역 실패의 원인은 여전히 미확정이며 진단 보강을 원인 수정으로 표시하지 않는다.
-PR12는 metadata 검사 순서를 수정하고 최신 HEAD의11개 CI 및 Opus delta검토 후 머지했다.
-main3fa41bc의 post-merge 검사는 현재 진행 중이다.
-Composer taske52f987188e4/ctxfe53e7184240의 프로젝트·태스크 기능은 미수락이며,
-실제 경합 검사·계약 보강 중이다. React 프로젝트·태스크 연결도 아직 미완료다.
-협업은 검증된 opt-in 범위만 수락했다. 실제 OS IME, 기존 데이터 전체 호환,
-전체 제품 동등성은 미완료다. 과거 수락·실행 기록은 아래에 그대로 보존한다.
-
+전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`. 2026-09-24 13:00Z부터 코디네이터는
+Claude Code Opus5.5 medium이며, 독립 검토는 별도 Orca dispatch의 Opus5.5 medium 세션이다.
+최신 수락 main `472c9053cd5eced7e788cd781cca75c06d0871bd` = PR1–12, 14–16.
+- PR15 `fe624aa`: 종료 신호 선등록·첫 pending poll 후 listen 알림, HTTP drain 검사의 100-Continue
+  수락 barrier·stdio pump 제한 join·signal 종료 구분. 원인 = listen 알림이 SIGTERM 등록보다 먼저라
+  기본 kill(b5ab024 CI 35996219456). 11 CI 성공(collab_shutdown 7/7×2), 별도 Opus 검토+delta 비차단.
+- PR16 `472c905`: `fvoci-migrate --grant-app-role` 단일 트랜잭션 권한 적용·소유 계열/BYPASSRLS/superuser
+  거부, migration별 SECURITY DEFINER PUBLIC EXECUTE 회수, 수락 migration SHA-256 고정. 11 CI 성공
+  (db_integration 70/70×2), 별도 Opus 검토+delta 비차단.
+- PR13(프로젝트·태스크)은 아직 미수락: 통합 브랜치에서 backend 62f1c62와 UI 38dea4d, main 472c905를
+  합쳤고 원격 CI·독립 검토 전이다.
+협업은 검증된 opt-in 범위만 수락했다. 실제 OS IME, 기존 데이터 전체 호환, 설치 산출물,
+전체 제품 동등성은 미완료다. 아래 과거 기록은 당시 사실로 보존한다.
 
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
@@ -35,7 +31,8 @@ Composer taske52f987188e4/ctxfe53e7184240의 프로젝트·태스크 기능은 �
 | 기본 위키 문서 | domains/documents | 생성·조회·metadata·현재 문서 권한 | 첫 backend/React 수락, PR5 merged | 실제 앱 역할DB13·UI·CI·독립 검토 | 댓글·공유·리비전·확장 문서 기능 |
 | 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 opt-in 수락 | x64/ARM64 lifecycle20/product56/projection19/shutdown7·React14·Opus 검토 | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계 추가 검증, 과거 단발 timeout 원인 미확정. 명시적 opt-in이며 전체 협업 수락 아님 |
 | 위키 첨부 local | domains/attachments, packages/storage | 현재 부모 권한·원본 bytes·원자 완료·취소 | PR10 수락·merged0582c29 | 최종2f4fc7c 실제11CI·x64/ARM64 DB20·React18·Opus 후속 검토 통과 | 추출 job PR11 수락; S3/썸네일·다른 부모·GC 미완료 |
-| 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
+| 프로젝트·태스크 | domains/projects, domains/tasks, search lookup | 비공개 접근·lead/철회 경합·RLS·원자성·lookup 빈 결과 계약 | PR13 통합 중(생성/목록/상세/lookup/페이지네이션) | 로컬 project35/task24/db70·UI77·E2E6(워커) | 태스크 수정/보관/담당자/라벨/마일스톤/의존성, 프로젝트 문서·홈 |
+| 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 첨부 다른 부모/검색/알림/운영/설치 등 |
 
 ## 설계·자원 결정
 
@@ -2081,3 +2078,20 @@ Composer 보고서의 “accepted review cc48112” 표기는 잘못된 라벨�
 (Composer/동일 core worktree)를 사용한다. 각 명령에는 기존 Run과 실제 worktree,
 지정 모델을 명시하고 최신 handoff/허용 경로를 전달한다. 첫 수정 순서와 수락 조건은
 위 기록을 따른다. 현재 백그라운드 구현·자동 머지·추가 CI를 예약하지 않았다.
+
+
+### 2026-09-24 Opus 코디네이터 재개 (13:00Z–)
+
+- 인계 확인: 3865e7e(인계 문서), ded0d7d(core), c3b1b12(종료 후보) 실제 객체 확인, 강제 reset 없음.
+- 종료 복구: Grok ctx_c97ebb20c9b0가 c3b1b12를 이어 fb6bd02 제출, 코디네이터가 AGENTS/env 역할 갱신과
+  검토 NB 수정 추가 → PR15 merged fe624aa. 검토 ctx_e1415b9ca48b.
+- 권한 원자성(사용자 추가 지침 §2): 코디네이터 소유 파일로 직접 구현 → PR16 merged 472c905.
+  검토 ctx_e8d61c8aa79c. 남은 NIT: refusal 테스트의 owner_can_read 단언은 superuser owner에서 무의미.
+- PR13 backend: Composer ctx_cfdccc3dbce5(6f38715 v7 fixture), ctx_a796df4ecf21(9dfc421 barrier
+  current_database+pg_blocking_pids, lookup 거부, 페이지네이션 6개), ctx_3123a808bba3(62f1c62 lookup을
+  원본 계약 200 빈 items로 복원, 비공개 프로젝트 cross-path 인가 연결 검사). 라운드2의 404 변경은 코디네이터
+  명세 오류였고 원본 search.ts 대조로 되돌렸다.
+- PR13 UI: Grok ctx_aada5311960f 38dea4d(KEY-n kind 분기·프로젝트 문서 명시 상태, dialog a11y, 검증 메시지,
+  55개 실제 API 페이지네이션 E2E). 워커 E2E 6/6은 통합 SHA 수락이 아니다.
+- 워커 완료 전송 주의: bare `orca`는 빈 파일이라 worker_done이 조용히 유실됐다. 이후 명세에
+  `/home/kinesis/.local/bin/orca-ide` 절대 경로를 명시한다.

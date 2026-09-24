@@ -36,10 +36,19 @@ export DATABASE_URL='postgres://owner@host:5432/fvoci?sslmode=require'
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE fvoci_app_prod LOGIN NOSUPERUSER NOBYPASSRLS"
 psql "$DATABASE_URL" -c '\password fvoci_app_prod'
 cargo run --bin fvoci-migrate
-psql "$DATABASE_URL" -v app_role=fvoci_app_prod -f scripts/grant-app-role.sql
+cargo run --bin fvoci-migrate -- --grant-app-role fvoci_app_prod
 export DATABASE_APP_URL='postgres://fvoci_app_prod:***@host:5432/fvoci?sslmode=require'
 ```
 
+`--grant-app-role` applies `scripts/grant-app-role.sql` as a single transaction
+and exits nonzero on any error, leaving the previous privileges unchanged; do not
+start the server after a failed grant. It refuses a missing, superuser or
+BYPASSRLS role and any role that owns, or inherits ownership of, fvoci objects.
+Re-run it after every upgrade that applies new migrations: new SECURITY DEFINER
+functions are not executable by PUBLIC, so requests that need them fail until
+the grant is re-run. If you must use psql instead, run
+`psql -X -v ON_ERROR_STOP=1 --single-transaction -v app_role=<role> -f scripts/grant-app-role.sql`;
+without those flags psql commits each statement and can leave a partial grant.
 Never grant the app role before the role exists. Keep database credentials and pepper keys in your secret configuration, outside Git. Retain the same pepper keyring across restarts; replacing it prevents verification of existing passwords.
 
 ## Start server
@@ -58,7 +67,7 @@ extraction job integration and search indexing are not yet accepted.
 
 Invalid upload-limit values fail startup instead of silently selecting defaults.
 After applying migration 006 to an existing Rust slice database, re-run
-`scripts/grant-app-role.sql` for the same application role before serving requests.
+`fvoci-migrate --grant-app-role` for the same application role before serving requests.
 This does not provide an importer for the original TypeScript installation.
 
 Migrations run once at startup via the owner URL; the server connects only through `DATABASE_APP_URL`. The app pool is closed explicitly on shutdown and startup failures.
@@ -113,7 +122,7 @@ self-change restrictions and owner invariant. `POST /api/v1/me/personal-workspac
 is idempotent; personal workspace metadata/members are immutable.
 
 Migration 003 adds the membership self-selection policy and personal-workspace
-constraints. **Re-run `scripts/grant-app-role.sql` after applying migration 003**
+constraints. **Re-run `fvoci-migrate --grant-app-role` after applying migration 003**
 to restrict the new helper function's EXECUTE grant to the app role. The tested
 upgrade is from this Rust slice's 001/002 schema, not from a TypeScript installation.
 
@@ -211,7 +220,7 @@ import/export, and deletion surfaces are shown as unavailable rather than faked.
 
 ## Native attachment text extraction
 
-After applying migration 007, rerun `scripts/grant-app-role.sql` with the existing
+After applying migration 007, rerun `fvoci-migrate --grant-app-role` with the existing
 app-role procedure. The no-argument claim function has a fixed search path and
 PUBLIC execution revoked. Its migration owner needs table-owner access; the
 runtime role remains non-superuser without BYPASSRLS.

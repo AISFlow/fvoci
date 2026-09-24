@@ -125,21 +125,33 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
 }
 
 async fn apply_grants_through(pool: &PgPool, role_name: &str, max_migration_version: i32) {
-    let quoted_role = format!("\"{}\"", role_name);
-    let grants =
-        include_str!("../../scripts/grant-app-role.sql").replace(":\"app_role\"", &quoted_role);
-    for statement in grants.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        if max_migration_version < 8
-            && (statement.contains("fvoci.projects")
-                || statement.contains("fvoci.project_members")
-                || statement.contains("fvoci.workflows")
-                || statement.contains("fvoci.statuses")
-                || statement.contains("fvoci.tasks"))
-        {
-            continue;
-        }
-        sqlx::query(statement).execute(pool).await.expect("grant");
+    if max_migration_version >= 8 {
+        fvoci_server::db::migrate::apply_app_role_grants(pool, role_name)
+            .await
+            .expect("grant");
+        return;
     }
+    // Seeding a pre-008 installation: drop the statements for tables that do
+    // not exist yet, but still apply the rest atomically like the real command.
+    let grants: Vec<String> = fvoci_server::db::migrate::app_role_grant_sql(role_name)
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| {
+            !statement.is_empty()
+                && !(statement.contains("fvoci.projects")
+                    || statement.contains("fvoci.project_members")
+                    || statement.contains("fvoci.workflows")
+                    || statement.contains("fvoci.statuses")
+                    || statement.contains("fvoci.tasks"))
+        })
+        .map(|statement| format!("{statement};"))
+        .collect();
+    let mut tx = pool.begin().await.expect("grant tx");
+    sqlx::raw_sql(&grants.join("\n"))
+        .execute(&mut *tx)
+        .await
+        .expect("grant through v7");
+    tx.commit().await.expect("commit grants");
 }
 
 async fn app_state(app_url: &str) -> AppState {
