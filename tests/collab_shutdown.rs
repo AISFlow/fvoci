@@ -879,14 +879,15 @@ async fn wait_for_restart_close_without_auth_denied(
             Ok(Some(Ok(Message::Close(Some(frame))))) => {
                 let code = u16::from(frame.code);
                 assert!(
-                    code == 1012 || code == 1001,
-                    "pre-auth shutdown CloseFrame {code} ({:?}), expected 1012 or 1001; reason {:?}",
-                    frame.code, frame.reason
+                    code == 1012,
+                    "pre-auth shutdown CloseFrame {code} ({:?}), expected 1012; reason {:?}",
+                    frame.code,
+                    frame.reason
                 );
                 return;
             }
             Ok(Some(Ok(Message::Close(None)))) => {
-                panic!("Close without code, expected CloseFrame 1012/1001");
+                panic!("Close without code, expected CloseFrame 1012");
             }
             Ok(Some(Ok(Message::Binary(bytes)))) => {
                 if let Ok(WireFrame::Document {
@@ -900,12 +901,12 @@ async fn wait_for_restart_close_without_auth_denied(
                 }
             }
             Ok(Some(Ok(_))) => {}
-            Ok(None) => panic!("bare TCP EOF without CloseFrame, expected 1012/1001"),
+            Ok(None) => panic!("bare TCP EOF without CloseFrame, expected 1012"),
             Ok(Some(Err(err))) => panic!("websocket error before CloseFrame 1012: {err}"),
             Err(_) => {}
         }
     }
-    panic!("did not receive CloseFrame 1012/1001 within {within:?}");
+    panic!("did not receive CloseFrame 1012 within {within:?}");
 }
 
 #[tokio::test]

@@ -350,9 +350,8 @@ async fn handle_socket(
             _ = auth_wait.as_mut(), if !collab_authenticated => {
                 break;
             }
-            // Current live join (authenticated room), not the sticky collab_authenticated
-            // flag: a socket that authenticated then lost its room must still drop the
-            // permit on shutdown. Live joins keep actor-driven close/commit ordering.
+            // No room, or a room still awaiting auth: release its socket permit
+            // on shutdown. Joined rooms retain actor-driven close/commit ordering.
             _ = shutdown_wait.as_mut(), if !matches!(joined_room, Some((_, _, true, _))) => {
                 send_close(
                     &mut sender,

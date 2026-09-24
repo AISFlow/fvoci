@@ -1441,3 +1441,20 @@ barrier5초와 client-ID 소유권 검사30초. shutdown target은 앞선 실패
 diff는 engine.stop 성공bool witness와 실제 helper lib검사의 CI 연결이다.
 PR7 Draft/미병합/auto-merge 없음. 다음은 기존 Run inbox와 두 제출·실패 원인
 확인, F5-B1 및 F7 dead-slot/Closing 경합 해소 후 고정delta Opus/원격 검사다.
+
+Grok8ce96bd를bfc2899에 통합했다. 일시 engine/DB/용량(RoomFull)/writer-lock
+실패는 기존 잘못된 인증 거부 대신1011, 종료 중이면1012로 닫는다. 원본의
+onAuthenticate 실패 auth-frame과 의도적인 차이이며 provider4.6의 기존
+backoff 재접속을 사용한다. 지속 장애에서도 재접속이 계속될 수 있다. 실제
+권한 거부는 기존 auth-frame이며 읽기전용 의미는 유지한다. Opus
+task9ea11e4a463c/ctx4f918ae5d1cf 고정8ce96bd 및5cd7d4c 검토는 코드 차단
+없음/F5-B1 해결, release. 로컬4-thread product56/shutdown7(body61.71/6.21s,
+wall70.69s) 성공이지만 default32 실패 원인은 확정하지 않았다. 통합 원격
+동등 검사를 수락 조건으로 유지한다. 종료 close검사는1012로 좁히고 native
+lib검사는 정확한 이름과 실제1개 실행을 CI에서 확인한다.
+
+현재 Grok taskc9a3a3ddce70/ctx8142e18735be, basebfc2899, rust-collab-rejoin:
+hub 및 RoomHandle/관련 hooks/lifecycle 검사 단독 소유로 dead-slot reclaim과
+Closing 경합 구현. Composer ctx3811075aeb40은 browser spec/helpers 단독
+소유 및 로컬 무거운 슬롯을 인계받았다. 이전 워커들은 release, 커밋/worktree
+보존. 다음 통합은 두 결과와 고정 SHA delta 검토; 전체 포팅은 미완료다.
