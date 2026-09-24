@@ -8,6 +8,10 @@ use crate::db::context::{
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects;
+use crate::db::quota::{
+    acquire_admission_lock, require_membership_admission, require_new_instance_billable_user,
+    QuotaError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceRole {
@@ -61,6 +65,8 @@ pub enum WorkspaceDbError {
     RoleCap,
     SlugTaken,
     LastProjectLead,
+    SeatLimit,
+    GuestLimit,
 }
 
 pub struct WorkspaceListItem {
@@ -83,6 +89,13 @@ pub struct MemberRow {
     pub given_name: String,
     pub family_name: Option<String>,
     pub role: WorkspaceRole,
+}
+
+fn quota_error(err: QuotaError) -> WorkspaceDbError {
+    match err {
+        QuotaError::SeatLimit => WorkspaceDbError::SeatLimit,
+        QuotaError::GuestLimit => WorkspaceDbError::GuestLimit,
+    }
 }
 
 pub fn personal_workspace_slug(user_id: Uuid) -> String {
@@ -409,6 +422,7 @@ pub async fn create_workspace_as_instance_admin(
 ) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
     let workspace_id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
+    acquire_admission_lock(&mut tx).await?;
     lock_membership_users(&mut tx, &[actor_user_id]).await?;
     if !recheck_session(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
@@ -423,6 +437,10 @@ pub async fn create_workspace_as_instance_admin(
     if !admin.map(|(v,)| v).unwrap_or(false) {
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    if let Err(err) = require_new_instance_billable_user(&mut tx, Some(actor_user_id)).await? {
+        tx.rollback().await?;
+        return Ok(Err(quota_error(err)));
     }
     set_tenant(&mut tx, workspace_id).await?;
     let inserted = sqlx::query_as::<_, (Uuid, String, String)>(
@@ -506,6 +524,7 @@ pub async fn ensure_personal_workspace(
     let workspace_id = Uuid::now_v7();
     let slug = personal_workspace_slug(user_id);
     let mut tx = pool.begin().await?;
+    acquire_admission_lock(&mut tx).await?;
     lock_membership_users(&mut tx, &[user_id]).await?;
     if !recheck_session(&mut tx, user_id, session_id).await? {
         tx.rollback().await?;
@@ -528,6 +547,10 @@ pub async fn ensure_personal_workspace(
             tx.commit().await?;
             return Ok(Ok(WorkspaceMeta { id, name, slug }));
         }
+    }
+    if let Err(err) = require_new_instance_billable_user(&mut tx, Some(user_id)).await? {
+        tx.rollback().await?;
+        return Ok(Err(quota_error(err)));
     }
     set_tenant(&mut tx, workspace_id).await?;
     sqlx::query(
@@ -588,6 +611,7 @@ pub async fn set_member_role(
     client_ip: Option<&str>,
 ) -> Result<Result<MemberRow, WorkspaceDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    acquire_admission_lock(&mut tx).await?;
     set_tenant(&mut tx, workspace_id).await?;
     lock_membership_users(&mut tx, &[actor_user_id, target_user_id]).await?;
     if !recheck_session(&mut tx, actor_user_id, session_id).await? {
@@ -642,6 +666,12 @@ pub async fn set_member_role(
         tx.commit().await?;
         let member = fetch_member(pool, workspace_id, target_user_id).await?;
         return Ok(member.ok_or(WorkspaceDbError::NotFound));
+    }
+    if let Err(err) =
+        require_membership_admission(&mut tx, target_user_id, next_role, Some(target_role)).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(quota_error(err)));
     }
     sqlx::query(
         "UPDATE fvoci.memberships SET role = $3, updated_at = now() WHERE workspace_id = $1 AND user_id = $2",

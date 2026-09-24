@@ -1,7 +1,7 @@
 import { t, formatPersonName } from "@fvoci/i18n";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -165,6 +165,9 @@ export function WorkspaceMembersSection({
 }) {
   const queryClient = useQueryClient();
   const headingRef = useRef<HTMLElement>(null);
+  const confirmRemoveRef = useRef<HTMLButtonElement>(null);
+  const cancelRemoveRef = useRef<HTMLButtonElement>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const members = useQuery(membersQuery(workspaceId));
   const canManage = roleAtLeast(currentUserRole, "admin");
   const inviteRoles = ROLES.filter((role) => roleAtLeast(currentUserRole, role));
@@ -172,6 +175,14 @@ export function WorkspaceMembersSection({
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<MemberOutput | null>(null);
+
+  useEffect(() => {
+    if (!removeTarget) {
+      return;
+    }
+    setRemoveError(null);
+    confirmRemoveRef.current?.focus();
+  }, [removeTarget]);
 
   const invite = useMutation({
     mutationFn: async (input: InviteFormValues) =>
@@ -206,7 +217,7 @@ export function WorkspaceMembersSection({
     },
   });
 
-  async function run(userId: string, action: () => Promise<void>): Promise<boolean> {
+  async function run(userId: string, action: () => Promise<void>): Promise<string | null> {
     setPendingIds((current) => new Set(current).add(userId));
     setRowErrors((current) => {
       const next = { ...current };
@@ -216,13 +227,15 @@ export function WorkspaceMembersSection({
     setStatus(null);
     try {
       await action();
-      return true;
+      return null;
     } catch (err) {
+      const message =
+        err instanceof ProblemError ? err.title : t("workspace.member.action.failed");
       setRowErrors((current) => ({
         ...current,
-        [userId]: err instanceof ProblemError ? err.title : t("workspace.member.action.failed"),
+        [userId]: message,
       }));
-      return false;
+      return message;
     } finally {
       setPendingIds((current) => {
         const next = new Set(current);
@@ -339,6 +352,29 @@ export function WorkspaceMembersSection({
           aria-modal="true"
           aria-labelledby="member-remove-title"
           className="fixed inset-0 z-20 flex items-center justify-center bg-black/40 p-4"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setRemoveTarget(null);
+              setRemoveError(null);
+              return;
+            }
+            if (event.key !== "Tab") {
+              return;
+            }
+            const first = cancelRemoveRef.current;
+            const last = confirmRemoveRef.current;
+            if (!first || !last) {
+              return;
+            }
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }}
         >
           <div className="max-w-md rounded-md border border-border bg-background p-4">
             <h2 id="member-remove-title" className="text-title">
@@ -357,11 +393,26 @@ export function WorkspaceMembersSection({
                 }),
               })}
             </p>
+            {removeError ? (
+              <p role="alert" className="settings-notice settings-notice--danger mt-2">
+                {removeError}
+              </p>
+            ) : null}
             <div className="mt-4 flex justify-end gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => setRemoveTarget(null)}>
+              <Button
+                ref={cancelRemoveRef}
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setRemoveTarget(null);
+                  setRemoveError(null);
+                }}
+              >
                 {t("common.dismiss")}
               </Button>
               <Button
+                ref={confirmRemoveRef}
                 type="button"
                 size="sm"
                 onClick={() => {
@@ -374,9 +425,14 @@ export function WorkspaceMembersSection({
                     await removeMember.mutateAsync(member.userId);
                     setStatus(t("workspace.member.removed", { name }));
                     setRemoveTarget(null);
+                    setRemoveError(null);
                     requestAnimationFrame(() => {
                       headingRef.current?.focus();
                     });
+                  }).then((error) => {
+                    if (error) {
+                      setRemoveError(error);
+                    }
                   });
                 }}
               >

@@ -26,13 +26,31 @@ Claude Code Opus5.5 medium이며, 독립 검토는 별도 Orca dispatch의 Opus5
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 첫 slice 수락, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | PAT/OIDC/MFA·계정 생명주기·확장 정책 |
-| 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락, PR4 merged | 실제 앱 역할DB66·양 아키텍처·React·CI·독립 검토 | counts·quota·groups·members-list 등 |
+| 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락, PR4 merged | 실제 앱 역할DB66·양 아키텍처·React·CI·독립 검토 | counts·groups·workspace delete 등 |
+| 워크스페이스 멤버·초대 | invitation.ts, workspace.ts, quota.ts, consent.ts | 인스턴스 좌석 한도·토큰 단일 사용·역할 상한·RLS | PR21 구현 중(목록/초대/수락/역할 변경) | 실제 PG·초대 E2E; 수락 전 | mailer/SMTP, accept MFA/OIDC, legal consent 428, pending list/revoke API, notification prefs, workspace/guest/storage quota, e2e-fixture SQL members |
 | HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component PR2 + 얇은 client PR8/취소 PR9 수락 | native default51/test-hang54·client8×2 양 아키텍처·CI·독립 검토 | 위키 첨부 추출 job PR11 수락; 검색/썸네일 미연결 |
 | 기본 위키 문서 | domains/documents | 생성·조회·metadata·현재 문서 권한 | 첫 backend/React 수락, PR5 merged | 실제 앱 역할DB13·UI·CI·독립 검토 | 댓글·공유·리비전·확장 문서 기능 |
 | 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 opt-in 수락 | x64/ARM64 lifecycle20/product56/projection19/shutdown7·React14·Opus 검토 | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계 추가 검증, 과거 단발 timeout 원인 미확정. 명시적 opt-in이며 전체 협업 수락 아님 |
 | 위키 첨부 local | domains/attachments, packages/storage | 현재 부모 권한·원본 bytes·원자 완료·취소 | PR10 수락·merged0582c29 | 최종2f4fc7c 실제11CI·x64/ARM64 DB20·React18·Opus 후속 검토 통과 | 추출 job PR11 수락; S3/썸네일·다른 부모·GC 미완료 |
 | 프로젝트·태스크 | domains/projects, domains/tasks, search lookup | 비공개 접근·lead/철회 경합·RLS·원자성·lookup 빈 결과 계약 | PR13 통합 중(생성/목록/상세/lookup/페이지네이션) | 로컬 project35/task24/db70·UI77·E2E6(워커) | 태스크 수정/보관/담당자/라벨/마일스톤/의존성, 프로젝트 문서·홈 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 첨부 다른 부모/검색/알림/운영/설치 등 |
+
+### PR21 멤버·초대 — 구현과 잔여 구분 (미수락)
+
+인스턴스 좌석 한도(기본 10)는 원본 `requireMembershipAdmission` / `requireNewInstanceBillableUser`와 같이, 사용자를 billable로 만드는 경로에서 같은 트랜잭션의 전용 admission advisory lock 아래에서 강제한다: 초대 수락, guest→member/admin PATCH, `ensure_personal_workspace`, 인스턴스 관리자 workspace 생성, 첫 설치 workspace. 게스트는 기본 정책이 unlimited라 `limit.guests`는 이 빌드에서 나올 수 없다.
+
+아직 이식하지 않은 항목(부분 완료로 표시하지 않음):
+
+| 항목 | 원본 | 이 빌드 |
+| --- | --- | --- |
+| 초대 메일 발송 | `mailer.sendInvite`, 응답 `mailDelayed` | 메일/SMTP 없음. 응답 모양만 맞추고 전송하지 않음 |
+| accept MFA/OIDC | `issueSessionOrChallenge` | 비밀번호 세션만 발급 |
+| legal consent 428 | `requiredLegal`, `body.consents` 기록 | preview `requiredLegal: []`. consents 본문은 받고 무시 |
+| pending invite list/revoke API | 초대 목록·철회 라우트 | 생성/미리보기/수락만. 목록·철회 HTTP 없음 |
+| notification prefs | 신규 계정 `defaults.user` | 미기록 |
+| workspace/guest/storage quota | workspace-scope seats, `GuestLimit`, storage lock | 인스턴스 seats만. guest/storage provider 없음 |
+| 계정 삭제 시 pending 정리 | `removePendingByInviter` on delete | 계정 생명주기 미구현 |
+| e2e-fixture SQL members | — | `fvoci-e2e-fixture`가 멤버십을 SQL INSERT. 초대 흐름 외 다른 E2E가 계속 사용 |
 
 ## 설계·자원 결정
 
@@ -53,7 +71,7 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 인증 확장·PAT·OIDC·MFA·사용자 생명주기 | packages/contracts/src/routes.ts auth/me/admin, core/auth.ts | 세션 폐기, 범위, 마지막 관리자, 탈퇴/복구 | 재작성 미착수 | 미실행 | 첫 로그인 외 전체 |
-| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend/React 수락5d8cac8, PR4 merged | 실제 앱 역할DB66 양 아키텍처/React6/CI/Fable | groups/확장 정책 등 미구현 |
+| 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend/React 수락5d8cac8, PR4 merged; 멤버 목록·초대 PR21 구현 중 | 실제 앱 역할DB66 양 아키텍처/React6/CI/Fable | groups/확장 정책, 아래 멤버·초대 잔여 |
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | Composer backend 구현 중, 미수락 | 실제 DB·경합 검사 보강 중 | React 연결·일정·확장 태스크·그룹 등 |
 | 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata PR5 수락; 본문 협업 PR7 opt-in 수락 | PR5/7 실제DB/UI/CI·독립 검토 | 댓글·공유·리비전, 협업 최종 수락 미완료 |
 | 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine PR6 수락; 실제 제품/2UI PR7 opt-in 수락 | provider/native/DB/2UI 회귀·CI·Opus | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계, 과거 단발 timeout 원인 미확정 |

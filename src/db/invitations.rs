@@ -7,18 +7,17 @@ use crate::auth::password::{hash_password, verify_password, Keyring};
 use crate::auth::token::{hash_token, new_token};
 use crate::db::context::{
     clear_invitation_token_hash, lock_membership_users, recheck_session, set_invitation_token_hash,
-    set_system, set_tenant,
+    set_tenant,
 };
 use crate::db::identity::{
     find_user_id_by_email, issue_session, password_hash_by_id, rehash_password_if_unchanged,
 };
+use crate::db::quota::{acquire_admission_lock, require_membership_admission, QuotaError};
 use crate::db::workspace::{
     record_workspace_event_and_audit, WorkspaceChangeRecord, WorkspaceRole,
 };
 
 const INVITE_TTL: Duration = Duration::days(7);
-const ADMISSION_LOCK_KEY: i64 = 847_291_003_552;
-const INSTANCE_SEAT_LIMIT: i32 = 10;
 
 #[derive(Debug)]
 pub enum InvitationDbError {
@@ -317,10 +316,7 @@ async fn grant_membership(
     client_ip: Option<&str>,
 ) -> Result<Result<(), InvitationDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(ADMISSION_LOCK_KEY)
-        .execute(&mut *tx)
-        .await?;
+    acquire_admission_lock(&mut tx).await?;
     set_tenant(&mut tx, invitation.workspace_id).await?;
     lock_membership_users(&mut tx, &[invitation.invited_by, user_id]).await?;
     let kind = lock_workspace_kind(&mut tx, invitation.workspace_id).await?;
@@ -386,9 +382,10 @@ async fn grant_membership(
         .await?
         .is_some();
     if !already_member {
-        if let Err(err) = require_membership_admission(&mut tx, user_id, current.role).await? {
+        if let Err(err) = require_membership_admission(&mut tx, user_id, current.role, None).await?
+        {
             tx.rollback().await?;
-            return Ok(Err(err));
+            return Ok(Err(quota_error(err)));
         }
         sqlx::query(
             "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, $3)",
@@ -436,29 +433,11 @@ async fn grant_membership(
     Ok(Ok(()))
 }
 
-async fn require_membership_admission(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    role: WorkspaceRole,
-) -> Result<Result<(), InvitationDbError>, sqlx::Error> {
-    if role == WorkspaceRole::Guest {
-        return Ok(Ok(()));
+fn quota_error(err: QuotaError) -> InvitationDbError {
+    match err {
+        QuotaError::SeatLimit => InvitationDbError::SeatLimit,
+        QuotaError::GuestLimit => InvitationDbError::GuestLimit,
     }
-    set_system(tx).await?;
-    let already_billable: i32 = sqlx::query_scalar("SELECT fvoci.app_quota_billable_users($1)")
-        .bind(user_id)
-        .fetch_one(&mut **tx)
-        .await?;
-    if already_billable > 0 {
-        return Ok(Ok(()));
-    }
-    let billable: i32 = sqlx::query_scalar("SELECT fvoci.app_quota_billable_users(NULL::uuid)")
-        .fetch_one(&mut **tx)
-        .await?;
-    if billable >= INSTANCE_SEAT_LIMIT {
-        return Ok(Err(InvitationDbError::SeatLimit));
-    }
-    Ok(Ok(()))
 }
 
 async fn load_invitation_by_token(

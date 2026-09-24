@@ -1116,3 +1116,162 @@ async fn create_invitation_rolls_back_when_event_insert_fails() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+async fn seed_extra_instance_admins(admin: &PgPool, count: usize) {
+    for i in 0..count {
+        sqlx::query(
+            "INSERT INTO fvoci.users (id, email, given_name, is_instance_admin) VALUES ($1, $2, $3, true)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(format!("seat-extra-{i}@example.com"))
+        .bind("Seat")
+        .execute(admin)
+        .await
+        .unwrap();
+    }
+}
+
+async fn insert_workspace_guest(admin: &PgPool, workspace_id: Uuid, email: &str) -> Uuid {
+    let user_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(email)
+        .bind("Guest")
+        .execute(admin)
+        .await
+        .unwrap();
+    add_membership(admin, workspace_id, user_id, "guest").await;
+    user_id
+}
+
+async fn billable_user_count(admin: &PgPool) -> i32 {
+    let mut tx = admin.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let count: i32 = sqlx::query_scalar("SELECT fvoci.app_quota_billable_users(NULL::uuid)")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    count
+}
+
+#[tokio::test]
+async fn guest_promotion_is_rejected_at_instance_seat_limit() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let admin = harness.admin().await;
+    let ws = acme_id(&admin).await;
+    seed_extra_instance_admins(&admin, 9).await;
+    let guest_id = insert_workspace_guest(&admin, ws, "promote-guest@example.com").await;
+    assert_eq!(billable_user_count(&admin).await, 10);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{ws}/members/{guest_id}"),
+        Some(json!({ "role": "member" })),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{body}");
+    assert_eq!(body["code"], "limit.seats");
+    assert_eq!(billable_user_count(&admin).await, 10);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_guest_promotions_have_single_winner_for_last_seat() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let admin = harness.admin().await;
+    let ws = acme_id(&admin).await;
+    seed_extra_instance_admins(&admin, 8).await;
+    let first = insert_workspace_guest(&admin, ws, "race-a@example.com").await;
+    let second = insert_workspace_guest(&admin, ws, "race-b@example.com").await;
+    assert_eq!(billable_user_count(&admin).await, 9);
+
+    let left_path = format!("/api/v1/workspaces/{ws}/members/{first}");
+    let right_path = format!("/api/v1/workspaces/{ws}/members/{second}");
+    let (left, right) = tokio::join!(
+        json_request(
+            app.clone(),
+            "PATCH",
+            &left_path,
+            Some(json!({ "role": "member" })),
+            Some(&cookie),
+            &[],
+            None,
+        ),
+        json_request(
+            app,
+            "PATCH",
+            &right_path,
+            Some(json!({ "role": "member" })),
+            Some(&cookie),
+            &[],
+            None,
+        ),
+    );
+    let statuses = [left.0, right.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1,
+        "{left:?} {right:?}"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::PAYMENT_REQUIRED)
+            .count(),
+        1,
+        "{left:?} {right:?}"
+    );
+    let loser = if left.0 == StatusCode::PAYMENT_REQUIRED {
+        &left.1
+    } else {
+        &right.1
+    };
+    assert_eq!(loser["code"], "limit.seats");
+    assert_eq!(billable_user_count(&admin).await, 10);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn personal_workspace_creation_is_rejected_at_instance_seat_limit() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _, _) = setup_session(&harness).await;
+    let admin = harness.admin().await;
+    seed_extra_instance_admins(&admin, 9).await;
+    assert_eq!(billable_user_count(&admin).await, 10);
+    let (_, guest_cookie) =
+        create_second_user_session(&harness, "personal-guest@example.com", "Personal").await;
+
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        "/api/v1/me/personal-workspace",
+        None,
+        Some(&guest_cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{body}");
+    assert_eq!(body["code"], "limit.seats");
+    assert_eq!(billable_user_count(&admin).await, 10);
+
+    admin.close().await;
+    harness.cleanup().await;
+}

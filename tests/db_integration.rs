@@ -804,7 +804,7 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .await
         .unwrap();
     sqlx::query(
-        "DROP FUNCTION IF EXISTS public.app_tenant_id(), public.app_system_ctx_on(), public.app_self_user_id()",
+        "DROP FUNCTION IF EXISTS public.app_tenant_id(), public.app_system_ctx_on(), public.app_self_user_id(), public.app_invitation_token_hash()",
     )
     .execute(&admin)
     .await
@@ -850,7 +850,10 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions, 8);
+    assert_eq!(
+        versions,
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
+    );
     admin.close().await;
     harness.cleanup().await;
 }
