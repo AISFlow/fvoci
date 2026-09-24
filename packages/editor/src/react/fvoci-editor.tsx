@@ -15,6 +15,7 @@ import {
 	TextSelection,
 } from "@tiptap/pm/state";
 import { CellSelection } from "@tiptap/pm/tables";
+import type { EditorView } from "@tiptap/pm/view";
 import { EditorContent, ReactNodeViewRenderer, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import Suggestion from "@tiptap/suggestion";
@@ -58,6 +59,7 @@ import {
 	MathNodeView,
 	MermaidNodeView,
 } from "./node-views.js";
+import { isNativeOwnedDeleteKey } from "./native-delete-owner.js";
 import { overlayOwner } from "./overlay-owner.js";
 import { parseWorkspaceUrl, resolvePastedEmbed } from "./paste-embed.js";
 import {
@@ -105,6 +107,58 @@ export function collabCaretRender(peer: {
 	label.textContent = peer.name;
 	caret.append(label);
 	return caret;
+}
+
+/* WHY: see native-delete-owner.ts. When PM's selection lags the native caret at
+ * a Delete/Backspace keydown, dispatch one selection-only transaction and return
+ * false so Tiptap's stock chain (undoInputRule, joins, atom handling) runs on the
+ * caret the user sees. The native caret is mapped like PM's selectionFromDOM
+ * (bias 1, TextSelection.between normalisation) and skipped inside
+ * non-editable leaf DOM, where PM would pick a different position or a
+ * NodeSelection. placeContentCaret's [1,1] case is a different writer and is not
+ * handled here. */
+function handleNativeOwnedDeleteKeyDown(
+	view: EditorView,
+	event: KeyboardEvent,
+): boolean {
+	const selection = view.state.selection;
+	if (
+		!isNativeOwnedDeleteKey({
+			trusted: event.isTrusted,
+			editable: view.editable,
+			composing: event.isComposing,
+			keyCode: event.keyCode,
+			key: event.key,
+			pmIsTextSelection: selection instanceof TextSelection,
+		})
+	) {
+		return false;
+	}
+	const domSel = view.dom.ownerDocument.defaultView?.getSelection();
+	const anchorNode = domSel?.anchorNode;
+	const focusNode = domSel?.focusNode;
+	if (!domSel || !anchorNode || !focusNode) return false;
+	if (!view.dom.contains(anchorNode) || !view.dom.contains(focusNode)) {
+		return false;
+	}
+	for (const node of [anchorNode, focusNode]) {
+		const element = node instanceof Element ? node : node.parentElement;
+		const leaf = element?.closest('[contenteditable="false"]');
+		if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return false;
+	}
+	let aligned: TextSelection;
+	try {
+		const doc = view.state.doc;
+		aligned = TextSelection.between(
+			doc.resolve(view.posAtDOM(anchorNode, domSel.anchorOffset, 1)),
+			doc.resolve(view.posAtDOM(focusNode, domSel.focusOffset, 1)),
+		) as TextSelection;
+	} catch {
+		return false;
+	}
+	if (aligned.eq(selection)) return false;
+	view.dispatch(view.state.tr.setSelection(aligned));
+	return false;
 }
 
 export type MentionHit = {
@@ -478,10 +532,12 @@ export const FvociEditor = memo(function FvociEditor({
 	 * role 도 적는다 — setOptions 의 view.setProps(editorProps) 가 attributes 를 통째로 갈아끼워
 	 * Tiptap createView 의 role=textbox 를 지운다(EditorContent 마운트 경로). */
 	const editorProps = useMemo(
-		() =>
-			ariaLabel
+		() => ({
+			handleKeyDown: handleNativeOwnedDeleteKeyDown,
+			...(ariaLabel
 				? { attributes: { role: "textbox", "aria-label": ariaLabel } }
-				: {},
+				: {}),
+		}),
 		[ariaLabel],
 	);
 
