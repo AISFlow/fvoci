@@ -2,6 +2,7 @@ use std::env;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::auth::password::Keyring;
 
@@ -14,6 +15,8 @@ pub struct Config {
     pub public_origin: String,
     pub cookie_secure: bool,
     pub static_dir: Option<PathBuf>,
+    /// Wall deadline covering HTTP drain, hub join, and pool close after the stop signal.
+    pub shutdown_deadline: Duration,
 }
 
 impl Clone for Config {
@@ -27,6 +30,7 @@ impl Clone for Config {
             public_origin: self.public_origin.clone(),
             cookie_secure: self.cookie_secure,
             static_dir: self.static_dir.clone(),
+            shutdown_deadline: self.shutdown_deadline,
         }
     }
 }
@@ -41,6 +45,7 @@ impl fmt::Debug for Config {
             .field("public_origin", &self.public_origin)
             .field("cookie_secure", &self.cookie_secure)
             .field("static_dir", &self.static_dir)
+            .field("shutdown_deadline", &self.shutdown_deadline)
             .finish()
     }
 }
@@ -99,6 +104,9 @@ impl Config {
             _ => None,
         };
 
+        let shutdown_deadline =
+            parse_shutdown_deadline_ms(env::var("FVOCI_SHUTDOWN_DEADLINE_MS").ok().as_deref())?;
+
         Ok(Self {
             bind,
             migration_url,
@@ -108,8 +116,23 @@ impl Config {
             public_origin,
             cookie_secure,
             static_dir,
+            shutdown_deadline,
         })
     }
+}
+
+/// Default 30s; values below 1ms are rejected so expiry cannot be confused with success.
+fn parse_shutdown_deadline_ms(raw: Option<&str>) -> Result<Duration, String> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Duration::from_millis(30_000));
+    };
+    let millis: u64 = raw
+        .parse()
+        .map_err(|e| format!("invalid FVOCI_SHUTDOWN_DEADLINE_MS: {e}"))?;
+    if millis == 0 {
+        return Err("FVOCI_SHUTDOWN_DEADLINE_MS must be at least 1".into());
+    }
+    Ok(Duration::from_millis(millis))
 }
 
 fn database_role(url: &str) -> Result<String, String> {

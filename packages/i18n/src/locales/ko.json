@@ -1140,6 +1140,7 @@
 	"doc.status.a11y": "문서 상태",
 	"doc.body.a11y": "문서 본문",
 	"doc.collab.saved": "연결됨 · 저장됨",
+	"doc.collab.connected": "연결됨",
 	"doc.collab.connecting": "연결 중…",
 	"doc.collab.reconnecting": "재연결 중…",
 	"doc.collab.pending": "연결됨 · 저장 대기",

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,7 +40,7 @@ pub enum UnsupportedReason {
 /// Engine result. `applied` means this child's in-memory Doc integrated bytes.
 /// It is **not** a durable/authoritative mutation: the parent broadcasts only
 /// after a DB commit, and never treats Yrs undo as a DB rollback.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum EngineStatus {
     Ok {
@@ -58,6 +59,9 @@ pub enum EngineStatus {
         xml_string: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         xml_len: Option<u32>,
+        /// Tiptap JSON from [`crate::protocol::Request::Project`]. Never reused as CRDT bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_json: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         yrs: Option<String>,
     },
@@ -92,6 +96,7 @@ impl EngineStatus {
             state_vector_b64: None,
             xml_string: None,
             xml_len: None,
+            content_json: None,
             yrs: Some(crate::YRS_VERSION.into()),
         }
     }
@@ -101,7 +106,7 @@ impl EngineStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineReport {
     pub engine: String,
     pub yrs: String,

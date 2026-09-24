@@ -4,10 +4,12 @@ use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::auth::password::Keyring;
+use fvoci_server::collab::derived_body::{prepare_derived_body, PreparedDerivedBody};
 use fvoci_server::db::collab::{
     append_collab_update, claim_writer_and_load, compact_collab_snapshot, load_collab_document,
-    lookup_collab_operation, verify_collab_operation, AppendCollabInput, AppendCollabResult,
-    CollabDbError, CompactCollabInput, VerifyCollabInput, MAX_COLLAB_SNAPSHOT_BYTES,
+    lookup_collab_operation, project_derived_body, verify_collab_operation, AppendCollabInput,
+    AppendCollabResult, CollabDbError, CompactCollabInput, ProjectDerivedBodyInput,
+    ProjectDerivedBodyResult, VerifyCollabInput, MAX_COLLAB_SNAPSHOT_BYTES,
     MAX_COLLAB_TAIL_UPDATES, MAX_COLLAB_UPDATE_BYTES,
 };
 use fvoci_server::db::documents::{empty_document_json, CreateDocumentInput};
@@ -15,6 +17,7 @@ use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::workspace::{self, WorkspaceRole};
 use fvoci_server::db::{documents, migrate, pool};
 use rand::RngCore;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -310,6 +313,7 @@ fn append_input<'a>(
     session: &'a SessionFixture,
     document_id: Uuid,
     writer_generation: i64,
+    expected_tail_seq: i64,
     op_id: Uuid,
     payload: &'a [u8],
 ) -> AppendCollabInput<'a> {
@@ -319,6 +323,7 @@ fn append_input<'a>(
         session_id: session.session_id,
         document_id,
         writer_generation,
+        expected_tail_seq,
         op_id,
         payload,
         client_ip: None,
@@ -344,6 +349,50 @@ fn compact_input<'a>(
         new_snapshot,
         client_ip: None,
     }
+}
+
+fn project_input(
+    session: &SessionFixture,
+    document_id: Uuid,
+    writer_generation: i64,
+    expected_tail_seq: i64,
+    prepared: &PreparedDerivedBody,
+) -> ProjectDerivedBodyInput {
+    ProjectDerivedBodyInput::new(
+        session.workspace_id,
+        session.user_id,
+        session.session_id,
+        document_id,
+        writer_generation,
+        expected_tail_seq,
+        prepared.clone(),
+    )
+}
+
+fn derived_doc_json(text: &str) -> Value {
+    json!({
+        "type": "doc",
+        "content": [{
+            "type": "paragraph",
+            "content": [{"type": "text", "text": text}]
+        }]
+    })
+}
+
+async fn event_count(admin: &PgPool, document_id: Uuid, verb: &str) -> i64 {
+    let row: (i64,) = sqlx::query_as(
+        r#"
+        SELECT count(*)::bigint
+        FROM fvoci.events
+        WHERE target_id = $1 AND verb = $2
+        "#,
+    )
+    .bind(document_id)
+    .bind(verb)
+    .fetch_one(admin)
+    .await
+    .unwrap();
+    row.0
 }
 
 async fn create_member_session(
@@ -508,6 +557,10 @@ async fn wait_for_advisory_xact_lock_blocked_by(admin: &PgPool, holder_pid: i32)
 
 async fn wait_for_document_states_for_update(admin: &PgPool, blocker_pid: i32) -> i32 {
     wait_for_lock_blocked_by(admin, blocker_pid, "%document_states%", "%FOR UPDATE%").await
+}
+
+async fn wait_for_documents_for_update(admin: &PgPool, blocker_pid: i32) -> i32 {
+    wait_for_lock_blocked_by(admin, blocker_pid, "%fvoci.documents%", "%FOR UPDATE%").await
 }
 
 async fn wait_for_session_revoke_blocked(admin: &PgPool, blocker_pid: i32) -> i32 {
@@ -773,6 +826,7 @@ async fn claim_seeds_empty_yjs_and_loads_snapshot_with_tail() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             op_id,
             payload,
         ),
@@ -831,6 +885,7 @@ async fn stale_writer_generation_is_rejected_after_takeover() {
             &fixture.session,
             fixture.document_id,
             first.writer_generation,
+            0,
             Uuid::now_v7(),
             b"stale",
         ),
@@ -845,6 +900,7 @@ async fn stale_writer_generation_is_rejected_after_takeover() {
             &fixture.session,
             fixture.document_id,
             second.writer_generation,
+            0,
             Uuid::now_v7(),
             b"fresh",
         ),
@@ -879,6 +935,7 @@ async fn duplicate_op_id_same_bytes_ack_different_bytes_conflict() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             op_id,
             payload,
         ),
@@ -894,6 +951,7 @@ async fn duplicate_op_id_same_bytes_ack_different_bytes_conflict() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             op_id,
             payload,
         ),
@@ -909,6 +967,7 @@ async fn duplicate_op_id_same_bytes_ack_different_bytes_conflict() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             op_id,
             b"different",
         ),
@@ -956,6 +1015,7 @@ async fn compact_rejects_oversized_snapshot() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             Uuid::now_v7(),
             b"one",
         ),
@@ -1003,6 +1063,7 @@ async fn append_rejects_oversized_payload() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             Uuid::now_v7(),
             &huge,
         ),
@@ -1068,6 +1129,7 @@ async fn collab_append_loses_to_session_revoke_barrier() {
                     session_id,
                     document_id,
                     writer_generation,
+                    expected_tail_seq: 0,
                     op_id: Uuid::now_v7(),
                     payload: b"after-revoke-wins",
                     client_ip: None,
@@ -1155,6 +1217,7 @@ async fn collab_append_wins_before_session_revoke_barrier() {
                     session_id,
                     document_id,
                     writer_generation,
+                    expected_tail_seq: 0,
                     op_id: Uuid::now_v7(),
                     payload: b"before-revoke",
                     client_ip: None,
@@ -1198,6 +1261,7 @@ async fn collab_append_wins_before_session_revoke_barrier() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             Uuid::now_v7(),
             b"after-revoke",
         ),
@@ -1266,6 +1330,7 @@ async fn collab_append_wins_before_membership_remove_barrier() {
                     session_id,
                     document_id,
                     writer_generation,
+                    expected_tail_seq: 0,
                     op_id: Uuid::now_v7(),
                     payload: b"before-remove",
                     client_ip: None,
@@ -1319,6 +1384,7 @@ async fn collab_append_wins_before_membership_remove_barrier() {
             session_id: member.session_id,
             document_id: fixture.document_id,
             writer_generation: claim.writer_generation,
+            expected_tail_seq: 0,
             op_id: Uuid::now_v7(),
             payload: b"after-remove",
             client_ip: None,
@@ -1400,6 +1466,7 @@ async fn collab_append_loses_to_membership_remove_barrier() {
                     session_id,
                     document_id,
                     writer_generation,
+                    expected_tail_seq: 0,
                     op_id: Uuid::now_v7(),
                     payload: b"after-remove-wins",
                     client_ip: None,
@@ -1473,6 +1540,7 @@ async fn collab_rejects_archived_and_suspended_and_role_demotion() {
             session_id: member.session_id,
             document_id: fixture.document_id,
             writer_generation: claim.writer_generation,
+            expected_tail_seq: 0,
             op_id: Uuid::now_v7(),
             payload: b"nope",
             client_ip: None,
@@ -1501,6 +1569,7 @@ async fn collab_rejects_archived_and_suspended_and_role_demotion() {
             session_id: member.session_id,
             document_id: fixture.document_id,
             writer_generation: claim.writer_generation,
+            expected_tail_seq: 0,
             op_id: Uuid::now_v7(),
             payload: b"nope",
             client_ip: None,
@@ -1531,6 +1600,7 @@ async fn collab_rejects_archived_and_suspended_and_role_demotion() {
             session_id: member.session_id,
             document_id: fixture.document_id,
             writer_generation: claim.writer_generation,
+            expected_tail_seq: 0,
             op_id: Uuid::now_v7(),
             payload: b"nope",
             client_ip: None,
@@ -1570,6 +1640,7 @@ async fn lookup_hides_operation_from_forbidden_actor() {
             session_id: member.session_id,
             document_id: fixture.document_id,
             writer_generation: claim.writer_generation,
+            expected_tail_seq: 0,
             op_id,
             payload: b"secret",
             client_ip: None,
@@ -1666,6 +1737,7 @@ async fn event_or_audit_failure_rolls_back_append_and_seq() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             Uuid::now_v7(),
             b"rollback-me",
         ),
@@ -1698,6 +1770,7 @@ async fn event_or_audit_failure_rolls_back_append_and_seq() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             Uuid::now_v7(),
             b"rollback-me",
         ),
@@ -1749,6 +1822,7 @@ async fn pool_tenant_context_resets_after_collab_commit_and_rollback() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             Uuid::now_v7(),
             b"ctx",
         ),
@@ -1809,6 +1883,7 @@ async fn app_role_cannot_update_or_delete_collab_receipts() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             op_id,
             b"immutable-receipt",
         ),
@@ -1966,6 +2041,7 @@ async fn compact_snapshot_requires_exact_cutoff_and_rejects_stale_fence() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             Uuid::now_v7(),
             b"one",
         ),
@@ -1979,6 +2055,7 @@ async fn compact_snapshot_requires_exact_cutoff_and_rejects_stale_fence() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            1,
             Uuid::now_v7(),
             b"two",
         ),
@@ -2091,6 +2168,7 @@ async fn claim_blocks_inflight_append_until_generation_bump_resolves() {
                     session_id,
                     document_id,
                     writer_generation,
+                    expected_tail_seq: 0,
                     op_id: Uuid::now_v7(),
                     payload: b"race",
                     client_ip: None,
@@ -2122,6 +2200,7 @@ async fn claim_blocks_inflight_append_until_generation_bump_resolves() {
             &fixture.session,
             fixture.document_id,
             first.writer_generation,
+            0,
             Uuid::now_v7(),
             b"stale",
         ),
@@ -2156,6 +2235,7 @@ async fn compact_preserves_receipt_lookup_and_duplicate_ack() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             op_id,
             payload,
         ),
@@ -2201,6 +2281,7 @@ async fn compact_preserves_receipt_lookup_and_duplicate_ack() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            0,
             op_id,
             payload,
         ),
@@ -2271,6 +2352,7 @@ async fn append_rejects_state_budget_exhaustion() {
             &fixture.session,
             fixture.document_id,
             claim.writer_generation,
+            MAX_COLLAB_TAIL_UPDATES,
             Uuid::now_v7(),
             b"x",
         ),
@@ -2305,6 +2387,7 @@ async fn verify_collab_operation_rejects_payload_and_actor_mismatch() {
             &member,
             fixture.document_id,
             claim.writer_generation,
+            0,
             op_id,
             b"truth",
         ),
@@ -2369,6 +2452,737 @@ async fn verify_collab_operation_rejects_payload_and_actor_mismatch() {
     assert_eq!(ok.payload_sha256, truth_digest);
     assert_eq!(ok.actor_user_id, member.user_id);
     member.pool.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_fence_rejects_stale_generation_and_tail_seq() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &fixture.session.pool,
+        append_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"one",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let prepared = prepare_derived_body(derived_doc_json("projected")).unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+
+    let stale_tail = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stale_tail, Err(CollabDbError::StaleCutoff));
+
+    let stale_gen = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation + 1,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stale_gen, Err(CollabDbError::StaleWriter));
+
+    let before_events = event_count(&admin, fixture.document_id, "document.updated").await;
+    let updated = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(updated, ProjectDerivedBodyResult::Updated);
+    let after_events = event_count(&admin, fixture.document_id, "document.updated").await;
+    assert_eq!(after_events, before_events + 1);
+
+    let unchanged = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(unchanged, ProjectDerivedBodyResult::Unchanged);
+    let final_events = event_count(&admin, fixture.document_id, "document.updated").await;
+    assert_eq!(final_events, after_events);
+
+    admin.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_skips_seed_at_tail_seq_zero() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(claim.load.tail_seq, 0);
+
+    let prepared = prepare_derived_body(json!({"type":"doc","content":[]})).unwrap();
+    let skipped = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(skipped, ProjectDerivedBodyResult::SkippedSeed);
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let content: (Value,) =
+        sqlx::query_as("SELECT content_json FROM fvoci.documents WHERE id = $1")
+            .bind(fixture.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(content.0, empty_document_json());
+    admin.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_denies_archived_and_trashed_documents() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &fixture.session.pool,
+        append_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"one",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let prepared = prepare_derived_body(derived_doc_json("blocked")).unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let baseline: (Value, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT content_json, updated_at FROM fvoci.documents WHERE id = $1")
+            .bind(fixture.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+
+    sqlx::query(
+        "UPDATE fvoci.documents SET status = 'archived' WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(fixture.session.workspace_id)
+    .bind(fixture.document_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let archived = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(archived, Err(CollabDbError::Forbidden));
+
+    sqlx::query(
+        "UPDATE fvoci.documents SET status = 'draft', deleted_at = now() WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(fixture.session.workspace_id)
+    .bind(fixture.document_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let trashed = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(trashed, Err(CollabDbError::NotFound));
+
+    let events = event_count(&admin, fixture.document_id, "document.updated").await;
+    assert_eq!(events, 0);
+    let after: (Value, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT content_json, updated_at FROM fvoci.documents WHERE id = $1")
+            .bind(fixture.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(after, baseline);
+    admin.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_event_failure_rolls_back_content_write() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &fixture.session.pool,
+        append_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"durability",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    install_insert_fail_trigger(&admin, "events", "test_derived_event_fail").await;
+
+    let prepared = prepare_derived_body(derived_doc_json("rollback")).unwrap();
+    let failed = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await;
+    assert!(failed.is_err());
+
+    let content: (Value,) =
+        sqlx::query_as("SELECT content_json FROM fvoci.documents WHERE id = $1")
+            .bind(fixture.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(content.0, empty_document_json());
+
+    let tail_seq: (i64,) =
+        sqlx::query_as("SELECT tail_seq FROM fvoci.document_states WHERE document_id = $1")
+            .bind(fixture.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(tail_seq.0, 1);
+
+    sqlx::query("DROP TRIGGER fvoci_test_derived_event_fail ON fvoci.events")
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let retry = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(retry, ProjectDerivedBodyResult::Updated);
+
+    admin.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_app_role_rls_and_system_channel_event() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let other = setup_owner_session(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &fixture.session.pool,
+        append_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"tenant-a",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let prepared = prepare_derived_body(derived_doc_json("tenant scoped")).unwrap();
+    let updated = project_derived_body(
+        &fixture.session.pool,
+        project_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(updated, ProjectDerivedBodyResult::Updated);
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let event: (Option<Uuid>, String) = sqlx::query_as(
+        r#"
+        SELECT actor_user_id, channel
+        FROM fvoci.events
+        WHERE target_id = $1 AND verb = 'document.updated'
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(fixture.document_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(event.0.is_none());
+    assert_eq!(event.1, "system");
+
+    let prepared_cross = prepare_derived_body(derived_doc_json("cross tenant")).unwrap();
+    let denied = project_derived_body(
+        &other.pool,
+        ProjectDerivedBodyInput::new(
+            other.workspace_id,
+            other.user_id,
+            other.session_id,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            prepared_cross,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(denied, Err(CollabDbError::NotFound));
+
+    let version: (i32,) = sqlx::query_as("SELECT version FROM fvoci.documents WHERE id = $1")
+        .bind(fixture.document_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(version.0, 1);
+
+    admin.close().await;
+    other.pool.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_acl_denies_guest_and_revoked_session() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let member =
+        create_member_session(&harness, fixture.session.workspace_id, "derive@example.com").await;
+    let claim = claim_writer_and_load(
+        &member.pool,
+        member.workspace_id,
+        member.user_id,
+        member.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &member.pool,
+        append_input(
+            &member,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"member",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let prepared = prepare_derived_body(derived_doc_json("member write")).unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.memberships SET role = 'guest' WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(member.workspace_id)
+    .bind(member.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let guest_denied = project_derived_body(
+        &member.pool,
+        project_input(
+            &member,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(guest_denied, Err(CollabDbError::Forbidden));
+
+    sqlx::query(
+        "UPDATE fvoci.memberships SET role = 'member' WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(member.workspace_id)
+    .bind(member.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let _ = revoke_session(&member.pool, &member.token_hash, None).await;
+    let revoked = project_derived_body(
+        &member.pool,
+        project_input(
+            &member,
+            fixture.document_id,
+            claim.writer_generation,
+            1,
+            &prepared,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(revoked, Err(CollabDbError::Forbidden));
+
+    admin.close().await;
+    member.pool.close().await;
+    fixture.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_denies_workspace_spoof_from_non_member() {
+    let harness = TestDb::bootstrap().await;
+    let victim = setup_wiki_doc(&harness).await;
+    let attacker = setup_owner_session(&harness).await;
+    let claim = claim_writer_and_load(
+        &victim.session.pool,
+        victim.session.workspace_id,
+        victim.session.user_id,
+        victim.session.session_id,
+        victim.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &victim.session.pool,
+        append_input(
+            &victim.session,
+            victim.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"victim",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let baseline: (Value, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT content_json, updated_at FROM fvoci.documents WHERE id = $1")
+            .bind(victim.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+
+    let prepared = prepare_derived_body(derived_doc_json("spoofed")).unwrap();
+    let denied = project_derived_body(
+        &attacker.pool,
+        ProjectDerivedBodyInput::new(
+            victim.session.workspace_id,
+            attacker.user_id,
+            attacker.session_id,
+            victim.document_id,
+            claim.writer_generation,
+            1,
+            prepared,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(denied, Err(CollabDbError::Forbidden));
+
+    let after: (Value, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT content_json, updated_at FROM fvoci.documents WHERE id = $1")
+            .bind(victim.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(after, baseline);
+    let events = event_count(&admin, victim.document_id, "document.updated").await;
+    assert_eq!(events, 0);
+
+    admin.close().await;
+    attacker.pool.close().await;
+    victim.session.pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn derived_body_stale_projection_race_denies_after_newer_append() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_wiki_doc(&harness).await;
+    let claim = claim_writer_and_load(
+        &fixture.session.pool,
+        fixture.session.workspace_id,
+        fixture.session.user_id,
+        fixture.session.session_id,
+        fixture.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    append_collab_update(
+        &fixture.session.pool,
+        append_input(
+            &fixture.session,
+            fixture.document_id,
+            claim.writer_generation,
+            0,
+            Uuid::now_v7(),
+            b"first",
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let mut doc_barrier = admin.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *doc_barrier)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+        .bind(fixture.session.workspace_id)
+        .bind(fixture.document_id)
+        .execute(&mut *doc_barrier)
+        .await
+        .unwrap();
+
+    let prepared = prepare_derived_body(derived_doc_json("stale race")).unwrap();
+    let append = tokio::spawn({
+        let pool = fixture.session.pool.clone();
+        let workspace_id = fixture.session.workspace_id;
+        let actor_user_id = fixture.session.user_id;
+        let session_id = fixture.session.session_id;
+        let document_id = fixture.document_id;
+        let writer_generation = claim.writer_generation;
+        async move {
+            append_collab_update(
+                &pool,
+                AppendCollabInput {
+                    workspace_id,
+                    actor_user_id,
+                    session_id,
+                    document_id,
+                    writer_generation,
+                    expected_tail_seq: 1,
+                    op_id: Uuid::now_v7(),
+                    payload: b"second",
+                    client_ip: None,
+                },
+            )
+            .await
+        }
+    });
+    let append_pid = wait_for_documents_for_update(&admin, blocker_pid).await;
+
+    let project = tokio::spawn({
+        let pool = fixture.session.pool.clone();
+        let workspace_id = fixture.session.workspace_id;
+        let actor_user_id = fixture.session.user_id;
+        let session_id = fixture.session.session_id;
+        let document_id = fixture.document_id;
+        let writer_generation = claim.writer_generation;
+        let prepared = prepared.clone();
+        async move {
+            project_derived_body(
+                &pool,
+                ProjectDerivedBodyInput::new(
+                    workspace_id,
+                    actor_user_id,
+                    session_id,
+                    document_id,
+                    writer_generation,
+                    1,
+                    prepared,
+                ),
+            )
+            .await
+        }
+    });
+    wait_for_lock_blocked_by_any(
+        &admin,
+        &[blocker_pid, append_pid],
+        "%fvoci.documents%",
+        "%FOR UPDATE%",
+    )
+    .await;
+    doc_barrier.commit().await.unwrap();
+
+    let append_result = tokio::time::timeout(Duration::from_secs(10), append)
+        .await
+        .expect("append did not finish after documents release")
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(append_result, AppendCollabResult::Committed { seq: 2 });
+
+    let project_result = tokio::time::timeout(Duration::from_secs(10), project)
+        .await
+        .expect("project did not finish after documents release")
+        .unwrap()
+        .unwrap();
+    assert_eq!(project_result, Err(CollabDbError::StaleCutoff));
+
+    admin.close().await;
     fixture.session.pool.close().await;
     harness.cleanup().await;
 }

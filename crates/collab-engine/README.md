@@ -25,10 +25,43 @@ Length-prefixed frames: `u32 LE` + JSON. One in-flight op per `EngineSession`.
 
 Requests: `ping`, `load` (committed snapshot + tail), `apply` (candidate),
 `sync` (state vector → `encode_state_as_update_v1` including pending/delete
-set), `snapshot` (completeV1 including pending/delete set), `inspect`.
-`encoding != 1` → `unsupported/encoding_v2`.
+set), `snapshot` (completeV1 including pending/delete set), `inspect`,
+`project` (read-only Tiptap JSON of the `prosemirror` fragment; optional
+`content_json` on `ok`; never overloads `update_b64`). `project` counts toward
+`max_ops` and does not set `mutated`. JSON is capped at 1 MiB
+(`DOCUMENT_MAX_BODY_BYTES`); depth 128 / 100k nodes / per-string 1 MiB.
+Nested Any arrays/maps (including numeric/bool leaves) count toward the node
+and depth caps before allocation. Output is size-checked with a counting
+serializer, not a full `to_vec` then reject. Source `withoutYChange` keeps
+empty `marks: []` and does not rewrite surviving marks (nested `ychange` in
+retained mark attrs stays).
+Yjs reserves the text attribute name `ychange`; fixtures `ychange_only.v1`
+and `ychange_retained_nested.v1` use hashed `ychange--xxxxxxxx` plus a
+surviving mark whose attrs contain `ychange`. Unsupported CRDT shape →
+`malformed` (including a non-XML child such as `Y.Map` or an Any embed at
+fragment or element; yrs `XmlNodes` would otherwise truncate). Over-limit →
+`resource_limit`. `encoding != 1` → `unsupported/encoding_v2`.
 
-Response `EngineReport.outcome`: `ok` (`applied`, `pending`, **`durable: false`**),
+Mark arrays are **not** exact raw JS JSON. y-tiptap emits marks in Y.Text
+format-item order; that order is not exposed by yrs 0.28, so Project emits
+marks sorted by raw attribute name. ProseMirror `Node.fromJSON` re-ranks
+marks on load; typed mark contents and schema-ranked editor state match the
+JS oracle. Fixtures keep `js_raw_prosemirror_json` separately and pin
+`project_prosemirror_json` (raw-key sort). `serde_json` is built without
+`preserve_order`, so object keys are sorted (JS keeps insertion order).
+Source `yDocToTiptapJson` falls back to `{type:"doc",content:[]}` when
+`!isTiptapDoc(json)`; y-tiptap always returns `type:"doc"` with an array, so
+that fallback is unreachable and Rust has no equivalent.
+
+Intentional non-Tiptap-client divergences (not byte-equal with JS):
+`Any::Number` may print `1e21` vs JS `1e+21`; Rust returns `malformed` for
+non-finite numbers (JS `null`) and prints i64 (JS bigint64 can throw).
+`Any::Undefined` inside `Any::Array` is `malformed` (JS `JSON.stringify`
+yields `null`). `Any::Buffer` attrs are `malformed` (JS index-keyed object).
+Element attr `undefined` omits the key (JS may emit `"attrs":{}`).
+
+Response `EngineReport.outcome`: `ok` (`applied`, `pending`, **`durable: false`**,
+optional `content_json`),
 `malformed`, `unsupported`, `resource_limit`, `worker_failure`.
 `applied` is this child's Doc only. Parent FIFO/DB; broadcast after durable
 commit. Denied/uncertain → `kill_and_reap` and reload committed bytes. Never

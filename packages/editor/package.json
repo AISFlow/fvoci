@@ -1,0 +1,69 @@
+{
+  "name": "@fvoci/editor",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./json": "./src/json.ts",
+    "./react": "./src/react/schema.tsx",
+    "./fvoci-editor": "./src/react/fvoci-editor.tsx",
+    "./block-menu": "./src/react/block-menu.tsx",
+    "./format-toolbar": "./src/react/format-toolbar.tsx",
+    "./link-popover": "./src/react/tiptap-ui/link-popover.tsx",
+    "./list-dropdown-menu": "./src/react/tiptap-ui/list-dropdown-menu.tsx",
+    "./safe-html": "./src/react/safe-html.tsx",
+    "./extract": "./src/extract.ts",
+    "./collab": "./src/collab/constants.ts",
+    "./collab-tiptap": "./src/collab-tiptap.ts",
+    "./tiptap-schema": "./src/tiptap-schema.ts",
+    "./styles.css": "./src/react/editor.css"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --import ./test/register-ts.mjs --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@floating-ui/dom": "1.8.0",
+    "@fvoci/i18n": "file:../i18n",
+    "@hocuspocus/provider": "4.6.0",
+    "@radix-ui/react-popover": "1.1.23",
+    "@tiptap/core": "3.31.3",
+    "@tiptap/extension-code-block-lowlight": "3.31.3",
+    "@tiptap/extension-collaboration": "3.31.3",
+    "@tiptap/extension-collaboration-caret": "3.31.3",
+    "@tiptap/extension-details": "3.31.3",
+    "@tiptap/extension-drag-handle": "3.31.3",
+    "@tiptap/extension-drag-handle-react": "3.31.3",
+    "@tiptap/extension-emoji": "3.31.3",
+    "@tiptap/extension-file-handler": "3.31.3",
+    "@tiptap/extension-highlight": "3.31.3",
+    "@tiptap/extension-list": "3.31.3",
+    "@tiptap/extension-node-range": "3.31.3",
+    "@tiptap/extension-table": "3.31.3",
+    "@tiptap/extension-table-of-contents": "3.31.3",
+    "@tiptap/extension-text-align": "3.31.3",
+    "@tiptap/extension-text-style": "3.31.3",
+    "@tiptap/extension-unique-id": "3.31.3",
+    "@tiptap/extensions": "3.31.3",
+    "@tiptap/pm": "3.31.3",
+    "@tiptap/react": "3.31.3",
+    "@tiptap/starter-kit": "3.31.3",
+    "@tiptap/suggestion": "3.31.3",
+    "@tiptap/y-tiptap": "3.0.9",
+    "highlight.js": "11.12.0",
+    "katex": "0.18.7",
+    "lowlight": "3.3.0",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.32",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "5.9.2"
+  },
+  "peerDependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}

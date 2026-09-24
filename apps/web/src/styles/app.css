@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "@fvoci/editor/styles.css";
 
 @theme inline {
   --color-background: var(--background);
@@ -39,6 +40,10 @@
   --input: #d7e0e6;
   --ring: #087579;
   --accent: #eef4f6;
+  --popover: #ffffff;
+  --popover-foreground: var(--foreground);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: var(--radius);
   --text-title-size: 1.5rem;
   --text-title-leading: 1.25;
   --text-ui-size: 0.9375rem;
@@ -47,6 +52,40 @@
   --text-dense-leading: 1.4;
   --text-caption-size: 0.75rem;
   --text-caption-leading: 1.35;
+}
+
+/* Presence ink matches packages/ui/presence.ts / apps/web/src/lib/presence.ts. */
+.afn-label-red {
+  --afn-label-ink: #b91c1c;
+  color: var(--afn-label-ink);
+}
+.afn-label-orange {
+  --afn-label-ink: #c2410c;
+  color: var(--afn-label-ink);
+}
+.afn-label-amber {
+  --afn-label-ink: #b45309;
+  color: var(--afn-label-ink);
+}
+.afn-label-green {
+  --afn-label-ink: #15803d;
+  color: var(--afn-label-ink);
+}
+.afn-label-teal {
+  --afn-label-ink: #0f766e;
+  color: var(--afn-label-ink);
+}
+.afn-label-blue {
+  --afn-label-ink: #1d4ed8;
+  color: var(--afn-label-ink);
+}
+.afn-label-violet {
+  --afn-label-ink: #6d28d9;
+  color: var(--afn-label-ink);
+}
+.afn-label-pink {
+  --afn-label-ink: #be185d;
+  color: var(--afn-label-ink);
 }
 
 * {

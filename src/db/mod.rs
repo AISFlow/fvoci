@@ -1,4 +1,5 @@
 pub mod collab;
+pub mod collab_delivery;
 pub mod context;
 pub mod documents;
 pub mod identity;

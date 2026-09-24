@@ -18,7 +18,14 @@
     "noUncheckedSideEffectImports": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "react": ["./node_modules/@types/react/index.d.ts"],
+      "react-dom": ["./node_modules/@types/react-dom/index.d.ts"],
+      "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime.d.ts"],
+      "react/jsx-dev-runtime": ["./node_modules/@types/react/jsx-dev-runtime.d.ts"],
+      "yjs": ["./node_modules/yjs"],
+      "@hocuspocus/provider": ["./node_modules/@hocuspocus/provider"],
+      "@hocuspocus/provider-react": ["./node_modules/@hocuspocus/provider-react"]
     }
   },
   "include": ["src"],

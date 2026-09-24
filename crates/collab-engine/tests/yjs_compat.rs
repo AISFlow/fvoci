@@ -826,6 +826,367 @@ fn xml_fragment_update(client_id: u64, target: usize, token: &str, payload_len: 
     encoded
 }
 
+fn project_of(engine: &mut CollabEngine) -> Value {
+    match engine.handle(&Request::Project { encoding: 1 }) {
+        EngineStatus::Ok {
+            applied: false,
+            content_json: Some(json),
+            update_b64: None,
+            ..
+        } => json,
+        other => panic!("project: {other:?}"),
+    }
+}
+
+#[test]
+fn project_fresh_empty_doc() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    let json = project_of(&mut engine);
+    assert_eq!(json, expectations()["empty_doc"]["prosemirror_json"]);
+}
+
+#[test]
+fn project_structured_matches_pinned_js() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("structured.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let json = project_of(&mut engine);
+    assert_eq!(json, expectations()["structured"]["prosemirror_json"]);
+}
+
+#[test]
+fn project_korean_emoji_after_mid_and_delete() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("korean_emoji_base.v1")),
+        tail_b64: vec![
+            load_bytes("korean_emoji_mid_edit.v1"),
+            load_bytes("korean_emoji_delete.v1"),
+        ],
+        encoding: 1,
+    }));
+    let json = project_of(&mut engine);
+    assert_eq!(json, expectations()["korean_emoji"]["prosemirror_json"]);
+}
+
+#[test]
+fn project_delete_only_changes_json_not_state_vector() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("delete_only_base.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let before = project_of(&mut engine);
+    let sv_before = match engine.handle(&Request::Inspect) {
+        EngineStatus::Ok {
+            state_vector_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("sv"),
+        other => panic!("{other:?}"),
+    };
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: load_bytes("delete_only.v1"),
+        encoding: 1,
+    }));
+    let after = project_of(&mut engine);
+    let sv_after = match engine.handle(&Request::Inspect) {
+        EngineStatus::Ok {
+            state_vector_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("sv"),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(sv_before, sv_after);
+    assert_eq!(sv_before, load_bytes("sv_before_delete.bin"));
+    assert_eq!(
+        before,
+        expectations()["delete_only"]["prosemirror_json_before"]
+    );
+    assert_eq!(
+        after,
+        expectations()["delete_only"]["prosemirror_json_after"]
+    );
+    assert_ne!(before, after);
+}
+
+#[test]
+fn project_pending_then_dependency() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: load_bytes("pending_u2.v1"),
+        encoding: 1,
+    }));
+    match engine.handle(&Request::Project { encoding: 1 }) {
+        EngineStatus::Ok {
+            pending: true,
+            content_json: Some(json),
+            ..
+        } => {
+            assert_eq!(json, expectations()["pending"]["prosemirror_json_u2_only"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: load_bytes("pending_u1.v1"),
+        encoding: 1,
+    }));
+    match engine.handle(&Request::Project { encoding: 1 }) {
+        EngineStatus::Ok {
+            pending: false,
+            content_json: Some(json),
+            ..
+        } => {
+            assert_eq!(json, expectations()["pending"]["prosemirror_json_both"]);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn project_followup_and_typed_marks_ychange_empty_para() {
+    let exp = expectations();
+    let mut structured = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&structured.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("structured.v1")),
+        tail_b64: vec![load_bytes("followup_edit.v1")],
+        encoding: 1,
+    }));
+    assert_eq!(
+        project_of(&mut structured),
+        exp["followup"]["prosemirror_json"]
+    );
+
+    for (file, path) in [
+        ("empty_paragraph.v1", "/empty_paragraph/prosemirror_json"),
+        ("typed_attrs.v1", "/typed_attrs/prosemirror_json"),
+        ("marks_link_bold.v1", "/marks_link_bold/prosemirror_json"),
+        ("ychange_strip.v1", "/ychange_strip/prosemirror_json"),
+        ("ychange_only.v1", "/ychange_only/prosemirror_json"),
+        (
+            "ychange_retained_nested.v1",
+            "/ychange_retained_nested/prosemirror_json",
+        ),
+    ] {
+        let mut engine = CollabEngine::new(Limits::for_tests());
+        assert_ok_applied(&engine.handle(&Request::Load {
+            snapshot_b64: Some(load_bytes(file)),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        }));
+        let got = project_of(&mut engine);
+        let expected = exp.pointer(path).unwrap_or_else(|| panic!("{path}"));
+        assert_eq!(&got, expected, "{file}");
+    }
+}
+
+#[test]
+fn project_does_not_block_later_load_and_counts_ops() {
+    let mut limits = Limits::for_tests();
+    limits.max_ops = 3;
+    let mut engine = CollabEngine::new(limits);
+    let _ = project_of(&mut engine);
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("utf8_korean.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let _ = project_of(&mut engine);
+    let refused = engine.handle(&Request::Project { encoding: 1 });
+    assert!(
+        matches!(
+            refused,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Ops,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn project_output_and_depth_caps() {
+    let mut tiny = Limits::for_tests();
+    tiny.max_project_json_bytes = 8;
+    let mut engine = CollabEngine::new(tiny);
+    let over = engine.handle(&Request::Project { encoding: 1 });
+    assert!(
+        matches!(
+            over,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Output,
+                ..
+            }
+        ),
+        "{over:?}"
+    );
+
+    let nested = nested_project_update(5);
+    let mut shallow = Limits::for_tests();
+    shallow.max_project_depth = 2;
+    let mut engine = CollabEngine::new(shallow);
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(nested),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let deep = engine.handle(&Request::Project { encoding: 1 });
+    assert!(
+        matches!(
+            deep,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Stack,
+                ..
+            }
+        ),
+        "{deep:?}"
+    );
+}
+
+#[test]
+fn project_overlapping_marks_are_deterministic_and_preserve_js_semantics() {
+    let exp = expectations();
+    for (file, key) in [
+        ("three_marks.v1", "three_marks"),
+        ("overlapping_marks.v1", "overlapping_marks"),
+        ("link_then_bold.v1", "link_then_bold"),
+    ] {
+        let rec = &exp[key];
+        let mut engine = CollabEngine::new(Limits::for_tests());
+        assert_ok_applied(&engine.handle(&Request::Load {
+            snapshot_b64: Some(load_bytes(file)),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        }));
+        let first = project_of(&mut engine);
+        let second = project_of(&mut engine);
+        assert_eq!(
+            first, second,
+            "{file} same-doc projection must be deterministic"
+        );
+        assert_eq!(
+            first, rec["project_prosemirror_json"],
+            "{file} project JSON is raw-key sorted, not claimed as exact JS JSON"
+        );
+        assert_eq!(
+            first_multi_mark_order(&first),
+            rec["project_mark_order"]
+                .as_array()
+                .expect("project_mark_order")
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            "{file} project mark order"
+        );
+        assert_eq!(
+            mark_contents(&first),
+            mark_contents(&rec["js_raw_prosemirror_json"]),
+            "{file} typed mark contents must match the JS oracle"
+        );
+        let rank: Vec<String> = rec["schema_mark_rank"]
+            .as_array()
+            .expect("schema_mark_rank")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let ranked_project = rank_marks(&first, &rank);
+        let ranked_js = rank_marks(&rec["js_raw_prosemirror_json"], &rank);
+        assert_eq!(
+            ranked_project, ranked_js,
+            "{file} ProseMirror schema re-ranking must preserve semantics"
+        );
+        assert!(
+            rec["schema_ranked_prosemirror_json"].is_object(),
+            "{file} generator must pin the actual schema-ranked JSON"
+        );
+        assert!(
+            rec["schema_ranking_preserves_semantics"]
+                .as_bool()
+                .expect("flag"),
+            "{file}"
+        );
+    }
+
+    let link = &exp["link_then_bold"];
+    assert_eq!(
+        link["js_raw_mark_order"],
+        serde_json::json!(["link", "bold"])
+    );
+    assert_eq!(
+        link["project_mark_order"],
+        serde_json::json!(["bold", "link"])
+    );
+    assert_ne!(
+        link["js_raw_prosemirror_json"], link["project_prosemirror_json"],
+        "must keep the JS oracle separate; do not normalize away the known order gap"
+    );
+}
+
+#[test]
+fn project_non_xml_child_is_malformed_and_leaves_bytes_unchanged() {
+    let exp = expectations();
+    for (file, where_) in [
+        ("map_child.v1", "fragment"),
+        ("embed_child.v1", "paragraph"),
+    ] {
+        assert_eq!(exp[file.trim_end_matches(".v1")]["expected"], "malformed");
+        assert_eq!(exp[file.trim_end_matches(".v1")]["js_throws"], true);
+        let mut engine = CollabEngine::new(Limits::for_tests());
+        assert_ok_applied(&engine.handle(&Request::Load {
+            snapshot_b64: Some(load_bytes(file)),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        }));
+        let before = snapshot_bytes(&mut engine);
+        match engine.handle(&Request::Project { encoding: 1 }) {
+            EngineStatus::Malformed { detail } => {
+                assert!(
+                    detail.contains(&format!("non-XML child in {where_}")),
+                    "{file}: {detail}"
+                );
+            }
+            other => panic!("{file} must be malformed, got {other:?}"),
+        }
+        let after = snapshot_bytes(&mut engine);
+        assert_eq!(before, after, "{file} project must not mutate CRDT bytes");
+        match engine.handle(&Request::Inspect) {
+            EngineStatus::Ok { .. } => {}
+            other => panic!("{file} engine must survive document error, got {other:?}"),
+        }
+        match engine.handle(&Request::Project { encoding: 1 }) {
+            EngineStatus::Malformed { .. } => {}
+            other => panic!("{file} second project must still be malformed, got {other:?}"),
+        }
+    }
+}
+
+fn nested_project_update(depth: usize) -> Vec<u8> {
+    use yrs::types::xml::XmlIn;
+    use yrs::{XmlElementPrelim, XmlFragment, XmlTextPrelim};
+    let doc = new_doc();
+    let xml = doc.get_or_insert_xml_fragment(collab_engine::FRAGMENT);
+    let mut node = XmlIn::from(XmlElementPrelim::new(
+        "paragraph",
+        [XmlIn::from(XmlTextPrelim::new("x"))],
+    ));
+    for _ in 1..depth {
+        node = XmlIn::from(XmlElementPrelim::new("paragraph", [node]));
+    }
+    {
+        let mut txn = doc.transact_mut();
+        let XmlIn::Element(el) = node else {
+            panic!("expected element");
+        };
+        xml.push_back(&mut txn, el);
+    }
+    let txn = doc.transact();
+    txn.encode_state_as_update_v1(&yrs::StateVector::default())
+}
+
 fn assert_fully_reaped(pid: u32) {
     let path = format!("/proc/{pid}");
     if !Path::new(&path).exists() {
@@ -836,4 +1197,96 @@ fn assert_fully_reaped(pid: u32) {
         panic!("pid {pid} is a zombie; kill+reap failed");
     }
     panic!("pid {pid} still exists after session ended:\n{status}");
+}
+
+fn snapshot_bytes(engine: &mut CollabEngine) -> Vec<u8> {
+    match engine.handle(&Request::Snapshot) {
+        EngineStatus::Ok {
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("snapshot"),
+        other => panic!("snapshot: {other:?}"),
+    }
+}
+
+fn first_multi_mark_order(json: &Value) -> Vec<String> {
+    let mut order = Vec::new();
+    walk_marked_text(json, &mut |node| {
+        if order.is_empty() {
+            if let Some(marks) = node.get("marks").and_then(Value::as_array) {
+                if marks.len() >= 2 {
+                    order = marks
+                        .iter()
+                        .map(|m| m["type"].as_str().unwrap_or("").to_string())
+                        .collect();
+                }
+            }
+        }
+    });
+    order
+}
+
+fn mark_contents(json: &Value) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    walk_marked_text(json, &mut |node| {
+        if let Some(marks) = node.get("marks").and_then(Value::as_array) {
+            for mark in marks {
+                let ty = mark["type"].as_str().unwrap_or("").to_string();
+                let attrs = mark
+                    .get("attrs")
+                    .cloned()
+                    .unwrap_or(Value::Object(Default::default()));
+                out.push((ty, attrs));
+            }
+        }
+    });
+    out.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
+    });
+    out
+}
+
+fn rank_marks(json: &Value, rank: &[String]) -> Value {
+    match json {
+        Value::Array(items) => Value::Array(items.iter().map(|v| rank_marks(v, rank)).collect()),
+        Value::Object(obj) => {
+            let mut out = serde_json::Map::new();
+            for (key, child) in obj {
+                if key == "marks" {
+                    if let Value::Array(marks) = child {
+                        let mut ranked = marks.clone();
+                        ranked.sort_by_key(|mark| {
+                            let ty = mark.get("type").and_then(Value::as_str).unwrap_or("");
+                            rank.iter().position(|r| r == ty).unwrap_or(usize::MAX)
+                        });
+                        out.insert(key.clone(), Value::Array(ranked));
+                        continue;
+                    }
+                }
+                out.insert(key.clone(), rank_marks(child, rank));
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn walk_marked_text(json: &Value, visit: &mut impl FnMut(&Value)) {
+    match json {
+        Value::Array(items) => {
+            for item in items {
+                walk_marked_text(item, visit);
+            }
+        }
+        Value::Object(obj) => {
+            if obj.contains_key("marks") {
+                visit(json);
+            }
+            if let Some(content) = obj.get("content") {
+                walk_marked_text(content, visit);
+            }
+        }
+        _ => {}
+    }
 }

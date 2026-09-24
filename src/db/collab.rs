@@ -39,12 +39,15 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::{
     empty_document_json, lock_membership_users, membership_role_for_update, recheck_session,
     wiki_can_edit, workspace_is_live,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+
+pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
 
 pub const COLLAB_INIT_LOCK_NAMESPACE: i32 = 1_907_004;
 /// Reserved for a future room-manager session lock held for the connection lifetime.
@@ -153,6 +156,7 @@ pub struct AppendCollabInput<'a> {
     pub session_id: Uuid,
     pub document_id: Uuid,
     pub writer_generation: i64,
+    pub expected_tail_seq: i64,
     pub op_id: Uuid,
     pub payload: &'a [u8],
     pub client_ip: Option<&'a str>,
@@ -197,6 +201,62 @@ pub struct VerifyCollabInput<'a> {
     pub expected_payload_len: i64,
     pub expected_payload_sha256: &'a [u8],
     pub expected_actor_user_id: Uuid,
+}
+
+pub struct ProjectDerivedBodyInput {
+    pub workspace_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub session_id: Uuid,
+    pub document_id: Uuid,
+    pub writer_generation: i64,
+    pub expected_tail_seq: i64,
+    prepared: PreparedDerivedBody,
+}
+
+impl ProjectDerivedBodyInput {
+    pub fn new(
+        workspace_id: Uuid,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        document_id: Uuid,
+        writer_generation: i64,
+        expected_tail_seq: i64,
+        prepared: PreparedDerivedBody,
+    ) -> Self {
+        Self {
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+            writer_generation,
+            expected_tail_seq,
+            prepared,
+        }
+    }
+
+    pub fn prepared(&self) -> &PreparedDerivedBody {
+        &self.prepared
+    }
+
+    pub fn into_parts(self) -> (Uuid, Uuid, Uuid, Uuid, i64, i64, PreparedDerivedBody) {
+        (
+            self.workspace_id,
+            self.actor_user_id,
+            self.session_id,
+            self.document_id,
+            self.writer_generation,
+            self.expected_tail_seq,
+            self.prepared,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectDerivedBodyResult {
+    Updated,
+    Unchanged,
+    /// Empty Yjs seed at `tail_seq == 0` must not overwrite the paragraph seed JSON.
+    SkippedSeed,
 }
 
 type StateRow = (Vec<u8>, i16, i64, i64, i64, DateTime<Utc>);
@@ -290,6 +350,25 @@ async fn ensure_collab_state_row(
     .execute(&mut **tx)
     .await?;
     Ok(Ok(()))
+}
+
+async fn fetch_state_fence_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<Option<(i64, i64)>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT writer_generation, tail_seq
+        FROM fvoci.document_states
+        WHERE workspace_id = $1 AND document_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await
 }
 
 async fn fetch_state_for_update(
@@ -435,6 +514,31 @@ async fn authorize_wiki_collab_read(
         return Ok(Err(CollabDbError::NotFound));
     }
     Ok(Ok(()))
+}
+
+async fn append_system_document_updated_event(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let payload = json!({
+        "documentId": document_id.to_string(),
+        "collab": true,
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (
+            id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel
+        ) VALUES ($1, $2, NULL, 'document.updated', 'document', $3, $4, 'system')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(payload)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn record_collab_event_and_audit(
@@ -636,6 +740,7 @@ pub async fn append_collab_update(
         session_id,
         document_id,
         writer_generation,
+        expected_tail_seq,
         op_id,
         payload,
         client_ip,
@@ -702,6 +807,10 @@ pub async fn append_collab_update(
         }
         tx.rollback().await?;
         return Ok(Err(CollabDbError::OpIdConflict));
+    }
+    if state.4 != expected_tail_seq {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleCutoff));
     }
 
     match tail_budget_allows_append(
@@ -1064,6 +1173,205 @@ pub async fn compact_collab_snapshot(
     let load = state_row_to_load(refreshed, tail);
     tx.commit().await?;
     Ok(Ok(load))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollabAdmission {
+    pub read_only: bool,
+    pub archived: bool,
+}
+
+/// Resolve whether a live session may join a wiki document collab room.
+pub async fn resolve_collab_admission(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    if !wiki_can_edit(role) {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let doc = lock_wiki_document_for_update(&mut tx, workspace_id, document_id).await?;
+    let Some((project_id, status, deleted_at)) = doc else {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    };
+    if deleted_at.is_some() || project_id.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let archived = status == "archived";
+    tx.commit().await?;
+    Ok(Ok(CollabAdmission {
+        read_only: archived,
+        archived,
+    }))
+}
+
+/// Read-only collab load for sync without claiming writer generation.
+pub async fn load_collab_readonly(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    match authorize_wiki_collab_read(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await?
+    {
+        Ok(()) => {}
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    }
+    let content: (Value,) = sqlx::query_as(
+        "SELECT content_json FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    match ensure_collab_state_row(&mut tx, workspace_id, document_id, &content.0).await? {
+        Ok(()) => {}
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    }
+    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let Some(state) = state else {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    };
+    if state.1 != COLLAB_STATE_ENCODING_V1 {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let tail = match load_tail_updates(
+        &mut tx,
+        workspace_id,
+        document_id,
+        state.3,
+        state.0.len() as i64,
+    )
+    .await?
+    {
+        Ok(tail) => tail,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+    let load = state_row_to_load(state, tail);
+    tx.commit().await?;
+    Ok(Ok(load))
+}
+
+pub async fn project_derived_body(
+    pool: &PgPool,
+    input: ProjectDerivedBodyInput,
+) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+    let ProjectDerivedBodyInput {
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        writer_generation,
+        expected_tail_seq,
+        prepared,
+    } = input;
+    let content_json = prepared.content_json();
+    let text = prepared.text();
+    let chosung = prepared.chosung();
+
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    match authorize_wiki_collab_write(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await?
+    {
+        Ok(_) => {}
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+
+    let state = fetch_state_fence_for_update(&mut tx, workspace_id, document_id).await?;
+    let Some((current_generation, current_tail_seq)) = state else {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    };
+    if current_tail_seq == 0 {
+        tx.rollback().await?;
+        return Ok(Ok(ProjectDerivedBodyResult::SkippedSeed));
+    }
+    if current_generation != writer_generation {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    if current_tail_seq != expected_tail_seq {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::StaleCutoff));
+    }
+
+    let updated: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        UPDATE fvoci.documents
+        SET content_json = $3,
+            text = $4,
+            chosung = $5,
+            updated_at = now()
+        WHERE workspace_id = $1
+          AND id = $2
+          AND content_json IS DISTINCT FROM $3::jsonb
+        RETURNING id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(content_json)
+    .bind(text)
+    .bind(chosung)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if updated.is_none() {
+        tx.commit().await?;
+        return Ok(Ok(ProjectDerivedBodyResult::Unchanged));
+    }
+
+    append_system_document_updated_event(&mut tx, workspace_id, document_id).await?;
+    tx.commit().await?;
+    Ok(Ok(ProjectDerivedBodyResult::Updated))
 }
 
 #[cfg(test)]

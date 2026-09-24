@@ -12,6 +12,7 @@ import { getSchema, Node } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table/kit";
 import { UniqueID } from "@tiptap/extension-unique-id";
+import { Node as PMNode } from "@tiptap/pm/model";
 import {
   prosemirrorJSONToYXmlFragment,
   yDocToProsemirrorJSON,
@@ -311,6 +312,355 @@ function b64(u8) {
   return Buffer.from(u8).toString("base64");
 }
 
+/** Source packages/editor/src/collab-tiptap.ts withoutYChange (3937952). */
+function withoutYChange(value) {
+  if (Array.isArray(value)) return value.map(withoutYChange);
+  if (typeof value !== "object" || value === null) return value;
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "ychange") continue;
+    if (key === "marks" && Array.isArray(child)) {
+      out.marks = child.filter(
+        (mark) => !(typeof mark === "object" && mark !== null && mark.type === "ychange"),
+      );
+      continue;
+    }
+    out[key] = withoutYChange(child);
+  }
+  return out;
+}
+
+function projectJson(doc) {
+  return withoutYChange(yDocToProsemirrorJSON(doc, FRAGMENT));
+}
+
+/** Walk text nodes that carry a `marks` array. */
+function forEachMarkedText(json, visit) {
+  if (Array.isArray(json)) {
+    json.forEach((item) => forEachMarkedText(item, visit));
+    return;
+  }
+  if (!json || typeof json !== "object") return;
+  if (Array.isArray(json.marks)) visit(json);
+  if (Array.isArray(json.content)) forEachMarkedText(json.content, visit);
+}
+
+/**
+ * Project emission: sort marks by raw attribute name. For these fixtures the
+ * y-tiptap mark `type` equals the raw Y.Text attribute key (no hashed suffix).
+ * Do not treat this as the JS oracle.
+ */
+function sortMarksByRawKey(json) {
+  const clone = JSON.parse(JSON.stringify(json));
+  forEachMarkedText(clone, (node) => {
+    node.marks = [...node.marks].sort((a, b) => {
+      const left = String(a?.type ?? "");
+      const right = String(b?.type ?? "");
+      if (left < right) return -1;
+      if (left > right) return 1;
+      return 0;
+    });
+  });
+  return clone;
+}
+
+function firstMultiMarkOrder(json) {
+  let order = null;
+  forEachMarkedText(json, (node) => {
+    if (order === null && node.marks.length >= 2) {
+      order = node.marks.map((mark) => mark.type);
+    }
+  });
+  return order;
+}
+
+function markContents(json) {
+  const out = [];
+  forEachMarkedText(json, (node) => {
+    for (const mark of node.marks) {
+      out.push({ type: mark.type, attrs: mark.attrs ?? {} });
+    }
+  });
+  out.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return out;
+}
+
+function schemaRankMarks(json) {
+  return PMNode.fromJSON(schema, json).toJSON();
+}
+
+function multiMarkRecord(jsRaw) {
+  const projectJsonSorted = sortMarksByRawKey(jsRaw);
+  const rankedJs = schemaRankMarks(jsRaw);
+  const rankedProject = schemaRankMarks(projectJsonSorted);
+  if (JSON.stringify(rankedJs) !== JSON.stringify(rankedProject)) {
+    throw new Error("ProseMirror schema ranking diverged between JS raw and raw-key sort");
+  }
+  if (JSON.stringify(markContents(jsRaw)) !== JSON.stringify(markContents(projectJsonSorted))) {
+    throw new Error("typed mark contents diverged between JS raw and raw-key sort");
+  }
+  return {
+    js_raw_prosemirror_json: jsRaw,
+    js_raw_mark_order: firstMultiMarkOrder(jsRaw),
+    project_prosemirror_json: projectJsonSorted,
+    project_mark_order: firstMultiMarkOrder(projectJsonSorted),
+    schema_ranked_prosemirror_json: rankedJs,
+    schema_mark_rank: Object.keys(schema.marks),
+    schema_ranking_preserves_semantics: true,
+  };
+}
+
+const emptyPm = projectJson(new Y.Doc({ gc: false }));
+
+const emptyPara = docWithClient(71);
+{
+  const frag = emptyPara.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-empty-001");
+  frag.insert(0, [p]);
+}
+writeBin("empty_paragraph.v1", Y.encodeStateAsUpdate(emptyPara));
+const emptyParaPm = projectJson(emptyPara);
+
+const typed = docWithClient(72);
+{
+  const frag = typed.getXmlFragment(FRAGMENT);
+  const heading = new Y.XmlElement("heading");
+  heading.setAttribute("id", "h-typed-001");
+  heading.setAttribute("level", 2);
+  heading.setAttribute("checked", false);
+  heading.setAttribute("highlightLines", []);
+  heading.setAttribute("nullable", null);
+  heading.setAttribute("flag", true);
+  const t = new Y.XmlText();
+  t.insert(0, "typed한글");
+  heading.insert(0, [t]);
+  frag.insert(0, [heading]);
+}
+writeBin("typed_attrs.v1", Y.encodeStateAsUpdate(typed));
+const typedPm = projectJson(typed);
+
+const marksDoc = seedJson(
+  {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "p-marks-001" },
+        content: [
+          { type: "text", marks: [{ type: "bold" }], text: "굵게" },
+          { type: "text", text: " " },
+          {
+            type: "text",
+            marks: [
+              {
+                type: "link",
+                attrs: { href: "https://example.invalid/b", target: "_blank" },
+              },
+            ],
+            text: "링크",
+          },
+        ],
+      },
+    ],
+  },
+  73,
+);
+writeBin("marks_link_bold.v1", Y.encodeStateAsUpdate(marksDoc));
+const marksPm = projectJson(marksDoc);
+
+const ychangeDoc = seedJson(
+  {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { id: "p-ychange-001" },
+        content: [{ type: "text", text: "원문한글" }],
+      },
+    ],
+  },
+  74,
+);
+{
+  const para = ychangeDoc.getXmlFragment(FRAGMENT).get(0);
+  para.setAttribute("ychange", { type: "added" });
+  const xmlText = para.get(0);
+  xmlText.format(0, 2, { ychange: { type: "added" } });
+}
+writeBin("ychange_strip.v1", Y.encodeStateAsUpdate(ychangeDoc));
+const ychangePmRaw = yDocToProsemirrorJSON(ychangeDoc, FRAGMENT);
+const ychangePm = withoutYChange(ychangePmRaw);
+
+/** Y.Text reserves the key `ychange`; y-tiptap emits type "ychange" via hashedMarkNameRegex. */
+const ychangeOnly = docWithClient(80);
+{
+  const frag = ychangeOnly.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-yc-only-001");
+  const t = new Y.XmlText();
+  t.insert(0, "원문", { "ychange--abcd1234": { type: "added" } });
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+}
+writeBin("ychange_only.v1", Y.encodeStateAsUpdate(ychangeOnly));
+const ychangeOnlyRaw = yDocToProsemirrorJSON(ychangeOnly, FRAGMENT);
+const ychangeOnlyPm = withoutYChange(ychangeOnlyRaw);
+
+const ychangeNested = docWithClient(81);
+{
+  const frag = ychangeNested.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-yc-nested-001");
+  const t = new Y.XmlText();
+  t.insert(0, "한글", {
+    link: { href: "https://x.invalid", ychange: { type: "nested" } },
+  });
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+}
+writeBin("ychange_retained_nested.v1", Y.encodeStateAsUpdate(ychangeNested));
+const ychangeNestedPm = projectJson(ychangeNested);
+
+const threeMarks = docWithClient(90);
+{
+  const frag = threeMarks.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-3marks");
+  const t = new Y.XmlText();
+  t.insert(0, "세마크", { bold: {}, italic: {}, link: { href: "https://x.invalid" } });
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+}
+writeBin("three_marks.v1", Y.encodeStateAsUpdate(threeMarks));
+const threeMarksPm = projectJson(threeMarks);
+
+const overlappingMarks = docWithClient(91);
+{
+  const frag = overlappingMarks.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-overlap");
+  const t = new Y.XmlText();
+  t.insert(0, "토글");
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+  t.format(0, 2, { link: { href: "https://y.invalid" } });
+  t.format(0, 2, { bold: {} });
+}
+writeBin("overlapping_marks.v1", Y.encodeStateAsUpdate(overlappingMarks));
+const overlappingMarksPm = projectJson(overlappingMarks);
+
+const linkThenBold = docWithClient(94);
+{
+  const frag = linkThenBold.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-lb");
+  const t = new Y.XmlText();
+  t.insert(0, "역순", { link: { href: "https://z.invalid" }, bold: {} });
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+}
+writeBin("link_then_bold.v1", Y.encodeStateAsUpdate(linkThenBold));
+const linkThenBoldPm = projectJson(linkThenBold);
+
+const threeMarksRecord = multiMarkRecord(threeMarksPm);
+const overlappingMarksRecord = multiMarkRecord(overlappingMarksPm);
+const linkThenBoldRecord = multiMarkRecord(linkThenBoldPm);
+if (
+  JSON.stringify(linkThenBoldRecord.js_raw_mark_order) !==
+  JSON.stringify(["link", "bold"])
+) {
+  throw new Error(
+    `link_then_bold JS oracle must stay link,bold (got ${JSON.stringify(linkThenBoldRecord.js_raw_mark_order)})`,
+  );
+}
+
+const mapChild = docWithClient(92);
+{
+  const frag = mapChild.getXmlFragment(FRAGMENT);
+  const p1 = new Y.XmlElement("paragraph");
+  p1.setAttribute("id", "p-a");
+  const p2 = new Y.XmlElement("paragraph");
+  p2.setAttribute("id", "p-b");
+  frag.insert(0, [p1]);
+  frag.insert(1, [new Y.Map()]);
+  frag.insert(2, [p2]);
+}
+writeBin("map_child.v1", Y.encodeStateAsUpdate(mapChild));
+let mapChildJsThrows = false;
+try {
+  yDocToProsemirrorJSON(mapChild, FRAGMENT);
+} catch {
+  mapChildJsThrows = true;
+}
+if (!mapChildJsThrows) {
+  throw new Error("map_child JS oracle must throw Unexpected case");
+}
+
+const embedChild = docWithClient(93);
+{
+  const frag = embedChild.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-embed");
+  const t1 = new Y.XmlText();
+  t1.insert(0, "앞");
+  const t2 = new Y.XmlText();
+  t2.insert(0, "뒤");
+  p.insert(0, [t1]);
+  frag.insert(0, [p]);
+  p.insert(1, [{ any: 1 }]);
+  p.insert(2, [t2]);
+}
+writeBin("embed_child.v1", Y.encodeStateAsUpdate(embedChild));
+let embedChildJsThrows = false;
+try {
+  yDocToProsemirrorJSON(embedChild, FRAGMENT);
+} catch {
+  embedChildJsThrows = true;
+}
+if (!embedChildJsThrows) {
+  throw new Error("embed_child JS oracle must throw Unexpected case");
+}
+
+const delBeforePm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, delFull);
+    return d;
+  })(),
+);
+const delAfterPm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, delFull);
+    Y.applyUpdate(d, deleteOnly);
+    return d;
+  })(),
+);
+
+const pendingU1Pm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, pendingU1);
+    return d;
+  })(),
+);
+const pendingU2OnlyPm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, pendingU2);
+    return d;
+  })(),
+);
+const pendingBothPm = projectJson(
+  (() => {
+    const d = new Y.Doc({ gc: false });
+    Y.applyUpdate(d, pendingU2);
+    Y.applyUpdate(d, pendingU1);
+    return d;
+  })(),
+);
+
 const expectations = {
   yjs: "13.6.32",
   fragment: FRAGMENT,
@@ -328,20 +678,27 @@ const expectations = {
       href: "https://example.invalid/wiki/안녕",
     },
     prosemirror_type: structuredPm.type,
+    prosemirror_json: projectJson(structured),
   },
   korean_emoji: {
     after_mid_and_delete_includes: ["가", "중", "🚀", "마바사"],
     after_mid_and_delete_excludes: ["나다"],
     prosemirror_text: JSON.stringify(koAfterPm),
+    prosemirror_json: withoutYChange(koAfterPm),
   },
   delete_only: {
     state_vector_unchanged: Buffer.from(svBefore).equals(Buffer.from(svAfter)),
     sv_before_b64: b64(svBefore),
     sv_after_b64: b64(svAfter),
+    prosemirror_json_before: delBeforePm,
+    prosemirror_json_after: delAfterPm,
   },
   pending: {
     u1_has: "one",
     u2_has: "two한글",
+    prosemirror_json_u1: pendingU1Pm,
+    prosemirror_json_u2_only: pendingU2OnlyPm,
+    prosemirror_json_both: pendingBothPm,
   },
   revision: {
     before: ["스냅샷-본문"],
@@ -350,8 +707,43 @@ const expectations = {
   followup: {
     must_include: ["후속편집한글✨", "안녕 본문"],
     prosemirror_type: followPm.type,
+    prosemirror_json: projectJson(follow),
   },
   utf8_marker: "안녕",
+  empty_doc: {
+    prosemirror_json: emptyPm,
+  },
+  empty_paragraph: {
+    prosemirror_json: emptyParaPm,
+  },
+  typed_attrs: {
+    prosemirror_json: typedPm,
+  },
+  marks_link_bold: {
+    prosemirror_json: marksPm,
+  },
+  ychange_strip: {
+    raw_has_ychange: JSON.stringify(ychangePmRaw).includes("ychange"),
+    prosemirror_json: ychangePm,
+  },
+  ychange_only: {
+    raw_has_ychange_mark: JSON.stringify(ychangeOnlyRaw).includes('"type":"ychange"'),
+    prosemirror_json: ychangeOnlyPm,
+  },
+  ychange_retained_nested: {
+    prosemirror_json: ychangeNestedPm,
+  },
+  three_marks: threeMarksRecord,
+  overlapping_marks: overlappingMarksRecord,
+  link_then_bold: linkThenBoldRecord,
+  map_child: {
+    expected: "malformed",
+    js_throws: mapChildJsThrows,
+  },
+  embed_child: {
+    expected: "malformed",
+    js_throws: embedChildJsThrows,
+  },
 };
 
 writeFileSync(
@@ -380,6 +772,17 @@ console.log(
         "revision_snapshot.bin",
         "followup_edit.v1",
         "utf8_korean.v1",
+        "empty_paragraph.v1",
+        "typed_attrs.v1",
+        "marks_link_bold.v1",
+        "ychange_strip.v1",
+        "ychange_only.v1",
+        "ychange_retained_nested.v1",
+        "three_marks.v1",
+        "overlapping_marks.v1",
+        "link_then_bold.v1",
+        "map_child.v1",
+        "embed_child.v1",
         "expectations.json",
       ],
       delete_only_sv_unchanged: expectations.delete_only.state_vector_unchanged,
