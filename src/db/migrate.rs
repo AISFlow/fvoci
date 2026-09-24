@@ -31,11 +31,11 @@ BEGIN
         SELECT p.oid::regprocedure
         FROM pg_proc p
         INNER JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname IN ('fvoci', 'public')
+        WHERE (n.nspname = 'fvoci' OR (n.nspname = 'public' AND p.proname LIKE 'app\_%'))
           AND p.prosecdef
           AND p.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
     LOOP
-        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', definer);
+        EXECUTE format('REVOKE EXECUTE ON ROUTINE %s FROM PUBLIC', definer);
     END LOOP;
 END
 $$;
@@ -103,7 +103,10 @@ pub enum GrantError {
 impl std::fmt::Display for GrantError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Db(error) => write!(f, "app role grant failed and was rolled back: {error}"),
+            Self::Db(error) => write!(
+                f,
+                "app role grant failed; no privileges were committed: {error}"
+            ),
             Self::InvalidRole(reason) => write!(f, "app role grant refused: {reason}"),
         }
     }
@@ -158,14 +161,33 @@ pub async fn apply_app_role_grants(pool: &PgPool, role: &str) -> Result<(), Gran
         }
         Some(_) => {}
     }
-    let is_owner: bool = sqlx::query_scalar("SELECT $1 = current_user::text")
-        .bind(role)
-        .fetch_one(&mut *tx)
-        .await?;
-    if is_owner {
-        return Err(GrantError::InvalidRole(
-            "the app role must differ from the migration owner".into(),
-        ));
+    // The script revokes privileges from `role`; applied to an owner it would
+    // strip the ACL that the SECURITY DEFINER functions run under.
+    let owns_schema_objects: bool = sqlx::query_scalar(
+        r#"
+        SELECT $1 = current_user::text
+            OR pg_has_role($1, n.nspowner, 'MEMBER')
+            OR EXISTS (
+                SELECT 1 FROM pg_class c
+                WHERE c.relnamespace = n.oid AND pg_has_role($1, c.relowner, 'MEMBER')
+            )
+            OR EXISTS (
+                SELECT 1 FROM pg_proc p
+                INNER JOIN pg_namespace pn ON pn.oid = p.pronamespace
+                WHERE (pn.oid = n.oid OR (pn.nspname = 'public' AND p.proname LIKE 'app\_%'))
+                  AND pg_has_role($1, p.proowner, 'MEMBER')
+            )
+        FROM pg_namespace n
+        WHERE n.nspname = 'fvoci'
+        "#,
+    )
+    .bind(role)
+    .fetch_one(&mut *tx)
+    .await?;
+    if owns_schema_objects {
+        return Err(GrantError::InvalidRole(format!(
+            "role {role:?} owns or inherits ownership of fvoci objects; use a separate app role"
+        )));
     }
     sqlx::raw_sql(&app_role_grant_sql(role))
         .execute(&mut *tx)

@@ -3874,6 +3874,29 @@ async fn assert_forbidden_app_access_denied(app_url: &str) {
             "receipt delete",
             "DELETE FROM fvoci.document_collab_op_receipts",
         ),
+        (
+            "instance admin escalation",
+            "UPDATE fvoci.users SET is_instance_admin = true",
+        ),
+        (
+            "password overwrite",
+            "UPDATE fvoci.users SET password_hash = 'x'",
+        ),
+        ("email overwrite", "UPDATE fvoci.users SET email = email"),
+        (
+            "auth generation reset",
+            "UPDATE fvoci.users SET auth_generation = auth_generation",
+        ),
+        ("user delete", "DELETE FROM fvoci.users"),
+        (
+            "session token overwrite",
+            "UPDATE fvoci.sessions SET token_hash = 'x'",
+        ),
+        (
+            "session reassignment",
+            "UPDATE fvoci.sessions SET user_id = user_id",
+        ),
+        ("event delete", "DELETE FROM fvoci.events"),
     ] {
         let error = sqlx::query(sql)
             .execute(&app)
@@ -3941,7 +3964,7 @@ async fn failed_grant_leaves_no_partial_privileges_via_migrate_binary() {
         .expect("run fvoci-migrate");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "grant must fail: {stderr}");
-    assert!(stderr.contains("rolled back"), "{stderr}");
+    assert!(stderr.contains("no privileges were committed"), "{stderr}");
     let leaked = role_has_any_fvoci_privilege(&admin, &db.role_name).await;
     assert!(leaked.is_empty(), "failed grant left {leaked:?}");
     admin.close().await;
@@ -3963,7 +3986,10 @@ async fn failed_grant_via_library_rolls_back_then_rerun_restores_narrow_grants()
     let error = migrate::apply_app_role_grants(&admin, &db.role_name)
         .await
         .expect_err("grant must fail while the function is missing");
-    assert!(error.to_string().contains("rolled back"), "{error}");
+    assert!(
+        error.to_string().contains("no privileges were committed"),
+        "{error}"
+    );
     assert!(role_has_any_fvoci_privilege(&admin, &db.role_name)
         .await
         .is_empty());
@@ -3991,26 +4017,71 @@ async fn failed_grant_via_library_rolls_back_then_rerun_restores_narrow_grants()
 }
 
 #[tokio::test]
-async fn grant_refuses_owner_superuser_and_missing_roles() {
+async fn grant_refuses_owner_superuser_bypassrls_and_missing_roles() {
     let db = migrated_db_without_grants().await;
-    let owner: String = {
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db.admin_url)
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db.admin_url)
+        .await
+        .unwrap();
+    let schema_owner: String = sqlx::query_scalar(
+        "SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'fvoci'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let suffix = Uuid::now_v7().simple().to_string();
+    let inherits_owner = format!("fvoci_inherit_{suffix}");
+    let owns_table = format!("fvoci_owner_{suffix}");
+    let bypass = format!("fvoci_bypass_{suffix}");
+    let superuser = format!("fvoci_super_{suffix}");
+    for statement in [
+        format!("CREATE ROLE \"{inherits_owner}\" NOSUPERUSER NOBYPASSRLS"),
+        format!("GRANT \"{schema_owner}\" TO \"{inherits_owner}\""),
+        format!("CREATE ROLE \"{owns_table}\" NOSUPERUSER NOBYPASSRLS"),
+        "CREATE TABLE fvoci.grant_owner_probe (id int)".to_string(),
+        format!("ALTER TABLE fvoci.grant_owner_probe OWNER TO \"{owns_table}\""),
+        format!("CREATE ROLE \"{bypass}\" NOSUPERUSER BYPASSRLS"),
+        format!("CREATE ROLE \"{superuser}\" SUPERUSER"),
+    ] {
+        sqlx::query(&statement)
+            .execute(&admin)
             .await
-            .unwrap();
-        let owner = sqlx::query_scalar("SELECT current_user::text")
-            .fetch_one(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
-        owner
-    };
-    for role in [owner.as_str(), "fvoci_missing_role_for_grant_test"] {
+            .expect(&statement);
+    }
+    for role in [
+        schema_owner.as_str(),
+        inherits_owner.as_str(),
+        owns_table.as_str(),
+        bypass.as_str(),
+        superuser.as_str(),
+        "fvoci_missing_role_for_grant_test",
+    ] {
         let error = migrate::grant_app_role(&db.admin_url, role)
             .await
             .expect_err("grant must be refused");
         assert!(error.to_string().contains("refused"), "{role}: {error}");
     }
+    let owner_can_read: bool =
+        sqlx::query_scalar("SELECT has_table_privilege($1, 'fvoci.users', 'SELECT')")
+            .bind(&schema_owner)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert!(
+        owner_can_read,
+        "refused grants must not touch the owner ACL"
+    );
+    sqlx::query("DROP TABLE fvoci.grant_owner_probe")
+        .execute(&admin)
+        .await
+        .unwrap();
+    for role in [&inherits_owner, &owns_table, &bypass, &superuser] {
+        sqlx::query(&format!("DROP ROLE \"{role}\""))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    admin.close().await;
     drop_ungranted(db).await;
 }

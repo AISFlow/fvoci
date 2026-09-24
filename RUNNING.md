@@ -42,9 +42,11 @@ export DATABASE_APP_URL='postgres://fvoci_app_prod:***@host:5432/fvoci?sslmode=r
 
 `--grant-app-role` applies `scripts/grant-app-role.sql` as a single transaction
 and exits nonzero on any error, leaving the previous privileges unchanged; do not
-start the server after a failed grant. It refuses a missing, superuser,
-BYPASSRLS or migration-owner role. Re-run it after every upgrade that applies new
-migrations. If you must use psql instead, run
+start the server after a failed grant. It refuses a missing, superuser or
+BYPASSRLS role and any role that owns, or inherits ownership of, fvoci objects.
+Re-run it after every upgrade that applies new migrations: new SECURITY DEFINER
+functions are not executable by PUBLIC, so requests that need them fail until
+the grant is re-run. If you must use psql instead, run
 `psql -X -v ON_ERROR_STOP=1 --single-transaction -v app_role=<role> -f scripts/grant-app-role.sql`;
 without those flags psql commits each statement and can leave a partial grant.
 Never grant the app role before the role exists. Keep database credentials and pepper keys in your secret configuration, outside Git. Retain the same pepper keyring across restarts; replacing it prevents verification of existing passwords.
