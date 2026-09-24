@@ -37,6 +37,8 @@ import {
   peer,
   persistBody,
   placeContentCaret,
+  installCaretProbe,
+  readCaretProbe,
   readEditorSelection,
   sentPersistRequests,
   sessionCookie,
@@ -308,30 +310,59 @@ test("delete-only save then structured marks, table, and IDs persist", async ({ 
   expect(secondId).not.toBe(firstId);
   await expectMatchingPersistAck(page, wire);
 
+  let reconnects = 0;
+  page.on("websocket", (socket) => {
+    if (socket.url().includes("/collab")) reconnects += 1;
+  });
+  const authFramesBefore = wire.received.filter((frame) => frame.kind === "auth-scope").length;
+  await installCaretProbe(page);
   await editor.click();
   await page.keyboard.type("굵은링크");
-  await page.keyboard.press("Shift+Home");
-  // Native keyboard selectionchange and ProseMirror selection update are
-  // separate events. Assert both before exercising the selection toolbar;
-  // a lost selection must fail here, not look like a missing format button.
-  await expect.poll(() => editor.evaluate((root) => {
-    const live = (root as HTMLElement & {
-      editor?: {
-        state: {
-          selection: { from: number; to: number };
-          doc: { textBetween(from: number, to: number): string };
+  try {
+    // Observe the native input precondition; never repair focus or selection.
+    // A failure here distinguishes input/remount trouble from losing Shift+Home.
+    await expect.poll(() => editor.evaluate((root) => {
+      const live = (root as HTMLElement & {
+        editor?: {
+          view: { posAtDOM(node: Node, offset: number): number };
+          state: {
+            selection: { from: number; to: number; empty: boolean };
+            doc: { textContent: string; childCount: number; firstChild: { content: { size: number } } | null };
+          };
         };
+      }).editor;
+      const native = window.getSelection();
+      const anchor = native?.anchorNode;
+      const inside = Boolean(anchor && root.contains(anchor));
+      const end = live?.state.doc.childCount === 1 && live.state.doc.firstChild
+        ? live.state.doc.firstChild.content.size + 1 : null;
+      const selection = live?.state.selection;
+      return {
+        text: live?.state.doc.textContent ?? null,
+        focused: document.activeElement === root || root.contains(document.activeElement),
+        editable: root.getAttribute("contenteditable"),
+        nativeAtEnd: Boolean(inside && native?.isCollapsed && live && anchor &&
+          live.view.posAtDOM(anchor, native.anchorOffset) === end),
+        editorAtEnd: Boolean(selection?.empty && selection.from === end && selection.to === end),
       };
-    }).editor;
-    const selection = live?.state.selection;
-    return {
-      browser: window.getSelection()?.toString() ?? "",
-      editor: live && selection
-        ? live.state.doc.textBetween(selection.from, selection.to)
-        : null,
-    };
-  }), { message: "native and editor selection must cover the intended marked text" })
-    .toEqual({ browser: "굵은링크", editor: "굵은링크" });
+    }), { message: "native input must finish with the focused caret at the typed paragraph end" })
+      .toEqual({ text: "굵은링크", focused: true, editable: "true", nativeAtEnd: true, editorAtEnd: true });
+
+    await page.keyboard.press("Shift+Home");
+    // Both native and PM selections must reflect the real keyboard gesture.
+    await expect.poll(async () => {
+      const selection = await readEditorSelection(page);
+      return { browser: selection.browser, editor: selection.editor };
+    }, { message: "native and editor selection must cover the intended marked text" })
+      .toEqual({ browser: "굵은링크", editor: "굵은링크" });
+  } catch (error) {
+    console.info("caret probe on selection failure", {
+      probe: await readCaretProbe(page),
+      reconnects,
+      newAuthFrames: wire.received.filter((frame) => frame.kind === "auth-scope").length - authFramesBefore,
+    });
+    throw error;
+  }
   await applyBoldToSelection(page);
   await applyLinkToSelection(page, "https://example.com");
   await persistBody(page);
