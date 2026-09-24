@@ -867,3 +867,68 @@ Grok ctxf628dd69a966는 유효 완료 보고 후 release, 커밋/worktree는 보
 제품 협업은 명시적 helper 환경 설정 없이 비활성 상태를 유지한다. OS IME 미검증.
 다음 명령: 위 dispatch의 `orchestration check`로 질문/제출 처리 후 고정 SHA 검토,
 각 제출 하나씩 통합·관련 검사·PR CI 확인. 저장소 밖 소유 불명 자원은 건드리지 않았다.
+
+PR7 HEAD9b3b66ea3a408a07ea20a202c28aa2fb3ce24ab6의 10 remote jobs 모두 성공.
+Rust35935717526: lib32/wire11, product27 각 플랫폼(x64 54.62s/ARM64 44.43s),
+실제 DB22+66+13 각 플랫폼, skip0. Web35935717458/Docs35935717461/
+Engine35935717542 성공. Web는 기존 등록 사용자 흐름이며 pending협업 E2E가 아니다.
+
+Fable ctx6b5d9cb29a2e 검토 완료 후 release, 실제 Fable5.1 medium/주간 quota 오류 없음.
+/tmp/fvoci-collab-review-b06a9a8.md: R1 malformed Step1 이후 dead primary의 healthy
+flag로 후속 sync 정지(High), R2 확정 rollback 거부를 ambiguous commit으로 분류하여
+전체 peer 종료(Medium-High), R3 join Load 실패 flag, R4 compaction 회복, R5 검사
+강도, R6 readonly persist 지적. 수락 보류. Composer ctx477df6e00c12에 같은 소유
+파일의 수정·회귀를 추가 배정했다. root에 Yrs parser를 연결하거나 서버 내부 조회를
+무인가로 우회하라는 제안은 채택하지 않았다.
+
+Grok ctxdc9df3677ffa의 3fc0c1b는 미통합 E2E 검사 초안이며 후속 미커밋 보완 중.
+`apps/web/e2e-pending/collab-*.ts`, 기존 pending spec 및 `scripts/web-e2e-inner.sh`
+소유권을 위임했다. 실제 child handle/process group 소유로 정상 SIGTERM과 강제
+process-tree SIGKILL을 구분하고 fresh context의 복원을 검사한다. 단순 watcher나
+PID 파일만으로 소유권을 주장하지 않는다. 아직 브라우저 수락 결과는 없다.
+
+Composer의 새 saturation 선택 검사는 실패했고, full queue에 Close를 await하는
+경로와 transport 이전 mpsc byte budget 누락을 후속 수정 중이다. timeout/retry를
+늘리지 않는다. 해당 test 종료 및 worktree의 cargo/collab/rustc 부재 확인 후
+현지 heavy slot을 Grok으로 이관했다(2026-09-24 00:06 UTC); Composer는 수정/빠른
+검사만, Grok은 `FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh` 실행 담당이다.
+이들은 여전히 진행 중인 task이며 수락된 제출로 표시하지 않는다. PR7 Draft 유지.
+
+진행 보완 (2026-09-24 00:30 UTC, 통합 HEAD9b3b66e 불변):
+Grok pending E2E642b7ff는 5 pass/1 fail/8 미실행(53.8s); offline 시나리오의
+초기 연결 실패이며 RoomFull은 당시 로그가 없어 가설이다. 공유 문서 재사용
+b4eeff4는 3 pass/1 fail/10 미실행(33.1s), 삽입/삭제 기대 실패. 기존 fixture
+간 오염을 없애도록 시나리오별 독립 문서·소유 서버 recycle로 수정 중이다.
+커서 이름표는 본문 DOM decoration으로 구분하고 실제 텍스트 정규화를 하지 않는다.
+실패 trace가 EXIT cleanup으로 사라진 문제는 실행별 고유 보존 경로로 보완 중.
+이 결과는 협업 수락이 아니며 변경은 아직 worker worktree에만 있다.
+
+Composer ctx477df6e00c12는 실제 mpsc enqueue 전 바이트 예산, 독립 종료 신호,
+close 코드, readonly 거부 이후 persist barrier, awareness generation/locale,
+Fable R1–R6를 계속 구현한다. host32CPU/load0.56/available40.8GiB 관찰에 따라
+CARGO_BUILD_JOBS=2와 소유 helper/DB로 한 번에 좁은 DB 회귀 하나를 허용했다.
+전체 heavy bundle은 Grok 소유이며 전체 suite 병렬 실행을 허용한 것은 아니다.
+두 task 모두 진행 중으로 소유권/기존 commit을 유지한다. 다음은 각 제출의
+실행 결과 확인, 고정 SHA 통합과 Fable 독립 재검토다. PR7 Draft/open 유지.
+
+Grok ctxdc9df3677ffa는 HEAD39a298792e7238aa4818d4bd14c75741bcd6f9bc를
+`worker_done failed`로 제출하고 release했다. 미수락 pending E2E를 통합했으며
+제품 성공으로 보지 않는다. 최신 실제 전체 실행(HEAD36c4901)은 exit1/71.231s,
+7 pass 후 revoke 검사 실패(unauthorized 이후 editor가 unmount된 실제 UI에
+기존 locator를 사용). 제출39a2987에는 locator 보완이 있으나 이후 전체 미실행.
+presence 최초 실패의 trace에 WS frame이 없으므로 'pageB가 원격 awareness를
+수신했다'는 워커 주장은 철회되었다. 이후 연결별 진단 attachment를 추가했다.
+아티팩트 /tmp/fvoci-collab-e2e-fail.T2OqHQ, 앞선 presence는 ywHrXm.
+코디네이터가 제출39a2987에서 Node wire/restart 검사4/4(skip0,96.7ms),
+`apps/web/node_modules/.bin/tsc -p apps/web/e2e-pending/collab-tsconfig.json` 성공을
+확인했다. shell syntax/diff check 성공. Native/browser 전체 수락은 아직 아니다.
+heavy slot은 실제 잔여 프로세스 없음 확인 후 Composer ctx477df6e00c12로 반환했다.
+
+Fable task26e08a380ab6/ctxd38f3f089237 파생 본문 경계 자문 완료·release.
+실제 Fable5.1 medium, quota 오류/Opus 전환 없음. 고정b06a9a8/source3937952.
+보고서 /tmp/fvoci-collab-derived-boundary-review.md: binary 정본 유지, loaded/clean
+primary만 projection, writer_generation+tail_seq 정확한 fence, tail_seq0 seed 보존,
+source version 유지, 인가·event 실패 rollback와 원본의 derived 실패 의미 확인.
+검사 실행 없는 설계 자문이다. 보고서의 '설치 y-tiptap 부재'는 잘못된 범위 조회:
+rust-collab-ui-acceptance/apps/web/node_modules에 실제 구현이 있으며 native
+구현 워커는 그 고정 라이브러리와 독립 JS fixture를 반드시 대조해야 한다.
