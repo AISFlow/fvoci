@@ -932,3 +932,21 @@ source version 유지, 인가·event 실패 rollback와 원본의 derived 실패
 검사 실행 없는 설계 자문이다. 보고서의 '설치 y-tiptap 부재'는 잘못된 범위 조회:
 rust-collab-ui-acceptance/apps/web/node_modules에 실제 구현이 있으며 native
 구현 워커는 그 고정 라이브러리와 독립 JS fixture를 반드시 대조해야 한다.
+
+협업 E2E 원격 gate 연결: 기존 workspace-flow와 독립인 collaboration-flow를
+표준 ubuntu-24.04에 추가했다. 두 job의 실제 검사·서비스는 독립이며 needs 없음,
+기존 architecture/toolchain/feature별 Cargo 캐시와 PR별 취소 정책을 유지한다.
+`FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh`가 실제 pending 14개 시나리오를
+실행한다. 삭제 전 editor focus, slash 표 삽입 위치, fresh context의 origin 진입 후
+IndexedDB 확인을 보완했다. 로컬 Node 보조 검사5/5(skip0,119ms), pending tsc
+0.87s, actionlint1.7.12/diff check 성공. 전체 브라우저 검증은 원격 실행 대기이며
+기존 알려진 presence/서버 보강 미완료를 성공으로 간주하지 않는다.
+
+현재 쓰기 소유권: Composer task_f5025d90f3a7/ctx_477df6e00c12는
+rust-collab-delivery에서 transport/room/hub/config/awareness/engine_bridge 및
+product 회귀 보강, Grok task_761c0f98805f/ctx_03ca7b6b0eeb는
+rust-collab-projection에서 native engine Project와 독립 JS fixture를 담당한다.
+새 native 작업 기준1f1446b485aa79eb9f25f031d78bd6a8b1c86cd9, 실제
+cursor-grok-4.6-high. root 계약의 Project/content_json 변경만 명시 위임했고
+DB/manifest/CI/UI 소유권은 위임하지 않았다. Fable 주간 한도 시에만 검증된
+Claude Code Opus5.5 medium으로 대체한다는 기존 조건은 유지하며 전환 미실행.

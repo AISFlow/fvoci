@@ -375,6 +375,8 @@ export async function expectConverged(pageA: Page, pageB: Page): Promise<void> {
 export async function insertSlashTable(page: Page): Promise<void> {
   const editor = editorLocator(page);
   await editor.click();
+  await placeContentCaret(page, "end");
+  await page.keyboard.press("Enter");
   await page.keyboard.type("/표");
   await page.keyboard.press("Enter");
   await expect(page.locator(".fvoci-editor table")).toBeVisible();

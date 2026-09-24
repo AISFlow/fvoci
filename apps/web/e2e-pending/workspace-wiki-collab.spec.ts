@@ -280,6 +280,7 @@ test("delete-only save then structured marks, table, and IDs persist", async ({ 
   await persistBody(page);
   const firstId = sentPersistRequests(wire).at(-1);
   expect(firstId).toBeTruthy();
+  await editor.click();
   await page.keyboard.press("Control+A");
   await page.keyboard.press("Backspace");
   await expectNotDurablySaved(page);
@@ -307,6 +308,7 @@ test("delete-only save then structured marks, table, and IDs persist", async ({ 
   await page.reload();
   await waitConnected(page);
   const restored = await editorShape(page);
+  expect(restored).toEqual(structured);
   expect(restored.table).not.toBeNull();
   expect(restored.table?.id).toBe(structured.table?.id);
   expect(restored.table?.rows).toEqual(structured.table?.rows);
@@ -400,10 +402,10 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   const restoredA = await freshA.newPage();
   const restoredB = await freshB.newPage();
   try {
-    expect(await indexedDbNames(restoredA)).toEqual([]);
-    expect(await indexedDbNames(restoredB)).toEqual([]);
     await login(restoredA, member.email, member.password);
     await login(restoredB, member.email, member.password);
+    expect(await indexedDbNames(restoredA)).toEqual([]);
+    expect(await indexedDbNames(restoredB)).toEqual([]);
     expect(
       (await indexedDbNames(restoredA)).some((name) => /yjs|y-indexeddb|hocus/i.test(name)),
     ).toBe(false);
