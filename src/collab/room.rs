@@ -1,8 +1,15 @@
 use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "db-tests")]
+use futures_util::future::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::MissedTickBehavior;
 
@@ -54,6 +61,70 @@ pub async fn arm_spawn_room_block(document_id: Uuid) -> tokio::sync::oneshot::Se
 #[cfg(feature = "db-tests")]
 pub async fn disarm_spawn_room_block(document_id: Uuid) {
     SPAWN_ROOM_BLOCKS.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+static JOIN_BARRIERS: std::sync::LazyLock<tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_join_barrier(document_id: Uuid) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    JOIN_BARRIERS.lock().await.insert(
+        document_id,
+        AppendRevokeBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_join_barrier(document_id: Uuid) {
+    JOIN_BARRIERS.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_join_barrier(document_id: Uuid) {
+    let barrier = JOIN_BARRIERS.lock().await.remove(&document_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
+#[cfg(feature = "db-tests")]
+static JOIN_REPLY_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_join_reply_barrier(conn_id: Uuid) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    assert!(JOIN_REPLY_BARRIERS
+        .lock()
+        .await
+        .insert(
+            conn_id,
+            AppendRevokeBarrier {
+                reached_tx,
+                proceed_rx,
+            }
+        )
+        .is_none());
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_before_join_reply(conn_id: Uuid) {
+    let barrier = JOIN_REPLY_BARRIERS.lock().await.remove(&conn_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
 }
 
 #[cfg(feature = "db-tests")]
@@ -334,11 +405,58 @@ pub struct RoomJoin {
     pub cancel: Option<watch::Sender<Option<ConnectionCancel>>>,
 }
 
+/// Actor-issued socket lifetime; dropping the sender closes the connection.
+#[derive(Debug)]
+#[must_use = "retain the lease for the connection lifetime"]
+pub struct ConnectionLease {
+    pub conn_id: Uuid,
+    _hold: oneshot::Sender<Infallible>,
+}
+
+struct JoinAdmission {
+    lease: ConnectionLease,
+    drop_rx: oneshot::Receiver<Infallible>,
+    conn_generation: u64,
+}
+
+struct ConnectionLeaseDrop {
+    conn_id: Uuid,
+    generation: u64,
+    drop_rx: oneshot::Receiver<Infallible>,
+}
+
+impl Future for ConnectionLeaseDrop {
+    type Output = (Uuid, u64);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.drop_rx.poll_unpin(cx) {
+            Poll::Ready(Ok(infallible)) => match infallible {},
+            Poll::Ready(Err(_)) => Poll::Ready((self.conn_id, self.generation)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 enum RoomCommand {
-    Join(RoomJoin, oneshot::Sender<Result<(), JoinError>>),
+    Join(
+        RoomJoin,
+        oneshot::Sender<Result<ConnectionLease, JoinError>>,
+    ),
     Leave(Uuid),
-    Frame { conn_id: Uuid, bytes: Vec<u8> },
+    Frame {
+        conn_id: Uuid,
+        bytes: Vec<u8>,
+    },
     Shutdown,
+    #[cfg(feature = "db-tests")]
+    Probe(oneshot::Sender<ActorProbe>),
+}
+
+#[cfg(feature = "db-tests")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActorProbe {
+    pub connections: usize,
+    pub awareness_clients: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,22 +469,46 @@ pub enum JoinError {
     DbError,
 }
 
+#[derive(Clone)]
 pub struct RoomHandle {
     tx: mpsc::Sender<RoomCommand>,
 }
 
 impl RoomHandle {
-    pub async fn join(&self, join: RoomJoin) -> Result<(), JoinError> {
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    pub async fn join(&self, join: RoomJoin) -> Result<ConnectionLease, JoinError> {
+        #[cfg(feature = "db-tests")]
+        let conn_id = join.conn.conn_id;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RoomCommand::Join(join, reply_tx))
             .await
             .map_err(|_| JoinError::EngineUnavailable)?;
+        #[cfg(feature = "db-tests")]
+        pause_before_join_reply(conn_id).await;
         reply_rx.await.map_err(|_| JoinError::EngineUnavailable)?
     }
 
     pub async fn leave(&self, conn_id: Uuid) {
         let _ = self.tx.send(RoomCommand::Leave(conn_id)).await;
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn probe(&self) -> ActorProbe {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.tx.send(RoomCommand::Probe(reply_tx)).await.is_err() {
+            return ActorProbe {
+                connections: 0,
+                awareness_clients: 0,
+            };
+        }
+        reply_rx.await.unwrap_or(ActorProbe {
+            connections: 0,
+            awareness_clients: 0,
+        })
     }
 
     pub async fn frame(&self, conn_id: Uuid, bytes: Vec<u8>) {
@@ -437,6 +579,8 @@ struct RoomActor {
     writer_generation: Option<i64>,
     committed: CommittedBundle,
     connections: HashMap<Uuid, ConnectionState>,
+    connection_lease_drops: FuturesUnordered<ConnectionLeaseDrop>,
+    live_conns: Arc<AtomicUsize>,
     awareness: AwarenessRegistry,
     fifo_seq: u64,
     /// Last compaction attempt failed; auto-compact backs off until a manual persist succeeds.
@@ -458,6 +602,7 @@ pub async fn spawn_room(
     config: CollabConfig,
     pool: PgPool,
     room_guard: RoomGuard,
+    live_conns: Arc<AtomicUsize>,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
     wait_spawn_room_block(document_id).await;
     let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
@@ -479,6 +624,8 @@ pub async fn spawn_room(
             snapshot_cutoff_seq: 0,
         },
         connections: HashMap::new(),
+        connection_lease_drops: FuturesUnordered::new(),
+        live_conns,
         awareness: AwarenessRegistry::new(),
         fifo_seq: 0,
         compact_unhealthy: false,
@@ -505,6 +652,43 @@ enum LockingAuth {
 }
 
 impl RoomActor {
+    fn publish_live_conns(&self) {
+        self.live_conns
+            .store(self.connections.len(), Ordering::Release);
+    }
+
+    #[cfg(feature = "db-tests")]
+    async fn drain_ready_lease_drops(&mut self) {
+        while let Some(Some((conn_id, generation))) =
+            self.connection_lease_drops.next().now_or_never()
+        {
+            self.handle_lease_drop(conn_id, generation).await;
+        }
+    }
+
+    async fn handle_lease_drop(&mut self, conn_id: Uuid, generation: u64) {
+        if self
+            .connections
+            .get(&conn_id)
+            .is_some_and(|conn| conn.conn_generation == generation)
+        {
+            self.close_connection(conn_id, 1000, "client leave").await;
+        }
+    }
+
+    fn register_connection_lease(
+        &mut self,
+        conn_id: Uuid,
+        generation: u64,
+        drop_rx: oneshot::Receiver<Infallible>,
+    ) {
+        self.connection_lease_drops.push(ConnectionLeaseDrop {
+            conn_id,
+            generation,
+            drop_rx,
+        });
+    }
+
     async fn run(mut self, mut rx: mpsc::Receiver<RoomCommand>) {
         let mut acl_tick = tokio::time::interval(Duration::from_millis(self.config.revoke_poll_ms));
         acl_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -513,8 +697,19 @@ impl RoomActor {
                 cmd = rx.recv() => {
                     match cmd {
                         Some(RoomCommand::Join(join, reply)) => {
-                            let result = self.handle_join(join).await;
-                            let _ = reply.send(result);
+                            match self.handle_join(join).await {
+                                Ok(admission) => {
+                                    self.register_connection_lease(
+                                        admission.lease.conn_id,
+                                        admission.conn_generation,
+                                        admission.drop_rx,
+                                    );
+                                    let _ = reply.send(Ok(admission.lease));
+                                }
+                                Err(err) => {
+                                    let _ = reply.send(Err(err));
+                                }
+                            }
                         }
                         Some(RoomCommand::Leave(conn_id)) => self.handle_leave(conn_id).await,
                         Some(RoomCommand::Frame { conn_id, bytes }) => {
@@ -524,13 +719,25 @@ impl RoomActor {
                             self.shutting_down = true;
                             break;
                         }
+                        #[cfg(feature = "db-tests")]
+                        Some(RoomCommand::Probe(reply)) => {
+                            self.drain_ready_lease_drops().await;
+                            let _ = reply.send(ActorProbe {
+                                connections: self.connections.len(),
+                                awareness_clients: self.awareness.tracked_client_count(),
+                            });
+                        }
                         None => break,
                     }
+                }
+                Some((conn_id, generation)) = self.connection_lease_drops.next(), if !self.connection_lease_drops.is_empty() => {
+                    self.handle_lease_drop(conn_id, generation).await;
                 }
                 _ = acl_tick.tick() => {
                     self.poll_acl().await;
                 }
             }
+            self.publish_live_conns();
             if self.connections.is_empty() && self.shutting_down {
                 break;
             }
@@ -538,6 +745,7 @@ impl RoomActor {
         for (_, conn) in self.connections.drain() {
             Self::enqueue_close(&conn.events, &conn.cancel, 1001, "server shutdown");
         }
+        self.publish_live_conns();
         let engine = self.engine;
         let _ = engine.stop().await;
         if let Some(guard) = self.room_guard.take() {
@@ -717,10 +925,12 @@ impl RoomActor {
         }
     }
 
-    async fn handle_join(&mut self, join: RoomJoin) -> Result<(), JoinError> {
+    async fn handle_join(&mut self, join: RoomJoin) -> Result<JoinAdmission, JoinError> {
         if self.shutting_down {
             return Err(JoinError::EngineUnavailable);
         }
+        #[cfg(feature = "db-tests")]
+        pause_for_join_barrier(self.document_id).await;
         if self.connections.len() >= self.config.max_connections_per_room {
             return Err(JoinError::RoomFull);
         }
@@ -809,6 +1019,7 @@ impl RoomActor {
             queued_bytes: AtomicUsize::new(0),
             max_bytes: self.config.max_outbound_bytes_per_connection,
         });
+        let (lease_tx, drop_rx) = oneshot::channel();
         self.connections.insert(
             conn_id,
             ConnectionState {
@@ -827,6 +1038,7 @@ impl RoomActor {
                 revoked: false,
             },
         );
+        self.publish_live_conns();
         let encoded = self.awareness.encode_all();
         if !encoded.is_empty() {
             if let Ok(bytes) = encode(&WireFrame::Document {
@@ -839,7 +1051,14 @@ impl RoomActor {
             }
         }
         self.flush_pending_awareness().await;
-        Ok(())
+        Ok(JoinAdmission {
+            lease: ConnectionLease {
+                conn_id,
+                _hold: lease_tx,
+            },
+            drop_rx,
+            conn_generation,
+        })
     }
 
     fn set_committed_from_load(&mut self, load: &crate::db::collab::CollabLoadState) {

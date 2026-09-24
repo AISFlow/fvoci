@@ -83,3 +83,8 @@ required-features = ["db-tests"]
 name = "collab_projection"
 path = "tests/collab_projection.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "collab_lifecycle"
+path = "tests/collab_lifecycle.rs"
+required-features = ["db-tests"]

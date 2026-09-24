@@ -12,10 +12,10 @@
 전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
 최신 main `ba19932b03a98a69b24479e33ade68946b5bbd47`은 PR1–6의 수락 결과다.
 PR7은 Draft/미병합이며 협업 제품 경로의 결함 보강·독립 검토 중이다.
-최신 원격 검사 HEAD는 `f46587645ee4d389f9044cd358638298c48fdcac`:
-Web/두 native workflow 성공, Rust collaboration은 양 아키텍처48/50으로 실패.
-이전8855c64의4 workflow 성공은 과거 증거다. 후속 로컬 복구 수정과 활성 작업은
-문서 끝의 최신 기록을 따른다. 전체 협업은 아직 수락되지 않았다.
+최신 원격 검사 HEAD는 `e232b876cb7cac82f382a40496fa99fa58ab4d9c`:
+4 workflow 성공, 양 아키텍처 협업50+파생본문14·DB/native·실제React13/협업14 실행.
+접속 취소/종료 수명주기 수정은 별도worktree에서 미수락이다. 활성 작업과
+검토 잔여사항은 문서 끝의 최신 기록을 따른다. 전체 협업은 아직 수락되지 않았다.
 
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
@@ -1268,3 +1268,68 @@ Grok taskebcf4b50da4f/ctx902336d49663: rust-collab-ci-fixtures/839e547에서
 collab_product.rs만 소유. 새 target CI 연결은 코디네이터 담당이다.
 PR7 Draft/미병합, auto-merge 미설정. 다음은 두 제출 통합·Opus delta 검토와
 관련 원격CI 후 남은 lifecycle F5–F7을 처리한다. 전체 포팅 완료가 아니다.
+
+통합 e232b876cb7cac82f382a40496fa99fa58ab4d9c push 및4 workflow 성공:
+Rust35960852302 / Documents35960852363 / Engine35960852383 / Web35960852404.
+실제 PR 합성 checkout5a9f9a4df783901a579ea701b42d6e14debdb965는
+e232b87 + mainba19932. 양 아키텍처 product50/50+projection14/14(skip0),
+DB30+66+13, fast44/wire11, React13(1.1분)/협업14(2.2분)가 실행됐다.
+협업본문 x64 85.98+22.06s, ARM62.72+15.20s. 같거나 더 넓은 전체검사를
+로컬에서 반복하지 않는다. PR7은 수명주기 미수락 때문에 Draft/미병합이다.
+
+Grok36f75a6을e232b87로 통합: 실제WS Close/EOF/오류 fail-fast, 순차XML편집을
+저장 snapshot의 새 helper Load/Project 및 고정 구조 기대값으로 대조한다.
+앞선 map_child 결과 차이는 오래된 helper 복사본 때문임을 빌드/mtime로 확인했다.
+현재 소스로 재빌드한 helper로 관련2검사 각1/1(body4.94/30.62s), clippy1.45s.
+Opus 고정e18dc29 검토 완료·release: delta차단없음, R1/R2 분기검사·R3/R4
+복구실패/오류분류·R5/R6 순서검사 등은 전체수락 전에 추적한다.
+
+Composer cb365a7 F4초안은 미통합: phase unlock 후 pending counter 증가와
+취소된 actor연결 잔존을 코디네이터가 발견했다. task2df6f413fb8b/ctx44be325cb27a
+동일소유권으로 수정 중. Grok taskdbf1e5aa5d58/ctx4a1414897df9는 base5160e8f
+(e18dc29포함)에서 projection/support 테스트만 소유해 R2/R5/R6를 보강한다.
+room hook은 Composer가 소유하므로 R1 새hook 검사는 후속으로 순차 처리한다.
+
+F4 후속3e4f246/5901787도 미통합 보존. 취소 경계의 이중 membership 정리를 위해
+Opus taske3b2b1692844/ctx5b1185fafbbe가 읽기 전용 자문을 완료·release했다.
+최종 결정은 actor-issued ConnectionLease를 transport가 소켓 수명 동안 보유하고
+actor의 단일 connection 상태·count를 사용한다. Drop은 oneshot을 닫을 뿐이며
+별도 비동기정리큐/daemon을 만들지 않는다. 실제 코드 수락은 아니다.
+Composer taskbb492b92646a/ctxcb3e7c497b32에 구현을 배정했고 hub/room/lifecycle
+검사 외 transport의 lease반환·보유 callsite 및 collab_product 직접hub호출 적응만
+추가 단독 위임했다. Grok의 projection/support 소유권은 유지한다.
+
+Grok5f9eda3의 R2/R5/R6 검사를a839816으로 로컬 통합했다. 워커 projection15/15
+(body57.42s) 뒤 Step1 경계 수정은 해당1검사만 다시1/1(body5.32s) 확인했다.
+코디네이터 관련clippy0.72s 성공, fmt는 두 테스트 파일의 서식 차이로 실패했다.
+정확한 committed payload 및 peer의 예기치 않은 EOF/Close fail-fast 보강과 서식
+수정은 후속 task1071a35043c3에 포함한다. 첫 재사용 ctx32dc8c3f526d는
+agent_readiness timeout(입력 전 실패); 기존 워커 후속 turn이 살아 있어 중복 작성자를
+시작하지 않고 종료를 확인 중이다. 원격 검증 SHA는 여전히e232b87이다.
+
+F4 제출bdc7cc1(e18dc29 기준 순수 delta)을 통합 worktree에 미커밋 적용했다.
+Opus5.5 medium taskba187313fafc/ctxf1040b6772a8의 고정 SHA 읽기 전용 검토는
+제품 lease 소유권의 차단 결함 없음이며 전체 협업 수락은 아니다. 실제 모델/medium
+요청·유효 일치 및 turnStart 확인, 검토 후 release. W2b 결정적 검사·fixture
+mem::forget 제거·must_use/실제 probe 보강은 Composer task0cb0d54096d6/
+ctxf23fcace46a3가 같은 worktree에서 수정 중이다. actor/hub 상태 이중 기록은
+제거했지만 F5–F7 종료/재접속 및 기존 오류분류 항목은 여전히 남는다.
+Grok1e2933c 관련3검사 각1/1(body5.17/4.58/2.97s), clippy2.12s 성공 후 release;
+해당 delta도 통합 미커밋 상태다. 새collab_lifecycle CI target 연결 actionlint 성공.
+통합 all-targets check5.61s 성공, lifecycle shared support의 dead_code 경고는
+해당 test 모듈에서만 정리하도록 배정했다. 현재 원격 성공 근거는e232b87 유지.
+
+F4 통합 보강: Composer855930a의 test-owned lease/정상drop을 반영했다.
+코디네이터가 W2b(reply 전송 후 receiver 미poll 취소)의 db-tests hook과 회귀1개,
+ConnectionLease must_use, 실제 처리 후 foreign leave assertion을 추가했다.
+통합 fmt/actionlint 성공, all-targets db-tests clippy5.49s 성공. 격리 PG
+collab_lifecycle7/7(body9.77s/compile10.90s), 현재 소스 helper build0.73s,
+lib44/44(body5.54s/compile5.19s) 성공. DB 스크립트 cleanup exit0.
+기본 feature의 hub test-only oneshot import 경고는 후속 hub 소유자가 정리한다.
+Opus bdc7cc1 검토를 이후 test-only delta 전체 승인이라고 표시하지 않는다.
+
+다음 쓰기 task2a58b2422dd6/ctx7e0973ad917a: Grok4.6 실제 요청·유효 모델 일치,
+새 Orca rust-collab-shutdown(basebdc7cc1), main/config/hub/newcollab_shutdown 및
+해당 Cargo test stanza만 단독 소유. 종료 신호 시 admission 중단·독립 room 정리·
+명시적 비정상 deadline을 구현한다. room/transport/DB 변경은 현재 범위 밖이다.
+종료·actor panic·재접속·오류분류 등의 남은 차단 사항 때문에 PR7은 Draft다.

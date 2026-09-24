@@ -13,7 +13,7 @@ use fvoci_server::collab::config::CollabConfig;
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabRoomName, DocumentMessage, SyncMessage, SyncStep, WireFrame,
 };
-use fvoci_server::collab::y_sync::encode_sync_payload;
+use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
 use fvoci_server::db::documents::CreateDocumentInput;
 use fvoci_server::db::workspace;
@@ -637,26 +637,27 @@ pub async fn wait_for_stateless_exact(
             Ok(Some(Ok(Message::Close(frame)))) => {
                 panic!("CloseFrame while waiting for stateless {expected}: {frame:?}")
             }
-            Ok(Some(Ok(Message::Binary(bytes)))) => match fvoci_server::collab::wire::decode(&bytes)
-            {
-                Ok(WireFrame::Document {
-                    message: DocumentMessage::Stateless(body),
-                    ..
-                }) if body == expected => return true,
-                Ok(WireFrame::Document {
-                    message: DocumentMessage::Stateless(body),
-                    ..
-                }) if body.starts_with("persisted:") || body.starts_with("persist-failed:") => {
-                    panic!("unexpected persist stateless {body}, expected {expected}");
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                match fvoci_server::collab::wire::decode(&bytes) {
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Stateless(body),
+                        ..
+                    }) if body == expected => return true,
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Stateless(body),
+                        ..
+                    }) if body.starts_with("persisted:") || body.starts_with("persist-failed:") => {
+                        panic!("unexpected persist stateless {body}, expected {expected}");
+                    }
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Close { reason },
+                        ..
+                    }) => {
+                        panic!("document Close while waiting for stateless {expected}: {reason:?}")
+                    }
+                    Ok(_) | Err(_) => {}
                 }
-                Ok(WireFrame::Document {
-                    message: DocumentMessage::Close { reason },
-                    ..
-                }) => {
-                    panic!("document Close while waiting for stateless {expected}: {reason:?}")
-                }
-                Ok(_) | Err(_) => {}
-            },
+            }
             Ok(Some(Ok(_))) => {}
         }
     }
@@ -946,8 +947,14 @@ pub async fn wait_for_writer_close_without_peer_update(
                             panic!("peer must not receive Sync Update for a pre-commit rejected edit");
                         }
                     }
-                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) | Err(_) => {}
-                    Ok(Some(Ok(_))) => {}
+                    Ok(Some(Ok(Message::Close(frame)))) => {
+                        panic!("peer closed before explicit Step1: {frame:?}")
+                    }
+                    Ok(None) => panic!("peer TCP EOF before explicit Step1"),
+                    Ok(Some(Err(err))) => {
+                        panic!("peer websocket error before explicit Step1: {err}")
+                    }
+                    Ok(Some(Ok(_))) | Err(_) => {}
                 }
             }
         }
@@ -961,6 +968,8 @@ pub async fn wait_for_committed_update_then_close(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
+    expected_routing_key: &str,
+    expected_payload: &[u8],
     expected: u16,
     within: Duration,
     expected_reason: Option<&str>,
@@ -1010,16 +1019,31 @@ pub async fn wait_for_committed_update_then_close(
                 {
                     saw_applied_false = true;
                 }
-                if matches!(
-                    fvoci_server::collab::wire::decode(&bytes),
-                    Ok(WireFrame::Document {
-                        message: DocumentMessage::Sync(SyncMessage {
+                if let Ok(WireFrame::Document {
+                    routing_key,
+                    message:
+                        DocumentMessage::Sync(SyncMessage {
                             step: SyncStep::Update,
-                            ..
+                            y_protocol,
                         }),
-                        ..
-                    })
-                ) {
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    assert_eq!(
+                        routing_key, expected_routing_key,
+                        "committed Sync Update routing_key must match the room"
+                    );
+                    let (step, payload) = parse_sync_payload(
+                        &y_protocol,
+                        fvoci_server::collab::wire::Limits::DEFAULT.max_binary_payload_bytes,
+                    )
+                    .expect("committed Sync Update y_protocol must parse");
+                    assert_eq!(step, SyncStep::Update);
+                    assert_eq!(
+                        payload.as_slice(),
+                        expected_payload,
+                        "committed Sync Update payload must match fixture"
+                    );
                     saw_update = true;
                 }
             }

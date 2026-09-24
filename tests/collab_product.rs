@@ -22,8 +22,8 @@ use fvoci_server::collab::room::{
     arm_append_in_tx_reject_barrier, arm_append_revoke_barrier, arm_force_primary_apply_fail,
     arm_force_primary_load_fail, arm_spawn_room_block, disarm_append_in_tx_reject_barrier,
     disarm_append_revoke_barrier, disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
-    disarm_spawn_room_block, AuthenticatedConnection, CollabSession, JoinError, RoomClientEvent,
-    RoomJoin,
+    disarm_spawn_room_block, AuthenticatedConnection, CollabSession, ConnectionLease, JoinError,
+    RoomClientEvent, RoomJoin,
 };
 use fvoci_server::collab::transport::take_data_frame_send_budget;
 use fvoci_server::collab::wire::{
@@ -360,12 +360,24 @@ async fn setup_wiki_doc_batch(harness: &TestDb, count: usize) -> Vec<WikiDocFixt
     docs
 }
 
+struct DirectHubLeases(Vec<ConnectionLease>);
+
+impl DirectHubLeases {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn retain(&mut self, lease: ConnectionLease) {
+        self.0.push(lease);
+    }
+}
+
 async fn hub_join_document(
     hub: &CollabHub,
     wiki: &WikiDocFixture,
     document_id: Uuid,
     client_id: u32,
-) -> Result<Uuid, JoinError> {
+) -> Result<(Uuid, fvoci_server::collab::room::ConnectionLease), JoinError> {
     let conn_id = Uuid::now_v7();
     let (events_tx, mut events_rx) = mpsc::channel(8);
     tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
@@ -387,20 +399,25 @@ async fn hub_join_document(
         events: events_tx,
         cancel: None,
     };
-    hub.join_room((wiki.session.workspace_id, document_id), join)
+    let lease = hub
+        .join_room((wiki.session.workspace_id, document_id), join)
         .await?;
-    Ok(conn_id)
+    Ok((conn_id, lease))
 }
 
 async fn hub_join(
+    leases: &mut DirectHubLeases,
     hub: &CollabHub,
     wiki: &WikiDocFixture,
     client_id: u32,
 ) -> Result<Uuid, JoinError> {
-    hub_join_document(hub, wiki, wiki.document_id, client_id).await
+    let (conn_id, lease) = hub_join_document(hub, wiki, wiki.document_id, client_id).await?;
+    leases.retain(lease);
+    Ok(conn_id)
 }
 
 async fn hub_join_readonly(
+    leases: &mut DirectHubLeases,
     hub: &CollabHub,
     wiki: &WikiDocFixture,
     client_id: u32,
@@ -426,8 +443,10 @@ async fn hub_join_readonly(
         events: events_tx,
         cancel: None,
     };
-    hub.join_room((wiki.session.workspace_id, wiki.document_id), join)
+    let lease = hub
+        .join_room((wiki.session.workspace_id, wiki.document_id), join)
         .await?;
+    leases.retain(lease);
     Ok(conn_id)
 }
 
@@ -1069,6 +1088,7 @@ async fn collab_concurrent_first_joins_both_succeed() {
         let key = (wiki.session.workspace_id, wiki.document_id);
         let slots_before = hub.available_room_slots();
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut leases = DirectHubLeases::new();
 
         let hub_a = hub.clone();
         let hub_b = hub.clone();
@@ -1080,11 +1100,11 @@ async fn collab_concurrent_first_joins_both_succeed() {
             tokio::join!(
                 async move {
                     barrier_a.wait().await;
-                    hub_join(&hub_a, &wiki_a, 1).await
+                    hub_join_document(&hub_a, &wiki_a, wiki_a.document_id, 1).await
                 },
                 async move {
                     barrier_b.wait().await;
-                    hub_join(&hub_b, &wiki_b, 2).await
+                    hub_join_document(&hub_b, &wiki_b, wiki_b.document_id, 2).await
                 }
             )
         })
@@ -1093,6 +1113,8 @@ async fn collab_concurrent_first_joins_both_succeed() {
 
         assert!(first.is_ok(), "first join failed: {:?}", first.err());
         assert!(second.is_ok(), "second join failed: {:?}", second.err());
+        leases.retain(first.unwrap().1);
+        leases.retain(second.unwrap().1);
         assert_eq!(hub.available_room_slots(), slots_before - 1);
         assert!(hub.room_occupies_slot(key).await);
         hub.shutdown().await;
@@ -1112,12 +1134,13 @@ async fn collab_lifecycle_failed_start_reuses_slot() {
             .expect("db")
             .expect("room lock should be free");
         let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+        let mut leases = DirectHubLeases::new();
         assert_eq!(hub.available_room_slots(), 4);
-        let failed = hub_join(&hub, &wiki, 1).await;
-        assert_eq!(failed, Err(JoinError::WriterStale));
+        let failed = hub_join(&mut leases, &hub, &wiki, 1).await;
+        assert!(matches!(failed, Err(JoinError::WriterStale)));
         assert_eq!(hub.available_room_slots(), 4);
         held.release().await;
-        assert!(hub_join(&hub, &wiki, 2).await.is_ok());
+        assert!(hub_join(&mut leases, &hub, &wiki, 2).await.is_ok());
         assert_eq!(hub.available_room_slots(), 3);
         hub.shutdown().await;
         assert_eq!(hub.available_room_slots(), 4);
@@ -1138,10 +1161,10 @@ async fn collab_lifecycle_cancelled_start_releases_slot() {
         let join_task = tokio::spawn({
             let hub = hub.clone();
             let wiki = wiki.clone_fixture();
-            async move { hub_join(&hub, &wiki, 1).await }
+            async move { hub_join_document(&hub, &wiki, wiki.document_id, 1).await }
         });
         hub.shutdown().await;
-        let result = join_task.await.expect("join task");
+        let result = join_task.await.expect("join task").map(|(id, _)| id);
         assert!(
             result.is_err(),
             "join during shutdown should fail, got conn_id {:?}",
@@ -1162,12 +1185,13 @@ async fn collab_lifecycle_denied_joins_do_not_reserve_slots() {
             let wiki = setup_wiki_doc(&harness).await;
             let outsider = setup_owner_session(&harness).await;
             let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+            let mut leases = DirectHubLeases::new();
             assert_eq!(hub.available_room_slots(), 4);
 
             for index in 0..4 {
                 let fake_doc = Uuid::now_v7();
                 let denied = hub_join_document(&hub, &wiki, fake_doc, index).await;
-                assert_eq!(denied, Err(JoinError::AdmissionDenied));
+                assert!(matches!(denied, Err(JoinError::AdmissionDenied)));
             }
             let outsider_denied = hub_join_document(
                 &hub,
@@ -1179,9 +1203,9 @@ async fn collab_lifecycle_denied_joins_do_not_reserve_slots() {
                 9,
             )
             .await;
-            assert_eq!(outsider_denied, Err(JoinError::AdmissionDenied));
+            assert!(matches!(outsider_denied, Err(JoinError::AdmissionDenied)));
             assert_eq!(hub.available_room_slots(), 4);
-            assert!(hub_join(&hub, &wiki, 1).await.is_ok());
+            assert!(hub_join(&mut leases, &hub, &wiki, 1).await.is_ok());
             assert_eq!(hub.available_room_slots(), 3);
             hub.shutdown().await;
             harness.cleanup().await;
@@ -1204,11 +1228,12 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
             ));
             let key = (wiki.session.workspace_id, wiki.document_id);
             let slots_before = hub.available_room_slots();
+            let mut leases = DirectHubLeases::new();
 
             let join_a = tokio::spawn({
                 let hub = hub.clone();
                 let wiki = wiki.clone_fixture();
-                async move { hub_join(&hub, &wiki, 1).await }
+                async move { hub_join_document(&hub, &wiki, wiki.document_id, 1).await }
             });
             wait_for_booting(&hub, key).await;
             assert_eq!(hub.available_room_slots(), slots_before - 1);
@@ -1216,7 +1241,7 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
             let join_b = tokio::spawn({
                 let hub = hub.clone();
                 let wiki = wiki.clone_fixture();
-                async move { hub_join(&hub, &wiki, 2).await }
+                async move { hub_join_document(&hub, &wiki, wiki.document_id, 2).await }
             });
             tokio::time::timeout(Duration::from_secs(5), async {
                 while hub.room_waiter_count(key).await == 0 {
@@ -1232,8 +1257,11 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
             assert_eq!(hub.available_room_slots(), slots_before - 1);
 
             let _ = release.send(());
-            assert!(join_a.await.expect("join a task").is_ok());
-            assert!(join_b.await.expect("join b task").is_ok());
+            let (conn_a, lease_a) = join_a.await.expect("join a task").expect("join a");
+            leases.retain(lease_a);
+            let (conn_b, lease_b) = join_b.await.expect("join b task").expect("join b");
+            leases.retain(lease_b);
+            assert_ne!(conn_a, conn_b);
             assert_eq!(hub.available_room_slots(), slots_before - 1);
             disarm_spawn_room_block(wiki.document_id).await;
             hub.shutdown().await;
@@ -1259,7 +1287,7 @@ async fn collab_lifecycle_aborted_booting_creator_releases_slot() {
             let join_task = tokio::spawn({
                 let hub = hub.clone();
                 let wiki = wiki.clone_fixture();
-                async move { hub_join(&hub, &wiki, 1).await }
+                async move { hub_join_document(&hub, &wiki, wiki.document_id, 1).await }
             });
             wait_for_booting(&hub, key).await;
             assert_eq!(hub.available_room_slots(), 3);
@@ -1272,7 +1300,8 @@ async fn collab_lifecycle_aborted_booting_creator_releases_slot() {
             // its zero-client room and can subsequently acquire the database guard.
             wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
             assert_eq!(hub.available_room_slots(), 4);
-            assert!(hub_join(&hub, &wiki, 2).await.is_ok());
+            let mut leases = DirectHubLeases::new();
+            assert!(hub_join(&mut leases, &hub, &wiki, 2).await.is_ok());
             disarm_spawn_room_block(wiki.document_id).await;
             hub.shutdown().await;
             harness.cleanup().await;
@@ -1287,20 +1316,25 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
         let harness = TestDb::bootstrap().await;
         let docs = setup_wiki_doc_batch(&harness, 5).await;
         let hub = CollabHub::new(test_collab_config(4, 200), docs[0].session.pool.clone());
+        let mut leases = DirectHubLeases::new();
 
         let mut conn_ids = Vec::new();
         for doc in docs.iter().take(4) {
-            conn_ids.push(hub_join(&hub, doc, 1).await.expect("join room"));
+            conn_ids.push(
+                hub_join(&mut leases, &hub, doc, 1)
+                    .await
+                    .expect("join room"),
+            );
         }
         assert_eq!(hub.available_room_slots(), 0);
-        let fifth = hub_join(&hub, &docs[4], 1).await;
-        assert_eq!(fifth, Err(JoinError::RoomFull));
+        let fifth = hub_join(&mut leases, &hub, &docs[4], 1).await;
+        assert!(matches!(fifth, Err(JoinError::RoomFull)));
 
         let key = (docs[0].session.workspace_id, docs[0].document_id);
         hub.leave_room(key, conn_ids[0]).await;
         wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
         assert_eq!(hub.available_room_slots(), 1);
-        assert!(hub_join(&hub, &docs[4], 2).await.is_ok());
+        assert!(hub_join(&mut leases, &hub, &docs[4], 2).await.is_ok());
         hub.shutdown().await;
         harness.cleanup().await;
     })
@@ -1314,12 +1348,13 @@ async fn collab_lifecycle_idle_eviction_allows_rejoin() {
         let wiki = setup_wiki_doc(&harness).await;
         let hub = CollabHub::new(test_collab_config(4, 200), wiki.session.pool.clone());
         let key = (wiki.session.workspace_id, wiki.document_id);
-        let conn_id = hub_join(&hub, &wiki, 1).await.expect("join");
+        let mut leases = DirectHubLeases::new();
+        let conn_id = hub_join(&mut leases, &hub, &wiki, 1).await.expect("join");
         hub.leave_room(key, conn_id).await;
         wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
         assert!(!hub.room_occupies_slot(key).await);
         assert_eq!(hub.available_room_slots(), 4);
-        assert!(hub_join(&hub, &wiki, 2).await.is_ok());
+        assert!(hub_join(&mut leases, &hub, &wiki, 2).await.is_ok());
         assert_eq!(hub.available_room_slots(), 3);
         hub.shutdown().await;
         harness.cleanup().await;
@@ -2249,8 +2284,13 @@ async fn collab_two_readonly_joins_then_writer_edits() {
 
         let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
         let key = (wiki.session.workspace_id, wiki.document_id);
-        assert!(hub_join_readonly(&hub, &wiki, 81).await.is_ok());
-        assert!(hub_join_readonly(&hub, &wiki, 82).await.is_ok());
+        let mut leases = DirectHubLeases::new();
+        assert!(hub_join_readonly(&mut leases, &hub, &wiki, 81)
+            .await
+            .is_ok());
+        assert!(hub_join_readonly(&mut leases, &hub, &wiki, 82)
+            .await
+            .is_ok());
 
         let admin = PgPoolOptions::new()
             .max_connections(1)
@@ -2264,7 +2304,9 @@ async fn collab_two_readonly_joins_then_writer_edits() {
             .unwrap();
         admin.close().await;
 
-        let conn_id = hub_join(&hub, &wiki, 83).await.expect("writer join");
+        let conn_id = hub_join(&mut leases, &hub, &wiki, 83)
+            .await
+            .expect("writer join");
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
         hub.send_frame(
             key,
@@ -2504,7 +2546,8 @@ async fn collab_lifecycle_foreign_leave_does_not_evict_member() {
             let wiki = setup_wiki_doc(&harness).await;
             let hub = CollabHub::new(test_collab_config(4, 200), wiki.session.pool.clone());
             let key = (wiki.session.workspace_id, wiki.document_id);
-            let conn_id = hub_join(&hub, &wiki, 1).await.expect("join");
+            let mut leases = DirectHubLeases::new();
+            let conn_id = hub_join(&mut leases, &hub, &wiki, 1).await.expect("join");
             assert_eq!(
                 hub.room_lifecycle_phase(key).await,
                 RoomLifecyclePhase::Live
@@ -2548,7 +2591,7 @@ async fn collab_lifecycle_shutdown_during_booting_reclaims_slot() {
             let join_task = tokio::spawn({
                 let hub = hub.clone();
                 let wiki = wiki.clone_fixture();
-                async move { hub_join(&hub, &wiki, 1).await }
+                async move { hub_join_document(&hub, &wiki, wiki.document_id, 1).await }
             });
             wait_for_booting(&hub, key).await;
             assert_eq!(hub.available_room_slots(), slots_before - 1);
@@ -2847,28 +2890,29 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
         let (slow_tx, _slow_rx) = mpsc::channel(2);
         let (cancel_tx, cancel_rx) = watch::channel(None);
         let slow_id = Uuid::now_v7();
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: slow_id,
-                    session: CollabSession {
-                        session_id: wiki.session.session_id,
-                        user_id: wiki.session.user_id,
-                        given_name: "Slow".into(),
-                        family_name: None,
-                        locale: "en".into(),
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: slow_id,
+                        session: CollabSession {
+                            session_id: wiki.session.session_id,
+                            user_id: wiki.session.user_id,
+                            given_name: "Slow".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 301,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
                     },
-                    client_id: 301,
-                    read_only: false,
-                    routing_key: routing_key.clone(),
+                    events: slow_tx,
+                    cancel: Some(cancel_tx),
                 },
-                events: slow_tx,
-                cancel: Some(cancel_tx),
-            },
-        )
-        .await
-        .expect("slow join");
+            )
+            .await
+            .expect("slow join");
         hub.send_frame(
             key,
             slow_id,
@@ -2878,28 +2922,29 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
 
         let (writer_tx, mut writer_rx) = mpsc::channel(64);
         let writer_id = Uuid::now_v7();
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: writer_id,
-                    session: CollabSession {
-                        session_id: wiki.session.session_id,
-                        user_id: wiki.session.user_id,
-                        given_name: "Writer".into(),
-                        family_name: None,
-                        locale: "en".into(),
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: writer_id,
+                        session: CollabSession {
+                            session_id: wiki.session.session_id,
+                            user_id: wiki.session.user_id,
+                            given_name: "Writer".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 302,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
                     },
-                    client_id: 302,
-                    read_only: false,
-                    routing_key: routing_key.clone(),
+                    events: writer_tx,
+                    cancel: None,
                 },
-                events: writer_tx,
-                cancel: None,
-            },
-        )
-        .await
-        .expect("writer join");
+            )
+            .await
+            .expect("writer join");
         while writer_rx.try_recv().is_ok() {}
 
         let mut slow_cancelled: bool = false;
@@ -2981,28 +3026,29 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
         );
 
         let (late_tx, mut late_rx) = mpsc::channel(8);
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: Uuid::now_v7(),
-                    session: CollabSession {
-                        session_id: wiki.session.session_id,
-                        user_id: wiki.session.user_id,
-                        given_name: "Late".into(),
-                        family_name: None,
-                        locale: "en".into(),
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: Uuid::now_v7(),
+                        session: CollabSession {
+                            session_id: wiki.session.session_id,
+                            user_id: wiki.session.user_id,
+                            given_name: "Late".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 303,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
                     },
-                    client_id: 303,
-                    read_only: false,
-                    routing_key: routing_key.clone(),
+                    events: late_tx,
+                    cancel: None,
                 },
-                events: late_tx,
-                cancel: None,
-            },
-        )
-        .await
-        .expect("late join");
+            )
+            .await
+            .expect("late join");
         let mut late_saw_ghost = false;
         let late_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < late_deadline {
@@ -3050,28 +3096,29 @@ async fn collab_awareness_generation_takeover_old_leave_cannot_clear() {
 
         let (old_tx, mut old_rx) = mpsc::channel(8);
         let old_id = Uuid::now_v7();
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: old_id,
-                    session: CollabSession {
-                        session_id: wiki.session.session_id,
-                        user_id: wiki.session.user_id,
-                        given_name: "Old".into(),
-                        family_name: None,
-                        locale: "en".into(),
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: old_id,
+                        session: CollabSession {
+                            session_id: wiki.session.session_id,
+                            user_id: wiki.session.user_id,
+                            given_name: "Old".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 201,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
                     },
-                    client_id: 201,
-                    read_only: false,
-                    routing_key: routing_key.clone(),
+                    events: old_tx,
+                    cancel: None,
                 },
-                events: old_tx,
-                cancel: None,
-            },
-        )
-        .await
-        .expect("old join");
+            )
+            .await
+            .expect("old join");
         hub.send_frame(
             key,
             old_id,
@@ -3082,28 +3129,29 @@ async fn collab_awareness_generation_takeover_old_leave_cannot_clear() {
 
         let (new_tx, mut new_rx) = mpsc::channel(8);
         let new_id = Uuid::now_v7();
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: new_id,
-                    session: CollabSession {
-                        session_id: wiki.session.session_id,
-                        user_id: wiki.session.user_id,
-                        given_name: "New".into(),
-                        family_name: None,
-                        locale: "en".into(),
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: new_id,
+                        session: CollabSession {
+                            session_id: wiki.session.session_id,
+                            user_id: wiki.session.user_id,
+                            given_name: "New".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 201,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
                     },
-                    client_id: 201,
-                    read_only: false,
-                    routing_key: routing_key.clone(),
+                    events: new_tx,
+                    cancel: None,
                 },
-                events: new_tx,
-                cancel: None,
-            },
-        )
-        .await
-        .expect("new join");
+            )
+            .await
+            .expect("new join");
         hub.send_frame(
             key,
             new_id,
@@ -3159,22 +3207,23 @@ async fn collab_client_id_live_ownership_blocks_other_user() {
 
         let (owner_tx, mut owner_rx) = mpsc::channel(8);
         let owner_id = Uuid::now_v7();
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: owner_id,
-                    session: collab_session_from(&wiki.session, "Owner"),
-                    client_id: 201,
-                    read_only: false,
-                    routing_key: routing_key.clone(),
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: owner_id,
+                        session: collab_session_from(&wiki.session, "Owner"),
+                        client_id: 201,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
+                    },
+                    events: owner_tx,
+                    cancel: None,
                 },
-                events: owner_tx,
-                cancel: None,
-            },
-        )
-        .await
-        .expect("owner join");
+            )
+            .await
+            .expect("owner join");
         while owner_rx.try_recv().is_ok() {}
 
         let (peer_tx, _peer_rx) = mpsc::channel(8);
@@ -3223,22 +3272,23 @@ async fn collab_client_id_live_ownership_blocks_other_user() {
         );
 
         let (same_tx, _same_rx) = mpsc::channel(8);
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: Uuid::now_v7(),
-                    session: collab_session_from(&wiki.session, "Owner"),
-                    client_id: 201,
-                    read_only: false,
-                    routing_key,
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: Uuid::now_v7(),
+                        session: collab_session_from(&wiki.session, "Owner"),
+                        client_id: 201,
+                        read_only: false,
+                        routing_key,
+                    },
+                    events: same_tx,
+                    cancel: None,
                 },
-                events: same_tx,
-                cancel: None,
-            },
-        )
-        .await
-        .expect("same user generation takeover must still be allowed");
+            )
+            .await
+            .expect("same user generation takeover must still be allowed");
         hub.shutdown().await;
         harness.cleanup().await;
     })
@@ -3257,28 +3307,29 @@ async fn collab_late_join_receives_peer_awareness_snapshot() {
 
         let (first_tx, mut first_rx) = mpsc::channel(8);
         let first_id = Uuid::now_v7();
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: first_id,
-                    session: CollabSession {
-                        session_id: wiki.session.session_id,
-                        user_id: wiki.session.user_id,
-                        given_name: "First".into(),
-                        family_name: None,
-                        locale: "en".into(),
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: first_id,
+                        session: CollabSession {
+                            session_id: wiki.session.session_id,
+                            user_id: wiki.session.user_id,
+                            given_name: "First".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 101,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
                     },
-                    client_id: 101,
-                    read_only: false,
-                    routing_key: routing_key.clone(),
+                    events: first_tx,
+                    cancel: None,
                 },
-                events: first_tx,
-                cancel: None,
-            },
-        )
-        .await
-        .expect("first join");
+            )
+            .await
+            .expect("first join");
         hub.send_frame(
             key,
             first_id,
@@ -3288,28 +3339,29 @@ async fn collab_late_join_receives_peer_awareness_snapshot() {
         while first_rx.try_recv().is_ok() {}
 
         let (late_tx, mut late_rx) = mpsc::channel(8);
-        hub.join_room(
-            key,
-            RoomJoin {
-                conn: AuthenticatedConnection {
-                    conn_id: Uuid::now_v7(),
-                    session: CollabSession {
-                        session_id: wiki.session.session_id,
-                        user_id: wiki.session.user_id,
-                        given_name: "Late".into(),
-                        family_name: None,
-                        locale: "en".into(),
+        let _lease = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: Uuid::now_v7(),
+                        session: CollabSession {
+                            session_id: wiki.session.session_id,
+                            user_id: wiki.session.user_id,
+                            given_name: "Late".into(),
+                            family_name: None,
+                            locale: "en".into(),
+                        },
+                        client_id: 102,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
                     },
-                    client_id: 102,
-                    read_only: false,
-                    routing_key: routing_key.clone(),
+                    events: late_tx,
+                    cancel: None,
                 },
-                events: late_tx,
-                cancel: None,
-            },
-        )
-        .await
-        .expect("late join");
+            )
+            .await
+            .expect("late join");
 
         let mut saw_peer = false;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);

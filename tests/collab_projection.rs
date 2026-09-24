@@ -24,8 +24,9 @@ use support::{
     expectations, get_document_body, join_denied, persist_barrier, recv_document_frame,
     setup_wiki_doc, stateless_frame, sync_step1_frame, sync_update_frame, test_collab_config,
     tiny_output_project_collab_config, wait_for_committed_update_then_close,
-    wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update, wait_for_ws_close_code,
-    wait_for_writer_close_without_peer_update, TestDb, TestRun, WikiDocFixture,
+    wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update,
+    wait_for_writer_close_without_peer_update, wait_for_ws_close_code, TestDb, TestRun,
+    WikiDocFixture,
 };
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -735,6 +736,8 @@ async fn collab_projection_recovery_failure_closes_room() {
             .await;
             wait_for_committed_update_then_close(
                 &mut peer,
+                &routing_key,
+                &update,
                 1011,
                 Duration::from_secs(5),
                 Some("primary engine unhealthy"),
@@ -836,6 +839,8 @@ async fn collab_post_commit_stale_writer_acks_before_close() {
             .await;
             wait_for_committed_update_then_close(
                 &mut peer,
+                &routing_key,
+                &update,
                 1008,
                 Duration::from_secs(5),
                 Some("writer stale"),

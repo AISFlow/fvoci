@@ -1,25 +1,101 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use sqlx::postgres::PgPool;
-use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{oneshot, watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
-use crate::collab::room::{JoinError, RoomHandle, RoomJoin, RoomKey};
+use crate::collab::room::{ConnectionLease, JoinError, RoomHandle, RoomJoin, RoomKey};
 use crate::db::collab::resolve_collab_admission;
+
+#[cfg(feature = "db-tests")]
+pub const HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN: u8 = 0;
+#[cfg(feature = "db-tests")]
+pub const HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY: u8 = 1;
+
+#[cfg(feature = "db-tests")]
+struct HubJoinBarrier {
+    reached_tx: oneshot::Sender<()>,
+    proceed_rx: oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "db-tests")]
+static HUB_JOIN_BARRIERS: std::sync::LazyLock<Mutex<HashMap<(Uuid, u8), HubJoinBarrier>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_hub_join_barrier(
+    document_id: Uuid,
+    point: u8,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    HUB_JOIN_BARRIERS.lock().await.insert(
+        (document_id, point),
+        HubJoinBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_hub_join_barrier(document_id: Uuid, point: u8) {
+    HUB_JOIN_BARRIERS.lock().await.remove(&(document_id, point));
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_hub_join_barrier(document_id: Uuid, point: u8) {
+    let barrier = HUB_JOIN_BARRIERS.lock().await.remove(&(document_id, point));
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
 
 struct LiveRoom {
     handle: RoomHandle,
     finished: tokio::sync::oneshot::Receiver<()>,
     last_activity: Instant,
-    members: HashSet<Uuid>,
+    live_conns: Arc<AtomicUsize>,
+    /// In-flight hub joins that have not yet finished actor admission.
+    joining: Arc<AtomicUsize>,
     permit: OwnedSemaphorePermit,
+}
+
+struct JoiningLease {
+    counter: Arc<AtomicUsize>,
+}
+
+impl JoiningLease {
+    fn register(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self {
+            counter: counter.clone(),
+        }
+    }
+}
+
+impl Drop for JoiningLease {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleEvictDecision {
+    NotApplicable,
+    DeferredMembers,
+    DeferredJoining,
+    DeferredActivity,
+    WouldEvict,
 }
 
 enum RoomPhase {
@@ -156,13 +232,110 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
+    pub async fn probe_actor(&self, key: RoomKey) -> crate::collab::room::ActorProbe {
+        let handle = {
+            let Some(slot) = self.room_slot(key).await else {
+                return crate::collab::room::ActorProbe {
+                    connections: 0,
+                    awareness_clients: 0,
+                };
+            };
+            let phase = slot.phase.lock().await;
+            match &*phase {
+                RoomPhase::Live(live) => live.handle.clone(),
+                _ => {
+                    return crate::collab::room::ActorProbe {
+                        connections: 0,
+                        awareness_clients: 0,
+                    };
+                }
+            }
+        };
+        handle.probe().await
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn idle_evict_decision(&self, key: RoomKey) -> IdleEvictDecision {
+        let Some(slot) = self.room_slot(key).await else {
+            return IdleEvictDecision::NotApplicable;
+        };
+        let phase = slot.phase.lock().await;
+        match &*phase {
+            RoomPhase::Live(live) => Self::idle_evict_decision_for(live, self.config.idle_evict_ms),
+            _ => IdleEvictDecision::NotApplicable,
+        }
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn force_room_idle_eligible(&self, key: RoomKey) {
+        let Some(slot) = self.room_slot(key).await else {
+            return;
+        };
+        let mut phase = slot.phase.lock().await;
+        if let RoomPhase::Live(live) = &mut *phase {
+            live.last_activity =
+                Instant::now() - Duration::from_millis(self.config.idle_evict_ms + 1);
+        }
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn execute_idle_evict_if_eligible(&self, key: RoomKey) -> bool {
+        let Some(slot) = self.room_slot(key).await else {
+            return false;
+        };
+        let live = {
+            let mut phase = slot.phase.lock().await;
+            let RoomPhase::Live(live) = &*phase else {
+                return false;
+            };
+            if Self::idle_evict_decision_for(live, self.config.idle_evict_ms)
+                != IdleEvictDecision::WouldEvict
+            {
+                return false;
+            }
+            let RoomPhase::Live(live) = std::mem::replace(&mut *phase, RoomPhase::Closing) else {
+                unreachable!()
+            };
+            live
+        };
+        complete_idle_eviction(self.rooms.clone(), key, slot, live).await;
+        true
+    }
+
+    fn idle_evict_decision_for(live: &LiveRoom, idle_ms: u64) -> IdleEvictDecision {
+        if live.joining.load(Ordering::Acquire) > 0 {
+            return IdleEvictDecision::DeferredJoining;
+        }
+        if live.live_conns.load(Ordering::Acquire) > 0 {
+            return IdleEvictDecision::DeferredMembers;
+        }
+        let idle = Duration::from_millis(idle_ms);
+        if live.last_activity.elapsed() < idle {
+            return IdleEvictDecision::DeferredActivity;
+        }
+        IdleEvictDecision::WouldEvict
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn room_joining_count(&self, key: RoomKey) -> usize {
+        let Some(slot) = self.room_slot(key).await else {
+            return 0;
+        };
+        let phase = slot.phase.lock().await;
+        match &*phase {
+            RoomPhase::Live(live) => live.joining.load(Ordering::Acquire),
+            _ => 0,
+        }
+    }
+
+    #[cfg(feature = "db-tests")]
     pub async fn room_member_count(&self, key: RoomKey) -> usize {
         let Some(slot) = self.room_slot(key).await else {
             return 0;
         };
         let phase = slot.phase.lock().await;
         match &*phase {
-            RoomPhase::Live(live) => live.members.len(),
+            RoomPhase::Live(live) => live.live_conns.load(Ordering::Acquire),
             _ => 0,
         }
     }
@@ -206,7 +379,11 @@ impl CollabHub {
         }
     }
 
-    pub async fn join_room(&self, key: RoomKey, join: RoomJoin) -> Result<(), JoinError> {
+    pub async fn join_room(
+        &self,
+        key: RoomKey,
+        join: RoomJoin,
+    ) -> Result<ConnectionLease, JoinError> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(JoinError::EngineUnavailable);
         }
@@ -222,28 +399,39 @@ impl CollabHub {
         admission.map_err(|_| JoinError::AdmissionDenied)?;
 
         let slot = self.get_or_create_room(key).await?;
-        let mut phase = slot.phase.lock().await;
-        if let RoomPhase::Live(live) = &mut *phase {
-            live.last_activity = Instant::now();
-            let conn_id = join.conn.conn_id;
-            let result = live.handle.join(join).await;
-            if result.is_ok() {
-                live.members.insert(conn_id);
+        let (handle, joining_lease) = {
+            let mut phase = slot.phase.lock().await;
+            match &mut *phase {
+                RoomPhase::Live(live) => {
+                    live.last_activity = Instant::now();
+                    (live.handle.clone(), JoiningLease::register(&live.joining))
+                }
+                _ => return Err(JoinError::EngineUnavailable),
             }
-            return result;
-        }
-        Err(JoinError::EngineUnavailable)
+        };
+        #[cfg(feature = "db-tests")]
+        pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN).await;
+        let lease = handle.join(join).await;
+        drop(joining_lease);
+        #[cfg(feature = "db-tests")]
+        pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY).await;
+        lease
     }
 
     pub async fn leave_room(&self, key: RoomKey, conn_id: Uuid) {
         let slot = self.room_slot(key).await;
         if let Some(slot) = slot {
-            let mut phase = slot.phase.lock().await;
-            if let RoomPhase::Live(live) = &mut *phase {
-                if live.members.remove(&conn_id) {
-                    live.handle.leave(conn_id).await;
+            let handle = {
+                let mut phase = slot.phase.lock().await;
+                if let RoomPhase::Live(live) = &mut *phase {
                     live.last_activity = Instant::now();
+                    Some(live.handle.clone())
+                } else {
+                    None
                 }
+            };
+            if let Some(handle) = handle {
+                handle.leave(conn_id).await;
             }
         }
     }
@@ -254,12 +442,17 @@ impl CollabHub {
         }
         let slot = self.room_slot(key).await;
         if let Some(slot) = slot {
-            let mut phase = slot.phase.lock().await;
-            if let RoomPhase::Live(live) = &mut *phase {
-                if live.members.contains(&conn_id) {
+            let handle = {
+                let mut phase = slot.phase.lock().await;
+                if let RoomPhase::Live(live) = &mut *phase {
                     live.last_activity = Instant::now();
-                    live.handle.frame(conn_id, bytes).await;
+                    Some(live.handle.clone())
+                } else {
+                    None
                 }
+            };
+            if let Some(handle) = handle {
+                handle.frame(conn_id, bytes).await;
             }
         }
     }
@@ -489,12 +682,14 @@ impl CollabHub {
         };
 
         let (workspace_id, document_id) = key;
+        let live_conns = Arc::new(AtomicUsize::new(0));
         let spawn = crate::collab::room::spawn_room(
             workspace_id,
             document_id,
             self.config.clone(),
             self.pool.clone(),
             guard,
+            live_conns.clone(),
         )
         .await;
 
@@ -521,7 +716,8 @@ impl CollabHub {
                     handle,
                     finished,
                     last_activity: Instant::now(),
-                    members: HashSet::new(),
+                    live_conns,
+                    joining: Arc::new(AtomicUsize::new(0)),
                     permit,
                 });
                 slot.ready.notify_waiters();
@@ -616,12 +812,33 @@ enum ReserveOutcome {
     Creator(Arc<RoomSlot>),
 }
 
+async fn complete_idle_eviction(
+    rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
+    key: RoomKey,
+    slot: Arc<RoomSlot>,
+    live: LiveRoom,
+) {
+    live.handle.shutdown().await;
+    if live.finished.await.is_err() {
+        tracing::error!(document_id = %key.1, "idle eviction actor failed");
+    }
+    drop(live.permit);
+    *slot.phase.lock().await = RoomPhase::Failed;
+    let mut map = rooms.write().await;
+    if map
+        .get(&key)
+        .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
+    {
+        map.remove(&key);
+    }
+    slot.ready.notify_waiters();
+}
+
 async fn idle_eviction_loop(
     rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
     idle_ms: u64,
     mut stopped: watch::Receiver<bool>,
 ) {
-    let idle = Duration::from_millis(idle_ms);
     let tick = Duration::from_millis(idle_ms.max(1_000) / 2);
     loop {
         tokio::select! {
@@ -644,7 +861,9 @@ async fn idle_eviction_loop(
                 let RoomPhase::Live(live) = &*phase else {
                     continue;
                 };
-                if !live.members.is_empty() || live.last_activity.elapsed() < idle {
+                if CollabHub::idle_evict_decision_for(live, idle_ms)
+                    != IdleEvictDecision::WouldEvict
+                {
                     continue;
                 }
                 // Publish Closing atomically with the idle observation. Never
@@ -655,20 +874,7 @@ async fn idle_eviction_loop(
                 };
                 live
             };
-            live.handle.shutdown().await;
-            if live.finished.await.is_err() {
-                tracing::error!(document_id = %key.1, "evicted collaboration actor failed");
-            }
-            drop(live.permit);
-            *slot.phase.lock().await = RoomPhase::Failed;
-            let mut map = rooms.write().await;
-            if map
-                .get(&key)
-                .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
-            {
-                map.remove(&key);
-            }
-            slot.ready.notify_waiters();
+            complete_idle_eviction(rooms.clone(), key, slot, live).await;
         }
     }
 }

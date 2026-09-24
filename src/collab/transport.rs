@@ -18,8 +18,8 @@ use crate::collab::config::CollabConfig;
 use crate::collab::hub::CollabHub;
 use crate::collab::origin::{validate_collab_origin, CollabOriginError};
 use crate::collab::room::{
-    parse_client_id, AuthenticatedConnection, CollabSession, ConnectionCancel, JoinError,
-    OutboundFrame, OutboundKind, RoomClientEvent, RoomJoin,
+    parse_client_id, AuthenticatedConnection, CollabSession, ConnectionCancel, ConnectionLease,
+    JoinError, OutboundFrame, OutboundKind, RoomClientEvent, RoomJoin,
 };
 use crate::collab::wire::{AuthMessage, CollabKind, CollabRoomName, DocumentMessage, WireFrame};
 use crate::db::collab::resolve_collab_admission;
@@ -322,6 +322,7 @@ async fn handle_socket(
         mpsc::channel(config.max_outbound_frames_per_connection.max(8));
     let (cancel_tx, mut cancel_rx) = watch::channel(None::<ConnectionCancel>);
     let mut joined_room: Option<(crate::collab::room::RoomKey, String, bool, bool)> = None;
+    let mut connection_lease: Option<ConnectionLease> = None;
     let send_deadline = Duration::from_millis(config.outbound_send_deadline_ms);
     let max_frame_bytes = config.max_ws_frame_bytes;
     let auth_deadline = Instant::now() + Duration::from_millis(config.auth_wait_ms);
@@ -526,9 +527,10 @@ async fn handle_socket(
                                 )
                                 .await
                                 {
-                                    AuthAttempt::Joined { read_only } => {
+                                    AuthAttempt::Joined { read_only, lease } => {
                                         joined_room =
                                             Some((*key, routing_key.clone(), true, read_only));
+                                        connection_lease = Some(lease);
                                         collab_authenticated = true;
                                     }
                                     AuthAttempt::Denied => {}
@@ -561,8 +563,10 @@ async fn handle_socket(
                                     key,
                                     routing,
                                     read_only,
+                                    lease,
                                 } => {
                                     joined_room = Some((key, routing, true, read_only));
+                                    connection_lease = Some(lease);
                                     collab_authenticated = true;
                                 }
                                 FirstRoom::Pending { key, routing } => {
@@ -607,6 +611,7 @@ async fn handle_socket(
     if let Some((key, _, _, _)) = joined_room {
         hub.leave_room(key, conn_id).await;
     }
+    drop(connection_lease);
 }
 
 async fn first_room_from_frame(
@@ -650,10 +655,11 @@ async fn first_room_from_frame(
         )
         .await
         {
-            AuthAttempt::Joined { read_only } => FirstRoom::Joined {
+            AuthAttempt::Joined { read_only, lease } => FirstRoom::Joined {
                 key,
                 routing: routing_key,
                 read_only,
+                lease,
             },
             AuthAttempt::Denied => FirstRoom::Pending {
                 key,
@@ -674,6 +680,7 @@ enum FirstRoom {
         key: crate::collab::room::RoomKey,
         routing: String,
         read_only: bool,
+        lease: ConnectionLease,
     },
     Pending {
         key: crate::collab::room::RoomKey,
@@ -684,7 +691,10 @@ enum FirstRoom {
 }
 
 enum AuthAttempt {
-    Joined { read_only: bool },
+    Joined {
+        read_only: bool,
+        lease: ConnectionLease,
+    },
     Denied,
     Closed,
 }
@@ -772,13 +782,14 @@ async fn try_authenticate(
         .join_room((room.workspace_id, room.resource_id), join)
         .await
     {
-        Ok(()) => {
+        Ok(lease) => {
             let scope = if read_only { "readonly" } else { "read-write" };
             if send_auth_ok(pre_auth_outbound, events, routing_key, scope) {
-                AuthAttempt::Joined { read_only }
+                AuthAttempt::Joined { read_only, lease }
             } else {
                 hub.leave_room((room.workspace_id, room.resource_id), conn_id)
                     .await;
+                drop(lease);
                 signal_pre_auth_close(cancel);
                 AuthAttempt::Closed
             }

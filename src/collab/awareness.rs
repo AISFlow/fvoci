@@ -354,6 +354,11 @@ impl AwarenessRegistry {
         self.generation
     }
 
+    #[cfg(feature = "db-tests")]
+    pub(crate) fn tracked_client_count(&self) -> usize {
+        self.by_client.len()
+    }
+
     /// Establish generation ownership at join, independent of awareness clocks.
     pub fn claim_connection_client(&mut self, client_id: u32, conn_generation: u64) {
         match self.by_client.get_mut(&client_id) {
