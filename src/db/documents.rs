@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::db::context::{lock_tree, set_tenant};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::db::projects::{lock_project, project_permission};
 use crate::db::workspace::WorkspaceRole;
+use crate::projects::{workspace_base_permission, ProjectPermission};
 
 pub(crate) use crate::db::context::{lock_membership_users, recheck_session, session_is_live};
 pub const MAX_TREE_DEPTH: i32 = 20;
@@ -25,6 +27,24 @@ pub enum DocumentDbError {
     AffiliationMismatch,
     DepthLimit,
     InvalidSortKey,
+    Cycle,
+    TrashedParent,
+    RootDocumentTrash,
+    RootDocumentMove,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashChildrenMode {
+    Trash,
+    Reparent,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrashNode {
+    pub id: Uuid,
+    pub title: String,
+    pub deleted_at: DateTime<Utc>,
+    pub project_id: Option<Uuid>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -103,6 +123,10 @@ pub struct UpdateDocumentMetaInput<'a> {
     pub status: Option<&'a str>,
 }
 
+type DocProjectDeletedParent = (Option<Uuid>, Option<DateTime<Utc>>, Option<Uuid>);
+type DocProjectDeletedPathParent = (Option<Uuid>, Option<DateTime<Utc>>, String, Option<Uuid>);
+type DocParentProjectDeleted = (Option<Uuid>, Option<Uuid>, Option<DateTime<Utc>>);
+
 type DocumentRow = (
     Uuid,
     Uuid,
@@ -162,8 +186,50 @@ pub(crate) fn wiki_can_edit(role: Option<WorkspaceRole>) -> bool {
     )
 }
 
-fn wiki_can_view(role: Option<WorkspaceRole>) -> bool {
-    wiki_can_edit(role)
+fn permission_can_view(permission: ProjectPermission) -> bool {
+    permission >= ProjectPermission::View
+}
+
+fn permission_can_edit(permission: ProjectPermission) -> bool {
+    permission >= ProjectPermission::Edit
+}
+
+/// Wiki document permission for HTTP and tree listing. Project documents return `None`.
+pub(crate) async fn document_permission(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    document_id: Uuid,
+    require_live: bool,
+) -> Result<ProjectPermission, sqlx::Error> {
+    let role = membership_role(tx, workspace_id, user_id).await?;
+    let Some(role) = role else {
+        return Ok(ProjectPermission::None);
+    };
+    if role == WorkspaceRole::Guest {
+        return Ok(ProjectPermission::None);
+    }
+    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((project_id, deleted_at)) = row else {
+        return Ok(ProjectPermission::None);
+    };
+    if project_id.is_some() {
+        return Ok(ProjectPermission::None);
+    }
+    if require_live && deleted_at.is_some() {
+        return Ok(ProjectPermission::None);
+    }
+    Ok(workspace_base_permission(role))
 }
 
 pub(crate) async fn membership_role(
@@ -466,10 +532,11 @@ pub async fn get_wiki_document(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_view(role) {
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission_can_view(permission) {
         tx.rollback().await?;
-        return Ok(Err(DocumentDbError::Forbidden));
+        return Ok(Err(DocumentDbError::NotFound));
     }
     let row = fetch_document_row(&mut tx, workspace_id, document_id).await?;
     tx.commit().await?;
@@ -578,10 +645,11 @@ pub async fn list_wiki_ancestors(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_view(role) {
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission_can_view(permission) {
         tx.rollback().await?;
-        return Ok(Err(DocumentDbError::Forbidden));
+        return Ok(Err(DocumentDbError::NotFound));
     }
     let current = fetch_document_row(&mut tx, workspace_id, document_id).await?;
     let Some(current) = current else {
@@ -652,10 +720,11 @@ pub async fn update_wiki_document_meta(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }
-    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_edit(role) {
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission_can_edit(permission) {
         tx.rollback().await?;
-        return Ok(Err(DocumentDbError::Forbidden));
+        return Ok(Err(DocumentDbError::NotFound));
     }
     let current: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
         r#"
@@ -796,6 +865,889 @@ fn midpoint(a: &str, b: &str) -> String {
         digits.push_str(&key_after(a.get(i + 1..).unwrap_or("")));
         return digits;
     }
+}
+
+async fn subtree_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    root_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        r#"
+        WITH root AS (
+            SELECT path FROM fvoci.documents
+            WHERE workspace_id = $1 AND id = $2
+        )
+        SELECT d.id
+        FROM fvoci.documents AS d
+        CROSS JOIN root
+        WHERE d.workspace_id = $1
+          AND root.path IS NOT NULL
+          AND (
+            d.path = root.path
+            OR substr(d.path, 1, length(root.path) + 1) = root.path || '.'
+          )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(root_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+async fn is_descendant(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    ancestor_id: Uuid,
+    descendant_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(bool,)> = sqlx::query_as(
+        r#"
+        WITH a_doc AS (
+            SELECT path FROM fvoci.documents
+            WHERE workspace_id = $1 AND id = $2
+        ),
+        b_doc AS (
+            SELECT path FROM fvoci.documents
+            WHERE workspace_id = $1 AND id = $3
+        )
+        SELECT (
+            a_doc.path IS NOT NULL
+            AND b_doc.path IS NOT NULL
+            AND (
+                a_doc.path = b_doc.path
+                OR substr(a_doc.path, 1, length(b_doc.path) + 1) = b_doc.path || '.'
+            )
+        )
+        FROM a_doc
+        CROSS JOIN b_doc
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(ancestor_id)
+    .bind(descendant_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(v,)| v).unwrap_or(false))
+}
+
+async fn lock_document_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    if document_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        SELECT id
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = ANY($2)
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_ids)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub fn resolve_reorder_sort_key(
+    siblings: &[TreeNode],
+    document_id: Uuid,
+    after_id: Option<Uuid>,
+) -> Result<String, DocumentDbError> {
+    let filtered = siblings
+        .iter()
+        .filter(|node| node.id != document_id)
+        .collect::<Vec<_>>();
+    if let Some(after_id) = after_id {
+        let idx = filtered.iter().position(|node| node.id == after_id);
+        if idx.is_none() {
+            return Err(DocumentDbError::NotFound);
+        }
+        let idx = idx.unwrap();
+        let left_key = filtered[idx].sort_key.as_str();
+        let right_key = filtered.get(idx + 1).map(|node| node.sort_key.as_str());
+        return between(Some(left_key), right_key).map_err(|_| DocumentDbError::InvalidSortKey);
+    }
+    let first_key = filtered.first().map(|node| node.sort_key.as_str());
+    between(None, first_key).map_err(|_| DocumentDbError::InvalidSortKey)
+}
+
+async fn list_live_siblings(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    parent_id: Option<Uuid>,
+) -> Result<Vec<TreeNode>, sqlx::Error> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            Option<Uuid>,
+            Option<Uuid>,
+            String,
+            Option<String>,
+            String,
+            String,
+            i32,
+            String,
+        ),
+    >(
+        r#"
+        SELECT id, workspace_id, parent_id, project_id, title, icon, path, sort_key, number, status
+        FROM fvoci.documents
+        WHERE workspace_id = $1
+          AND parent_id IS NOT DISTINCT FROM $2
+          AND deleted_at IS NULL
+          AND project_id IS NULL
+        ORDER BY sort_key COLLATE "C"
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(parent_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                workspace_id,
+                parent_id,
+                project_id,
+                title,
+                icon,
+                path,
+                sort_key,
+                number,
+                status,
+            )| TreeNode {
+                id,
+                workspace_id,
+                parent_id,
+                project_id,
+                title,
+                icon,
+                path,
+                sort_key,
+                number,
+                status,
+            },
+        )
+        .collect())
+}
+
+async fn renumber_subtree_for_project(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    document_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    for document_id in document_ids {
+        let number: (i32,) = sqlx::query_as(
+            r#"
+            UPDATE fvoci.projects
+            SET next_number = next_number + 1, updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            RETURNING next_number - 1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(project_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE fvoci.documents
+            SET number = $3, updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(document_id)
+        .bind(number.0)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn move_subtree(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    new_parent_id: Option<Uuid>,
+    new_path: &str,
+    new_project_id: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        WITH old AS (
+            SELECT path FROM fvoci.documents
+            WHERE workspace_id = $1 AND id = $2
+        )
+        UPDATE fvoci.documents AS d
+        SET path = CASE
+                WHEN d.id = $2 THEN $4
+                ELSE $4 || substr(d.path, length(old.path) + 1)
+            END,
+            parent_id = CASE WHEN d.id = $2 THEN $3 ELSE d.parent_id END,
+            project_id = $5,
+            updated_at = now()
+        FROM old
+        WHERE d.workspace_id = $1
+          AND (
+            d.path = old.path
+            OR substr(d.path, 1, length(old.path) + 1) = old.path || '.'
+          )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(new_parent_id)
+    .bind(new_path)
+    .bind(new_project_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn trash_document_row(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    at: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE fvoci.documents
+        SET deleted_at = $3, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn move_wiki_document(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    new_parent_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    lock_tree(&mut tx, workspace_id).await?;
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission_can_edit(permission) {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    let subtree = subtree_ids(&mut tx, workspace_id, document_id).await?;
+    lock_document_rows(&mut tx, workspace_id, &subtree).await?;
+
+    let doc: Option<DocProjectDeletedPathParent> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at, path, parent_id
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((doc_project_id, deleted_at, doc_path, old_parent_id)) = doc else {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if deleted_at.is_some() || doc_project_id.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    let parent: Option<(Option<Uuid>, Option<DateTime<Utc>>, String)> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at, path
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(new_parent_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((new_parent_project_id, parent_deleted_at, parent_path)) = parent else {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if parent_deleted_at.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    if let Some(project_id) = new_parent_project_id {
+        if doc_project_id != Some(project_id) {
+            let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+            let Some(locked) = locked else {
+                tx.rollback().await?;
+                return Ok(Err(DocumentDbError::NotFound));
+            };
+            if locked.status == "archived" {
+                tx.rollback().await?;
+                return Ok(Err(DocumentDbError::NotFound));
+            }
+            let permission =
+                project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+            if !permission.at_least(ProjectPermission::Edit) {
+                tx.rollback().await?;
+                return Ok(Err(DocumentDbError::NotFound));
+            }
+        }
+    }
+
+    if is_descendant(&mut tx, workspace_id, new_parent_id, document_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Cycle));
+    }
+
+    let own_depth = depth_of(&doc_path);
+    let new_depth = depth_of(&parent_path) + 1;
+    let mut max_relative_depth = 0i32;
+    for id in &subtree {
+        if *id == document_id {
+            continue;
+        }
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT path FROM fvoci.documents WHERE workspace_id = $1 AND id = $2")
+                .bind(workspace_id)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some((path,)) = row {
+            max_relative_depth = max_relative_depth.max(depth_of(&path) - own_depth);
+        }
+    }
+    if new_depth + max_relative_depth > MAX_TREE_DEPTH {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::DepthLimit));
+    }
+
+    let new_path = format!("{}.{}", parent_path, to_path_label(document_id));
+    let dest_project_id = new_parent_project_id;
+    if doc_project_id.is_none() {
+        if let Some(project_id) = dest_project_id {
+            renumber_subtree_for_project(&mut tx, workspace_id, project_id, &subtree).await?;
+        }
+    }
+    move_subtree(
+        &mut tx,
+        workspace_id,
+        document_id,
+        Some(new_parent_id),
+        &new_path,
+        dest_project_id,
+    )
+    .await?;
+
+    let payload = json!({
+        "documentId": document_id.to_string(),
+        "newParentId": new_parent_id.to_string(),
+        "newPath": new_path,
+        "oldParentId": old_parent_id.map(|id| id.to_string()),
+        "oldPath": doc_path,
+        "oldProjectId": null,
+        "newProjectId": dest_project_id.map(|id| id.to_string()),
+    });
+    record_document_event_and_audit(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        "document.moved",
+        document_id,
+        payload,
+        client_ip,
+    )
+    .await?;
+
+    let row = fetch_document_row(&mut tx, workspace_id, document_id).await?;
+    tx.commit().await?;
+    match row {
+        Some(row) => Ok(Ok(row_to_meta(row, false))),
+        None => Ok(Err(DocumentDbError::NotFound)),
+    }
+}
+
+pub async fn reorder_wiki_document(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    after_id: Option<Uuid>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission_can_edit(permission) {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    let current: Option<DocParentProjectDeleted> = sqlx::query_as(
+        r#"
+        SELECT parent_id, project_id, deleted_at
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((parent_id, project_id, deleted_at)) = current else {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if deleted_at.is_some() || project_id.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    let siblings = list_live_siblings(&mut tx, workspace_id, parent_id).await?;
+    let new_sort_key = match resolve_reorder_sort_key(&siblings, document_id, after_id) {
+        Ok(key) => key,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+    sqlx::query(
+        r#"
+        UPDATE fvoci.documents
+        SET sort_key = $3, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(&new_sort_key)
+    .execute(&mut *tx)
+    .await?;
+
+    let payload = json!({
+        "documentId": document_id.to_string(),
+        "kind": "reorder",
+        "afterId": after_id.map(|id| id.to_string()),
+        "newSortKey": new_sort_key,
+    });
+    record_document_event_and_audit(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        "document.moved",
+        document_id,
+        payload,
+        client_ip,
+    )
+    .await?;
+
+    let row = fetch_document_row(&mut tx, workspace_id, document_id).await?;
+    tx.commit().await?;
+    match row {
+        Some(row) => Ok(Ok(row_to_meta(row, false))),
+        None => Ok(Err(DocumentDbError::NotFound)),
+    }
+}
+
+pub async fn trash_wiki_document(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    children: TrashChildrenMode,
+    client_ip: Option<&str>,
+) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
+    let now = Utc::now();
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    lock_tree(&mut tx, workspace_id).await?;
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission_can_edit(permission) {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    let doc: Option<DocProjectDeletedParent> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at, parent_id
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((project_id, deleted_at, parent_id)) = doc else {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if deleted_at.is_some() || project_id.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    if children == TrashChildrenMode::Reparent {
+        let direct_children = list_live_siblings(&mut tx, workspace_id, Some(document_id)).await?;
+        let mut parent_path = String::new();
+        let dest_project_id: Option<Uuid> = if let Some(grandparent_id) = parent_id {
+            let parent: Option<(Option<Uuid>, Option<DateTime<Utc>>, String)> = sqlx::query_as(
+                r#"
+                SELECT project_id, deleted_at, path
+                FROM fvoci.documents
+                WHERE workspace_id = $1 AND id = $2
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(grandparent_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some((gp_project_id, gp_deleted_at, gp_path)) = parent else {
+                tx.rollback().await?;
+                return Ok(Err(DocumentDbError::NotFound));
+            };
+            if gp_deleted_at.is_some() {
+                tx.rollback().await?;
+                return Ok(Err(DocumentDbError::NotFound));
+            }
+            parent_path = gp_path;
+            gp_project_id
+        } else {
+            None
+        };
+
+        let dest_siblings = list_live_siblings(&mut tx, workspace_id, parent_id).await?;
+        let mut last_key = dest_siblings
+            .iter()
+            .rev()
+            .find(|node| node.id != document_id)
+            .map(|node| node.sort_key.clone());
+
+        for child in direct_children {
+            let child_subtree = subtree_ids(&mut tx, workspace_id, child.id).await?;
+            lock_document_rows(&mut tx, workspace_id, &child_subtree).await?;
+            let child_row: Option<(String, Option<Uuid>)> = sqlx::query_as(
+                "SELECT path, parent_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace_id)
+            .bind(child.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some((child_path, child_parent_id)) = child_row else {
+                continue;
+            };
+            let new_path = if parent_id.is_some() {
+                format!("{}.{}", parent_path, to_path_label(child.id))
+            } else {
+                to_path_label(child.id)
+            };
+            move_subtree(
+                &mut tx,
+                workspace_id,
+                child.id,
+                parent_id,
+                &new_path,
+                dest_project_id,
+            )
+            .await?;
+            let sort_key = match between(last_key.as_deref(), None) {
+                Ok(key) => key,
+                Err(_) => {
+                    tx.rollback().await?;
+                    return Ok(Err(DocumentDbError::InvalidSortKey));
+                }
+            };
+            sqlx::query(
+                r#"
+                UPDATE fvoci.documents
+                SET sort_key = $3, updated_at = now()
+                WHERE workspace_id = $1 AND id = $2
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(child.id)
+            .bind(&sort_key)
+            .execute(&mut *tx)
+            .await?;
+            last_key = Some(sort_key);
+            let payload = json!({
+                "documentId": child.id.to_string(),
+                "newParentId": parent_id.map(|id| id.to_string()),
+                "newPath": new_path,
+                "oldParentId": child_parent_id.map(|id| id.to_string()),
+                "oldPath": child_path,
+                "oldProjectId": null,
+                "newProjectId": dest_project_id.map(|id| id.to_string()),
+            });
+            record_document_event_and_audit(
+                &mut tx,
+                workspace_id,
+                actor_user_id,
+                "document.moved",
+                child.id,
+                payload,
+                client_ip,
+            )
+            .await?;
+        }
+
+        lock_document_rows(&mut tx, workspace_id, &[document_id]).await?;
+        if !trash_document_row(&mut tx, workspace_id, document_id, now).await? {
+            tx.rollback().await?;
+            return Ok(Err(DocumentDbError::NotFound));
+        }
+        record_document_event_and_audit(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            "document.trashed",
+            document_id,
+            json!({ "documentId": document_id.to_string() }),
+            client_ip,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(Ok(()));
+    }
+
+    let subtree = subtree_ids(&mut tx, workspace_id, document_id).await?;
+    lock_document_rows(&mut tx, workspace_id, &subtree).await?;
+    for id in subtree {
+        let live: Option<(Option<DateTime<Utc>>, Option<Uuid>)> = sqlx::query_as(
+            "SELECT deleted_at, project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((deleted_at, project_id)) = live else {
+            continue;
+        };
+        if deleted_at.is_some() || project_id.is_some() {
+            continue;
+        }
+        if !trash_document_row(&mut tx, workspace_id, id, now).await? {
+            continue;
+        }
+        record_document_event_and_audit(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            "document.trashed",
+            id,
+            json!({ "documentId": id.to_string() }),
+            client_ip,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Ok(()))
+}
+
+pub async fn list_trashed_wiki_documents(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<TrashNode>, DocumentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    if role.is_none() {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    let rows = sqlx::query_as::<_, (Uuid, String, DateTime<Utc>, Option<Uuid>)>(
+        r#"
+        SELECT id, title, deleted_at, project_id
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND deleted_at IS NOT NULL
+        ORDER BY deleted_at DESC, id DESC
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut visible = Vec::new();
+    for (id, title, deleted_at, project_id) in rows {
+        if project_id.is_some() {
+            continue;
+        }
+        let permission =
+            document_permission(&mut tx, workspace_id, actor_user_id, id, false).await?;
+        if permission_can_view(permission) {
+            visible.push(TrashNode {
+                id,
+                title,
+                deleted_at,
+                project_id,
+            });
+        }
+    }
+    tx.commit().await?;
+    Ok(Ok(visible))
+}
+
+pub async fn restore_wiki_document(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    lock_tree(&mut tx, workspace_id).await?;
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+
+    lock_document_rows(&mut tx, workspace_id, &[document_id]).await?;
+    let doc: Option<DocProjectDeletedParent> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at, parent_id
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((project_id, deleted_at, parent_id)) = doc else {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if deleted_at.is_none() || project_id.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, false).await?;
+    if !permission_can_edit(permission) {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    if let Some(parent_id) = parent_id {
+        let parent: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+            "SELECT deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(parent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((parent_deleted_at,)) = parent else {
+            tx.rollback().await?;
+            return Ok(Err(DocumentDbError::TrashedParent));
+        };
+        if parent_deleted_at.is_some() {
+            tx.rollback().await?;
+            return Ok(Err(DocumentDbError::TrashedParent));
+        }
+    }
+
+    let restored = sqlx::query(
+        r#"
+        UPDATE fvoci.documents
+        SET deleted_at = NULL, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NOT NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .execute(&mut *tx)
+    .await?;
+    if restored.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    record_document_event_and_audit(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        "document.restored",
+        document_id,
+        json!({ "documentId": document_id.to_string() }),
+        client_ip,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(()))
 }
 
 pub fn between(a: Option<&str>, b: Option<&str>) -> Result<String, FractionalError> {
