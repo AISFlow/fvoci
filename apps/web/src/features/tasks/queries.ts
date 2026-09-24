@@ -1,6 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
 import type { components } from "@/generated/api";
 import { api, ensureOk } from "@/lib/api";
+import { GENERATED_TASK_LIST_PAGINATION } from "./task-list-page";
 
 export type TaskMeta = components["schemas"]["TaskMetaOutput"];
 export type TaskDetail = components["schemas"]["TaskOutput"];
@@ -10,12 +11,16 @@ export type TaskListResponse = components["schemas"]["TaskListResponse"];
 export function taskListQuery(workspaceId: string, projectId: string) {
   return queryOptions({
     queryKey: ["tasks", workspaceId, projectId] as const,
-    queryFn: async () =>
-      ensureOk(
+    queryFn: async () => {
+      if (GENERATED_TASK_LIST_PAGINATION) {
+        throw new Error("wire_generated_list_cursor");
+      }
+      return ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks", {
           params: { path: { workspace_id: workspaceId, project_id: projectId } },
         }),
-      ),
+      );
+    },
     enabled: Boolean(workspaceId) && Boolean(projectId),
     retry: false,
   });

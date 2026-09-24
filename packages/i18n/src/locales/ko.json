@@ -1150,6 +1150,7 @@
 	"doc.readOnly": "읽기 전용",
 	"doc.body.unavailable": "문서 편집과 협업 기능은 이 슬라이스에서 지원하지 않습니다.",
 	"task.body.unavailable": "태스크 본문 협업은 이 슬라이스에서 지원하지 않습니다.",
+	"task.lookup.unavailable": "표시 ID 조회가 아직 생성 계약에 없습니다.",
 	"doc.schema.unreadable": "문서 본문을 열 수 없습니다",
 	"doc.loading": "문서를 불러오는 중…",
 	"doc.unsaved": "저장 안 됨",

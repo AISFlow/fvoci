@@ -91,11 +91,24 @@ test("member creates a workspace project, task, and sees counts after reload", a
   await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
 
   await expect(page).toHaveURL(/\/w\/acme\/LAB-2$/);
+  const idAfterCreate = await workspaceId(page, "acme");
+  const labLookup = await page.request.get(
+    `/api/v1/workspaces/${idAfterCreate}/lookup/LAB-2`,
+  );
+  expect(labLookup.status()).toBe(200);
+  const labLookupBody = await labLookup.json();
+  expect(
+    labLookupBody.items.some(
+      (entry: { kind: string; displayId: string }) =>
+        entry.kind === "task" && entry.displayId === "LAB-2",
+    ),
+  ).toBe(true);
   await expect(page.getByRole("heading", { name: "첫 일" })).toBeVisible();
   await expect(page.getByText("LAB-2")).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "첫 일" })).toBeVisible();
+  await expect(page.getByText("LAB-2")).toBeVisible();
 
   await page.goto("/w/acme/projects");
   await expect(page.getByRole("link", { name: /Lab/ })).toBeVisible();
@@ -152,10 +165,21 @@ test("private project is absent for non-members and viewer writes fail visibly",
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
   await expect(page).toHaveURL(/\/w\/acme\/HID\/tasks$/);
 
+  await page.getByRole("button", { name: "새 태스크" }).click();
+  await page.getByLabel("제목").fill("비밀 초안");
+  await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
+  await expect(page).toHaveURL(/\/w\/acme\/HID-2$/);
+
   const id = await workspaceId(page, "acme");
 
   await page.getByRole("button", { name: "로그아웃" }).click();
   await login(page, admin.email, admin.password);
+  const maskedLookup = await page.request.get(`/api/v1/workspaces/${id}/lookup/HID-2`);
+  expect(maskedLookup.status()).toBe(200);
+  expect((await maskedLookup.json()).items).toEqual([]);
+  await page.goto("/w/acme/HID-2");
+  await expect(page.getByRole("alert")).toContainText("태스크를 찾을 수 없습니다");
+  await expect(page.getByRole("heading", { name: "비밀 초안" })).toHaveCount(0);
   const adminMe = await page.request.get("/api/v1/auth/me");
   expect(adminMe.ok()).toBe(true);
   const adminId = (await adminMe.json()).userId;
@@ -207,4 +231,40 @@ test("duplicate and reserved keys keep the form and show errors", async ({ page 
   await page.getByLabel("키").fill("WIKI");
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("예약된 키");
+});
+
+test("wiki shell and foreign workspace denial still hold after project flow", async ({ page }) => {
+  await login(page, member.email, member.password);
+  await page.goto("/w/acme/wiki");
+  await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
+  await expect(page.getByText("현재 역할: 멤버")).toBeVisible();
+
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await login(page, guest.email, guest.password);
+  await page.goto("/w/acme/wiki");
+  await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
+  await expect(page.getByText("현재 역할: 게스트")).toBeVisible();
+  await expect(page.getByRole("button", { name: "새 문서" })).toHaveCount(0);
+
+  const foreign = {
+    email: "pt-foreign@example.com",
+    password: "foreignpass1",
+    givenName: "외부",
+    familyName: "정",
+  };
+  createE2eUser(foreign.email, foreign.password, foreign.givenName, {
+    familyName: foreign.familyName,
+  });
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await login(page, foreign.email, foreign.password);
+  await page.goto("/w/acme/settings");
+  await expect(page).toHaveURL(/\?denied=workspace$/);
+  await expect(page.getByRole("alert")).toContainText("접근 권한");
+  await page.getByRole("button", { name: "닫기" }).click();
+  await expect(page).not.toHaveURL(/\?denied=workspace/);
+
+  await page.goto("/login");
+  await login(page, admin.email, admin.password);
+  await page.goto("/w/acme/wiki");
+  await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
 });

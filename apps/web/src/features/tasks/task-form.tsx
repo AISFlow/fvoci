@@ -4,6 +4,7 @@ import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { taskCreatePayload } from "./create-payload";
 import type { CreateTaskBody } from "./queries";
 import { TASK_TYPES, TASK_TYPE_LABELS, isTaskType, type TaskType } from "./task-types";
 import "@/features/projects/projects.css";
@@ -36,20 +37,18 @@ export function TaskForm({
       className="task-form"
       noValidate
       onSubmit={form.handleSubmit(async (values) => {
-        const title = values.title.trim();
-        if (title.length < 1) {
-          form.setError("title", { message: t("task.form.titleRequired") });
+        const parsed = taskCreatePayload(values);
+        if (!parsed.ok) {
+          if (parsed.issue === "parent") {
+            form.setError("type", { message: t("task.parent.required") });
+          } else if (parsed.issue === "type") {
+            form.setError("type", { message: t("task.form.type.label") });
+          } else {
+            form.setError("title", { message: t("task.form.titleRequired") });
+          }
           return;
         }
-        if (title.length > 500) {
-          form.setError("title", { message: t("task.form.titleRequired") });
-          return;
-        }
-        if (values.type === "subtask") {
-          form.setError("type", { message: t("task.parent.required") });
-          return;
-        }
-        await onSubmit({ title, type: values.type });
+        await onSubmit(parsed.body);
       })}
     >
       <div className="task-form__field">

@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { findProjectByKey, projectsQuery, workflowQuery } from "@/features/projects/queries";
 import { TaskDetailView } from "@/features/tasks/task-detail";
+import { GENERATED_LOOKUP_READY, lookupQuery, pickLookupTask } from "@/features/tasks/lookup";
 import { taskQuery } from "@/features/tasks/queries";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
@@ -15,13 +16,18 @@ export function TaskDetailPage() {
   const { ref } = useParams<{ ref: string }>();
   const { slug, workspace } = useWorkspaceContext();
   const parsed = parseRef(ref ?? "");
-  const item = parsed?.kind === "item" ? parsed : null;
+  const item = parsed?.kind === "item" && parsed.prefix !== "WIKI" ? parsed : null;
+  const displayId = item?.displayId ?? "";
 
   const projects = useQuery(projectsQuery(workspace?.id ?? ""));
   const project = findProjectByKey(projects.data?.items, item?.prefix ?? "");
-  const lookupTaskId: string | undefined = undefined;
-  const task = useQuery(taskQuery(workspace?.id ?? "", lookupTaskId ?? ""));
-  const workflow = useQuery(workflowQuery(workspace?.id ?? "", project?.id ?? ""));
+  const lookup = useQuery({
+    ...lookupQuery(workspace?.id ?? "", displayId),
+    enabled: GENERATED_LOOKUP_READY && Boolean(workspace?.id) && displayId.length > 0,
+  });
+  const lookupTask = lookup.isSuccess ? pickLookupTask(lookup.data.items, displayId) : null;
+  const task = useQuery(taskQuery(workspace?.id ?? "", lookupTask?.id ?? ""));
+  const workflow = useQuery(workflowQuery(workspace?.id ?? "", project?.id ?? lookupTask?.projectId ?? ""));
 
   if (!workspace) return null;
 
@@ -29,9 +35,17 @@ export function TaskDetailPage() {
     projects.isError &&
     projects.error instanceof ProblemError &&
     projects.error.status === 404;
-  const missingItem = item == null || item.prefix === "WIKI";
-  const missingProject = projects.isSuccess && project === undefined;
-  const missingLookup = lookupTaskId === undefined;
+  const missingItem = item == null;
+  const lookup404 =
+    lookup.isError && lookup.error instanceof ProblemError && lookup.error.status === 404;
+  const lookupMiss = lookup.isSuccess && lookupTask === null;
+  const task404 =
+    Boolean(lookupTask) &&
+    task.isError &&
+    task.error instanceof ProblemError &&
+    task.error.status === 404;
+  const realNotFound = missingItem || projectsDenied || lookup404 || lookupMiss || task404;
+  const lookupUnavailable = !GENERATED_LOOKUP_READY && !missingItem && !projectsDenied;
 
   return (
     <WorkspaceShell
@@ -49,19 +63,29 @@ export function TaskDetailPage() {
           }}
         />
       ) : null}
-      {projectsDenied || missingItem || missingProject || missingLookup ? (
+      {lookupUnavailable ? (
+        <p role="status" className="task-form__alert">
+          {t("task.lookup.unavailable")}
+        </p>
+      ) : null}
+      {realNotFound ? (
         <p role="alert" className="task-form__alert">
           {t("task.error.notFound")}
         </p>
       ) : null}
-      {lookupTaskId && task.isLoading ? <QueryLoading /> : null}
-      {lookupTaskId && task.isError ? (
+      {GENERATED_LOOKUP_READY && lookup.isLoading ? <QueryLoading /> : null}
+      {lookup.isError && !lookup404 ? (
         <QueryError
-          message={
-            task.error instanceof ProblemError && task.error.status === 404
-              ? t("task.error.notFound")
-              : loadErrorMessage(task.error)
-          }
+          message={loadErrorMessage(lookup.error)}
+          onRetry={() => {
+            void lookup.refetch();
+          }}
+        />
+      ) : null}
+      {lookupTask && task.isLoading ? <QueryLoading /> : null}
+      {lookupTask && task.isError && !task404 ? (
+        <QueryError
+          message={loadErrorMessage(task.error)}
           onRetry={() => {
             void task.refetch();
           }}
@@ -84,7 +108,7 @@ export function TaskDetailPage() {
           statuses={workflow.data?.statuses ?? []}
         />
       ) : null}
-      {missingItem || missingProject || missingLookup || projectsDenied ? (
+      {lookupUnavailable || realNotFound ? (
         <p className="task-home__note">
           <Link to={project ? projectTasksPath(slug, project.key) : projectsPath(slug)}>
             {t("nav.projects")}

@@ -8,15 +8,21 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ProblemError } from "@/lib/api";
 import { formFieldMessage } from "@/lib/form-issues";
-import { canonicalizeProjectKey, projectKeyIssue } from "@/lib/href";
+import { canonicalizeProjectKey } from "@/lib/href";
+import {
+  PROJECT_DESCRIPTION_MAX,
+  PROJECT_ICON_MAX,
+  PROJECT_NAME_MAX,
+  projectCreatePayload,
+} from "./create-payload";
 import type { CreateProjectBody } from "./queries";
 
 const createSchema = z.object({
   key: z.string().min(1, "i18n:form.too_small"),
-  name: z.string().trim().min(1, "i18n:form.too_small").max(200, "i18n:form.too_small"),
+  name: z.string().trim().min(1, "i18n:form.too_small").max(PROJECT_NAME_MAX, "i18n:form.too_small"),
   visibility: z.enum(["workspace", "private"]),
-  description: z.string().optional(),
-  icon: z.string().optional(),
+  description: z.string().max(PROJECT_DESCRIPTION_MAX, "i18n:form.too_small").optional(),
+  icon: z.string().max(PROJECT_ICON_MAX, "i18n:form.too_small").optional(),
 });
 
 type CreateForm = z.infer<typeof createSchema>;
@@ -51,24 +57,19 @@ export function CreateProjectForm({
       noValidate
       onSubmit={form.handleSubmit(async (values) => {
         setServerError(null);
-        const key = canonicalizeProjectKey(values.key);
-        const issue = projectKeyIssue(key);
-        if (issue === "reserved") {
-          form.setError("key", { message: "i18n:project.key.reserved" });
-          return;
-        }
-        if (issue === "pattern") {
-          form.setError("key", { message: "i18n:form.pattern.key" });
+        const parsed = projectCreatePayload(values);
+        if (!parsed.ok) {
+          if (parsed.issue.field === "key" && parsed.issue.code === "reserved") {
+            form.setError("key", { message: "i18n:project.key.reserved" });
+          } else if (parsed.issue.field === "key" && parsed.issue.code === "pattern") {
+            form.setError("key", { message: "i18n:form.pattern.key" });
+          } else {
+            form.setError(parsed.issue.field, { message: "i18n:form.too_small" });
+          }
           return;
         }
         try {
-          await onSubmit({
-            key,
-            name: values.name.trim(),
-            visibility: values.visibility,
-            description: values.description?.trim() || null,
-            icon: values.icon?.trim() || null,
-          });
+          await onSubmit(parsed.body);
         } catch (err) {
           setServerError(err instanceof ProblemError ? err.title : t("error.network"));
         }
