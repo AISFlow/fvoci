@@ -169,6 +169,7 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
     await expectTokens(pageA, ["안녕🙂세계"]);
     await expectTokens(pageB, ["안녕🙂세계"]);
     await expectConverged(pageA, pageB);
+    await Promise.all([installCaretProbe(pageA), installCaretProbe(pageB)]);
     const beforeIds = uniqueBlockIds(await editorShape(pageA));
     await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
     await Promise.all([
@@ -181,7 +182,9 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
         await pageB.keyboard.press("ArrowLeft");
         await pageB.keyboard.press("ArrowLeft");
         await pageB.keyboard.press("ArrowLeft");
+        console.info("emoji before Delete", await readCaretProbe(pageB));
         await pageB.keyboard.press("Delete");
+        console.info("emoji after Delete", await readCaretProbe(pageB));
       })(),
     ]);
     await expectTokens(pageA, ["안녕", "중간", "세계"]);

@@ -618,19 +618,17 @@ export function uniqueBlockIds(shape: EditorShape): string[] {
   return ids;
 }
 
-/** Display convenience only. Structural acceptance uses editorShape, not these. */
+/** Read actual document text, excluding awareness decorations; structure is checked separately. */
 export async function expectTokens(page: Page, tokens: string[]): Promise<void> {
-  const editor = editorLocator(page);
   for (const token of tokens) {
-    await expect(editor).toContainText(token, { timeout: 15_000 });
+    await expect.poll(async () => (await editorShape(page)).text, { timeout: 15_000 }).toContain(token);
   }
 }
 
-/** Display convenience only. Structural acceptance uses editorShape, not these. */
+/** Read actual document text, excluding awareness decorations; structure is checked separately. */
 export async function expectTokensAbsent(page: Page, tokens: string[]): Promise<void> {
-  const editor = editorLocator(page);
   for (const token of tokens) {
-    await expect(editor).not.toContainText(token);
+    await expect.poll(async () => (await editorShape(page)).text).not.toContain(token);
   }
 }
 
