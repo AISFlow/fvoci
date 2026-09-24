@@ -304,6 +304,27 @@ test("delete-only save then structured marks, table, and IDs persist", async ({ 
   await editor.click();
   await page.keyboard.type("굵은링크");
   await page.keyboard.press("Shift+Home");
+  // Native keyboard selectionchange and ProseMirror selection update are
+  // separate events. Assert both before exercising the selection toolbar;
+  // a lost selection must fail here, not look like a missing format button.
+  await expect.poll(() => editor.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: {
+        state: {
+          selection: { from: number; to: number };
+          doc: { textBetween(from: number, to: number): string };
+        };
+      };
+    }).editor;
+    const selection = live?.state.selection;
+    return {
+      browser: window.getSelection()?.toString() ?? "",
+      editor: live && selection
+        ? live.state.doc.textBetween(selection.from, selection.to)
+        : null,
+    };
+  }), { message: "native and editor selection must cover the intended marked text" })
+    .toEqual({ browser: "굵은링크", editor: "굵은링크" });
   await applyBoldToSelection(page);
   await applyLinkToSelection(page, "https://example.com");
   await persistBody(page);

@@ -60,6 +60,9 @@ retain_failure_artifacts() {
       "$log" >"$dest"
   done < <(find "$RUN_DIR" -mindepth 2 -name server.log -type f -print0 2>/dev/null || true)
   echo "retained failure artifacts in $retain_dir" >&2
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf 'failure-artifacts=%s\n' "$retain_dir" >>"$GITHUB_OUTPUT"
+  fi
 }
 
 cleanup() {

@@ -1351,3 +1351,27 @@ server/Web은 컴파일 실패로 필요한 검사가 미실행됐다. 해당 cf
 기본 lib44/44(body5.77s/compile2.78s), api-schema bins check8.49s, 기본 bins
 build9.49s와 fmt를 실제로 다시 성공 확인했다. hub의 test-only import 경고1건은
 별도 소유자의 후속 수정 항목이며 오류를 숨기기 위한 경고 억제는 하지 않았다.
+
+1194b9c 원격 Rust35964181490(5 jobs), Documents35964181476 및
+Engine35964181472 성공. 합성 checkout b28fe16은1194b9c+mainba19932다.
+양 아키텍처 lifecycle7/product50/projection15, DB30/66/13 및 fast44/wire11이
+실제로 실행됐다. Web35964181522는 workspace 성공, collaboration13/14:
+삭제-only 이후 굵게 버튼 대기에서30초 실패했다. 동일1194 제품 코드의 로컬
+`FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh --grep 'instance setup then member fixture|delete-only save then structured'`
+는2/2(body18.4s)였으나 원격 결함 해결 증거로 간주하지 않는다. 네이티브/편집기
+선택 일치 assertion을 추가해 실패 경계를 좁히고, CI 실패 DOM(error-context.md)만
+3일 보존한다. 인증 헤더가 포함될 수 있는 trace는 업로드하지 않는다.
+
+R1/R4 Composer76a5356+026ee10을 통합 worktree에 미커밋 적용했다. 전역 실패
+플래그는 실제 테스트 전용 symlink 제거/복구로 대체; 통합 순수6/6(compile2.85s).
+Opus5.5 medium task027654e6e4e9/ctx934d67e0d3ba가 고정 delta를 검토·release했고,
+입력으로 유발된 Memory/Stack 한도를1011로 분류하는 B1은 미해소다.
+Composer task2e483f4d33da/ctxd00235e6a8cf가 rust-collab-error-boundary의
+room/validation/projection tests/support만 소유해 수정한다. 요청/유효 모델 일치.
+Grok task36c75bee7752/ctxa3e770ca498a는 rust-collab-shutdown의 기존 미커밋
+main/config/hub/guard/shutdown test/Cargo target을 보존해 종료 실패 전파를
+수정한다. 앞선4/4 성공은 초안 검사이며, JoinHandle 오류 무시 등 차단 경로의
+수락 근거가 아니다. 현재 로컬 무거운 검사 슬롯은 Grok 소유다.
+PR7 Draft/미병합, auto-merge 미설정. F5–F7과 B1/브라우저 실패를 해소한 뒤
+고정 SHA Opus delta/원격 검사로 수락한다. 다음 명령은 기존 Run inbox 확인과
+두 고정 제출 delta 검토·통합이다. 소유 불명 자원은 그대로 보존했다.
