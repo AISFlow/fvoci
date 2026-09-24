@@ -1,5 +1,6 @@
 use uuid::Uuid;
 
+use crate::db::context::{session_is_live, set_tenant};
 use crate::db::documents::membership_role;
 use crate::db::workspace::WorkspaceRole;
 use crate::display_id::{format_display_id, parse_display_id, ParsedDisplayId};
@@ -19,11 +20,20 @@ pub async fn lookup_display_id(
     pool: &PgPool,
     workspace_id: Uuid,
     actor_user_id: Uuid,
+    session_id: Uuid,
     display_id: &str,
     project_filter: Option<Uuid>,
 ) -> Result<Result<Vec<LookupItemRow>, LookupDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    crate::db::context::set_tenant(&mut tx, workspace_id).await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(LookupDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(LookupDbError::NotFound));
+    }
     let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
     let Some(role) = role else {
         tx.rollback().await?;
@@ -236,7 +246,20 @@ async fn search_project_acl(
     })
 }
 
+async fn workspace_is_live(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(Option<chrono::DateTime<chrono::Utc>>,)> =
+        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LookupDbError {
     NotFound,
+    Forbidden,
 }

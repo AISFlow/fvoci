@@ -69,7 +69,7 @@ impl TestDb {
         .execute(&migration_pool)
         .await
         .expect("create role");
-        apply_grants(&migration_pool, &role_name).await;
+        apply_grants_through(&migration_pool, &role_name, max_migration_version).await;
         migration_pool.close().await;
         let mut app = url::Url::parse(&admin_url).expect("database url");
         app.set_username(&role_name).ok();
@@ -121,10 +121,23 @@ fn join_db_url(server_url: &str, db_name: &str) -> String {
 }
 
 async fn apply_grants(pool: &PgPool, role_name: &str) {
+    apply_grants_through(pool, role_name, 8).await;
+}
+
+async fn apply_grants_through(pool: &PgPool, role_name: &str, max_migration_version: i32) {
     let quoted_role = format!("\"{}\"", role_name);
     let grants =
         include_str!("../../scripts/grant-app-role.sql").replace(":\"app_role\"", &quoted_role);
     for statement in grants.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        if max_migration_version < 8
+            && (statement.contains("fvoci.projects")
+                || statement.contains("fvoci.project_members")
+                || statement.contains("fvoci.workflows")
+                || statement.contains("fvoci.statuses")
+                || statement.contains("fvoci.tasks"))
+        {
+            continue;
+        }
         sqlx::query(statement).execute(pool).await.expect("grant");
     }
 }
@@ -156,6 +169,52 @@ fn app_router(state: AppState) -> axum::Router {
     fvoci_server::http::router(state, None)
 }
 
+pub async fn http_request(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    content_type: Option<&str>,
+    cookie: Option<&str>,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, Value, axum::http::HeaderMap) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("origin", "http://localhost");
+    if let Some(cookie) = cookie {
+        builder = builder.header("cookie", format!("fvoci_session={}", cookie));
+    }
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = if let Some(body) = body {
+        let mut builder = builder;
+        if let Some(content_type) = content_type {
+            builder = builder.header("content-type", content_type);
+        }
+        builder.body(Body::from(body)).unwrap()
+    } else {
+        builder.body(Body::empty()).unwrap()
+    };
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default();
+    let json = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(json!({}))
+    };
+    (status, json, headers)
+}
+
 pub async fn json_request(
     app: axum::Router,
     method: &str,
@@ -163,6 +222,17 @@ pub async fn json_request(
     body: Option<Value>,
     cookie: Option<&str>,
 ) -> (StatusCode, Value) {
+    let (status, json, _) = json_request_with_headers(app, method, path, body, cookie).await;
+    (status, json)
+}
+
+pub async fn json_request_with_headers(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    cookie: Option<&str>,
+) -> (StatusCode, Value, axum::http::HeaderMap) {
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
@@ -184,6 +254,7 @@ pub async fn json_request(
         .insert(axum::extract::ConnectInfo(test_peer()));
     let response = app.oneshot(request).await.expect("response");
     let status = response.status();
+    let headers = response.headers().clone();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap_or_default();
@@ -192,7 +263,7 @@ pub async fn json_request(
     } else {
         serde_json::from_slice(&bytes).unwrap_or(json!({}))
     };
-    (status, json)
+    (status, json, headers)
 }
 
 fn extract_session_cookie(set_cookie: &str) -> String {
@@ -414,7 +485,8 @@ pub async fn wait_for_user_for_update_blocked(admin: &PgPool, blocker_pid: i32) 
             r#"
             SELECT activity.pid
             FROM pg_stat_activity AS activity
-            WHERE activity.wait_event_type = 'Lock'
+            WHERE activity.datname = current_database()
+              AND activity.wait_event_type = 'Lock'
               AND activity.state = 'active'
               AND activity.query ILIKE '%fvoci.users%'
               AND activity.query ILIKE '%FOR UPDATE%'
@@ -435,30 +507,128 @@ pub async fn wait_for_user_for_update_blocked(admin: &PgPool, blocker_pid: i32) 
 }
 
 pub async fn wait_for_query_blocked_by(admin: &PgPool, blocker_pid: i32, query_like: &str) -> i32 {
+    wait_for_blocked_query_count(admin, blocker_pid, query_like, 1)
+        .await
+        .into_iter()
+        .next()
+        .expect("expected one blocked query")
+}
+
+pub async fn wait_for_blocked_query_count(
+    admin: &PgPool,
+    blocker_pid: i32,
+    query_like: &str,
+    expected: usize,
+) -> Vec<i32> {
+    wait_for_blocked_by_holder(admin, blocker_pid, Some(query_like), expected).await
+}
+
+pub async fn wait_for_blocked_by_holder(
+    admin: &PgPool,
+    blocker_pid: i32,
+    query_like: Option<&str>,
+    expected: usize,
+) -> Vec<i32> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
-        let blocked: Option<i32> = sqlx::query_scalar(
+        let blocked: Vec<i32> = if let Some(query_like) = query_like {
+            sqlx::query_scalar(
+                r#"
+                SELECT activity.pid
+                FROM pg_stat_activity AS activity
+                WHERE activity.datname = current_database()
+                  AND activity.wait_event_type = 'Lock'
+                  AND activity.state = 'active'
+                  AND activity.query ILIKE $2
+                  AND $1 = ANY(pg_blocking_pids(activity.pid))
+                ORDER BY activity.pid
+                "#,
+            )
+            .bind(blocker_pid)
+            .bind(query_like)
+            .fetch_all(admin)
+            .await
+            .unwrap()
+        } else {
+            sqlx::query_scalar(
+                r#"
+                SELECT activity.pid
+                FROM pg_stat_activity AS activity
+                WHERE activity.datname = current_database()
+                  AND activity.wait_event_type = 'Lock'
+                  AND activity.state = 'active'
+                  AND $1 = ANY(pg_blocking_pids(activity.pid))
+                ORDER BY activity.pid
+                "#,
+            )
+            .bind(blocker_pid)
+            .fetch_all(admin)
+            .await
+            .unwrap()
+        };
+        if blocked.len() >= expected {
+            return blocked;
+        }
+        tokio::task::yield_now().await;
+    }
+    let detail = query_like.unwrap_or("any query");
+    panic!("expected at least {expected} blocked queries matching {detail}");
+}
+
+pub async fn wait_for_active_query_count(admin: &PgPool, query_like: &str, expected: usize) {
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(admin)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let active: i64 = sqlx::query_scalar(
             r#"
-            SELECT activity.pid
+            SELECT count(*)
             FROM pg_stat_activity AS activity
-            WHERE activity.wait_event_type = 'Lock'
+            WHERE activity.datname = current_database()
+              AND activity.pid <> $1
               AND activity.state = 'active'
               AND activity.query ILIKE $2
-              AND $1 = ANY(pg_blocking_pids(activity.pid))
-            LIMIT 1
             "#,
         )
         .bind(blocker_pid)
         .bind(query_like)
-        .fetch_optional(admin)
+        .fetch_one(admin)
         .await
         .unwrap();
-        if let Some(pid) = blocked {
-            return pid;
+        if active >= expected as i64 {
+            return;
         }
         tokio::task::yield_now().await;
     }
-    panic!("expected blocked query matching {query_like}");
+    panic!("expected at least {expected} active queries matching {query_like}");
+}
+
+pub async fn wait_for_project_lock_waiters(admin: &PgPool, blocker_pid: i32, expected: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM pg_stat_activity AS activity
+            WHERE activity.datname = current_database()
+              AND activity.wait_event_type = 'Lock'
+              AND activity.state = 'active'
+              AND activity.query ILIKE '%fvoci.projects%'
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
+            "#,
+        )
+        .bind(blocker_pid)
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        if waiting >= expected as i64 {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("expected at least {expected} active project-lock waiters blocked by pid {blocker_pid}");
 }
 
 pub async fn wait_for_advisory_blocked_by(admin: &PgPool, blocker_pid: i32) -> i32 {
@@ -498,4 +668,40 @@ pub async fn create_project(
 
 pub async fn app_pool(harness: &TestDb) -> PgPool {
     pool::connect_app(&harness.app_url).await.expect("app pool")
+}
+
+pub async fn session_id_for_user(admin: &PgPool, user_id: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "SELECT id FROM fvoci.sessions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_one(admin)
+    .await
+    .expect("session id")
+}
+
+pub async fn insert_stored_attachment(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    uploader_id: Uuid,
+) -> Uuid {
+    let attachment_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.attachments (
+            id, workspace_id, document_id, uploader_id, status, name, reserved_size_bytes,
+            size_bytes, storage_key, completed_at
+        ) VALUES ($1, $2, $3, $4, 'stored', 'probe.bin', 4, 4, $5, now())
+        "#,
+    )
+    .bind(attachment_id)
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(uploader_id)
+    .bind(Uuid::now_v7().to_string())
+    .execute(admin)
+    .await
+    .expect("insert attachment");
+    attachment_id
 }

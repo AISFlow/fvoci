@@ -139,6 +139,7 @@ impl Modify for CookieSecurityAddon {
         (name = "auth", description = "Authentication and profile"),
         (name = "workspaces", description = "Workspace membership and metadata"),
         (name = "projects", description = "Project and workflow management"),
+        (name = "search", description = "Display id lookup"),
         (name = "tasks", description = "Project task operations"),
         (name = "documents", description = "Wiki documents"),
         (name = "attachments", description = "Wiki document attachments"),

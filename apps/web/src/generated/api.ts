@@ -644,8 +644,8 @@ export interface components {
             icon?: string | null;
             /** Format: uuid */
             leadUserId?: string | null;
-            name?: string | null;
-            visibility?: string | null;
+            name?: string;
+            visibility?: string;
         };
         PatchWorkspaceBody: {
             name: string;
@@ -667,7 +667,7 @@ export interface components {
             name: string;
             /** Format: int64 */
             openTaskCount: number;
-            rootDocumentId: string;
+            rootDocumentId: string | null;
             status: string;
             /** Format: int64 */
             taskCount: number;
@@ -691,7 +691,7 @@ export interface components {
             id: string;
             key: string;
             name: string;
-            rootDocumentId: string;
+            rootDocumentId: string | null;
             status: string;
             /** Format: date-time */
             updatedAt: string;

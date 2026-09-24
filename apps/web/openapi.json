@@ -3126,16 +3126,10 @@
             "format": "uuid"
           },
           "name": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "visibility": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -3226,7 +3220,10 @@
             "format": "int64"
           },
           "rootDocumentId": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
@@ -3321,7 +3318,10 @@
             "type": "string"
           },
           "rootDocumentId": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
@@ -4062,6 +4062,10 @@
     {
       "name": "projects",
       "description": "Project and workflow management"
+    },
+    {
+      "name": "search",
+      "description": "Display id lookup"
     },
     {
       "name": "tasks",

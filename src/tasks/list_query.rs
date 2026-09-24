@@ -118,15 +118,16 @@ pub fn parse_task_list_query(
         return Err(TaskListQueryError::InvalidInput);
     }
     let view = parse_view_query(raw_query)?;
-    let as_of = Utc::now();
-    let cursor = match cursor {
+    let (cursor, as_of) = match cursor {
         Some(raw) => {
             if raw.len() > CURSOR_MAX {
                 return Err(TaskListQueryError::InvalidCursor);
             }
-            Some(decode_cursor(raw)?)
+            let decoded = decode_cursor(raw)?;
+            let as_of = decoded.as_of;
+            (Some(decoded), as_of)
         }
-        None => None,
+        None => (None, Utc::now()),
     };
     Ok(ParsedTaskListQuery {
         view,
@@ -402,6 +403,7 @@ pub fn sort_field_name(field: SortField) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 pub fn cursor_key_for_row(
     sort: &[ViewSort],
+    id: Uuid,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     number: i32,
@@ -411,26 +413,64 @@ pub fn cursor_key_for_row(
     status_id: Uuid,
     due_date: Option<NaiveDate>,
 ) -> String {
-    let primary = if sort.is_empty() {
-        format!("created:{}:{}", created_at.to_rfc3339(), number)
+    let sort = effective_sort_entries(sort);
+    let mut parts = Vec::with_capacity(sort.len() + 1);
+    for entry in sort {
+        parts.push(format!(
+            "{}:{}",
+            sort_field_name(entry.field),
+            sort_value_token(
+                entry.field,
+                created_at,
+                updated_at,
+                number,
+                title,
+                sort_key,
+                priority,
+                status_id,
+                due_date,
+            )
+        ));
+    }
+    parts.push(format!("id:{id}"));
+    sha256_hex(parts.join("\0"))
+}
+
+fn effective_sort_entries(sort: &[ViewSort]) -> Vec<ViewSort> {
+    if sort.is_empty() {
+        vec![ViewSort {
+            field: SortField::Created,
+            direction: SortDirection::Desc,
+        }]
     } else {
-        match sort[0].field {
-            SortField::Created => format!("created:{}", created_at.to_rfc3339()),
-            SortField::Updated => format!("updated:{}", updated_at.to_rfc3339()),
-            SortField::Number => format!("number:{number}"),
-            SortField::Title => format!("title:{title}"),
-            SortField::Rank => format!("rank:{sort_key}"),
-            SortField::Priority => format!("priority:{priority}"),
-            SortField::Status => format!("status:{status_id}"),
-            SortField::Due => format!(
-                "due:{}",
-                due_date
-                    .map(|date| date.to_string())
-                    .unwrap_or_else(|| "null".to_string())
-            ),
-        }
-    };
-    sha256_hex(primary)
+        sort.to_vec()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sort_value_token(
+    field: SortField,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    number: i32,
+    title: &str,
+    sort_key: &str,
+    priority: &str,
+    status_id: Uuid,
+    due_date: Option<NaiveDate>,
+) -> String {
+    match field {
+        SortField::Created => created_at.to_rfc3339(),
+        SortField::Updated => updated_at.to_rfc3339(),
+        SortField::Number => number.to_string(),
+        SortField::Title => title.to_string(),
+        SortField::Rank => sort_key.to_string(),
+        SortField::Priority => priority.to_string(),
+        SortField::Status => status_id.to_string(),
+        SortField::Due => due_date
+            .map(|date| date.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+    }
 }
 
 fn sha256_hex(value: String) -> String {
@@ -507,5 +547,19 @@ mod tests {
         let huge = format!("{{\"filters\":{{\"title\":\"{}\"}}}}", "a".repeat(16_001));
         let err = parse_task_list_query(Some(&huge), None, None, None, None, None).unwrap_err();
         assert_eq!(err, TaskListQueryError::InvalidInput);
+    }
+
+    #[test]
+    fn preserves_cursor_as_of_on_decode() {
+        let as_of = Utc::now();
+        let encoded = encode_cursor(&TaskListCursor {
+            id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            key: "a".repeat(64),
+            f: "b".repeat(64),
+            as_of,
+        });
+        let parsed = parse_task_list_query(None, None, Some(&encoded), None, None, None)
+            .expect("valid cursor");
+        assert_eq!(parsed.as_of.timestamp(), as_of.timestamp());
     }
 }

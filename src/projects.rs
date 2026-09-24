@@ -111,6 +111,20 @@ pub fn name_is_valid(name: &str) -> bool {
     !trimmed.is_empty() && trimmed.chars().count() <= 200
 }
 
+pub fn description_is_valid(value: Option<&str>) -> bool {
+    match value {
+        None => true,
+        Some(raw) => raw.chars().count() <= 2000,
+    }
+}
+
+pub fn icon_is_valid(value: Option<&str>) -> bool {
+    match value {
+        None => true,
+        Some(raw) => raw.chars().count() <= 50,
+    }
+}
+
 pub fn optional_text_to_db(value: Option<&str>) -> Option<String> {
     value.map(str::trim).and_then(|v| {
         if v.is_empty() {

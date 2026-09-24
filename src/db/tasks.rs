@@ -671,6 +671,145 @@ pub async fn list_project_tasks(
         return Ok(Err(ProjectDbError::NotFound));
     }
 
+    let (base_conditions, base_binds) = task_list_filter_conditions(query);
+    let mut conditions = base_conditions.clone();
+    let mut binds = base_binds.clone();
+    let sort = effective_sort(&query.view.sort);
+    if let Some(cursor) = &query.cursor {
+        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(
+            r#"
+            SELECT t.created_at, t.updated_at, t.id, t.number, t.title, t.sort_key, t.priority, t.status_id, t.due_date
+            FROM fvoci.tasks t
+            WHERE t.workspace_id = $1 AND t.project_id = $2 AND t.id = $3 AND t.deleted_at IS NULL
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(cursor.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((
+            created_at,
+            updated_at,
+            id,
+            number,
+            title,
+            sort_key,
+            priority,
+            status_id,
+            due_date,
+        )) = anchor
+        else {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::InvalidCursor));
+        };
+        let key = cursor_key_for_row(
+            &sort, id, created_at, updated_at, number, &title, &sort_key, &priority, status_id,
+            due_date,
+        );
+        if key != cursor.key {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::InvalidCursor));
+        }
+        let bind_start = binds.len() + 3;
+        conditions.push(cursor_clause(&sort, bind_start));
+        for entry in &sort {
+            binds.push(cursor_bind_value(
+                entry.field,
+                created_at,
+                updated_at,
+                number,
+                &title,
+                &sort_key,
+                &priority,
+                status_id,
+                due_date,
+            ));
+        }
+        binds.push(id.to_string());
+    }
+
+    let list_where_sql = conditions.join(" AND ");
+    let count_where_sql = base_conditions.join(" AND ");
+    let order_sql = order_clause(&sort);
+    let limit = query.limit + 1;
+    let list_sql = format!(
+        r#"
+        SELECT t.id, t.project_id, t.number, t.title, t.type AS task_type, t.priority, t.status_id,
+               t.start_date, t.due_date, t.due_at, t.estimate, t.parent_id, t.milestone_id,
+               t.sort_key, t.schema_version, t.version, t.archived_at, t.created_by, t.created_at,
+               t.updated_at, t.recurrence
+        FROM fvoci.tasks t
+        WHERE {list_where_sql}
+        ORDER BY {order_sql}
+        LIMIT {limit}
+        "#
+    );
+    let mut list_query = sqlx::query(&list_sql).bind(workspace_id).bind(project_id);
+    for value in &binds {
+        list_query = list_query.bind(value);
+    }
+    let rows = list_query.fetch_all(&mut *tx).await?;
+
+    let count_sql = format!(
+        r#"
+        SELECT t.status_id, count(*)
+        FROM fvoci.tasks t
+        WHERE {count_where_sql}
+        GROUP BY t.status_id
+        "#
+    );
+    let mut count_query = sqlx::query_as::<_, (Uuid, i64)>(&count_sql)
+        .bind(workspace_id)
+        .bind(project_id);
+    for value in &base_binds {
+        count_query = count_query.bind(value);
+    }
+    let status_counts = count_query.fetch_all(&mut *tx).await?;
+
+    let mut items = Vec::new();
+    for row in rows.iter().take(query.limit as usize) {
+        let record = map_task_row(row)?;
+        let recurrence = row.try_get::<Option<Value>, _>("recurrence").ok().flatten();
+        items.push(row_to_meta(workspace_id, record, recurrence));
+    }
+    let next_cursor = if rows.len() as i32 > query.limit {
+        let last = &rows[(query.limit - 1) as usize];
+        let record = map_task_row(last)?;
+        let created_at: DateTime<Utc> = last.try_get("created_at")?;
+        let updated_at: DateTime<Utc> = last.try_get("updated_at")?;
+        let due_date: Option<NaiveDate> = last.try_get("due_date")?;
+        let key = cursor_key_for_row(
+            &sort,
+            record.id,
+            created_at,
+            updated_at,
+            record.number,
+            &record.title,
+            &record.sort_key,
+            &record.priority,
+            record.status_id,
+            due_date,
+        );
+        Some(encode_cursor(&TaskListCursor {
+            id: record.id,
+            key,
+            f: fingerprint,
+            as_of: query.as_of,
+        }))
+    } else {
+        None
+    };
+
+    tx.commit().await?;
+    Ok(Ok(TaskListPage {
+        items,
+        status_counts,
+        next_cursor,
+    }))
+}
+
+fn task_list_filter_conditions(query: &ParsedTaskListQuery) -> (Vec<String>, Vec<String>) {
     let mut binds: Vec<String> = Vec::new();
     let mut conditions = vec![
         "t.workspace_id = $1".to_string(),
@@ -726,168 +865,10 @@ pub async fn list_project_tasks(
             "GREATEST(t.start_date, COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date)) >= ${from_idx}::date"
         ));
     }
-
-    let sort = effective_sort(&query.view.sort);
-    if let Some(cursor) = &query.cursor {
-        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(
-                r#"
-                SELECT t.created_at, t.updated_at, t.id, t.number, t.title, t.sort_key, t.priority, t.status_id, t.due_date
-                FROM fvoci.tasks t
-                WHERE t.workspace_id = $1 AND t.project_id = $2 AND t.id = $3 AND t.deleted_at IS NULL
-                "#,
-            )
-            .bind(workspace_id)
-            .bind(project_id)
-            .bind(cursor.id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some((
-            created_at,
-            updated_at,
-            id,
-            number,
-            title,
-            sort_key,
-            priority,
-            status_id,
-            due_date,
-        )) = anchor
-        else {
-            tx.rollback().await?;
-            return Ok(Err(ProjectDbError::InvalidCursor));
-        };
-        let key = cursor_key_for_row(
-            &sort, created_at, updated_at, number, &title, &sort_key, &priority, status_id,
-            due_date,
-        );
-        if key != cursor.key {
-            tx.rollback().await?;
-            return Ok(Err(ProjectDbError::InvalidCursor));
-        }
-        let bind_start = binds.len() + 3;
-        match sort[0].field {
-            SortField::Created => {
-                conditions.push(cursor_clause(&sort, bind_start));
-                binds.push(created_at.to_rfc3339());
-                binds.push(id.to_string());
-            }
-            SortField::Updated => {
-                conditions.push(cursor_clause(&sort, bind_start));
-                binds.push(updated_at.to_rfc3339());
-                binds.push(id.to_string());
-            }
-            SortField::Number => {
-                conditions.push(cursor_clause(&sort, bind_start));
-                binds.push(number.to_string());
-                binds.push(id.to_string());
-            }
-            SortField::Title => {
-                conditions.push(cursor_clause(&sort, bind_start));
-                binds.push(title);
-                binds.push(id.to_string());
-            }
-            SortField::Rank => {
-                conditions.push(cursor_clause(&sort, bind_start));
-                binds.push(sort_key);
-                binds.push(id.to_string());
-            }
-            SortField::Priority => {
-                conditions.push(cursor_clause(&sort, bind_start));
-                binds.push(priority);
-                binds.push(id.to_string());
-            }
-            SortField::Status => {
-                conditions.push(cursor_clause(&sort, bind_start));
-                binds.push(status_id.to_string());
-                binds.push(id.to_string());
-            }
-            SortField::Due => {
-                conditions.push(cursor_clause(&sort, bind_start));
-                binds.push(
-                    due_date
-                        .map(|date| date.to_string())
-                        .unwrap_or_else(|| "null".to_string()),
-                );
-                binds.push(id.to_string());
-            }
-        }
-    }
-
-    let where_sql = conditions.join(" AND ");
-    let order_sql = order_clause(&sort);
-    let limit = query.limit + 1;
-    let list_sql = format!(
-        r#"
-        SELECT t.id, t.project_id, t.number, t.title, t.type AS task_type, t.priority, t.status_id,
-               t.start_date, t.due_date, t.due_at, t.estimate, t.parent_id, t.milestone_id,
-               t.sort_key, t.schema_version, t.version, t.archived_at, t.created_by, t.created_at,
-               t.updated_at, t.recurrence
-        FROM fvoci.tasks t
-        WHERE {where_sql}
-        ORDER BY {order_sql}
-        LIMIT {limit}
-        "#
-    );
-    let mut list_query = sqlx::query(&list_sql).bind(workspace_id).bind(project_id);
-    for value in &binds {
-        list_query = list_query.bind(value);
-    }
-    let rows = list_query.fetch_all(&mut *tx).await?;
-
-    let status_counts = sqlx::query_as::<_, (Uuid, i64)>(
-        r#"
-        SELECT t.status_id, count(*)
-        FROM fvoci.tasks t
-        WHERE t.workspace_id = $1 AND t.project_id = $2 AND t.deleted_at IS NULL
-          AND (($3::bool AND t.archived_at IS NOT NULL) OR (NOT $3::bool AND t.archived_at IS NULL))
-        GROUP BY t.status_id
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(query.archived)
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let mut items = Vec::new();
-    for row in rows.iter().take(query.limit as usize) {
-        let record = map_task_row(row)?;
-        let recurrence = row.try_get::<Option<Value>, _>("recurrence").ok().flatten();
-        items.push(row_to_meta(workspace_id, record, recurrence));
-    }
-    let next_cursor = if rows.len() as i32 > query.limit {
-        let last = &rows[(query.limit - 1) as usize];
-        let record = map_task_row(last)?;
-        let created_at: DateTime<Utc> = last.try_get("created_at")?;
-        let updated_at: DateTime<Utc> = last.try_get("updated_at")?;
-        let due_date: Option<NaiveDate> = last.try_get("due_date")?;
-        let key = cursor_key_for_row(
-            &sort,
-            created_at,
-            updated_at,
-            record.number,
-            &record.title,
-            &record.sort_key,
-            &record.priority,
-            record.status_id,
-            due_date,
-        );
-        Some(encode_cursor(&TaskListCursor {
-            id: record.id,
-            key,
-            f: fingerprint,
-            as_of: query.as_of,
-        }))
-    } else {
-        None
-    };
-
-    tx.commit().await?;
-    Ok(Ok(TaskListPage {
-        items,
-        status_counts,
-        next_cursor,
-    }))
+    let as_of_idx = binds.len() + 3;
+    binds.push(query.as_of.to_rfc3339());
+    conditions.push(format!("t.created_at <= ${as_of_idx}::timestamptz"));
+    (conditions, binds)
 }
 
 fn effective_sort(sort: &[ViewSort]) -> Vec<ViewSort> {
@@ -925,47 +906,83 @@ fn order_clause(sort: &[ViewSort]) -> String {
     parts.join(", ")
 }
 
-fn cursor_clause(sort: &[ViewSort], bind_index: usize) -> String {
-    let primary = &sort[0];
-    let op = if primary.direction == SortDirection::Asc {
-        ">"
-    } else {
-        "<"
-    };
-    match primary.field {
-        SortField::Created | SortField::Updated => {
-            let column = if primary.field == SortField::Created {
-                "t.created_at"
-            } else {
-                "t.updated_at"
-            };
-            format!(
-                "(({column}, t.id) {op} (${bind_index}::timestamptz, ${}::uuid))",
-                bind_index + 1
-            )
+fn cursor_clause(sort: &[ViewSort], bind_start: usize) -> String {
+    let id_bind = bind_start + sort.len();
+    let mut branches = Vec::with_capacity(sort.len());
+    for (index, entry) in sort.iter().enumerate() {
+        let mut parts = Vec::with_capacity(index + 2);
+        for (prior_index, prior) in sort[..index].iter().enumerate() {
+            parts.push(sort_equality_sql(prior.field, bind_start + prior_index));
         }
-        SortField::Number => {
-            format!("((t.number, t.id) {op} (${bind_index}::int, ${}::uuid))", bind_index + 1)
+        let cmp = sort_compare_op(entry.direction);
+        parts.push(sort_compare_sql(entry.field, bind_start + index, cmp));
+        if index + 1 == sort.len() {
+            parts.push(format!("t.id {cmp} ${id_bind}::uuid"));
         }
-        SortField::Title => format!(
-            "((t.title COLLATE \"C\", t.id) {op} (${bind_index}, ${}::uuid))",
-            bind_index + 1
-        ),
-        SortField::Rank => format!(
-            "((t.sort_key COLLATE \"C\", t.id) {op} (${bind_index}, ${}::uuid))",
-            bind_index + 1
-        ),
-        SortField::Priority => format!(
-            "((t.priority, t.id) {op} (${bind_index}, ${}::uuid))",
-            bind_index + 1
-        ),
-        SortField::Status => format!(
-            "((t.status_id, t.id) {op} (${bind_index}::uuid, ${}::uuid))",
-            bind_index + 1
-        ),
+        branches.push(format!("({})", parts.join(" AND ")));
+    }
+    format!("({})", branches.join(" OR "))
+}
+
+fn sort_compare_op(direction: SortDirection) -> &'static str {
+    match direction {
+        SortDirection::Asc => ">",
+        SortDirection::Desc => "<",
+    }
+}
+
+fn sort_equality_sql(field: SortField, bind_index: usize) -> String {
+    match field {
+        SortField::Created => format!("t.created_at = ${bind_index}::timestamptz"),
+        SortField::Updated => format!("t.updated_at = ${bind_index}::timestamptz"),
+        SortField::Number => format!("t.number = ${bind_index}::int"),
+        SortField::Title => format!("t.title COLLATE \"C\" = ${bind_index}"),
+        SortField::Rank => format!("t.sort_key COLLATE \"C\" = ${bind_index}"),
+        SortField::Priority => format!("t.priority = ${bind_index}"),
+        SortField::Status => format!("t.status_id = ${bind_index}::uuid"),
         SortField::Due => format!(
-            "((COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date), t.id) {op} (${bind_index}, ${}::uuid))",
-            bind_index + 1
+            "COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date) IS NOT DISTINCT FROM NULLIF(${bind_index}, 'null')::date"
         ),
+    }
+}
+
+fn sort_compare_sql(field: SortField, bind_index: usize, op: &str) -> String {
+    match field {
+        SortField::Created => format!("t.created_at {op} ${bind_index}::timestamptz"),
+        SortField::Updated => format!("t.updated_at {op} ${bind_index}::timestamptz"),
+        SortField::Number => format!("t.number {op} ${bind_index}::int"),
+        SortField::Title => format!("t.title COLLATE \"C\" {op} ${bind_index}"),
+        SortField::Rank => format!("t.sort_key COLLATE \"C\" {op} ${bind_index}"),
+        SortField::Priority => format!("t.priority {op} ${bind_index}"),
+        SortField::Status => format!("t.status_id {op} ${bind_index}::uuid"),
+        SortField::Due => format!(
+            "COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date) {op} NULLIF(${bind_index}, 'null')::date"
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cursor_bind_value(
+    field: SortField,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    number: i32,
+    title: &str,
+    sort_key: &str,
+    priority: &str,
+    status_id: Uuid,
+    due_date: Option<NaiveDate>,
+) -> String {
+    match field {
+        SortField::Created => created_at.to_rfc3339(),
+        SortField::Updated => updated_at.to_rfc3339(),
+        SortField::Number => number.to_string(),
+        SortField::Title => title.to_string(),
+        SortField::Rank => sort_key.to_string(),
+        SortField::Priority => priority.to_string(),
+        SortField::Status => status_id.to_string(),
+        SortField::Due => due_date
+            .map(|date| date.to_string())
+            .unwrap_or_else(|| "null".to_string()),
     }
 }

@@ -4,6 +4,7 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -13,6 +14,7 @@ use project_harness::{
     setup_session, wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
+use url::form_urlencoded;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -591,12 +593,13 @@ async fn task_create_rejects_unsupported_milestone_and_recurrence_blob() {
 #[tokio::test]
 async fn concurrent_visibility_private_vs_task_create_under_project_lock() {
     let harness = TestDb::bootstrap().await;
-    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let (app, _owner_cookie, _, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
     let lead = add_workspace_user(&admin, workspace_id, "member", "lead").await;
     let other = add_workspace_user(&admin, workspace_id, "member", "other").await;
     let lab = create_project(app.clone(), &lead.cookie, workspace_id, "LAB", "workspace").await;
     let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    let tasks_before = count_rows(&admin, "tasks").await;
     let events_before = count_rows(&admin, "events").await;
 
     let mut barrier = admin.begin().await.unwrap();
@@ -613,14 +616,14 @@ async fn concurrent_visibility_private_vs_task_create_under_project_lock() {
 
     let patch = tokio::spawn({
         let app = app.clone();
-        let owner_cookie = owner_cookie.clone();
+        let lead_cookie = lead.cookie.clone();
         async move {
             json_request(
                 app,
                 "PATCH",
                 &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
                 Some(json!({"visibility":"private"})),
-                Some(&owner_cookie),
+                Some(&lead_cookie),
             )
             .await
         }
@@ -661,7 +664,8 @@ async fn concurrent_visibility_private_vs_task_create_under_project_lock() {
         .expect("join");
     assert_eq!(patch_status, StatusCode::OK);
     assert_eq!(create_status, StatusCode::NOT_FOUND);
-    assert_eq!(count_rows(&admin, "events").await, events_before);
+    assert_eq!(count_rows(&admin, "tasks").await, tasks_before);
+    assert_eq!(count_rows(&admin, "events").await, events_before + 1);
     admin.close().await;
     harness.cleanup().await;
 }
@@ -753,11 +757,14 @@ async fn contract_task_meta_fields_workflow_and_list_pagination() {
         assert_eq!(status, StatusCode::CREATED);
     }
 
+    let list_query = r#"{"sort":[{"field":"number","direction":"asc"}]}"#;
+    let encoded_query = form_urlencoded::byte_serialize(list_query.as_bytes()).collect::<String>();
+
     let (status, page1) = json_request(
         app.clone(),
         "GET",
         &format!(
-            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={{\"sort\":[{{\"field\":\"number\",\"direction\":\"asc\"}}]}}"
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={encoded_query}"
         ),
         None,
         Some(&cookie),
@@ -775,11 +782,12 @@ async fn contract_task_meta_fields_workflow_and_list_pagination() {
     assert!(first["labelIds"].as_array().unwrap().is_empty());
 
     let cursor = page1["nextCursor"].as_str().unwrap();
+    let encoded_cursor = form_urlencoded::byte_serialize(cursor.as_bytes()).collect::<String>();
     let (status, page2) = json_request(
         app,
         "GET",
         &format!(
-            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={{\"sort\":[{{\"field\":\"number\",\"direction\":\"asc\"}}]}}&cursor={cursor}"
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={encoded_query}&cursor={encoded_cursor}"
         ),
         None,
         Some(&cookie),
@@ -889,6 +897,352 @@ async fn contract_task_create_includes_bug_type() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(task["type"], "bug");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn list_tasks_page(
+    app: axum::Router,
+    workspace_id: Uuid,
+    project_id: &str,
+    cookie: &str,
+    query: &str,
+    limit: i32,
+    cursor: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let encoded_query = form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
+    let path = if let Some(cursor) = cursor {
+        let encoded_cursor = form_urlencoded::byte_serialize(cursor.as_bytes()).collect::<String>();
+        format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit={limit}&query={encoded_query}&cursor={encoded_cursor}"
+        )
+    } else {
+        format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit={limit}&query={encoded_query}"
+        )
+    };
+    json_request(app, "GET", &path, None, Some(cookie)).await
+}
+
+async fn walk_task_list_ids(
+    app: axum::Router,
+    workspace_id: Uuid,
+    project_id: &str,
+    cookie: &str,
+    query: &str,
+    limit: i32,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let (status, page) = list_tasks_page(
+            app.clone(),
+            workspace_id,
+            project_id,
+            cookie,
+            query,
+            limit,
+            cursor.as_deref(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page:?}");
+        for item in page["items"].as_array().unwrap() {
+            ids.push(item["id"].as_str().unwrap().to_string());
+        }
+        cursor = page["nextCursor"].as_str().map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    ids
+}
+
+#[tokio::test]
+async fn task_list_pagination_walks_all_pages_without_duplicates() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    for (title, priority) in [
+        ("Alpha", "high"),
+        ("Beta", "high"),
+        ("Gamma", "medium"),
+        ("Delta", "medium"),
+        ("Epsilon", "low"),
+    ] {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+            Some(json!({"title": title, "priority": priority})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    for query in [
+        r#"{"sort":[{"field":"number","direction":"asc"}]}"#,
+        r#"{"sort":[{"field":"priority","direction":"desc"},{"field":"number","direction":"asc"}]}"#,
+    ] {
+        let ids =
+            walk_task_list_ids(app.clone(), workspace_id, project_id, &cookie, query, 2).await;
+        assert_eq!(ids.len(), 5, "query {query}");
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<HashSet<_>>().len(),
+            "query {query}"
+        );
+    }
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_as_of_cursor_excludes_late_created_tasks() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let query = r#"{"sort":[{"field":"number","direction":"asc"}]}"#;
+    for title in ["One", "Two", "Three", "Four"] {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+            Some(json!({"title": title})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    let (status, page1) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        2,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let page1_counts = page1["statusCounts"].clone();
+    let cursor = page1["nextCursor"].as_str().unwrap();
+
+    let (status, late) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Late"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let late_id = late["id"].as_str().unwrap();
+
+    let (status, page2) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        2,
+        Some(cursor),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page2["statusCounts"], page1_counts);
+    let page2_ids: Vec<&str> = page2["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert!(!page2_ids.contains(&late_id));
+    assert_eq!(page2_ids.len(), 2);
+    let page1_ids: Vec<String> = page1["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_string())
+        .collect();
+    let all_ids: Vec<String> = page1_ids
+        .into_iter()
+        .chain(page2_ids.iter().map(|id| id.to_string()))
+        .collect();
+    assert_eq!(all_ids.len(), 4);
+    assert_eq!(all_ids.len(), all_ids.iter().collect::<HashSet<_>>().len());
+    assert!(!all_ids.iter().any(|id| id == late_id));
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_status_counts_honor_active_filters() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    for (title, task_type) in [
+        ("Bug one", "bug"),
+        ("Bug two", "bug"),
+        ("Plain task", "task"),
+    ] {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+            Some(json!({"title": title, "type": task_type})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    let query = r#"{"filters":{"type":"bug"},"sort":[{"field":"number","direction":"asc"}]}"#;
+    let (status, page) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        50,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    let total: i64 = page["statusCounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["count"].as_i64().unwrap())
+        .sum();
+    assert_eq!(total, 2);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_rejects_unknown_query_params_and_bad_filters() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let base = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks");
+
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}?unknown=1"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+
+    let bad_query =
+        form_urlencoded::byte_serialize(r#"{"filters":{"type":"milestone"}}"#.as_bytes())
+            .collect::<String>();
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}?query={bad_query}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_rejects_cursor_with_different_filters() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    for title in ["A", "B", "C"] {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+            Some(json!({"title": title})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    let query_a = r#"{"sort":[{"field":"number","direction":"asc"}]}"#;
+    let (status, page1) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query_a,
+        1,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cursor = page1["nextCursor"].as_str().unwrap();
+
+    let query_b = r#"{"sort":[{"field":"number","direction":"desc"}]}"#;
+    let (status, body) = list_tasks_page(
+        app,
+        workspace_id,
+        project_id,
+        &cookie,
+        query_b,
+        1,
+        Some(cursor),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+    assert_eq!(body["params"]["code"], "invalid_cursor");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_rejects_malformed_cursor() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let query = r#"{"sort":[{"field":"number","direction":"asc"}]}"#;
+    let (status, body) = list_tasks_page(
+        app,
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        10,
+        Some("not-a-cursor"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_input");
+    assert_eq!(body["params"]["code"], "invalid_cursor");
+
     admin.close().await;
     harness.cleanup().await;
 }
