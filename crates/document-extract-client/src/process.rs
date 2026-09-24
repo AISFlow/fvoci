@@ -185,7 +185,11 @@ fn cancelled(flag: &AtomicBool) -> bool {
 /// deadline is `limits.timeout_ms` from admission. There is no external
 /// cancel token; use [`extract_killable_with_cancel`] for an `AtomicBool`.
 /// Dropping a `JoinHandle` that wraps this function does **not** terminate
-/// the child; only the watchdog kill+reap path or parent-death SIGKILL does.
+/// the child; only the watchdog kill+reap path or Linux parent-death SIGKILL
+/// does. `PR_SET_PDEATHSIG` is delivered when the **spawning thread** dies,
+/// which is stricter than whole-process death. This synchronous function
+/// keeps that thread in the wait loop until completion; exiting a detached
+/// spawn thread while a helper still runs is not a supported cancel path.
 pub fn extract_killable(req: ExtractRequest) -> ExtractReport {
     match extract_killable_with_cancel(req, &AtomicBool::new(false)) {
         Ok(report) => report,
@@ -592,8 +596,10 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
 #[cfg(target_os = "linux")]
 const PR_SET_PDEATHSIG: libc::c_int = 1;
 
-/// Ask the kernel to SIGKILL this child if the expected parent dies, including
-/// the fork-to-prctl race where the parent is already gone.
+/// Ask the kernel to SIGKILL this child if the forking thread dies, including
+/// the fork-to-prctl race where that thread is already gone. Linux
+/// `PR_SET_PDEATHSIG` is tied to the spawning thread, not to an arbitrary
+/// other thread of the parent process.
 #[cfg(target_os = "linux")]
 fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> {
     // SAFETY: `pre_exec` runs between fork and exec. Only async-signal-safe

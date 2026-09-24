@@ -40,7 +40,7 @@ exercised.
 | native `cargo clippy --locked --offline --all-targets -- -D warnings` | 34.11s | 0 | first rhwp compile in this target |
 | native `cargo clippy --locked --offline --all-targets --features test-hang -- -D warnings` | 0.78s | 0 | |
 | native `cargo test --locked --offline --all-targets` | 62.72s | 0 | 5 lib + 37 extract + 9 boundary = 51; production helper rejects `--test-hang-ms` / `--dump-rlimits`; parent-death driver not built |
-| native `cargo test --locked --offline --all-targets --features test-hang` | 4.86s | 0 | 5 lib + 37 extract + 12 boundary = 54; cancel before spawn / while slot wait / running hang; parent SIGKILL reaps helper; next extract works |
+| native `cargo test --locked --offline --all-targets --features test-hang` | 4.86s | 0 | 5 lib + 37 extract + 12 boundary = 54; cancel before spawn / while slot wait / running hang (kill+reap+IO join); parent SIGKILL **terminates** helper (gone or zombie; dead parent cannot reap); next extract works |
 
 Client 8 = previous 6 + cancel-before-admission + unset-cancel still MissingExecutable.
 Native default 51 = post-PR8 49 + metadata pin + cancel-before-spawn.

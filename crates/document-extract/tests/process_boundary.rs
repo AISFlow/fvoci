@@ -589,6 +589,9 @@ fn cancel_running_hanging_helper_reaps_and_joins() {
     }
 }
 
+/// Parent SIGKILL must terminate the hanging helper via PDEATHSIG without this
+/// client's watchdog. The dead parent cannot reap: Gone or Zombie both count
+/// as terminated. Live is failure. Cleanup may SIGKILL only this owned pair.
 #[cfg(feature = "test-hang")]
 #[test]
 fn parent_sigkill_terminates_helper_without_client_watchdog() {
