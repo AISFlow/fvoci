@@ -1180,3 +1180,46 @@ collab_reload_failure_after_commit_preserves_durable_tail 실패로 미수락이
 같은 Grok process task07c244fbbfdd/ctxd09f2f25bf01에 재현·원인 수정을 배정했다.
 무거운 로컬 검사 슬롯도 해당 Grok 소유다. CI target 연결 커밋e2b2906은 로컬에만
 있으며 최신 원격8855c64의 성공을 이후 수정의 증거로 재사용하지 않는다.
+
+501d0e1 통합 lib43/43(skip0, compile4.79s/body5.55s) 및 기존 공식
+ actionlint1.7.12 rust.yml 검사 성공. 송신aad2ea5를b515c7e로 통합했으며
+Opus 고정e20903a..aad2ea5 delta 차단 없음; 해당 검토는 실제 테스트 실행이 아니다.
+5-peer 관찰은 같은 사용자의 세션과 update1개,358ms/read7/예상치못한1011없음으로
+용량·지속 부하 수락이 아니다. 향후 비용 검증에 이 제한을 유지한다.
+Grok270131d를abc07e2로 통합: 실제 writer-delivery-read barrier가 적용된 회귀가
+수정 전 applied:false/Close1011:true를 재현했다. 좁은4검사 중3성공/1실패,
+body6.53s/wall9.65s. 완료 outcome failed로 제출·release, 실패를 수락하지 않았다.
+
+Composer09cb8e7은 cleanup 개선을 제출했지만 DB 미실행이며, Stack 성공 분류와
+Memory 문자열 분기 및 panic/timeout cleanup 누락이 남아 미통합이다.
+같은 Composer task4c1dd88d7a1b/ctxea68dceafc51에 소유권 유지: room/projectiontest만
+수정하고 실제 PostgreSQL 검증. local heavy slot은 Grok 종료 후 Composer 소유다.
+현재 결정을 전달했다: Memory/Stack 등 운영 자원 실패는 persist-failed;
+Request::Project의 실제 body-output 한도만 결정적 분류. 오류 문자열로 의미를
+구분하지 않는다. typed native budget 세분화는 아직 구현하지 않았다.
+postcommit primary fault만 이미 큐에 있는 ack 뒤에 Close를 순서대로 배치하며,
+권한 철회/자원 초과의 preemptive cancel을 약화하거나 전체1011에 적용하지 않는다.
+통합abc07e2의 변경은 아직 원격 미반영/미수락이다.
+
+1999083 room 보강을771a50d로 통합: Output만 결정적, Memory/Stack/Malformed는
+운영 실패로 persist-failed·helper 재생성, 오류 문자열 분기 제거. 원본 대비
+보수적인 자원 한도 차이며 동등성으로 주장하지 않는다. derive 트랜잭션에서
+현재 actor를 재인가하는 강화도 유지한다. 원본 debounce와 달리 현재 매 append
+전체 Project/DB/event 비용이 있으므로 성능·이벤트 빈도 차이는 미해소다.
+Opus task8ff1e29d9f0f/ctx2297b3adb75a 고정771a50d와d4fe474 검토: 수정 delta
+차단 없음, 미해소 M1(복구 자체 실패 후 engine 오류 처리), M2(후행 StaleWriter
+중 committed ack), M3(운영 Project 실패·두 번째 peer/negative 회귀)을 추적한다.
+기존 lifecycle F4–F7 및 전체 협업 수락을 승인한 검토가 아니다. 완료·release.
+
+통합d4fe474 fmt/clippy1.67s/lib44/44(body5.63s) 성공. 실제 앱 역할의 정확한
+종료 경합 검사 `scripts/start-test-postgres.sh cargo test --locked --offline
+--features db-tests --test collab_product
+collab_reload_failure_after_commit_preserves_durable_tail -- --exact --test-threads=1`
+1/1 성공(49filtered, compile13.19s/body3.19s), 종료·컨테이너 정리 exit0.
+동일 barrier가 실패했던 경로의 수정 증거이며 전체 collab_product 성공은 아니다.
+Composer0d4ef6c의 projection11/11(body20.37s)을ec323bd로 통합 후,
+코디네이터93cd6ce에서 서버 task 오류에도 hub 정리 및 원래 panic 보존을 보강했다.
+이 SHA의 fmt/clippy0.65s와 deliberate-panic 정확한 회귀1/1(body0.45s,
+compile2.38s,10filtered) 성공, 임시 자원 정리 exit0. Composer 완료·release.
+현재 진행 중인 워커 없음. 다음은 이 배치의 원격 CI 후 lifecycle F4–F7 및
+위 M1–M3 제품 보강이며 PR7은 Draft/미병합, 전체 동시편집 수락 전이다.
