@@ -727,7 +727,7 @@ async fn revoked_session_cannot_complete_upload() {
         Some(&cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     harness.cleanup().await;
 }
 
