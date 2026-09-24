@@ -1,23 +1,38 @@
 import { t } from "@fvoci/i18n";
-import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { findProjectByKey, projectsQuery, workflowQuery } from "@/features/projects/queries";
+import { invalidateTaskCaches } from "@/features/tasks/task-cache";
+import {
+  patchDateBody,
+  patchTitleBody,
+  patchTypeBody,
+  type PatchTaskBody,
+} from "@/features/tasks/task-edit-payload";
+import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features/tasks/task-errors";
 import { TaskDetailView } from "@/features/tasks/task-detail";
 import { lookupQuery, resolveLookupTarget } from "@/features/tasks/lookup";
-import { taskQuery } from "@/features/tasks/queries";
+import { taskListQuery, taskQuery } from "@/features/tasks/queries";
+import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
-import { ProblemError } from "@/lib/api";
+import { api, ensureOk, ProblemError } from "@/lib/api";
 import { parseRef, projectsPath, projectTasksPath } from "@/lib/href";
 import "@/features/projects/projects.css";
 
 export function TaskDetailPage() {
   const { ref } = useParams<{ ref: string }>();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { slug, workspace } = useWorkspaceContext();
   const parsed = parseRef(ref ?? "");
   const item = parsed?.kind === "item" && parsed.prefix !== "WIKI" ? parsed : null;
   const displayId = item?.displayId ?? "";
+  const [fieldError, setFieldError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [formEpoch, setFormEpoch] = useState(0);
 
   const projects = useQuery(projectsQuery(workspace?.id ?? ""));
   const project = findProjectByKey(projects.data?.items, item?.prefix ?? "");
@@ -32,6 +47,98 @@ export function TaskDetailPage() {
   const workflow = useQuery(
     workflowQuery(workspace?.id ?? "", project?.id ?? lookupTask?.projectId ?? ""),
   );
+  const taskPages = useInfiniteQuery(
+    taskListQuery(workspace?.id ?? "", project?.id ?? task.data?.projectId ?? ""),
+  );
+  const parentItems = mergeTaskListPages(taskPages.data?.pages ?? [])?.items ?? [];
+
+  const workspaceId = workspace?.id ?? "";
+  const taskId = task.data?.id ?? "";
+  const projectId = project?.id ?? task.data?.projectId ?? "";
+
+  const afterMutation = async () => {
+    await invalidateTaskCaches(queryClient, workspaceId, projectId, taskId);
+  };
+
+  const patchTask = useMutation({
+    mutationFn: async (body: PatchTaskBody) =>
+      ensureOk(
+        await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
+          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+          body,
+        }),
+      ),
+    onSuccess: async () => {
+      setFieldError(null);
+      setActionError(null);
+      await afterMutation();
+    },
+    onError: (err) => {
+      setActionError(taskMutationErrorMessage(err));
+    },
+  });
+
+  const moveTask = useMutation({
+    mutationFn: async (input: { statusId: string; expectedStatusId: string }) =>
+      ensureOk(
+        await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move", {
+          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+          body: {
+            statusId: input.statusId,
+            expectedStatusId: input.expectedStatusId,
+          },
+        }),
+      ),
+    onSuccess: async () => {
+      setFieldError(null);
+      setActionError(null);
+      await afterMutation();
+    },
+    onError: (err) => {
+      setActionError(taskMutationErrorMessage(err, "board.move.failed"));
+    },
+  });
+
+  const trashTask = useMutation({
+    mutationFn: async () =>
+      ensureOk(
+        await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash", {
+          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+        }),
+      ),
+    onSuccess: async () => {
+      setActionError(null);
+      await invalidateTaskCaches(queryClient, workspaceId, projectId, taskId);
+      const projectKey = project?.key ?? item?.prefix ?? "";
+      if (projectKey) {
+        await navigate(projectTasksPath(slug, projectKey));
+      }
+    },
+    onError: (err) => {
+      setActionError(taskMutationErrorMessage(err, "task.trash.failed"));
+    },
+  });
+
+  const pending =
+    patchTask.isPending || moveTask.isPending || trashTask.isPending;
+
+  const refetchAfterConflict = async (err: unknown) => {
+    if (err instanceof ProblemError && err.status === 409) {
+      await afterMutation();
+      setFormEpoch((n) => n + 1);
+    }
+  };
+
+  const runPatch = async (body: PatchTaskBody) => {
+    if (!task.data?.canEdit) return;
+    setFieldError(null);
+    setActionError(null);
+    try {
+      await patchTask.mutateAsync(body);
+    } catch (err) {
+      await refetchAfterConflict(err);
+    }
+  };
 
   if (!workspace) return null;
 
@@ -107,6 +214,71 @@ export function TaskDetailPage() {
           projectName={project?.name}
           task={task.data}
           statuses={workflow.data?.statuses ?? []}
+          parentItems={parentItems}
+          readOnly={!task.data.canEdit || task.data.archivedAt !== null}
+          canEdit={task.data.canEdit}
+          pending={pending}
+          fieldError={fieldError}
+          actionError={actionError}
+          archivePending={patchTask.isPending}
+          trashPending={trashTask.isPending}
+          formEpoch={formEpoch}
+          onTitleBlur={async (title) => {
+            const parsedTitle = patchTitleBody(title);
+            if (!parsedTitle.ok) {
+              setFieldError(taskFieldValidationMessage(parsedTitle.issue));
+              return;
+            }
+            await runPatch(parsedTitle.body);
+          }}
+          onStatusChange={async (statusId) => {
+            if (!task.data || statusId === task.data.statusId) return;
+            setActionError(null);
+            /* Source task-detail PATCHes statusId; collections and this rewrite use MOVE
+             * with expectedStatusId so a stale status change 409s instead of overwriting. */
+            try {
+              await moveTask.mutateAsync({
+                statusId,
+                expectedStatusId: task.data.statusId,
+              });
+            } catch (err) {
+              await refetchAfterConflict(err);
+            }
+          }}
+          onPriorityChange={async (priority) => {
+            if (!task.data || priority === task.data.priority) return;
+            await runPatch({ priority });
+          }}
+          onHierarchySave={async (type, parentId) => {
+            const parsedType = patchTypeBody(type, parentId);
+            if (!parsedType.ok) {
+              setFieldError(taskFieldValidationMessage(parsedType.issue));
+              return;
+            }
+            await runPatch(parsedType.body);
+          }}
+          onDueDateBlur={async (value) => {
+            if (!task.data) return;
+            const parsedDate = patchDateBody(task.data, "dueDate", value);
+            if (!parsedDate.ok) {
+              setFieldError(taskFieldValidationMessage(parsedDate.issue));
+              return;
+            }
+            await runPatch(parsedDate.body);
+          }}
+          onArchiveToggle={async (archived) => {
+            await runPatch({ archived });
+          }}
+          onTrash={async () => {
+            if (!window.confirm(`${t("task.trash.confirm.title")}\n${t("task.trash.confirm.body")}`)) {
+              return;
+            }
+            try {
+              await trashTask.mutateAsync();
+            } catch {
+              /* trashTask.onError already mapped the failure. */
+            }
+          }}
         />
       ) : null}
       {realNotFound || projectDocument ? (
