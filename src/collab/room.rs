@@ -686,7 +686,11 @@ enum RoomCommand {
         conn_id: Uuid,
         bytes: Vec<u8>,
     },
-    CaptureRevision(oneshot::Sender<Result<CapturedRevision, RevisionCaptureError>>),
+    CaptureRevision {
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        reply: oneshot::Sender<Result<CapturedRevision, RevisionCaptureError>>,
+    },
     Restore {
         actor_user_id: Uuid,
         session_id: Uuid,
@@ -703,7 +707,7 @@ fn reject_room_command(cmd: RoomCommand) {
         RoomCommand::Join(_, reply) => {
             let _ = reply.send(Err(JoinError::EngineUnavailable));
         }
-        RoomCommand::CaptureRevision(reply) => {
+        RoomCommand::CaptureRevision { reply, .. } => {
             let _ = reply.send(Err(RevisionCaptureError::Unavailable));
         }
         RoomCommand::Restore { reply, .. } => {
@@ -829,10 +833,18 @@ impl RoomHandle {
         let _ = self.tx.send(RoomCommand::Shutdown).await;
     }
 
-    pub async fn capture_revision(&self) -> Result<CapturedRevision, RevisionCaptureError> {
+    pub async fn capture_revision(
+        &self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<CapturedRevision, RevisionCaptureError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(RoomCommand::CaptureRevision(reply_tx))
+            .send(RoomCommand::CaptureRevision {
+                actor_user_id,
+                session_id,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| RevisionCaptureError::Unavailable)?;
         reply_rx
@@ -955,6 +967,10 @@ struct RoomActor {
     /// Tail row count when auto-compact last failed; retry after growth.
     compact_retry_at_tail_len: Option<usize>,
     primary_loaded: bool,
+    /// True after durable collab state has been loaded into `committed`.
+    /// Distinct from `primary_loaded`, which becomes true after reloading the
+    /// engine from whatever `committed` currently holds (including the empty default).
+    committed_loaded: bool,
     primary_dirty: bool,
     client_id_owner: HashMap<u32, (Uuid, Instant)>,
     shutting_down: bool,
@@ -998,6 +1014,7 @@ pub async fn spawn_room(
         compact_unhealthy: false,
         compact_retry_at_tail_len: None,
         primary_loaded: false,
+        committed_loaded: false,
         primary_dirty: false,
         client_id_owner: HashMap::new(),
         shutting_down: false,
@@ -1102,8 +1119,15 @@ impl RoomActor {
                         Some(RoomCommand::Frame { conn_id, bytes }) => {
                             self.handle_frame(conn_id, bytes).await;
                         }
-                        Some(RoomCommand::CaptureRevision(reply)) => {
-                            let _ = reply.send(self.handle_capture_revision().await);
+                        Some(RoomCommand::CaptureRevision {
+                            actor_user_id,
+                            session_id,
+                            reply,
+                        }) => {
+                            let _ = reply.send(
+                                self.handle_capture_revision(actor_user_id, session_id)
+                                    .await,
+                            );
                         }
                         Some(RoomCommand::Restore {
                             actor_user_id,
@@ -1495,6 +1519,7 @@ impl RoomActor {
         self.committed.tail_payloads = load.tail.iter().map(|r| r.payload.clone()).collect();
         self.committed.tail_seq = load.tail_seq;
         self.committed.snapshot_cutoff_seq = load.snapshot_cutoff_seq;
+        self.committed_loaded = true;
     }
 
     async fn close_all_connections(&mut self, code: u16, reason: &str) {
@@ -2743,7 +2768,27 @@ impl RoomActor {
         }
     }
 
-    async fn handle_capture_revision(&mut self) -> Result<CapturedRevision, RevisionCaptureError> {
+    async fn handle_capture_revision(
+        &mut self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<CapturedRevision, RevisionCaptureError> {
+        if !self.committed_loaded {
+            let load = load_collab_readonly(
+                &self.pool,
+                self.workspace_id,
+                actor_user_id,
+                session_id,
+                self.document_id,
+            )
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?;
+            let load = load.map_err(|_| RevisionCaptureError::Unavailable)?;
+            self.set_committed_from_load(&load);
+            self.reload_primary_from_committed()
+                .await
+                .map_err(|_| RevisionCaptureError::Unavailable)?;
+        }
         if self.ensure_primary_capacity().await.is_err() {
             return Err(RevisionCaptureError::Unavailable);
         }
@@ -2838,6 +2883,21 @@ impl RoomActor {
         };
         if is_empty_update(&payload) {
             return Ok(());
+        }
+
+        let validation = validate_recovery_bundle(
+            self.engine.engine_bin().to_path_buf(),
+            self.engine.limits(),
+            self.committed.snapshot.clone(),
+            self.committed.tail_payloads.clone(),
+            payload.clone(),
+        )
+        .await;
+        if validation == BundleValidation::EngineUnavailable {
+            return Err(RevisionRestoreError::Unavailable);
+        }
+        if validation != BundleValidation::Ok {
+            return Err(RevisionRestoreError::Rejected);
         }
 
         let writer_generation = self

@@ -1,6 +1,6 @@
 import { formatPersonName, t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import type { components } from "@/generated/api";
@@ -68,7 +68,22 @@ export function RevisionPanel({
   const [pendingRestoreId, setPendingRestoreId] = useState<string | null>(null);
   const [preview, setPreview] = useState<RevisionDetail | null>(null);
   const correlations = useRef(new Map<string, string>());
+  const openerRef = useRef<HTMLElement | null>(null);
+  const cancelRestoreRef = useRef<HTMLButtonElement>(null);
+  const confirmRestoreRef = useRef<HTMLButtonElement>(null);
   const queryKey = ["revisions", workspaceId, documentId] as const;
+
+  useEffect(() => {
+    if (!pendingRestoreId) {
+      openerRef.current?.focus();
+      openerRef.current = null;
+      return;
+    }
+    if (!openerRef.current && document.activeElement instanceof HTMLElement) {
+      openerRef.current = document.activeElement;
+    }
+    cancelRestoreRef.current?.focus();
+  }, [pendingRestoreId]);
 
   const listQuery = useQuery({
     queryKey,
@@ -141,11 +156,17 @@ export function RevisionPanel({
       await queryClient.invalidateQueries({ queryKey });
     },
     onError: (err) => {
-      setNotice(
-        err instanceof ProblemError && err.status === 504
-          ? t("version.restore.timeout")
-          : t("version.restore.failed"),
-      );
+      const timedOut = err instanceof ProblemError && err.status === 504;
+      if (timedOut) {
+        void queryClient.invalidateQueries({ queryKey });
+        void queryClient.invalidateQueries({
+          queryKey: ["document", workspaceId, documentId],
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ["document-body", workspaceId, documentId],
+        });
+      }
+      setNotice(timedOut ? t("version.restore.timeout") : t("version.restore.failed"));
     },
   });
 
@@ -270,6 +291,28 @@ export function RevisionPanel({
               aria-modal="true"
               aria-labelledby="revision-restore-title"
               aria-describedby="revision-restore-body"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setPendingRestoreId(null);
+                  return;
+                }
+                if (event.key !== "Tab") {
+                  return;
+                }
+                const first = cancelRestoreRef.current;
+                const last = confirmRestoreRef.current;
+                if (!first || !last) {
+                  return;
+                }
+                if (event.shiftKey && document.activeElement === first) {
+                  event.preventDefault();
+                  last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                  event.preventDefault();
+                  first.focus();
+                }
+              }}
             >
               <h3 id="revision-restore-title">{t("version.dialog.title")}</h3>
               <p id="revision-restore-body" className="document-revision-dialog__body">
@@ -277,6 +320,7 @@ export function RevisionPanel({
               </p>
               <div className="document-revision-dialog__actions">
                 <Button
+                  ref={cancelRestoreRef}
                   type="button"
                   variant="outline"
                   onClick={() => setPendingRestoreId(null)}
@@ -284,6 +328,7 @@ export function RevisionPanel({
                   {t("version.dialog.cancel")}
                 </Button>
                 <Button
+                  ref={confirmRestoreRef}
                   type="button"
                   data-testid="revision-restore-confirm"
                   disabled={restore.isPending}

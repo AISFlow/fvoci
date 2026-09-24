@@ -138,6 +138,37 @@ async fn authorize_document(
     }
 }
 
+pub async fn authorize_revision_document(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    write: bool,
+) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let result = authorize_document(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        write,
+    )
+    .await?;
+    match result {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(Ok(()))
+        }
+        Err(err) => {
+            tx.rollback().await?;
+            Ok(Err(err))
+        }
+    }
+}
+
 async fn collab_state_exists(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,

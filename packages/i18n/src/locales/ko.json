@@ -962,7 +962,7 @@
 	"version.list.failed": "목록을 불러오지 못했습니다.",
 	"version.save.failed": "버전 저장에 실패했습니다.",
 	"version.restore.done": "복원되었습니다 — 열린 편집기에 실시간 반영됩니다.",
-	"version.restore.timeout": "협업 서버 응답이 늦어 복원하지 못했습니다 — 잠시 후 다시 시도해 주세요.",
+	"version.restore.timeout": "협업 서버 응답이 늦어 복원 결과를 확인하지 못했습니다 — 문서를 확인한 뒤 다시 시도해 주세요.",
 	"version.restore.failed": "복원에 실패했습니다.",
 	"version.historyTitle": "버전 기록",
 	"legal.terms": "이용약관",

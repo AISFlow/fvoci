@@ -420,11 +420,7 @@ impl CollabHub {
     }
 
     pub fn rpc_timeout(&self) -> Duration {
-        let ms = std::env::var("COLLAB_RPC_TIMEOUT_MS")
-            .ok()
-            .and_then(|raw| raw.parse().ok())
-            .unwrap_or(5_000u64);
-        Duration::from_millis(ms.max(1))
+        Duration::from_millis(self.config.rpc_timeout_ms.max(1))
     }
 
     async fn live_handle(&self, key: RoomKey) -> Option<RoomHandle> {
@@ -439,9 +435,11 @@ impl CollabHub {
     pub async fn capture_if_live(
         &self,
         key: RoomKey,
+        actor_user_id: Uuid,
+        session_id: Uuid,
     ) -> Option<Result<CapturedRevision, RevisionCaptureError>> {
         let handle = self.live_handle(key).await?;
-        Some(handle.capture_revision().await)
+        Some(handle.capture_revision(actor_user_id, session_id).await)
     }
 
     pub async fn ensure_live_room(&self, key: RoomKey) -> Result<RoomHandle, JoinError> {

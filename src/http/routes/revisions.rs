@@ -21,9 +21,9 @@ use crate::auth::session::SessionUser;
 use crate::collab::revision::{capture_revision_offline, prepare_revision_text};
 use crate::collab::room::{CapturedRevision, RevisionCaptureError, RevisionRestoreError};
 use crate::db::revisions::{
-    create_manual_document_revision, decode_revision_cursor, get_document_revision,
-    list_document_revisions, load_persisted_collab_source, resolve_document_restore,
-    CreateRevisionInput, RevisionDbError, RevisionDetail, RevisionMeta,
+    authorize_revision_document, create_manual_document_revision, decode_revision_cursor,
+    get_document_revision, list_document_revisions, load_persisted_collab_source,
+    resolve_document_restore, CreateRevisionInput, RevisionDbError, RevisionDetail, RevisionMeta,
 };
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::guard::{check_origin, reject_bearer};
@@ -120,6 +120,20 @@ async fn create_revision(
         .await
     {
         return Err(AppError::rate_limited(retry_after).into());
+    }
+    match authorize_revision_document(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        document_id,
+        true,
+    )
+    .await
+    .map_err(internal)?
+    {
+        Ok(()) => {}
+        Err(err) => return Err(map_revision_error(err)),
     }
     let captured =
         capture_for_create(&state, workspace_id, user_id, session_id, document_id).await?;
@@ -285,7 +299,10 @@ async fn capture_for_create(
     document_id: Uuid,
 ) -> Result<CapturedRevision, RevisionApiError> {
     if let Some(hub) = state.collab.as_ref() {
-        if let Some(live) = hub.capture_if_live((workspace_id, document_id)).await {
+        if let Some(live) = hub
+            .capture_if_live((workspace_id, document_id), user_id, session_id)
+            .await
+        {
             return live.map_err(|_| collab_unavailable());
         }
     }

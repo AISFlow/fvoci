@@ -383,6 +383,7 @@ pub fn test_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig 
         idle_evict_ms,
         revoke_poll_ms: 5_000,
         client_id_ttl_ms: 60_000,
+        rpc_timeout_ms: 5_000,
     }
 }
 
