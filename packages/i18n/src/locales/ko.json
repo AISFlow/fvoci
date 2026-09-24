@@ -890,6 +890,7 @@
 	"version.dialog.cancel": "취소",
 	"version.author.system": "시스템",
 	"version.empty": "저장된 버전이 없습니다",
+	"version.preview": "버전 미리보기",
 	"shortcut.help.title": "키보드 단축키",
 	"shortcut.help.open": "단축키 도움말",
 	"shortcut.help.boardMove": "보드 태스크 이동 — 태스크의 「이동」 메뉴(키보드 대안)",

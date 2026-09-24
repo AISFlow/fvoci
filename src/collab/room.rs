@@ -686,9 +686,38 @@ enum RoomCommand {
         conn_id: Uuid,
         bytes: Vec<u8>,
     },
+    CaptureRevision(oneshot::Sender<Result<CapturedRevision, RevisionCaptureError>>),
+    Restore {
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        snap: Vec<u8>,
+        reply: oneshot::Sender<Result<(), RevisionRestoreError>>,
+    },
     Shutdown,
     #[cfg(feature = "db-tests")]
     Probe(oneshot::Sender<ActorProbe>),
+}
+
+fn reject_room_command(cmd: RoomCommand) {
+    match cmd {
+        RoomCommand::Join(_, reply) => {
+            let _ = reply.send(Err(JoinError::EngineUnavailable));
+        }
+        RoomCommand::CaptureRevision(reply) => {
+            let _ = reply.send(Err(RevisionCaptureError::Unavailable));
+        }
+        RoomCommand::Restore { reply, .. } => {
+            let _ = reply.send(Err(RevisionRestoreError::Unavailable));
+        }
+        RoomCommand::Leave(_) | RoomCommand::Frame { .. } | RoomCommand::Shutdown => {}
+        #[cfg(feature = "db-tests")]
+        RoomCommand::Probe(reply) => {
+            let _ = reply.send(ActorProbe {
+                connections: 0,
+                awareness_clients: 0,
+            });
+        }
+    }
 }
 
 #[cfg(feature = "db-tests")]
@@ -706,6 +735,23 @@ pub enum JoinError {
     EngineUnavailable,
     WriterStale,
     DbError,
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedRevision {
+    pub y_snapshot: Vec<u8>,
+    pub content_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionCaptureError {
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionRestoreError {
+    Rejected,
+    Unavailable,
 }
 
 pub(crate) enum JoinDelivery {
@@ -781,6 +827,38 @@ impl RoomHandle {
 
     pub async fn shutdown(&self) {
         let _ = self.tx.send(RoomCommand::Shutdown).await;
+    }
+
+    pub async fn capture_revision(&self) -> Result<CapturedRevision, RevisionCaptureError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RoomCommand::CaptureRevision(reply_tx))
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?;
+        reply_rx
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?
+    }
+
+    pub async fn restore_from_snapshot(
+        &self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        snap: Vec<u8>,
+    ) -> Result<(), RevisionRestoreError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RoomCommand::Restore {
+                actor_user_id,
+                session_id,
+                snap,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| RevisionRestoreError::Unavailable)?;
+        reply_rx
+            .await
+            .map_err(|_| RevisionRestoreError::Unavailable)?
     }
 
     pub(crate) async fn deliver_join(&self, join: RoomJoin) -> JoinDelivery {
@@ -1024,6 +1102,18 @@ impl RoomActor {
                         Some(RoomCommand::Frame { conn_id, bytes }) => {
                             self.handle_frame(conn_id, bytes).await;
                         }
+                        Some(RoomCommand::CaptureRevision(reply)) => {
+                            let _ = reply.send(self.handle_capture_revision().await);
+                        }
+                        Some(RoomCommand::Restore {
+                            actor_user_id,
+                            session_id,
+                            snap,
+                            reply,
+                        }) => {
+                            let _ = reply
+                                .send(self.handle_restore(actor_user_id, session_id, snap).await);
+                        }
                         Some(RoomCommand::Shutdown) => {
                             self.shutting_down = true;
                             break;
@@ -1062,9 +1152,7 @@ impl RoomActor {
 
         rx.close();
         while let Ok(cmd) = rx.try_recv() {
-            if let RoomCommand::Join(_, reply) = cmd {
-                let _ = reply.send(Err(JoinError::EngineUnavailable));
-            }
+            reject_room_command(cmd);
         }
 
         for (_, conn) in self.connections.drain() {
@@ -2653,6 +2741,181 @@ impl RoomActor {
             let request_id = Uuid::now_v7();
             let _ = self.run_persist_for(conn_id, request_id).await;
         }
+    }
+
+    async fn handle_capture_revision(&mut self) -> Result<CapturedRevision, RevisionCaptureError> {
+        if self.ensure_primary_capacity().await.is_err() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
+        let snap = match self.engine.call(Request::RevisionSnapshot).await {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    update_b64: Some(bytes),
+                    ..
+                } => collab_engine::b64::decode(&bytes)
+                    .map_err(|_| RevisionCaptureError::Unavailable)?,
+                _ => return Err(RevisionCaptureError::Unavailable),
+            },
+            Err(_) => return Err(RevisionCaptureError::Unavailable),
+        };
+        let content_json = match self.engine.call(Request::Project { encoding: 1 }).await {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    content_json: Some(json),
+                    ..
+                } => json,
+                _ => return Err(RevisionCaptureError::Unavailable),
+            },
+            Err(_) => return Err(RevisionCaptureError::Unavailable),
+        };
+        Ok(CapturedRevision {
+            y_snapshot: snap,
+            content_json,
+        })
+    }
+
+    async fn handle_restore(
+        &mut self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        snap: Vec<u8>,
+    ) -> Result<(), RevisionRestoreError> {
+        if self.writer_generation.is_none() {
+            let claim = claim_writer_and_load(
+                &self.pool,
+                self.workspace_id,
+                actor_user_id,
+                session_id,
+                self.document_id,
+            )
+            .await
+            .map_err(|_| RevisionRestoreError::Unavailable)?;
+            let claim = claim.map_err(|err| match err {
+                CollabDbError::Forbidden | CollabDbError::NotFound => {
+                    RevisionRestoreError::Rejected
+                }
+                _ => RevisionRestoreError::Unavailable,
+            })?;
+            self.set_committed_from_load(&claim.load);
+            self.reload_primary_from_committed()
+                .await
+                .map_err(|_| RevisionRestoreError::Unavailable)?;
+            self.writer_generation = Some(claim.writer_generation);
+        } else if self.ensure_primary_capacity().await.is_err() {
+            return Err(RevisionRestoreError::Unavailable);
+        }
+
+        #[cfg(feature = "db-tests")]
+        pause_for_append_revoke_barrier(self.document_id).await;
+
+        match self
+            .locking_session_auth_by_ids(actor_user_id, session_id, false)
+            .await
+        {
+            LockingAuth::Allow => {}
+            LockingAuth::Deny => return Err(RevisionRestoreError::Rejected),
+            LockingAuth::DbError => return Err(RevisionRestoreError::Unavailable),
+        }
+
+        let payload = match self
+            .engine
+            .call(Request::RestoreFromSnapshot {
+                snap_b64: snap,
+                encoding: 1,
+            })
+            .await
+        {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    applied: true,
+                    update_b64: Some(bytes),
+                    ..
+                } => collab_engine::b64::decode(&bytes)
+                    .map_err(|_| RevisionRestoreError::Unavailable)?,
+                _ => return Err(RevisionRestoreError::Unavailable),
+            },
+            Err(_) => return Err(RevisionRestoreError::Unavailable),
+        };
+        if is_empty_update(&payload) {
+            return Ok(());
+        }
+
+        let writer_generation = self
+            .writer_generation
+            .ok_or(RevisionRestoreError::Unavailable)?;
+        let op_id = Uuid::now_v7();
+        let expected_tail = self.committed.tail_seq;
+        let digest = payload_digest(&payload);
+        let append = append_collab_update(
+            &self.pool,
+            AppendCollabInput {
+                workspace_id: self.workspace_id,
+                actor_user_id,
+                session_id,
+                document_id: self.document_id,
+                writer_generation,
+                expected_tail_seq: expected_tail,
+                op_id,
+                payload: &payload,
+                client_ip: None,
+            },
+        )
+        .await;
+
+        let committed = match append {
+            Ok(Ok(result)) => result,
+            Ok(Err(CollabDbError::StaleWriter)) => {
+                self.fatal_writer_stale().await;
+                return Err(RevisionRestoreError::Unavailable);
+            }
+            Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
+                return Err(RevisionRestoreError::Rejected);
+            }
+            Ok(Err(CollabDbError::StaleCutoff)) | Ok(Err(_)) | Err(_) => {
+                match self
+                    .reconcile_ambiguous_append(
+                        actor_user_id,
+                        session_id,
+                        op_id,
+                        expected_tail,
+                        &payload,
+                        &digest,
+                    )
+                    .await
+                {
+                    Some(result) => result,
+                    None => return Err(RevisionRestoreError::Unavailable),
+                }
+            }
+        };
+
+        let seq = match committed {
+            AppendCollabResult::Committed { seq } | AppendCollabResult::DuplicateAck { seq } => {
+                if seq != expected_tail + 1 {
+                    self.fatal_room_divergence(actor_user_id, session_id).await;
+                    return Err(RevisionRestoreError::Unavailable);
+                }
+                seq
+            }
+        };
+
+        if self.committed.tail_seq < seq {
+            self.committed.tail_payloads.push(payload.clone());
+        }
+        self.committed.tail_seq = seq;
+        self.fifo_seq += 1;
+
+        if self.integrate_committed_update(&payload).await.is_err() {
+            self.fatal_primary_unhealthy(actor_user_id, session_id)
+                .await;
+            return Err(RevisionRestoreError::Unavailable);
+        }
+        let y_protocol = encode_sync_payload(SyncStep::Update, &payload);
+        self.broadcast_update(&y_protocol).await;
+        let _ = self
+            .maybe_project_derived_body(seq, actor_user_id, session_id, false)
+            .await;
+        Ok(())
     }
 
     async fn broadcast_update(&mut self, y_protocol: &[u8]) {
