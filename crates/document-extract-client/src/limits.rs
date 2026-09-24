@@ -31,8 +31,8 @@ pub const MAX_WALK_NEST_DEPTH: usize = 8;
 /// Distinct walk warning kinds retained on the report (counts collapse per kind).
 pub const MAX_WARNING_ENTRIES: usize = 32;
 
-/// Maximum concurrent extract children. Synchronous parse cannot be cancelled
-/// in-thread, so the parent admits only one child.
+/// Maximum concurrent extract children. The parent admits only one child.
+/// Slot wait and the child wait loop honor `extract_killable_with_cancel`.
 pub const MAX_CHILD_CONCURRENCY: usize = 1;
 
 /// RSS poll interval while a child is running.

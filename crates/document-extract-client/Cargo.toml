@@ -7,12 +7,7 @@ license = "MIT"
 description = "Killable native extract process client and canonical outcome/limits/revision types"
 
 # Revision constants in src/lib.rs are authoritative for ExtractReport.
-# Parser-side fetch-rhwp.sh still verifies origin/HEAD/clean from
-# crates/document-extract Cargo.toml metadata; keep these values identical.
-[package.metadata.document-extract]
-rhwp_repo = "https://github.com/edwardkim/rhwp"
-rhwp_rev = "e8800c8def63449808a4092798442652ed460552"
-rhwp_license = "MIT"
+# Parser-side fetch-rhwp.sh reads crates/document-extract Cargo.toml metadata.
 
 [features]
 default = []

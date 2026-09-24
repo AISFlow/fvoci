@@ -17,17 +17,22 @@ pub use limits::Limits;
 pub use outcome::{
     DocFormat, ExtractReport, ExtractStatus, LimitKind, UnsupportedReason, WorkerFailureReason,
 };
-pub use process::{apply_rlimits_now, extract_killable, ExtractRequest};
+pub use process::{
+    apply_rlimits_now, extract_killable, extract_killable_with_cancel, Cancelled, ExtractRequest,
+};
 #[cfg(feature = "test-hang")]
-pub use process::{take_last_spawn, SpawnTrace};
+pub use process::{
+    is_slot_waiter, peek_last_spawn, run_parent_death_driver, take_last_spawn, SpawnTrace,
+};
 
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_killable, ExtractReport, ExtractRequest, ExtractStatus, Limits,
-        WorkerFailureReason, RHWP_LICENSE, RHWP_REPO, RHWP_REV,
+        extract_killable, extract_killable_with_cancel, Cancelled, ExtractReport, ExtractRequest,
+        ExtractStatus, Limits, WorkerFailureReason, RHWP_LICENSE, RHWP_REPO, RHWP_REV,
     };
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn rhwp_revision_constants_are_the_accepted_pin() {
@@ -84,6 +89,52 @@ mod tests {
                 report.outcome,
                 ExtractStatus::WorkerFailure {
                     reason: WorkerFailureReason::InvalidLimits,
+                    ..
+                }
+            ),
+            "{:?}",
+            report.outcome
+        );
+    }
+
+    #[test]
+    fn cancel_before_admission_is_cancelled_not_success() {
+        let cancel = AtomicBool::new(true);
+        let result = extract_killable_with_cancel(
+            ExtractRequest {
+                bytes: b"not-a-document".to_vec(),
+                name: "x.hwp".into(),
+                limits: Limits::for_tests(),
+                extractor_bin: PathBuf::from("/no/such/document-extract"),
+                test_hang_ms: None,
+            },
+            &cancel,
+        );
+        match result {
+            Err(Cancelled { child_pid: None }) => {}
+            other => panic!("expected Cancelled without child, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unset_cancel_still_reports_missing_executable() {
+        let cancel = AtomicBool::new(false);
+        let result = extract_killable_with_cancel(
+            ExtractRequest {
+                bytes: b"not-a-document".to_vec(),
+                name: "x.hwp".into(),
+                limits: Limits::for_tests(),
+                extractor_bin: PathBuf::from("/no/such/document-extract"),
+                test_hang_ms: None,
+            },
+            &cancel,
+        );
+        let report = result.expect("unset cancel must not return Cancelled");
+        assert!(
+            matches!(
+                report.outcome,
+                ExtractStatus::WorkerFailure {
+                    reason: WorkerFailureReason::MissingExecutable,
                     ..
                 }
             ),
