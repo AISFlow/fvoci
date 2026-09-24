@@ -1,4 +1,5 @@
-use std::future::IntoFuture;
+use std::future::{poll_fn, Future, IntoFuture};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -95,14 +96,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_server(config, pool).await
 }
 
+struct InstalledShutdownSignals {
+    #[cfg(unix)]
+    interrupt: signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: signal::unix::Signal,
+}
+
+fn install_shutdown_signals() -> std::io::Result<InstalledShutdownSignals> {
+    #[cfg(unix)]
+    {
+        Ok(InstalledShutdownSignals {
+            interrupt: signal::unix::signal(signal::unix::SignalKind::interrupt())?,
+            terminate: signal::unix::signal(signal::unix::SignalKind::terminate())?,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(InstalledShutdownSignals {})
+    }
+}
+
+async fn wait_installed_shutdown_signals(mut signals: InstalledShutdownSignals) {
+    #[cfg(unix)]
+    {
+        tokio::select! {
+            result = signals.interrupt.recv() => {
+                if result.is_some() {
+                    eprintln!("shutdown signal received (Ctrl+C)");
+                }
+            }
+            result = signals.terminate.recv() => {
+                if result.is_some() {
+                    eprintln!("shutdown signal received (SIGTERM)");
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = signals;
+        if signal::ctrl_c().await.is_ok() {
+            eprintln!("shutdown signal received (Ctrl+C)");
+        }
+    }
+}
+
+/// Runs `announce` once, after the first poll of `fut` left it pending (the
+/// accept loop and shutdown wait are armed). A future that completes on its
+/// first poll never announces readiness.
+async fn announce_after_first_pending_poll<F, A>(fut: F, announce: A) -> F::Output
+where
+    F: Future,
+    A: FnOnce(),
+{
+    tokio::pin!(fut);
+    let mut announce = Some(announce);
+    poll_fn(move |cx| {
+        let output = fut.as_mut().poll(cx);
+        if output.is_pending() {
+            if let Some(announce) = announce.take() {
+                announce();
+            }
+        } else {
+            announce = None;
+        }
+        output
+    })
+    .await
+}
+
 async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     migrate::assert_app_role(&pool).await?;
+    // Replace the default SIGTERM/SIGINT handlers before bind or any readiness
+    // advertisement. Tokio buffers signals received between install and recv.
+    let shutdown_signals = install_shutdown_signals()?;
 
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let addr = listener.local_addr()?;
     let public_origin =
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
-    eprintln!("fvoci-server listening on http://{addr}");
 
     let collab = CollabConfig::from_env().map(|cfg| Arc::new(CollabHub::new(cfg, pool.clone())));
     let extract_job = match ExtractJobSettings::from_env()? {
@@ -144,35 +217,41 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
 
-    let serve = axum::serve(
-        listener,
-        router(state, config.static_dir.clone())
-            .into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        shutdown_signal().await;
-        let started = Instant::now();
-        if let Some(job) = extract_task_for_signal.lock().await.as_ref() {
-            job.request_shutdown();
-            tracing::info!("attachment extract shutdown started concurrently with HTTP drain");
-        }
-        if let Some(hub) = collab_for_signal {
-            hub.begin_shutdown();
-            let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
-            let join = tokio::spawn(async move {
-                let status = hub.shutdown().await;
-                let _ = finished_tx.send(status);
-                status
-            });
-            *hub_task_for_signal.lock().await = Some(HubShutdownTask {
-                join,
-                finished: Some(finished_rx),
-            });
-            tracing::info!("collaboration shutdown started concurrently with HTTP drain");
-        }
-        let _ = signaled_tx.send(started);
-    })
-    .into_future();
+    let serve = announce_after_first_pending_poll(
+        axum::serve(
+            listener,
+            router(state, config.static_dir.clone())
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            wait_installed_shutdown_signals(shutdown_signals).await;
+            let started = Instant::now();
+            if let Some(job) = extract_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
+                tracing::info!("attachment extract shutdown started concurrently with HTTP drain");
+            }
+            if let Some(hub) = collab_for_signal {
+                hub.begin_shutdown();
+                let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+                let join = tokio::spawn(async move {
+                    let status = hub.shutdown().await;
+                    let _ = finished_tx.send(status);
+                    status
+                });
+                *hub_task_for_signal.lock().await = Some(HubShutdownTask {
+                    join,
+                    finished: Some(finished_rx),
+                });
+                tracing::info!("collaboration shutdown started concurrently with HTTP drain");
+            }
+            let _ = signaled_tx.send(started);
+        })
+        .into_future(),
+        move || {
+            eprintln!("fvoci-server listening on http://{addr}");
+            let _ = std::io::stderr().flush();
+        },
+    );
 
     let mut serve_task = tokio::spawn(serve);
     let mut signaled_rx = Some(signaled_rx);
@@ -369,6 +448,7 @@ fn shutdown_deadline_error(
         "server shutdown deadline exceeded (rooms={rooms:?}, sockets_held={sockets_held}, deadline_ms={})",
         deadline.as_millis()
     );
+    let _ = std::io::stderr().flush();
     tracing::error!(
         ?rooms,
         sockets_held,
@@ -402,31 +482,6 @@ fn shutdown_panic_error() -> Box<dyn std::error::Error> {
     eprintln!("{error}");
     tracing::error!("server shutdown failed (collaboration task panicked)");
     Box::new(error)
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if signal::ctrl_c().await.is_ok() {
-            eprintln!("shutdown signal received (Ctrl+C)");
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        if let Ok(mut stream) = signal::unix::signal(signal::unix::SignalKind::terminate()) {
-            if stream.recv().await.is_some() {
-                eprintln!("shutdown signal received (SIGTERM)");
-            }
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
-    }
 }
 
 #[cfg(test)]
@@ -505,6 +560,54 @@ mod shutdown_outcome_tests {
         .to_string();
         assert!(text.contains("deadline exceeded"), "{text}");
         assert!(!text.contains("shutdown failed"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_stop_signals_install_without_waiting() {
+        // Tokio unix signal registration requires a runtime; install must not wait for a signal.
+        install_shutdown_signals().expect("SIGTERM and SIGINT must install before listen");
+    }
+
+    #[tokio::test]
+    async fn readiness_is_announced_only_after_a_pending_first_poll() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let announced_after = Arc::new(AtomicUsize::new(usize::MAX));
+        let seen = polls.clone();
+        let inner = poll_fn(move |cx| {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        });
+        let observed = polls.clone();
+        let record = announced_after.clone();
+        announce_after_first_pending_poll(inner, move || {
+            record.store(observed.load(Ordering::SeqCst), Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(
+            announced_after.load(Ordering::SeqCst),
+            1,
+            "announce must follow the first poll"
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn readiness_is_not_announced_when_first_poll_completes() {
+        let announced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = announced.clone();
+        announce_after_first_pending_poll(std::future::ready(()), move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+        assert!(!announced.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
