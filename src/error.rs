@@ -31,6 +31,8 @@ pub enum ProblemCode {
     SubmittedPartsDoNotMatchUploadedParts,
     AttachmentFailedVirusScan,
     RangeNotSatisfiable,
+    Conflict,
+    ProjectArchived,
     InternalError,
 }
 
@@ -62,6 +64,8 @@ impl ProblemCode {
             }
             Self::AttachmentFailedVirusScan => "attachment_failed_virus_scan",
             Self::RangeNotSatisfiable => "range_not_satisfiable",
+            Self::Conflict => "conflict",
+            Self::ProjectArchived => "project_archived",
             Self::InternalError => "internal_error",
         }
     }
@@ -95,6 +99,8 @@ impl ProblemCode {
             }
             Self::AttachmentFailedVirusScan => "attachment failed virus scan",
             Self::RangeNotSatisfiable => "range not satisfiable",
+            Self::Conflict => "conflict",
+            Self::ProjectArchived => "project archived",
             Self::InternalError => "internal error",
         }
     }
@@ -118,6 +124,7 @@ impl ProblemCode {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
             Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
+            Self::Conflict | Self::ProjectArchived => StatusCode::CONFLICT,
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
