@@ -1247,7 +1247,7 @@ async fn setup_records_client_ip_in_audit_log() {
 }
 
 #[tokio::test]
-async fn app_role_cannot_read_secret_columns_or_migrations() {
+async fn app_role_cannot_read_secret_columns() {
     let harness = TestDb::bootstrap().await;
     let app = pool::connect_app(&harness.app_url).await.unwrap();
     let denied_password =
@@ -1260,11 +1260,24 @@ async fn app_role_cannot_read_secret_columns_or_migrations() {
             .fetch_optional(&app)
             .await;
     assert!(denied_token.is_err());
-    let denied_migrations =
-        sqlx::query_scalar::<_, i32>("SELECT version FROM fvoci.schema_migrations LIMIT 1")
-            .fetch_optional(&app)
-            .await;
-    assert!(denied_migrations.is_err());
+    let max_version =
+        sqlx::query_scalar::<_, i32>("SELECT max(version) FROM fvoci.schema_migrations")
+            .fetch_one(&app)
+            .await
+            .expect("app role may read migration version");
+    assert_eq!(max_version, migrate::latest_migration_version());
+    for sql in [
+        "INSERT INTO fvoci.schema_migrations (version) VALUES (999)",
+        "UPDATE fvoci.schema_migrations SET version = version",
+        "DELETE FROM fvoci.schema_migrations",
+    ] {
+        let error = sqlx::query(sql).execute(&app).await.expect_err(sql);
+        let code = error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .map(|code| code.to_string());
+        assert_eq!(code.as_deref(), Some("42501"), "{sql}: {error}");
+    }
     app.close().await;
     harness.cleanup().await;
 }
@@ -3860,9 +3873,14 @@ async fn assert_forbidden_app_access_denied(app_url: &str) {
             "SELECT token_hash FROM fvoci.sessions LIMIT 1",
         ),
         (
-            "migrations",
-            "SELECT version FROM fvoci.schema_migrations LIMIT 1",
+            "migrations insert",
+            "INSERT INTO fvoci.schema_migrations (version) VALUES (999)",
         ),
+        (
+            "migrations update",
+            "UPDATE fvoci.schema_migrations SET version = version",
+        ),
+        ("migrations delete", "DELETE FROM fvoci.schema_migrations"),
         ("audit update", "UPDATE fvoci.audit_log SET verb = verb"),
         ("audit delete", "DELETE FROM fvoci.audit_log"),
         ("event update", "UPDATE fvoci.events SET verb = verb"),
@@ -4083,5 +4101,232 @@ async fn grant_refuses_owner_superuser_bypassrls_and_missing_roles() {
             .unwrap();
     }
     admin.close().await;
+    drop_ungranted(db).await;
+}
+
+fn server_process_env(app_url: &str, storage_root: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_fvoci-server"));
+    command
+        .env("DATABASE_APP_URL", app_url)
+        .env_remove("DATABASE_URL")
+        .env_remove("FVOCI_MIGRATION_URL")
+        .env("PASSWORD_PEPPER_KEYS", PEPPER)
+        .env("PASSWORD_PEPPER_ACTIVE_KEY_ID", "test")
+        .env("FVOCI_BIND", "127.0.0.1:0")
+        .env("FVOCI_PUBLIC_ORIGIN", "http://localhost")
+        .env("FVOCI_COOKIE_SECURE", "0")
+        .env(
+            "FVOCI_STORAGE_DIR",
+            storage_root.to_string_lossy().to_string(),
+        )
+        .env("FVOCI_SHUTDOWN_DEADLINE_MS", "5000")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command
+}
+
+fn assert_schema_gate_process_failure(output: &std::process::Output, expected_phrases: &[&str]) {
+    assert!(
+        !output.status.success(),
+        "server must exit nonzero: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    for phrase in expected_phrases {
+        assert!(
+            combined.contains(phrase),
+            "expected {phrase:?} in operator message, got: {combined}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn server_exits_when_schema_is_behind() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.schema_migrations WHERE version = 8")
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let output = server_process_env(&harness.app_url, &storage_root)
+        .output()
+        .expect("spawn fvoci-server");
+    assert_schema_gate_process_failure(
+        &output,
+        &[
+            "behind compiled version",
+            migrate::SCHEMA_GATE_OPERATOR_HINT,
+        ],
+    );
+    let _ = std::fs::remove_dir_all(storage_root);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn server_exits_when_schema_is_newer_than_binary() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO fvoci.schema_migrations (version) VALUES (999)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let output = server_process_env(&harness.app_url, &storage_root)
+        .output()
+        .expect("spawn fvoci-server");
+    assert_schema_gate_process_failure(
+        &output,
+        &["newer than this binary", "deploy a matching fvoci-server"],
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !combined.contains("fvoci-migrate"),
+        "newer schema must not tell the operator to migrate: {combined}"
+    );
+    let _ = std::fs::remove_dir_all(storage_root);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn server_exits_when_no_migrations_applied() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.schema_migrations")
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let output = server_process_env(&harness.app_url, &storage_root)
+        .output()
+        .expect("spawn fvoci-server");
+    assert_schema_gate_process_failure(
+        &output,
+        &["no applied migrations", migrate::SCHEMA_GATE_OPERATOR_HINT],
+    );
+    let _ = std::fs::remove_dir_all(storage_root);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn server_exits_on_unmigrated_database() {
+    let admin_base = std::env::var("TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
+        .expect("TEST_DATABASE_URL missing");
+    let db_name = format!("fvoci_test_{}", Uuid::now_v7().simple());
+    let role_name = format!("fvoci_app_{}", db_name.replace('-', "_"));
+    let mut password_bytes = [0u8; 24];
+    rand::rng().fill_bytes(&mut password_bytes);
+    let role_password = hex::encode(password_bytes);
+    let server_url = server_db_url(&admin_base);
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server_url)
+        .await
+        .expect("connect admin");
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
+    admin_pool.close().await;
+    let admin_url = join_db_url(&server_url, &db_name);
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect fresh db");
+    sqlx::query(&format!(
+        "CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{role_password}' NOSUPERUSER NOBYPASSRLS"
+    ))
+    .execute(&admin)
+    .await
+    .expect("create role");
+    admin.close().await;
+    let mut app = url::Url::parse(&admin_url).expect("database url");
+    app.set_username(&role_name).ok();
+    app.set_password(Some(&role_password)).ok();
+    let app_url = app.to_string();
+
+    let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let output = server_process_env(&app_url, &storage_root)
+        .output()
+        .expect("spawn fvoci-server");
+    assert_schema_gate_process_failure(
+        &output,
+        &[
+            "cannot read fvoci.schema_migrations",
+            migrate::SCHEMA_GATE_OPERATOR_HINT,
+        ],
+    );
+    let _ = std::fs::remove_dir_all(storage_root);
+
+    let cleanup_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server_url)
+        .await
+        .expect("connect server");
+    sqlx::query(&format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}'"
+    ))
+    .execute(&cleanup_pool)
+    .await
+    .ok();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
+        .execute(&cleanup_pool)
+        .await
+        .expect("drop database");
+    sqlx::query(&format!("DROP ROLE IF EXISTS \"{role_name}\""))
+        .execute(&cleanup_pool)
+        .await
+        .expect("drop role");
+    cleanup_pool.close().await;
+}
+
+#[tokio::test]
+async fn server_exits_when_app_grants_are_missing() {
+    let db = migrated_db_without_grants().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let output = server_process_env(&db.app_url, &storage_root)
+        .output()
+        .expect("spawn fvoci-server");
+    assert_schema_gate_process_failure(
+        &output,
+        &[
+            "cannot read fvoci.schema_migrations",
+            migrate::SCHEMA_GATE_OPERATOR_HINT,
+        ],
+    );
+    let _ = std::fs::remove_dir_all(storage_root);
     drop_ungranted(db).await;
 }
