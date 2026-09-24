@@ -49,8 +49,7 @@ DATABASE_APP_URL="${_db_urls[1]}"
 export DATABASE_URL DATABASE_APP_URL
 "$MIGRATE_BIN" >/dev/null
 psql_admin -d "$DB_NAME" -c "CREATE ROLE \"$ROLE_NAME\" LOGIN PASSWORD '$ROLE_PASSWORD' NOSUPERUSER NOBYPASSRLS" >/dev/null
-docker exec -i "$PG_CONTAINER" psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -v app_role="$ROLE_NAME" \
-  -f - <"$ROOT/scripts/grant-app-role.sql" >/dev/null
+"$MIGRATE_BIN" --grant-app-role "$ROLE_NAME"
 
 export PASSWORD_PEPPER_KEYS="$PEPPER"
 export PASSWORD_PEPPER_ACTIVE_KEY_ID=test

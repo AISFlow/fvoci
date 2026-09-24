@@ -77,15 +77,9 @@ impl TestDb {
         .await
         .expect("create role");
 
-        let quoted_role = format!("\"{}\"", role_name);
-        let grants =
-            include_str!("../scripts/grant-app-role.sql").replace(":\"app_role\"", &quoted_role);
-        for statement in grants.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            sqlx::query(statement)
-                .execute(&migration_pool)
-                .await
-                .expect("grant");
-        }
+        fvoci_server::db::migrate::apply_app_role_grants(&migration_pool, &role_name)
+            .await
+            .expect("grant");
         migration_pool.close().await;
 
         let mut app = url::Url::parse(&admin_url).expect("database url");
@@ -285,15 +279,9 @@ async fn reapply_app_grants(admin_url: &str, role_name: &str) {
         .connect(admin_url)
         .await
         .expect("connect for grants");
-    let quoted_role = format!("\"{}\"", role_name);
-    let grants =
-        include_str!("../scripts/grant-app-role.sql").replace(":\"app_role\"", &quoted_role);
-    for statement in grants.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        sqlx::query(statement)
-            .execute(&migration_pool)
-            .await
-            .expect("grant");
-    }
+    fvoci_server::db::migrate::apply_app_role_grants(&migration_pool, role_name)
+        .await
+        .expect("grant");
     migration_pool.close().await;
 }
 
@@ -3750,4 +3738,350 @@ async fn pool_context_resets_when_transaction_is_dropped_without_rollback() {
     assert!(system_ctx.is_none() || system_ctx.as_deref() == Some(""));
     pool.close().await;
     harness.cleanup().await;
+}
+
+struct UngrantedDb {
+    admin_url: String,
+    role_name: String,
+    app_url: String,
+}
+
+async fn migrated_db_without_grants() -> UngrantedDb {
+    let admin_base = std::env::var("TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
+        .expect("TEST_DATABASE_URL missing");
+    let db_name = format!("fvoci_test_{}", Uuid::now_v7().simple());
+    let role_name = format!("fvoci_app_{db_name}");
+    let mut password_bytes = [0u8; 24];
+    rand::rng().fill_bytes(&mut password_bytes);
+    let role_password = hex::encode(password_bytes);
+    let server_url = server_db_url(&admin_base);
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server_url)
+        .await
+        .expect("connect admin");
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
+    admin_pool.close().await;
+    let admin_url = join_db_url(&server_url, &db_name);
+    migrate::run_migrations(&admin_url).await.expect("migrate");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect migrated db");
+    sqlx::query(&format!(
+        "CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{role_password}' NOSUPERUSER NOBYPASSRLS"
+    ))
+    .execute(&admin)
+    .await
+    .expect("create role");
+    admin.close().await;
+    let mut app = url::Url::parse(&admin_url).expect("database url");
+    app.set_username(&role_name).ok();
+    app.set_password(Some(&role_password)).ok();
+    UngrantedDb {
+        admin_url,
+        role_name,
+        app_url: app.to_string(),
+    }
+}
+
+async fn drop_ungranted(db: UngrantedDb) {
+    let server_url = server_db_url(&db.admin_url);
+    let db_name = url::Url::parse(&db.admin_url)
+        .expect("url")
+        .path()
+        .trim_start_matches('/')
+        .to_string();
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server_url)
+        .await
+        .expect("connect server");
+    sqlx::query(&format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}'"
+    ))
+    .execute(&pool)
+    .await
+    .ok();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
+        .execute(&pool)
+        .await
+        .expect("drop database");
+    sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", db.role_name))
+        .execute(&pool)
+        .await
+        .expect("drop role");
+    pool.close().await;
+}
+
+async fn role_has_any_fvoci_privilege(admin: &PgPool, role: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        r#"
+        SELECT 'schema usage' WHERE has_schema_privilege($1, 'fvoci', 'USAGE')
+        UNION ALL
+        SELECT format('%s on %s', p.privilege, c.relname)
+        FROM pg_class c
+        INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege)
+        WHERE n.nspname = 'fvoci' AND c.relkind IN ('r', 'p')
+          AND has_table_privilege($1, c.oid, p.privilege)
+        UNION ALL
+        SELECT format('execute %s', p.oid::regprocedure)
+        FROM pg_proc p
+        INNER JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname IN ('fvoci', 'public') AND p.prosecdef
+          AND has_function_privilege($1, p.oid, 'EXECUTE')
+        "#,
+    )
+    .bind(role)
+    .fetch_all(admin)
+    .await
+    .expect("privilege probe")
+}
+
+async fn assert_forbidden_app_access_denied(app_url: &str) {
+    let app = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(app_url)
+        .await
+        .expect("connect app role");
+    for (label, sql) in [
+        (
+            "password hash",
+            "SELECT password_hash FROM fvoci.users LIMIT 1",
+        ),
+        (
+            "session token",
+            "SELECT token_hash FROM fvoci.sessions LIMIT 1",
+        ),
+        (
+            "migrations",
+            "SELECT version FROM fvoci.schema_migrations LIMIT 1",
+        ),
+        ("audit update", "UPDATE fvoci.audit_log SET verb = verb"),
+        ("audit delete", "DELETE FROM fvoci.audit_log"),
+        ("event update", "UPDATE fvoci.events SET verb = verb"),
+        (
+            "receipt update",
+            "UPDATE fvoci.document_collab_op_receipts SET op_id = op_id",
+        ),
+        (
+            "receipt delete",
+            "DELETE FROM fvoci.document_collab_op_receipts",
+        ),
+        (
+            "instance admin escalation",
+            "UPDATE fvoci.users SET is_instance_admin = true",
+        ),
+        (
+            "password overwrite",
+            "UPDATE fvoci.users SET password_hash = 'x'",
+        ),
+        ("email overwrite", "UPDATE fvoci.users SET email = email"),
+        (
+            "auth generation reset",
+            "UPDATE fvoci.users SET auth_generation = auth_generation",
+        ),
+        ("user delete", "DELETE FROM fvoci.users"),
+        (
+            "session token overwrite",
+            "UPDATE fvoci.sessions SET token_hash = 'x'",
+        ),
+        (
+            "session reassignment",
+            "UPDATE fvoci.sessions SET user_id = user_id",
+        ),
+        ("event delete", "DELETE FROM fvoci.events"),
+    ] {
+        let error = sqlx::query(sql)
+            .execute(&app)
+            .await
+            .expect_err(&format!("{label} must be denied to the app role"));
+        let code = error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .map(|code| code.to_string());
+        assert_eq!(code.as_deref(), Some("42501"), "{label}: {error}");
+    }
+    app.close().await;
+}
+
+#[tokio::test]
+async fn definer_functions_are_not_public_between_migrate_and_grant() {
+    let db = migrated_db_without_grants().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db.admin_url)
+        .await
+        .unwrap();
+    let public_definers: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT p.oid::regprocedure::text
+        FROM pg_proc p
+        INNER JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname IN ('fvoci', 'public') AND p.prosecdef
+          AND has_function_privilege('public', p.oid, 'EXECUTE')
+        "#,
+    )
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert!(
+        public_definers.is_empty(),
+        "PUBLIC can execute {public_definers:?}"
+    );
+    let leaked = role_has_any_fvoci_privilege(&admin, &db.role_name).await;
+    assert!(leaked.is_empty(), "ungranted role already has {leaked:?}");
+    admin.close().await;
+    drop_ungranted(db).await;
+}
+
+#[tokio::test]
+async fn failed_grant_leaves_no_partial_privileges_via_migrate_binary() {
+    let db = migrated_db_without_grants().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db.admin_url)
+        .await
+        .unwrap();
+    // The last statements of grant-app-role.sql reference this function, so the
+    // broad table grant near the top has already executed when the script fails.
+    sqlx::query("DROP FUNCTION fvoci.app_claim_attachment_extract()")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fvoci-migrate"))
+        .arg("--grant-app-role")
+        .arg(&db.role_name)
+        .env("DATABASE_URL", &db.admin_url)
+        .env_remove("FVOCI_MIGRATION_URL")
+        .output()
+        .expect("run fvoci-migrate");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "grant must fail: {stderr}");
+    assert!(stderr.contains("no privileges were committed"), "{stderr}");
+    let leaked = role_has_any_fvoci_privilege(&admin, &db.role_name).await;
+    assert!(leaked.is_empty(), "failed grant left {leaked:?}");
+    admin.close().await;
+    drop_ungranted(db).await;
+}
+
+#[tokio::test]
+async fn failed_grant_via_library_rolls_back_then_rerun_restores_narrow_grants() {
+    let db = migrated_db_without_grants().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("ALTER FUNCTION fvoci.app_claim_attachment_extract() RENAME TO app_claim_hidden")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let error = migrate::apply_app_role_grants(&admin, &db.role_name)
+        .await
+        .expect_err("grant must fail while the function is missing");
+    assert!(
+        error.to_string().contains("no privileges were committed"),
+        "{error}"
+    );
+    assert!(role_has_any_fvoci_privilege(&admin, &db.role_name)
+        .await
+        .is_empty());
+
+    sqlx::query("ALTER FUNCTION fvoci.app_claim_hidden() RENAME TO app_claim_attachment_extract")
+        .execute(&admin)
+        .await
+        .unwrap();
+    migrate::grant_app_role(&db.admin_url, &db.role_name)
+        .await
+        .expect("grant");
+    migrate::grant_app_role(&db.admin_url, &db.role_name)
+        .await
+        .expect("grant rerun is idempotent");
+    assert_forbidden_app_access_denied(&db.app_url).await;
+
+    let app_pool = pool::connect_app(&db.app_url).await.expect("app pool");
+    migrate::assert_app_role(&app_pool)
+        .await
+        .expect("app role checks");
+    assert_eq!(count_users(&app_pool).await.expect("count users"), 0);
+    app_pool.close().await;
+    admin.close().await;
+    drop_ungranted(db).await;
+}
+
+#[tokio::test]
+async fn grant_refuses_owner_superuser_bypassrls_and_missing_roles() {
+    let db = migrated_db_without_grants().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db.admin_url)
+        .await
+        .unwrap();
+    let schema_owner: String = sqlx::query_scalar(
+        "SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'fvoci'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let suffix = Uuid::now_v7().simple().to_string();
+    let inherits_owner = format!("fvoci_inherit_{suffix}");
+    let owns_table = format!("fvoci_owner_{suffix}");
+    let bypass = format!("fvoci_bypass_{suffix}");
+    let superuser = format!("fvoci_super_{suffix}");
+    for statement in [
+        format!("CREATE ROLE \"{inherits_owner}\" NOSUPERUSER NOBYPASSRLS"),
+        format!("GRANT \"{schema_owner}\" TO \"{inherits_owner}\""),
+        format!("CREATE ROLE \"{owns_table}\" NOSUPERUSER NOBYPASSRLS"),
+        "CREATE TABLE fvoci.grant_owner_probe (id int)".to_string(),
+        format!("ALTER TABLE fvoci.grant_owner_probe OWNER TO \"{owns_table}\""),
+        format!("CREATE ROLE \"{bypass}\" NOSUPERUSER BYPASSRLS"),
+        format!("CREATE ROLE \"{superuser}\" SUPERUSER"),
+    ] {
+        sqlx::query(&statement)
+            .execute(&admin)
+            .await
+            .expect(&statement);
+    }
+    for role in [
+        schema_owner.as_str(),
+        inherits_owner.as_str(),
+        owns_table.as_str(),
+        bypass.as_str(),
+        superuser.as_str(),
+        "fvoci_missing_role_for_grant_test",
+    ] {
+        let error = migrate::grant_app_role(&db.admin_url, role)
+            .await
+            .expect_err("grant must be refused");
+        assert!(error.to_string().contains("refused"), "{role}: {error}");
+    }
+    let owner_can_read: bool =
+        sqlx::query_scalar("SELECT has_table_privilege($1, 'fvoci.users', 'SELECT')")
+            .bind(&schema_owner)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert!(
+        owner_can_read,
+        "refused grants must not touch the owner ACL"
+    );
+    sqlx::query("DROP TABLE fvoci.grant_owner_probe")
+        .execute(&admin)
+        .await
+        .unwrap();
+    for role in [&inherits_owner, &owns_table, &bypass, &superuser] {
+        sqlx::query(&format!("DROP ROLE \"{role}\""))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    admin.close().await;
+    drop_ungranted(db).await;
 }
