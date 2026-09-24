@@ -1489,3 +1489,29 @@ CI1684412의 복원 이후30초timeout과 같은 결함이라고 단정하지 �
 덮어쓴 혼합log와 rg -q 반복의 성공은 수락 증거에서 제외한다. 브라우저
 근본 원인은 아직 미확정, 진단 추가를 제품 수정 완료로 표시하지 않는다.
 두 쓰기 워커는 release, 커밋/worktree 보존, 소유PG 정리 보고 확인.
+
+18760f9: Web35971090882/Native35971090831/Documents35971090816 성공,
+Rust35971090810 x64 lifecycle18/19 실패. Opus task0bf403ae1235/ctx23d7b64eb998
+고정f38a935/cae2602 검토는 제품 차단 없음, 자동idle-owner와 테스트join-owner
+경합B1 차단; release. 원격 실패1319의 reclaim barrier timeout과 일치한다.
+R1 QueueFull은 bounded overload의 의도적1011 fail-fast로 유지한다. R2 종료
+상태는 hub 수명 중 소유자가 관찰한 모든 비정상 actor 완료를 집계하도록 결정했다.
+Composer74a0a96의 전역shutdown witness는 다른 테스트가 신호를 보내 거짓
+통과할 수 있어 미수락이다. ctx3e99b07d40c9/taskca1c42d7feb2가 hub 인스턴스
+witness와 실제 대기 위치로 수정하며 단독 실패→성공 및20개 병렬 검증을 수행 중.
+허용파일 hub.rs/lifecycle, rust-collab-reclaim-fix; 로컬 무거운 슬롯 소유.
+
+브라우저 로컬 x3OdEO trace6의 GET /w/acme/WIKI-1은07:30:33.856Z에404,
+content-length0이었다. WebSocket 문제로 단정하지 않는다. openEditor에
+HTTP200 진입 검사를 추가하고 E2E별 정적 자산 snapshot을 RUN_DIR에 보존한다.
+다른 build의 dist 교체가 과거404 원인이었다고 확정하지는 않았다. shell구문·
+TypeScript 검사는 성공, 실제E2E는 다음 통합CI에서 확인한다. 이전 worker의
+공유target·비offline명령·혼합log는 최종수락 증거에서 제외하고 실제 명령을 기록한다.
+
+Grok task_e69eeb9b4ac6/ctx08a622d28ead는 다음 wiki 첨부 계약을 조사하고
+release했다. 원본 create/part/resume/complete/meta/download 및 기존 slash
+bridge가 대상이며, current document parent를 재사용한다. 결과는 로컬
+/tmp/fvoci-attachment-contract-next.md. 아직 구현·수락이 아니다. native crate를
+서버에 직접 연결하면 rhwp graph가 빠른 경로에 들어오므로 제품 연결 전에 작은
+client/worker 빌드 경계를 유지해야 한다. 다음은 PR7 차단 수정·Opus delta와
+원격수락 후 최신main의 첨부 수직 기능이다. auto-merge 미설정, 미병합.

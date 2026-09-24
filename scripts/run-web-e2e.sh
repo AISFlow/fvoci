@@ -74,7 +74,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Keep this run independent of a later Vite build replacing apps/web/dist.
+cp -a "$ROOT/apps/web/dist" "$RUN_DIR/static"
+
 bash "$ROOT/scripts/start-test-postgres.sh" \
   env RUN_DIR="$RUN_DIR" SERVER_LOG="$SERVER_LOG" PEPPER="$PEPPER" ROOT="$ROOT" \
-    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" FVOCI_STATIC_DIR="$RUN_DIR/static" \
   bash "$ROOT/scripts/web-e2e-inner.sh" "$@"
