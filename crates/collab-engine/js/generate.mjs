@@ -12,6 +12,7 @@ import { getSchema, Node } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table/kit";
 import { UniqueID } from "@tiptap/extension-unique-id";
+import { Node as PMNode } from "@tiptap/pm/model";
 import {
   prosemirrorJSONToYXmlFragment,
   yDocToProsemirrorJSON,
@@ -333,6 +334,82 @@ function projectJson(doc) {
   return withoutYChange(yDocToProsemirrorJSON(doc, FRAGMENT));
 }
 
+/** Walk text nodes that carry a `marks` array. */
+function forEachMarkedText(json, visit) {
+  if (Array.isArray(json)) {
+    json.forEach((item) => forEachMarkedText(item, visit));
+    return;
+  }
+  if (!json || typeof json !== "object") return;
+  if (Array.isArray(json.marks)) visit(json);
+  if (Array.isArray(json.content)) forEachMarkedText(json.content, visit);
+}
+
+/**
+ * Project emission: sort marks by raw attribute name. For these fixtures the
+ * y-tiptap mark `type` equals the raw Y.Text attribute key (no hashed suffix).
+ * Do not treat this as the JS oracle.
+ */
+function sortMarksByRawKey(json) {
+  const clone = JSON.parse(JSON.stringify(json));
+  forEachMarkedText(clone, (node) => {
+    node.marks = [...node.marks].sort((a, b) => {
+      const left = String(a?.type ?? "");
+      const right = String(b?.type ?? "");
+      if (left < right) return -1;
+      if (left > right) return 1;
+      return 0;
+    });
+  });
+  return clone;
+}
+
+function firstMultiMarkOrder(json) {
+  let order = null;
+  forEachMarkedText(json, (node) => {
+    if (order === null && node.marks.length >= 2) {
+      order = node.marks.map((mark) => mark.type);
+    }
+  });
+  return order;
+}
+
+function markContents(json) {
+  const out = [];
+  forEachMarkedText(json, (node) => {
+    for (const mark of node.marks) {
+      out.push({ type: mark.type, attrs: mark.attrs ?? {} });
+    }
+  });
+  out.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return out;
+}
+
+function schemaRankMarks(json) {
+  return PMNode.fromJSON(schema, json).toJSON();
+}
+
+function multiMarkRecord(jsRaw) {
+  const projectJsonSorted = sortMarksByRawKey(jsRaw);
+  const rankedJs = schemaRankMarks(jsRaw);
+  const rankedProject = schemaRankMarks(projectJsonSorted);
+  if (JSON.stringify(rankedJs) !== JSON.stringify(rankedProject)) {
+    throw new Error("ProseMirror schema ranking diverged between JS raw and raw-key sort");
+  }
+  if (JSON.stringify(markContents(jsRaw)) !== JSON.stringify(markContents(projectJsonSorted))) {
+    throw new Error("typed mark contents diverged between JS raw and raw-key sort");
+  }
+  return {
+    js_raw_prosemirror_json: jsRaw,
+    js_raw_mark_order: firstMultiMarkOrder(jsRaw),
+    project_prosemirror_json: projectJsonSorted,
+    project_mark_order: firstMultiMarkOrder(projectJsonSorted),
+    schema_ranked_prosemirror_json: rankedJs,
+    schema_mark_rank: Object.keys(schema.marks),
+    schema_ranking_preserves_semantics: true,
+  };
+}
+
 const emptyPm = projectJson(new Y.Doc({ gc: false }));
 
 const emptyPara = docWithClient(71);
@@ -445,6 +522,106 @@ const ychangeNested = docWithClient(81);
 writeBin("ychange_retained_nested.v1", Y.encodeStateAsUpdate(ychangeNested));
 const ychangeNestedPm = projectJson(ychangeNested);
 
+const threeMarks = docWithClient(90);
+{
+  const frag = threeMarks.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-3marks");
+  const t = new Y.XmlText();
+  t.insert(0, "세마크", { bold: {}, italic: {}, link: { href: "https://x.invalid" } });
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+}
+writeBin("three_marks.v1", Y.encodeStateAsUpdate(threeMarks));
+const threeMarksPm = projectJson(threeMarks);
+
+const overlappingMarks = docWithClient(91);
+{
+  const frag = overlappingMarks.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-overlap");
+  const t = new Y.XmlText();
+  t.insert(0, "토글");
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+  t.format(0, 2, { link: { href: "https://y.invalid" } });
+  t.format(0, 2, { bold: {} });
+}
+writeBin("overlapping_marks.v1", Y.encodeStateAsUpdate(overlappingMarks));
+const overlappingMarksPm = projectJson(overlappingMarks);
+
+const linkThenBold = docWithClient(94);
+{
+  const frag = linkThenBold.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-lb");
+  const t = new Y.XmlText();
+  t.insert(0, "역순", { link: { href: "https://z.invalid" }, bold: {} });
+  p.insert(0, [t]);
+  frag.insert(0, [p]);
+}
+writeBin("link_then_bold.v1", Y.encodeStateAsUpdate(linkThenBold));
+const linkThenBoldPm = projectJson(linkThenBold);
+
+const threeMarksRecord = multiMarkRecord(threeMarksPm);
+const overlappingMarksRecord = multiMarkRecord(overlappingMarksPm);
+const linkThenBoldRecord = multiMarkRecord(linkThenBoldPm);
+if (
+  JSON.stringify(linkThenBoldRecord.js_raw_mark_order) !==
+  JSON.stringify(["link", "bold"])
+) {
+  throw new Error(
+    `link_then_bold JS oracle must stay link,bold (got ${JSON.stringify(linkThenBoldRecord.js_raw_mark_order)})`,
+  );
+}
+
+const mapChild = docWithClient(92);
+{
+  const frag = mapChild.getXmlFragment(FRAGMENT);
+  const p1 = new Y.XmlElement("paragraph");
+  p1.setAttribute("id", "p-a");
+  const p2 = new Y.XmlElement("paragraph");
+  p2.setAttribute("id", "p-b");
+  frag.insert(0, [p1]);
+  frag.insert(1, [new Y.Map()]);
+  frag.insert(2, [p2]);
+}
+writeBin("map_child.v1", Y.encodeStateAsUpdate(mapChild));
+let mapChildJsThrows = false;
+try {
+  yDocToProsemirrorJSON(mapChild, FRAGMENT);
+} catch {
+  mapChildJsThrows = true;
+}
+if (!mapChildJsThrows) {
+  throw new Error("map_child JS oracle must throw Unexpected case");
+}
+
+const embedChild = docWithClient(93);
+{
+  const frag = embedChild.getXmlFragment(FRAGMENT);
+  const p = new Y.XmlElement("paragraph");
+  p.setAttribute("id", "p-embed");
+  const t1 = new Y.XmlText();
+  t1.insert(0, "앞");
+  const t2 = new Y.XmlText();
+  t2.insert(0, "뒤");
+  p.insert(0, [t1]);
+  frag.insert(0, [p]);
+  p.insert(1, [{ any: 1 }]);
+  p.insert(2, [t2]);
+}
+writeBin("embed_child.v1", Y.encodeStateAsUpdate(embedChild));
+let embedChildJsThrows = false;
+try {
+  yDocToProsemirrorJSON(embedChild, FRAGMENT);
+} catch {
+  embedChildJsThrows = true;
+}
+if (!embedChildJsThrows) {
+  throw new Error("embed_child JS oracle must throw Unexpected case");
+}
+
 const delBeforePm = projectJson(
   (() => {
     const d = new Y.Doc({ gc: false });
@@ -556,6 +733,17 @@ const expectations = {
   ychange_retained_nested: {
     prosemirror_json: ychangeNestedPm,
   },
+  three_marks: threeMarksRecord,
+  overlapping_marks: overlappingMarksRecord,
+  link_then_bold: linkThenBoldRecord,
+  map_child: {
+    expected: "malformed",
+    js_throws: mapChildJsThrows,
+  },
+  embed_child: {
+    expected: "malformed",
+    js_throws: embedChildJsThrows,
+  },
 };
 
 writeFileSync(
@@ -590,6 +778,11 @@ console.log(
         "ychange_strip.v1",
         "ychange_only.v1",
         "ychange_retained_nested.v1",
+        "three_marks.v1",
+        "overlapping_marks.v1",
+        "link_then_bold.v1",
+        "map_child.v1",
+        "embed_child.v1",
         "expectations.json",
       ],
       delete_only_sv_unchanged: expectations.delete_only.state_vector_unchanged,

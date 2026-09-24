@@ -649,5 +649,353 @@
         }
       ]
     }
+  },
+  "three_marks": {
+    "js_raw_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-3marks"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "세마크",
+              "marks": [
+                {
+                  "type": "bold",
+                  "attrs": {}
+                },
+                {
+                  "type": "italic",
+                  "attrs": {}
+                },
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.invalid"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "js_raw_mark_order": [
+      "bold",
+      "italic",
+      "link"
+    ],
+    "project_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-3marks"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "세마크",
+              "marks": [
+                {
+                  "type": "bold",
+                  "attrs": {}
+                },
+                {
+                  "type": "italic",
+                  "attrs": {}
+                },
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.invalid"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "project_mark_order": [
+      "bold",
+      "italic",
+      "link"
+    ],
+    "schema_ranked_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-3marks"
+          },
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.invalid",
+                    "target": "_blank",
+                    "rel": "noopener noreferrer nofollow",
+                    "class": null,
+                    "title": null
+                  }
+                },
+                {
+                  "type": "bold"
+                },
+                {
+                  "type": "italic"
+                }
+              ],
+              "text": "세마크"
+            }
+          ]
+        }
+      ]
+    },
+    "schema_mark_rank": [
+      "link",
+      "bold",
+      "code",
+      "italic",
+      "strike",
+      "underline"
+    ],
+    "schema_ranking_preserves_semantics": true
+  },
+  "overlapping_marks": {
+    "js_raw_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-overlap"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "토글",
+              "marks": [
+                {
+                  "type": "bold",
+                  "attrs": {}
+                },
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://y.invalid"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "js_raw_mark_order": [
+      "bold",
+      "link"
+    ],
+    "project_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-overlap"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "토글",
+              "marks": [
+                {
+                  "type": "bold",
+                  "attrs": {}
+                },
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://y.invalid"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "project_mark_order": [
+      "bold",
+      "link"
+    ],
+    "schema_ranked_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-overlap"
+          },
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://y.invalid",
+                    "target": "_blank",
+                    "rel": "noopener noreferrer nofollow",
+                    "class": null,
+                    "title": null
+                  }
+                },
+                {
+                  "type": "bold"
+                }
+              ],
+              "text": "토글"
+            }
+          ]
+        }
+      ]
+    },
+    "schema_mark_rank": [
+      "link",
+      "bold",
+      "code",
+      "italic",
+      "strike",
+      "underline"
+    ],
+    "schema_ranking_preserves_semantics": true
+  },
+  "link_then_bold": {
+    "js_raw_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-lb"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "역순",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://z.invalid"
+                  }
+                },
+                {
+                  "type": "bold",
+                  "attrs": {}
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "js_raw_mark_order": [
+      "link",
+      "bold"
+    ],
+    "project_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-lb"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "역순",
+              "marks": [
+                {
+                  "type": "bold",
+                  "attrs": {}
+                },
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://z.invalid"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "project_mark_order": [
+      "bold",
+      "link"
+    ],
+    "schema_ranked_prosemirror_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "id": "p-lb"
+          },
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://z.invalid",
+                    "target": "_blank",
+                    "rel": "noopener noreferrer nofollow",
+                    "class": null,
+                    "title": null
+                  }
+                },
+                {
+                  "type": "bold"
+                }
+              ],
+              "text": "역순"
+            }
+          ]
+        }
+      ]
+    },
+    "schema_mark_rank": [
+      "link",
+      "bold",
+      "code",
+      "italic",
+      "strike",
+      "underline"
+    ],
+    "schema_ranking_preserves_semantics": true
+  },
+  "map_child": {
+    "expected": "malformed",
+    "js_throws": true
+  },
+  "embed_child": {
+    "expected": "malformed",
+    "js_throws": true
   }
 }

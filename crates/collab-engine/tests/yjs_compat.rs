@@ -1047,6 +1047,123 @@ fn project_output_and_depth_caps() {
     );
 }
 
+#[test]
+fn project_overlapping_marks_are_deterministic_and_preserve_js_semantics() {
+    let exp = expectations();
+    for (file, key) in [
+        ("three_marks.v1", "three_marks"),
+        ("overlapping_marks.v1", "overlapping_marks"),
+        ("link_then_bold.v1", "link_then_bold"),
+    ] {
+        let rec = &exp[key];
+        let mut engine = CollabEngine::new(Limits::for_tests());
+        assert_ok_applied(&engine.handle(&Request::Load {
+            snapshot_b64: Some(load_bytes(file)),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        }));
+        let first = project_of(&mut engine);
+        let second = project_of(&mut engine);
+        assert_eq!(
+            first, second,
+            "{file} same-doc projection must be deterministic"
+        );
+        assert_eq!(
+            first, rec["project_prosemirror_json"],
+            "{file} project JSON is raw-key sorted, not claimed as exact JS JSON"
+        );
+        assert_eq!(
+            first_multi_mark_order(&first),
+            rec["project_mark_order"]
+                .as_array()
+                .expect("project_mark_order")
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            "{file} project mark order"
+        );
+        assert_eq!(
+            mark_contents(&first),
+            mark_contents(&rec["js_raw_prosemirror_json"]),
+            "{file} typed mark contents must match the JS oracle"
+        );
+        let rank: Vec<String> = rec["schema_mark_rank"]
+            .as_array()
+            .expect("schema_mark_rank")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let ranked_project = rank_marks(&first, &rank);
+        let ranked_js = rank_marks(&rec["js_raw_prosemirror_json"], &rank);
+        assert_eq!(
+            ranked_project, ranked_js,
+            "{file} ProseMirror schema re-ranking must preserve semantics"
+        );
+        assert!(
+            rec["schema_ranked_prosemirror_json"].is_object(),
+            "{file} generator must pin the actual schema-ranked JSON"
+        );
+        assert!(
+            rec["schema_ranking_preserves_semantics"]
+                .as_bool()
+                .expect("flag"),
+            "{file}"
+        );
+    }
+
+    let link = &exp["link_then_bold"];
+    assert_eq!(
+        link["js_raw_mark_order"],
+        serde_json::json!(["link", "bold"])
+    );
+    assert_eq!(
+        link["project_mark_order"],
+        serde_json::json!(["bold", "link"])
+    );
+    assert_ne!(
+        link["js_raw_prosemirror_json"], link["project_prosemirror_json"],
+        "must keep the JS oracle separate; do not normalize away the known order gap"
+    );
+}
+
+#[test]
+fn project_non_xml_child_is_malformed_and_leaves_bytes_unchanged() {
+    let exp = expectations();
+    for (file, where_) in [
+        ("map_child.v1", "fragment"),
+        ("embed_child.v1", "paragraph"),
+    ] {
+        assert_eq!(exp[file.trim_end_matches(".v1")]["expected"], "malformed");
+        assert_eq!(exp[file.trim_end_matches(".v1")]["js_throws"], true);
+        let mut engine = CollabEngine::new(Limits::for_tests());
+        assert_ok_applied(&engine.handle(&Request::Load {
+            snapshot_b64: Some(load_bytes(file)),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        }));
+        let before = snapshot_bytes(&mut engine);
+        match engine.handle(&Request::Project { encoding: 1 }) {
+            EngineStatus::Malformed { detail } => {
+                assert!(
+                    detail.contains(&format!("non-XML child in {where_}")),
+                    "{file}: {detail}"
+                );
+            }
+            other => panic!("{file} must be malformed, got {other:?}"),
+        }
+        let after = snapshot_bytes(&mut engine);
+        assert_eq!(before, after, "{file} project must not mutate CRDT bytes");
+        match engine.handle(&Request::Inspect) {
+            EngineStatus::Ok { .. } => {}
+            other => panic!("{file} engine must survive document error, got {other:?}"),
+        }
+        match engine.handle(&Request::Project { encoding: 1 }) {
+            EngineStatus::Malformed { .. } => {}
+            other => panic!("{file} second project must still be malformed, got {other:?}"),
+        }
+    }
+}
+
 fn nested_project_update(depth: usize) -> Vec<u8> {
     use yrs::types::xml::XmlIn;
     use yrs::{XmlElementPrelim, XmlFragment, XmlTextPrelim};
@@ -1080,4 +1197,96 @@ fn assert_fully_reaped(pid: u32) {
         panic!("pid {pid} is a zombie; kill+reap failed");
     }
     panic!("pid {pid} still exists after session ended:\n{status}");
+}
+
+fn snapshot_bytes(engine: &mut CollabEngine) -> Vec<u8> {
+    match engine.handle(&Request::Snapshot) {
+        EngineStatus::Ok {
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("snapshot"),
+        other => panic!("snapshot: {other:?}"),
+    }
+}
+
+fn first_multi_mark_order(json: &Value) -> Vec<String> {
+    let mut order = Vec::new();
+    walk_marked_text(json, &mut |node| {
+        if order.is_empty() {
+            if let Some(marks) = node.get("marks").and_then(Value::as_array) {
+                if marks.len() >= 2 {
+                    order = marks
+                        .iter()
+                        .map(|m| m["type"].as_str().unwrap_or("").to_string())
+                        .collect();
+                }
+            }
+        }
+    });
+    order
+}
+
+fn mark_contents(json: &Value) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    walk_marked_text(json, &mut |node| {
+        if let Some(marks) = node.get("marks").and_then(Value::as_array) {
+            for mark in marks {
+                let ty = mark["type"].as_str().unwrap_or("").to_string();
+                let attrs = mark
+                    .get("attrs")
+                    .cloned()
+                    .unwrap_or(Value::Object(Default::default()));
+                out.push((ty, attrs));
+            }
+        }
+    });
+    out.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
+    });
+    out
+}
+
+fn rank_marks(json: &Value, rank: &[String]) -> Value {
+    match json {
+        Value::Array(items) => Value::Array(items.iter().map(|v| rank_marks(v, rank)).collect()),
+        Value::Object(obj) => {
+            let mut out = serde_json::Map::new();
+            for (key, child) in obj {
+                if key == "marks" {
+                    if let Value::Array(marks) = child {
+                        let mut ranked = marks.clone();
+                        ranked.sort_by_key(|mark| {
+                            let ty = mark.get("type").and_then(Value::as_str).unwrap_or("");
+                            rank.iter().position(|r| r == ty).unwrap_or(usize::MAX)
+                        });
+                        out.insert(key.clone(), Value::Array(ranked));
+                        continue;
+                    }
+                }
+                out.insert(key.clone(), rank_marks(child, rank));
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn walk_marked_text(json: &Value, visit: &mut impl FnMut(&Value)) {
+    match json {
+        Value::Array(items) => {
+            for item in items {
+                walk_marked_text(item, visit);
+            }
+        }
+        Value::Object(obj) => {
+            if obj.contains_key("marks") {
+                visit(json);
+            }
+            if let Some(content) = obj.get("content") {
+                walk_marked_text(content, visit);
+            }
+        }
+        _ => {}
+    }
 }

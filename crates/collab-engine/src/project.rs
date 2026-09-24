@@ -1,10 +1,15 @@
 //! Bounded y-tiptap 3.0.9 `yXmlFragmentToProsemirrorJSON` + source `withoutYChange`.
 //!
-//! Exact algorithm from installed `@tiptap/y-tiptap` 3.0.9
+//! Traversal matches installed `@tiptap/y-tiptap` 3.0.9
 //! `yXmlFragmentToProsemirrorJSON` and FVOCI source SHA
-//! `393795261322b916e588043cf94feca999175843` `packages/editor/src/collab-tiptap.ts`.
-//! Traversal is over Yrs XmlFragment / XmlText delta, never XML strings.
-//! Mark order follows y-tiptap `Object.keys` (Yrs HashMap iteration; never sorted).
+//! `393795261322b916e588043cf94feca999175843` `packages/editor/src/collab-tiptap.ts`
+//! over Yrs XmlFragment / XmlText delta, never XML strings.
+//!
+//! y-tiptap emits marks in Y.Text format-item order (`Object.keys` of
+//! `currentAttributes`). yrs 0.28 does not expose that item chain, so Project
+//! emits marks sorted by raw attribute name. ProseMirror re-ranks marks on
+//! load; JSON-level mark-array order may differ from the JS oracle. Typed mark
+//! contents are preserved. This is not exact raw JS JSON.
 
 use std::io::{self, Write};
 
@@ -168,12 +173,15 @@ fn y_xml_fragment_to_prosemirror_json<T: ReadTxn>(
     budget: &mut Budget,
 ) -> Result<Value, EngineStatus> {
     let mut content = Vec::new();
+    let mut yielded = 0u32;
     for child in frag.children(txn) {
+        yielded = yielded.saturating_add(1);
         match serialize(txn, child, 1, budget)? {
             Serialized::Node(v) => content.push(v),
             Serialized::Nodes(vs) => content.push(Value::Array(vs)),
         }
     }
+    reject_truncated_xml_children(yielded, frag.len(txn), "fragment")?;
     Ok(serde_json::json!({ "type": "doc", "content": content }))
 }
 
@@ -218,7 +226,7 @@ fn serialize_xml_element<T: ReadTxn>(
     budget.add_string(&tag, "node type")?;
 
     let mut obj = Map::new();
-    obj.insert("type".into(), Value::String(tag));
+    obj.insert("type".into(), Value::String(tag.clone()));
 
     let mut attrs = Map::new();
     for (key, value) in el.attributes(txn) {
@@ -234,16 +242,34 @@ fn serialize_xml_element<T: ReadTxn>(
     }
 
     let mut content = Vec::new();
+    let mut yielded = 0u32;
     for child in el.children(txn) {
+        yielded = yielded.saturating_add(1);
         match serialize(txn, child, depth.saturating_add(1), budget)? {
             Serialized::Node(v) => content.push(v),
             Serialized::Nodes(vs) => content.extend(vs),
         }
     }
+    reject_truncated_xml_children(yielded, el.len(txn), &tag)?;
     if !content.is_empty() {
         obj.insert("content".into(), Value::Array(content));
     }
     Ok(Value::Object(obj))
+}
+
+/// yrs `XmlNodes` ends at the first non-XML child (`try_from(...).ok()`),
+/// dropping that child and every later sibling. y-tiptap throws instead.
+fn reject_truncated_xml_children(
+    yielded: u32,
+    declared: u32,
+    where_: &str,
+) -> Result<(), EngineStatus> {
+    if yielded == declared {
+        return Ok(());
+    }
+    Err(EngineStatus::Malformed {
+        detail: format!("project: non-XML child in {where_}"),
+    })
 }
 
 fn serialize_xml_text<T: ReadTxn>(
@@ -252,10 +278,10 @@ fn serialize_xml_text<T: ReadTxn>(
     depth: u32,
     budget: &mut Budget,
 ) -> Result<Vec<Value>, EngineStatus> {
+    budget.check_depth(depth)?;
     let mut nodes = Vec::new();
     // `YChange` stays on `Diff.ychange`; y-tiptap `toDelta()` has no snapshot, so ignore it.
     for diff in text.diff(txn, YChange::identity) {
-        budget.check_depth(depth)?;
         budget.add_node()?;
         let insert = match diff.insert {
             Out::Any(Any::String(s)) => s.to_string(),
@@ -276,15 +302,18 @@ fn serialize_xml_text<T: ReadTxn>(
             // Yjs `toDelta()` (no snapshot) never puts the reserved key `ychange` on
             // attributes; y-tiptap therefore omits `marks` when that was the only attr.
             // Hashed `ychange--xxxxxxxx` is a real mark name and is kept.
-            let mark_attrs: Vec<_> = attrs
+            let mut mark_attrs: Vec<_> = attrs
                 .iter()
                 .filter(|(key, _)| key.as_ref() != "ychange")
                 .collect();
+            // yrs 0.28 `Attrs` is a HashMap; iteration is not Y.Text format-item
+            // order. Sort by raw attribute key (bytes) before `yattr2markname`.
+            mark_attrs.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
             if !mark_attrs.is_empty() {
                 budget.ensure_nodes(mark_attrs.len())?;
                 let mut marks = Vec::with_capacity(mark_attrs.len());
-                // y-tiptap uses `Object.keys` insertion order, not alphabetical sort.
                 for (key, value) in mark_attrs {
+                    budget.add_node()?;
                     budget.add_string(key.as_ref(), "mark type")?;
                     let type_name = yattr2markname(key.as_ref());
                     let mut mark = Map::new();
@@ -602,5 +631,17 @@ mod tests {
             }
         ));
         super::bound_json_bytes(&json, 10_000).expect("fits");
+    }
+
+    #[test]
+    fn truncated_xml_children_are_malformed() {
+        super::reject_truncated_xml_children(2, 2, "fragment").expect("match");
+        let err = super::reject_truncated_xml_children(1, 3, "paragraph").expect_err("trunc");
+        match err {
+            crate::outcome::EngineStatus::Malformed { detail } => {
+                assert!(detail.contains("non-XML child in paragraph"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -639,6 +639,61 @@ fn nested_project_elements(depth: usize) -> Vec<u8> {
     txn.encode_state_as_update_v1(&yrs::StateVector::default())
 }
 
+fn load_fixture(name: &str) -> Vec<u8> {
+    std::fs::read(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join(name),
+    )
+    .unwrap_or_else(|e| panic!("read {name}: {e}"))
+}
+
+#[test]
+fn project_map_and_embed_are_malformed_document_errors_not_limits() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    for (file, needle) in [
+        ("map_child.v1", "non-XML child in fragment"),
+        ("embed_child.v1", "non-XML child in paragraph"),
+    ] {
+        let mut session = spawn(Limits::for_tests());
+        let pid = session.pid().expect("pid");
+        assert!(matches!(
+            session
+                .call(&Request::Load {
+                    snapshot_b64: Some(load_fixture(file)),
+                    tail_b64: Vec::new(),
+                    encoding: 1,
+                })
+                .outcome,
+            EngineStatus::Ok { .. }
+        ));
+        assert_eq!(session.pid(), Some(pid), "{file} load must keep the child");
+        let report = session.call(&Request::Project { encoding: 1 });
+        match report.outcome {
+            EngineStatus::Malformed { ref detail } if detail.contains(needle) => {}
+            EngineStatus::ResourceLimit { .. } => {
+                panic!(
+                    "{file} document error must not be a resource limit: {:?}",
+                    report.outcome
+                )
+            }
+            EngineStatus::WorkerFailure { .. } => {
+                panic!(
+                    "{file} child must survive and return malformed, got {:?}",
+                    report.outcome
+                )
+            }
+            other => panic!("{file}: {other:?}"),
+        }
+        // EngineSession recycles any non-Ok response (existing parent policy).
+        // The helper itself returned a complete malformed frame, not a crash.
+        if session.pid().is_some() {
+            session.kill_and_reap();
+        }
+        assert_fully_reaped(pid);
+    }
+}
+
 fn assert_fully_reaped(pid: u32) {
     let path = format!("/proc/{pid}");
     if !std::path::Path::new(&path).exists() {
