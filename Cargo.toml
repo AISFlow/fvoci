@@ -28,6 +28,7 @@ axum = { version = "0.8", default-features = false, features = ["macros", "json"
 axum-extra = { version = "0.10", features = ["cookie"] }
 base64 = "0.22"
 collab-engine = { path = "crates/collab-engine", default-features = false }
+document-extract-client = { path = "crates/document-extract-client" }
 futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 hex = "0.4"
@@ -60,6 +61,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 
 [features]
 db-tests = []
+extract-native-tests = ["db-tests"]
 api-schema = ["dep:utoipa"]
 
 [[test]]
@@ -81,6 +83,16 @@ required-features = ["db-tests"]
 name = "attachment_integration"
 path = "tests/attachment_integration.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "attachment_extract_integration"
+path = "tests/attachment_extract_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "attachment_extract_native"
+path = "tests/attachment_extract_native.rs"
+required-features = ["extract-native-tests"]
 
 [[test]]
 name = "collab_product"

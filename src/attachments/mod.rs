@@ -1,7 +1,12 @@
 mod disposition;
+mod extract_job;
 mod local;
 mod mime;
 mod range;
+
+pub use extract_job::{
+    spawn_extract_job, validate_extractor_bin, ExtractJobHandle, ExtractJobSettings,
+};
 
 pub use disposition::content_disposition_attachment;
 pub use local::{LocalStorage, PartInfo, StagedPart, StorageError};

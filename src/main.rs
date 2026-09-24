@@ -7,6 +7,7 @@ use tokio::signal;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
+use fvoci_server::attachments::{spawn_extract_job, ExtractJobHandle, ExtractJobSettings};
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
@@ -103,6 +104,23 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     eprintln!("fvoci-server listening on http://{addr}");
 
     let collab = CollabConfig::from_env().map(|cfg| Arc::new(CollabHub::new(cfg, pool.clone())));
+    let extract_job = match ExtractJobSettings::from_env()? {
+        Some(settings) => {
+            tracing::info!(
+                extractor = %settings.extractor_bin.display(),
+                "attachment native extraction enabled"
+            );
+            Some(spawn_extract_job(
+                settings,
+                pool.clone(),
+                fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
+            ))
+        }
+        None => {
+            tracing::info!("attachment native extraction disabled (FVOCI_EXTRACTOR_BIN unset)");
+            None
+        }
+    };
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
@@ -120,8 +138,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let deadline = config.shutdown_deadline;
     let (signaled_tx, signaled_rx) = tokio::sync::oneshot::channel::<Instant>();
     let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
+    let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
+    let extract_task_for_signal = extract_task.clone();
 
     let serve = axum::serve(
         listener,
@@ -131,6 +151,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     .with_graceful_shutdown(async move {
         shutdown_signal().await;
         let started = Instant::now();
+        if let Some(job) = extract_task_for_signal.lock().await.as_ref() {
+            job.request_shutdown();
+            tracing::info!("attachment extract shutdown started concurrently with HTTP drain");
+        }
         if let Some(hub) = collab_for_signal {
             hub.begin_shutdown();
             let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
@@ -162,6 +186,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             wait_for_deadline(
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
+                    join_extract_finished(&extract_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve: map_serve_result(serve_result),
@@ -187,6 +212,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 async {
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
+                    join_extract_finished(&extract_task).await;
                     drain_pool.close().await;
                     DrainOutcome { serve, hub }
                 },
@@ -206,6 +232,15 @@ fn map_serve_result(
     match result {
         Ok(result) => result,
         Err(error) => Err(std::io::Error::other(error)),
+    }
+}
+
+async fn join_extract_finished(
+    extract_task: &tokio::sync::Mutex<Option<ExtractJobHandle>>,
+) {
+    if let Some(job) = extract_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await;
     }
 }
 
