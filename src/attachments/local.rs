@@ -1,15 +1,21 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use super::sniff_mime_from_bytes;
 
-const UUID_KEY_RE: &str = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+static UUID_KEY_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        .expect("uuid regex")
+});
+
+const COPY_BUF: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct PartInfo {
@@ -23,6 +29,30 @@ pub struct StagedPart {
     pub etag: String,
     pub size_bytes: u64,
     writing_path: PathBuf,
+    keep: bool,
+}
+
+struct WritingGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl WritingGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, keep: false }
+    }
+
+    fn disarm(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for WritingGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,8 +85,7 @@ impl LocalStorage {
 
     pub fn assert_key(key: &str) -> Result<(), StorageError> {
         let lower = key.to_ascii_lowercase();
-        let re = regex::Regex::new(UUID_KEY_RE).expect("uuid regex");
-        if re.is_match(&lower) {
+        if UUID_KEY_RE.is_match(&lower) {
             Ok(())
         } else {
             Err(StorageError::InvalidKey)
@@ -77,7 +106,7 @@ impl LocalStorage {
 
     pub async fn create_multipart(&self, key: &str) -> Result<(), StorageError> {
         Self::assert_key(key)?;
-        fs::create_dir_all(self.parts_dir(key)).await?;
+        durable_create_dir_all(&self.parts_dir(key)).await?;
         Ok(())
     }
 
@@ -115,14 +144,18 @@ impl LocalStorage {
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         Self::assert_key(key)?;
-        if part_number < 1 || part_number > 10_000 {
+        if !(1..=10_000).contains(&part_number) {
             return Err(StorageError::InvalidKey);
         }
         let dir = self.parts_dir(key);
         if fs::metadata(&dir).await.is_err() {
             return Err(StorageError::UploadGone);
         }
-        let writing_path = dir.join(format!("{part_number}.{writing}.writing", writing = Uuid::now_v7()));
+        let writing_path = dir.join(format!(
+            "{part_number}.{writing}.writing",
+            writing = Uuid::now_v7()
+        ));
+        let mut guard = WritingGuard::new(writing_path.clone());
         let mut file = fs::File::create(&writing_path).await?;
         let mut hasher = Sha256::new();
         let mut size_bytes = 0u64;
@@ -130,27 +163,26 @@ impl LocalStorage {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(err) => {
-                    let _ = fs::remove_file(&writing_path).await;
                     return Err(StorageError::Io(io::Error::other(err)));
                 }
             };
             size_bytes += chunk.len() as u64;
             if size_bytes > max_bytes {
-                let _ = fs::remove_file(&writing_path).await;
                 return Err(StorageError::PartTooLarge);
             }
             hasher.update(&chunk);
-            if let Err(err) = file.write_all(&chunk).await {
-                let _ = fs::remove_file(&writing_path).await;
-                return Err(StorageError::Io(err));
-            }
+            file.write_all(&chunk).await?;
         }
         file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
         let etag = hex::encode(hasher.finalize());
+        guard.disarm();
         Ok(StagedPart {
             etag,
             size_bytes,
             writing_path,
+            keep: false,
         })
     }
 
@@ -158,7 +190,7 @@ impl LocalStorage {
         &self,
         key: &str,
         part_number: i32,
-        staged: &StagedPart,
+        staged: &mut StagedPart,
     ) -> Result<PartInfo, StorageError> {
         Self::assert_key(key)?;
         let dir = self.parts_dir(key);
@@ -167,7 +199,7 @@ impl LocalStorage {
             return Err(StorageError::UploadGone);
         }
         let final_path = dir.join(part_number.to_string());
-        if let Err(err) = fs::rename(&staged.writing_path, &final_path).await {
+        if let Err(err) = durable_rename(&staged.writing_path, &final_path).await {
             let _ = fs::remove_file(&staged.writing_path).await;
             return Err(if err.kind() == io::ErrorKind::NotFound {
                 StorageError::UploadGone
@@ -175,6 +207,7 @@ impl LocalStorage {
                 StorageError::Io(err)
             });
         }
+        staged.keep = true;
         Ok(PartInfo {
             part_number,
             etag: staged.etag.clone(),
@@ -182,8 +215,9 @@ impl LocalStorage {
         })
     }
 
-    pub async fn discard_staged_part(staged: &StagedPart) {
+    pub async fn discard_staged_part(staged: &mut StagedPart) {
         let _ = fs::remove_file(&staged.writing_path).await;
+        staged.keep = true;
     }
 
     pub async fn list_parts(&self, key: &str) -> Result<Vec<PartInfo>, StorageError> {
@@ -203,12 +237,11 @@ impl LocalStorage {
             if part_number < 1 {
                 continue;
             }
-            let data = fs::read(entry.path()).await?;
-            let etag = hex::encode(Sha256::digest(&data));
+            let (etag, size_bytes) = hash_file(&entry.path()).await?;
             parts.push(PartInfo {
                 part_number,
                 etag,
-                size_bytes: data.len() as u64,
+                size_bytes,
             });
         }
         parts.sort_by_key(|p| p.part_number);
@@ -244,24 +277,33 @@ impl LocalStorage {
         if !matches {
             return Err(StorageError::EtagMismatch);
         }
-        fs::create_dir_all(self.objects_dir(key)).await?;
+        durable_create_dir_all(&self.objects_dir(key)).await?;
         let assembly_path = self.object_path(key).with_extension("assembly");
+        let mut assembly_guard = WritingGuard::new(assembly_path.clone());
         let mut out = fs::File::create(&assembly_path).await?;
         let mut size_bytes = 0u64;
         for part in &actual {
             let path = self.parts_dir(key).join(part.part_number.to_string());
-            let data = fs::read(&path).await?;
-            let etag = hex::encode(Sha256::digest(&data));
-            if etag != part.etag {
-                let _ = fs::remove_file(&assembly_path).await;
-                return Err(StorageError::EtagMismatch);
+            let copied = copy_hashed(&path, &mut out).await;
+            match copied {
+                Ok((etag, copied_bytes)) if etag == part.etag => {
+                    size_bytes += copied_bytes;
+                }
+                Ok(_) => {
+                    drop(out);
+                    return Err(StorageError::EtagMismatch);
+                }
+                Err(err) => {
+                    drop(out);
+                    return Err(err);
+                }
             }
-            size_bytes += data.len() as u64;
-            out.write_all(&data).await?;
         }
         out.flush().await?;
         out.sync_all().await?;
-        fs::rename(&assembly_path, self.object_path(key)).await?;
+        drop(out);
+        durable_rename(&assembly_path, &self.object_path(key)).await?;
+        assembly_guard.disarm();
         Ok(size_bytes)
     }
 
@@ -293,7 +335,6 @@ impl LocalStorage {
         let len = end - start + 1;
         let mut file = self.open_payload_at(key, start).await?;
         let mut buf = vec![0u8; len as usize];
-        use tokio::io::AsyncReadExt;
         file.read_exact(&mut buf).await?;
         Ok(buf)
     }
@@ -319,5 +360,169 @@ impl LocalStorage {
         let end = (size - 1).min(4095);
         let sample = self.read_range(key, 0, end).await?;
         Ok(sniff_mime_from_bytes(&sample))
+    }
+}
+
+async fn fsync_dir(path: &Path) -> io::Result<()> {
+    let dir = fs::File::open(path).await?;
+    dir.sync_all().await
+}
+
+async fn durable_create_dir_all(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path).await?;
+    fsync_dir(path).await?;
+    if let Some(parent) = path.parent() {
+        fsync_dir(parent).await?;
+    }
+    Ok(())
+}
+
+async fn durable_rename(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to).await?;
+    if let Some(parent) = to.parent() {
+        fsync_dir(parent).await?;
+    }
+    Ok(())
+}
+
+async fn hash_file(path: &Path) -> Result<(String, u64), StorageError> {
+    let mut file = fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; COPY_BUF];
+    let mut size_bytes = 0u64;
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        size_bytes += n as u64;
+    }
+    Ok((hex::encode(hasher.finalize()), size_bytes))
+}
+
+async fn copy_hashed(path: &Path, out: &mut fs::File) -> Result<(String, u64), StorageError> {
+    let mut file = fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; COPY_BUF];
+    let mut size_bytes = 0u64;
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        out.write_all(&buf[..n]).await?;
+        size_bytes += n as u64;
+    }
+    Ok((hex::encode(hasher.finalize()), size_bytes))
+}
+
+impl Drop for StagedPart {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.writing_path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::stream;
+    use futures_util::StreamExt;
+    use std::time::Duration;
+
+    fn temp_storage() -> (LocalStorage, PathBuf) {
+        let root = std::env::temp_dir().join(format!("fvoci-att-local-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        (LocalStorage::new(root.clone()), root)
+    }
+
+    async fn writing_names(dir: &Path) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut entries = fs::read_dir(dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".writing") {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    #[tokio::test]
+    async fn cancelled_stage_removes_writing_and_keeps_published_part() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let mut first = storage
+            .stage_part_stream(
+                &key,
+                1,
+                stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
+                    bytes::Bytes::from_static(b"keep-me"),
+                )]),
+                32,
+            )
+            .await
+            .unwrap();
+        storage
+            .publish_staged_part(&key, 1, &mut first)
+            .await
+            .unwrap();
+
+        let hanging = stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
+            bytes::Bytes::from_static(b"xx"),
+        )])
+        .chain(futures_util::stream::pending());
+        let staged = tokio::spawn({
+            let storage = storage.clone();
+            let key = key.clone();
+            async move { storage.stage_part_stream(&key, 2, hanging, 32).await }
+        });
+        let dir = storage.parts_dir(&key);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !writing_names(&dir).await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("writing temp should appear");
+        staged.abort();
+        let _ = staged.await;
+        assert!(
+            writing_names(&dir).await.is_empty(),
+            "cancelled stage must remove .writing"
+        );
+        let parts = storage.list_parts(&key).await.unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].part_number, 1);
+        assert_eq!(parts[0].size_bytes, 7);
+    }
+
+    #[tokio::test]
+    async fn stream_error_flushes_cleanup_writing() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let err = storage
+            .stage_part_stream(
+                &key,
+                1,
+                stream::iter(vec![
+                    Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from_static(b"aa")),
+                    Err(io::Error::other("boom")),
+                ]),
+                32,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::Io(_)));
+        assert!(writing_names(&storage.parts_dir(&key)).await.is_empty());
+        assert!(storage.list_parts(&key).await.unwrap().is_empty());
     }
 }

@@ -499,6 +499,7 @@ fn get_attachment_meta() {}
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("attachment_id" = String, description = "Attachment id"),
+        ("variant" = Option<String>, Query, description = "Omit for original bytes; preview is not stored in this slice"),
     ),
     responses(
         (status = 200, description = "Original bytes", content_type = "application/octet-stream"),
@@ -545,6 +546,10 @@ mod tests {
             ),
             ("TreeNodeResponse", &["icon", "parentId", "projectId"][..]),
             ("AncestorResponse", &["icon", "projectId"][..]),
+            (
+                "AttachmentOutput",
+                &["sizeBytes", "completedAt", "preview"][..],
+            ),
         ] {
             for field in fields {
                 assert!(schemas[name]["required"]

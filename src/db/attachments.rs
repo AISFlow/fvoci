@@ -8,8 +8,8 @@ use sqlx::{Acquire, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::attachments::{
-    initial_extract_status, is_image_mime, ATTACHMENT_LOCK_NAMESPACE, MAX_PART_COUNT,
-    STORAGE_LOCK_NAMESPACE, StagedPart, UploadLimits,
+    initial_extract_status, is_image_mime, StagedPart, UploadLimits, ATTACHMENT_LOCK_NAMESPACE,
+    MAX_PART_COUNT, STORAGE_LOCK_NAMESPACE,
 };
 use crate::attachments::{LocalStorage, StorageError};
 use crate::db::context::{lock_key_from_uuid, set_tenant};
@@ -75,10 +75,7 @@ struct AttachmentSessionLock {
 }
 
 impl AttachmentSessionLock {
-    async fn try_acquire(
-        pool: &PgPool,
-        attachment_id: Uuid,
-    ) -> Result<Option<Self>, sqlx::Error> {
+    async fn try_acquire(pool: &PgPool, attachment_id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         let mut conn = pool.acquire().await?;
         // Never return this connection to the pool: session advisory locks must not
         // survive pool reuse, including when this task is cancelled mid-flight.
@@ -266,6 +263,9 @@ async fn recheck_upload_write_access(
     if !recheck_session(tx, actor_user_id, session_id).await? {
         return Ok(Err(AttachmentDbError::Forbidden));
     }
+    if !workspace_is_live(tx, workspace_id).await? {
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
     let att = match fetch_attachment(tx, workspace_id, attachment_id).await? {
         Some(att) => att,
         None => return Ok(Err(AttachmentDbError::NotFound)),
@@ -318,6 +318,7 @@ async fn record_attachment_event(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_upload(
     pool: &PgPool,
     storage: &LocalStorage,
@@ -450,6 +451,10 @@ pub async fn authorize_upload_part(
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::Forbidden));
     }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
     let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
         Some(att) => att,
         None => {
@@ -489,6 +494,7 @@ pub async fn authorize_upload_part(
     Ok(Ok((storage_key, max_bytes)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn commit_upload_part(
     pool: &PgPool,
     storage: &LocalStorage,
@@ -497,7 +503,7 @@ pub async fn commit_upload_part(
     actor_user_id: Uuid,
     session_id: Uuid,
     part_number: i32,
-    staged: &StagedPart,
+    staged: &mut StagedPart,
 ) -> Result<Result<crate::attachments::PartInfo, AttachmentDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -563,13 +569,20 @@ pub async fn resume_upload(
     attachment_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-) -> Result<Result<(AttachmentRow, UploadMeta, Vec<(i32, String)>, Vec<i32>), AttachmentDbError>, sqlx::Error> {
+) -> Result<
+    Result<(AttachmentRow, UploadMeta, Vec<(i32, String)>, Vec<i32>), AttachmentDbError>,
+    sqlx::Error,
+> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     lock_membership_users(&mut tx, &[actor_user_id]).await?;
     if !recheck_session(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
     }
     let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
         Some(att) => att,
@@ -615,6 +628,7 @@ pub async fn resume_upload(
     Ok(Ok((att, meta, done, remaining)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn complete_upload(
     pool: &PgPool,
     storage: &LocalStorage,
@@ -654,12 +668,14 @@ pub async fn complete_upload(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum CompleteAttempt {
     Done(AttachmentRow),
     Denied(AttachmentDbError),
     Retry,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn try_complete_owned(
     pool: &PgPool,
     storage: &LocalStorage,
@@ -677,6 +693,10 @@ async fn try_complete_owned(
         if !recheck_session(&mut tx, actor_user_id, session_id).await? {
             tx.rollback().await?;
             return Ok(CompleteAttempt::Denied(AttachmentDbError::Forbidden));
+        }
+        if !workspace_is_live(&mut tx, workspace_id).await? {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Denied(AttachmentDbError::NotFound));
         }
         let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
             Some(att) => att,
@@ -715,6 +735,7 @@ async fn try_complete_owned(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn complete_owned_inner(
     lock: &mut AttachmentSessionLock,
     storage: &LocalStorage,
@@ -1034,9 +1055,13 @@ pub mod test_barrier {
 
     use uuid::Uuid;
 
-    static BARRIERS: LazyLock<
-        Mutex<HashMap<Uuid, (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
-    > = LazyLock::new(|| Mutex::new(HashMap::new()));
+    type BarrierPair = (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    );
+    type BarrierMap = Mutex<HashMap<Uuid, BarrierPair>>;
+
+    static BARRIERS: LazyLock<BarrierMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
     pub struct PreMarkStoredBarrier {
         entered_rx: tokio::sync::oneshot::Receiver<()>,
@@ -1057,7 +1082,10 @@ pub mod test_barrier {
     }
 
     pub fn disarm_pre_mark_stored(attachment_id: Uuid) {
-        BARRIERS.lock().expect("barrier mutex").remove(&attachment_id);
+        BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .remove(&attachment_id);
     }
 
     impl PreMarkStoredBarrier {
@@ -1073,7 +1101,43 @@ pub mod test_barrier {
     }
 
     pub async fn wait_pre_mark_stored_barrier(attachment_id: Uuid) {
-        let entry = BARRIERS.lock().expect("barrier mutex").remove(&attachment_id);
+        let entry = BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .remove(&attachment_id);
+        if let Some((entered_tx, proceed_rx)) = entry {
+            let _ = entered_tx.send(());
+            let _ = proceed_rx.await;
+        }
+    }
+
+    static PUBLISH_BARRIERS: LazyLock<BarrierMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub fn arm_pre_publish(attachment_id: Uuid) -> PreMarkStoredBarrier {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+        PUBLISH_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .insert(attachment_id, (entered_tx, proceed_rx));
+        PreMarkStoredBarrier {
+            entered_rx,
+            proceed_tx: Some(proceed_tx),
+        }
+    }
+
+    pub fn disarm_pre_publish(attachment_id: Uuid) {
+        PUBLISH_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .remove(&attachment_id);
+    }
+
+    pub async fn wait_pre_publish_barrier(attachment_id: Uuid) {
+        let entry = PUBLISH_BARRIERS
+            .lock()
+            .expect("barrier mutex")
+            .remove(&attachment_id);
         if let Some((entered_tx, proceed_rx)) = entry {
             let _ = entered_tx.send(());
             let _ = proceed_rx.await;

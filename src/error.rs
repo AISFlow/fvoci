@@ -1,4 +1,4 @@
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -231,5 +231,11 @@ impl From<JsonRejection> for AppError {
             }
             _ => AppError::from_code(ProblemCode::InvalidInput),
         }
+    }
+}
+
+impl From<QueryRejection> for AppError {
+    fn from(_rejection: QueryRejection) -> Self {
+        AppError::from_code(ProblemCode::InvalidInput)
     }
 }

@@ -415,6 +415,9 @@ pub async fn setup_wiki_doc(harness: &TestDb) -> WikiDocFixture {
 pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> (AppState, Arc<CollabHub>) {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     let hub = Arc::new(CollabHub::new(cfg, pool));
+    let storage_root =
+        std::env::temp_dir().join(format!("fvoci-collab-proj-store-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(hub.pool().clone()),
@@ -424,6 +427,12 @@ pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> (AppState, Ar
         public_origin: PUBLIC_ORIGIN.to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
+        storage: fvoci_server::attachments::LocalStorage::new(storage_root),
+        upload: fvoci_server::attachments::UploadLimits {
+            part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+            max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+            create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+        },
         collab: Some(hub.clone()),
     };
     (state, hub)
