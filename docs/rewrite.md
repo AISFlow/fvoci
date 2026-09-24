@@ -1958,3 +1958,126 @@ PR14 a813b55의 11개 원격 job 및 협업20/20은 성공했고 Opus delta 검�
 - PR13 통합: React8783817→e6a184d, backend cc48112→f47f3b4, React9f8c92e→b510caf. 모두 미수락. 마지막 backend project DB26성공/2실패(`/tmp/fvoci-project-task-fix.log`), task suite 미실행. Composer ctx_fe53e7184240가 실제 서로 다른 actor의 visibility/제거 경합, lookupfixture와 복합cursor/filtercounts 수정 중.
 - Grok task_91abad5687f6의 첫 재배정 ctx_ab89f32b2537은 기존 turn 실행 중 readiness timeout. 기존 작업을 보존·안전한 경계에서 멈춘 뒤 같은 terminal/model에서 ctx_12714a31991e로 재시도 ready 확인. React worktree는 cc48112를 dd399c0로 가져왔으며 이제 실제 generated lookup/list 연결 중. 임시 타입 감지/가짜404/성공 경로는 최종 수락에서 제외한다.
 - Web CI는 기존 workspace-flow 이름을 유지하는 matrix에 project-task-flow를 추가했다. 각 job은 독립 DB로 명시한 spec만 실행하며 기존 첫 설치 검사를 약화하지 않는다. actionlint 성공, 아직 이 matrix의 원격 실행은 미실행.
+
+
+### 2026-09-24 12:12Z 진행 중인 수락 경계
+
+- main `b5ab024e85aa3532538e15f828aa6f4fc87b5118` post-merge Web35996219528,
+  NativeDocuments35996219558, NativeEngine35996219664 성공. Rust35996219456은
+  x64 collaboration107621670352의 `process_http_drain_deadline_exits_nonzero`
+  실패(종료 deadline 로그 부재); fast/PG 양 아키텍처/ARM 협업은 성공했다.
+  원격 실패 로그 `/tmp/fvoci-mainb5ab-collab-failure.log`를 보존했다.
+- Grok `task_d2a6f4322313 / ctx_441949d63a2e`, 새 worktree
+  `rust-shutdown-readiness`, base b5ab024: `src/main.rs`와 종료 테스트의 준비 순서,
+  신호 등록·실제 HTTP 요청 대기·로그 회수 경계를 수정/검증한다. 아직 원인·수정 수락 전.
+  현재 무거운 로컬 검사 slot을 이 작업에 배정했고 Composer는 코드 보완을 계속한다.
+- PR13 remote a1f930a는 여전히 Draft/미수락. 로컬 통합
+  `75679addd0227bc5d247f2abee3a8d1c033bca7f`: Grok React1bd8c29 제출 통합,
+  실제 generated lookup·상세·cursor 연결. 앱 TS와 순수75개, actionlint 성공;
+  새 React 프로젝트 흐름 E2E는 아직 미실행. Grok React task91abad5687f6/
+  ctx12714a31991e 완료·release, 미커밋·잔존 프로세스 없음으로 제출했다.
+- Composer 기존 task_e52f987188e4/ctx_fe53e7184240 유지. 체크포인트1bd2a9f의
+  실제 서로 다른 actor 경합을 포함해 관련 PG46개 통과했지만, barrier의 DB별 격리,
+  lookup 현재 세션/사용자/workspace 재검사, 복합 cursor/asOf/filter count,
+  원본 null/길이 계약과 기존 데이터 migration 검사가 남아 있어 수락하지 않았다.
+- Opus5.5 medium `task_b2280b45edaa / ctx_2a7bd652bebb`는 고정75679ad의
+  React/생성계약 사용·오류·실제 E2E 및 CI 분리만 독립 검토 중이다. 실행 receipt의
+  요청/유효 모델·medium 일치. backend는 별도 수정 후 고정 SHA delta 검토가 필요하다.
+- 다음: 기존 Run inbox 확인 → main 종료 수정의 실제 검사/Opus/수정 PR →
+  PR13 남은 backend 제출 통합 → 생성계약/React 관련 검사와 원격 CI/Opus.
+  기존 소유 불명 cargo1399699/PG와 retained 자원은 건드리지 않았다.
+
+
+### 사용자 요청에 따른 핸드오프 준비 (2026-09-24 12:15Z)
+
+새 기능 확장·새 검증 실행을 멈추고 기존 워커의 안전한 체크포인트를 수집한다.
+PR13 설명은 현재 원격 실패와 로컬 미수락 검증을 구분하도록 갱신했다. 새 push나
+자동 머지는 설정하지 않았으며, 전체 포팅 완료가 아니다.
+
+Opus UI 검토 `task_b2280b45edaa / ctx_2a7bd652bebb` 완료·release:
+고정75679ad에서 **차단2개**. (1) 실제 lookup이 document로 돌려주는 프로젝트
+`KEY-1`을 태스크 없음으로 오표시함: kind별 분기와 아직 미지원인 프로젝트 문서의
+명시적 상태가 필요하다. 위키로 우회하거나 자동 생성하지 않는다. (2) 실제 다중 페이지
+목록·statusCounts·더 보기/오류 UI 검증이 없다. DB pagination 보완 후 실제 API로
+페이지를 넘는 fixture를 만들고 브라우저에서 누락·중복·count·오류를 검사한다.
+나머지 dialog focus/Escape, 조용한 길이 검증 오류, unknown helper/수동 DTO 등은
+`/tmp/fvoci-project-task-ui-opus-75679ad-review.md`에 구분했다. 검토자는 테스트를
+실행하지 않았고, 검토 작업 완료는 기능 승인이 아니다.
+
+Composer의 마지막 추가 검사 `/tmp/fvoci-blockers-fix.log`는 project28pass/1fail,
+이후 task suite 미실행이다. 정확한 실패는 `migration_007_upgrades_to_008_projects`의
+fixture가 존재하지 않는 `workspaces.created_by`를 INSERT해 PostgreSQL42703을
+받은 것(`tests/project_integration.rs:60`). 과거46pass로 최신 변경을 승인하지 않는다.
+검사 명령은 기존 `scripts/start-test-postgres.sh` 안에서
+`cargo test --locked --offline --features db-tests --test project_integration --test task_integration -- --nocapture`.
+
+
+#### 보존된 체크포인트와 재개 순서
+
+1. `rust-shutdown-readiness`: base main b5ab024, 로컬 미수락
+   `c3b1b12f7d59ebc295770e0fc81d17df3816389a`, clean, 원격 미반영.
+   Grok task_d2a6f4322313/ctx_441949d63a2e는 인계로 failed 종료·release했다.
+   변경은 `src/main.rs` 신호 선등록/첫 serve poll 후 주소 출력뿐이며 **컴파일도 미실행**.
+   새 signal unit test는 일반 `#[test]`에서 Tokio signal 등록을 호출하므로 runtime
+   준비를 먼저 점검해야 한다(컴파일·실행 전 미수락). HTTP100-continue 요청 진입 barrier, 로그 reader join 및
+   Unix signal 종료를 deadline 성공으로 오인하지 않는 검사는 아직 미구현이다.
+   `/tmp/fvoci-shutdown-readiness-report.md` 참조. worker 소유 프로세스/DB 없음.
+2. `rust-project-task-core`: 기존 cc48112 자체도 미수락이다. 후속
+   `1bd2a9f54913c4a6e76e7d9325fadf8f50d6a4d1`(경합검사),
+   `ded0d7d8cd82be7f7e947d99109ea20fa844bc36`(lookup/페이지/DTO 보완), clean.
+   두 커밋 모두 아직 통합·push 전이다. 최신 PG28/1실패 외에 새 권한/복합cursor
+   회귀와 barrier `current_database()` 격리가 남았다. 마지막 clippy 전체 성공을
+   주장하지 않는다. `/tmp/fvoci-project-task-acceptance-report.md` 참조.
+   이번 Composer의 무배정 explore 하위 호출은 모델/쓰기 여부를 확인하지 못해
+   검증 근거에서 제외했다. 출력 폐기만으로 종료 증명이 되지 않으며 후속 배정에서
+   하위 위임 금지를 명확히 유지한다. 자체 PG 테스트 컨테이너는 종료 후 사라졌고
+   실제 process 확인에서 소유 cargo/server/helper는 없었다.
+3. `rust-project-task-react`: 제출1bd8c29 clean·release, UI는 이미 통합75679ad에
+   반영했다. Opus UI 차단사항을 별도 후속 task로 수정하되 core 생성 API와 겹치지 않는다.
+4. `rust-project-task-integration`: 코드75679ad 유지, 이 인계 문서만 추가.
+   PR13 remote a1f930a Draft, CI 실패 유지, auto-merge 미설정. 마지막 수락된 PR14의
+   HEAD8173b71은 11개 PR gate 성공 후 main b5ab024로 머지됐지만 현재 main 전체 CI는
+   위 종료 실패 때문에 녹색이 아니다. UI75 성공은 전체 통합 수락이 아니다.
+
+다음 세션의 첫 명령(새 task 배정 전에 기존 상태를 확인):
+
+```sh
+cd /home/kinesis/orca/workspaces/fvoci/rust-project-task-integration
+cat AGENTS.md
+cat .agents/environment.md
+tail -120 docs/rewrite.md
+git status --short
+/home/kinesis/.local/bin/orca-ide orchestration worker-list --run run_b01d432a9dee --json
+gh pr view 13 --repo AISFlow/fvoci --json state,isDraft,headRefOid,baseRefName
+gh run list --repo AISFlow/fvoci --branch main --limit 4
+```
+
+우선 c3b1b12 작업의 미완성 종료 회귀를 이어받고, 실제 고정 helper를 같은 worktree에서
+빌드한 후 `scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test collab_shutdown`를 실행한다.
+정확한 helper 경로/환경은 해당 보고서와 현재 rust.yml을 대조한다. 독립 Opus와 원격
+CI까지 수락한 별도 수정 PR로 main을 복구한다. 그와 독립적으로 Composer의 v7 fixture,
+인가/페이지네이션 회귀를 끝낸 뒤 두 미통합 커밋의 실제 diff를 순서대로 통합한다.
+최신 생성계약에 UI 검토 수정·실제 브라우저 검증을 연결한 후에만 PR13을 수락한다.
+새 worktree를 중복 만들거나 현재 커밋을 reset하지 않는다.
+
+공통 Rust 환경은 `.agents/environment.md`를 따른다. 로컬 heavy slot은 테스트 종료 후
+비었고 소유 불명 cargo1399699, `fvoci-rust-test-pg-kinesis`, 기존 GitHub runner 및
+retained/user_takeover 상태는 그대로 보존한다. 전체 정리·prune·강제 worktree 삭제는 하지 않았다.
+
+
+최종 lifecycle 확인: Opus ctx2a7bd652bebb와 Grok ctx441949d63a2e는 실제 완료
+메시지를 확인한 뒤 release했다. Composer ctxfe53e7184240의 완료 전송은 capability
+누락/불일치로 두 번 거부됐으므로 완료 처리로 인정하지 않았다. 파일 clean·최종
+인계 응답과 더 이상 실행하지 않겠다는 종료를 확인한 뒤 공식 `worker-stop`으로
+해당 terminal만 닫아 **stopped**로 기록했다. 다른 retained terminal은 건드리지 않았다.
+최종 Run 목록에는 active/reclaimable worker가 없고, retained60/released127이다.
+Composer 보고서의 “accepted review cc48112” 표기는 잘못된 라벨이며 cc48112도
+미수락이다. 이 문서의 수락 상태를 정본으로 따른다.
+
+재개 시 실패/중단 task를 새 중복 task로 만들지 않고 실제 상태를 확인한 뒤
+`worker-start --task task_d2a6f4322313 --retry-of ctx_441949d63a2e`
+(Grok/동일 shutdown worktree),
+`worker-start --task task_e52f987188e4 --retry-of ctx_fe53e7184240`
+(Composer/동일 core worktree)를 사용한다. 각 명령에는 기존 Run과 실제 worktree,
+지정 모델을 명시하고 최신 handoff/허용 경로를 전달한다. 첫 수정 순서와 수락 조건은
+위 기록을 따른다. 현재 백그라운드 구현·자동 머지·추가 CI를 예약하지 않았다.
