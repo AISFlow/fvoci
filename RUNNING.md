@@ -106,8 +106,44 @@ enforced by product operations. This is not a claim that arbitrary SQL executed
 with the app credentials is restricted to an authenticated end user's authority.
 
 Document/task count fields currently return zero because those domains are not
-implemented. Counts, quotas, member listing, invitations, exports, deletion and
-collaborative editing remain unsupported in this slice.
+implemented. Counts, quotas, member listing, invitations, exports, and deletion
+remain unsupported in this slice.
+
+## Collaboration (`/collab`)
+
+Collaboration is **opt-in**. The HTTP server exposes `GET /collab` (426 without
+WebSocket upgrade) and upgrades to Hocuspocus 4.6.0 only when
+`FVOCI_COLLAB_ENGINE` points at a built `collab-engine` helper binary. Without
+that variable the route returns 503 `collab_unavailable`.
+
+Build the helper (separate crate graph; parent depends on `collab-engine` with
+`default-features = false` and talks to the child through framed JSON only):
+
+```sh
+cd crates/collab-engine
+cargo build --bin collab-engine --features worker
+export FVOCI_COLLAB_ENGINE="$PWD/target/debug/collab-engine"
+```
+
+Optional tuning: `FVOCI_COLLAB_MAX_ROOMS` (default 4), `FVOCI_COLLAB_MAX_CONNECTIONS`,
+`FVOCI_COLLAB_IDLE_MS`, `FVOCI_COLLAB_REVOKE_POLL_MS`.
+
+`FVOCI_SHUTDOWN_DEADLINE_MS` sets the whole server shutdown deadline (default
+30000, positive milliseconds). SIGTERM/Ctrl+C stops collaboration admission
+before HTTP draining; independent rooms drain concurrently. Normal shutdown
+joins room helpers and releases their database guards before closing the pool.
+An observed shutdown failure or deadline expiry exits nonzero. Expiry is not a
+successful flush or proof that an in-flight transaction rolled back; recovery
+uses the durable CRDT state and operation receipts. Actor panic/rejoin handling
+is still under acceptance review, so collaboration remains opt-in.
+
+Product tests require `TEST_DATABASE_URL`, the helper path above, and run as:
+
+```sh
+export TEST_DATABASE_URL='postgres://admin@host:5432/postgres?sslmode=require'
+export FVOCI_COLLAB_ENGINE=/path/to/collab-engine
+cargo test --features db-tests --test collab_product
+```
 
 ## Web UI (React)
 

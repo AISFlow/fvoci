@@ -35,6 +35,12 @@ pub enum Request {
     /// Complete V1 snapshot including pending updates and the delete set.
     Snapshot,
     Inspect,
+    /// Read-only Tiptap JSON projection of the `prosemirror` XmlFragment.
+    /// Does not mutate the Doc. Counts toward the child op budget.
+    Project {
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
 }
 
 fn encoding_v1() -> u8 {
@@ -46,7 +52,8 @@ impl Request {
         match self {
             Self::Load { encoding, .. }
             | Self::Apply { encoding, .. }
-            | Self::Sync { encoding, .. } => *encoding,
+            | Self::Sync { encoding, .. }
+            | Self::Project { encoding } => *encoding,
             Self::Ping | Self::Snapshot | Self::Inspect => 1,
         }
     }
@@ -54,7 +61,7 @@ impl Request {
     /// Binary payload size before JSON/base64 expansion.
     pub fn payload_bytes(&self) -> u64 {
         match self {
-            Self::Ping | Self::Snapshot | Self::Inspect => 0,
+            Self::Ping | Self::Snapshot | Self::Inspect | Self::Project { .. } => 0,
             Self::Apply { update_b64, .. } => update_b64.len() as u64,
             Self::Sync {
                 state_vector_b64, ..

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::auth::AuthService;
+use crate::collab::CollabHub;
 use crate::http::rate_limit::RateLimiter;
 
 #[derive(Clone)]
@@ -10,4 +11,5 @@ pub struct AppState {
     pub public_origin: String,
     pub cookie_secure: bool,
     pub rate_limiter: RateLimiter,
+    pub collab: Option<Arc<CollabHub>>,
 }

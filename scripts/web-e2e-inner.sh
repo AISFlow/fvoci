@@ -55,7 +55,18 @@ export PASSWORD_PEPPER_KEYS="$PEPPER"
 export PASSWORD_PEPPER_ACTIVE_KEY_ID=test
 export FVOCI_BIND="127.0.0.1:0"
 export FVOCI_PUBLIC_ORIGIN="http://127.0.0.1:0"
-export FVOCI_STATIC_DIR="$ROOT/apps/web/dist"
+export FVOCI_STATIC_DIR="${FVOCI_STATIC_DIR:?run-web-e2e.sh must provide isolated static assets}"
+export FVOCI_E2E_ADMIN_DATABASE_URL="$DATABASE_URL"
+export FVOCI_E2E_SERVER_BIN="$SERVER_BIN"
+export FVOCI_E2E_RESULT_DIR="$RUN_DIR"
+
+if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]]; then
+  cd "$ROOT/apps/web"
+  "$ROOT/apps/web/node_modules/.bin/playwright" test \
+    --config=e2e-pending/collab-playwright.config.ts "$@"
+  exit 0
+fi
+
 "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
@@ -80,5 +91,4 @@ fi
 
 cd "$ROOT/apps/web"
 export PLAYWRIGHT_BASE_URL="$BASE_URL"
-export FVOCI_E2E_ADMIN_DATABASE_URL="$DATABASE_URL"
-"$ROOT/apps/web/node_modules/.bin/playwright" test
+"$ROOT/apps/web/node_modules/.bin/playwright" test "$@"

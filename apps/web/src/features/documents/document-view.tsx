@@ -1,18 +1,24 @@
-import { t } from "@fvoci/i18n";
+import { FvociEditor, type TiptapEditor } from "@fvoci/editor/fvoci-editor";
+import { formatPersonName, t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { documentPath, wikiDisplayId, wikiPath } from "@/lib/href";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import type { components } from "@/generated/api";
+import { meQuery } from "@/lib/queries";
 import {
   ancestorsQuery,
-  documentBodyQuery,
   documentMetaQuery,
   treeQuery,
 } from "@/lib/queries/documents";
+import { bindBlockPresence, isBlockPresenceAwareness } from "./block-presence";
+import { collabBadge } from "./collab-badge";
+import { CollabPresence } from "./collab-presence";
+import { collabUserOf, setTitleEditing, useCollabSession } from "./collab-session";
 import "./document-shell.css";
 
 type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
@@ -21,16 +27,17 @@ const STATUSES = ["draft", "published", "archived"] as const;
 const TITLE_MAX = 300;
 const ICON_MAX = 50;
 
-function isEmptyBody(content: unknown): boolean {
-  if (!content || typeof content !== "object") return true;
-  const doc = content as { type?: string; content?: unknown[] };
-  if (doc.type !== "doc" || !Array.isArray(doc.content)) return false;
-  if (doc.content.length === 0) return true;
-  if (doc.content.length === 1) {
-    const block = doc.content[0] as { type?: string; content?: unknown[] };
-    return block.type === "paragraph" && (!block.content || block.content.length === 0);
-  }
-  return false;
+function flashBlock(id: string): (() => void) | undefined {
+  const el = document.querySelector<HTMLElement>(`.fvoci-editor [data-id="${CSS.escape(id)}"]`);
+  if (!el) return undefined;
+  el.setAttribute("data-afn-flash", "");
+  const timer = window.setTimeout(() => {
+    el.removeAttribute("data-afn-flash");
+  }, 800);
+  return () => {
+    window.clearTimeout(timer);
+    el.removeAttribute("data-afn-flash");
+  };
 }
 
 interface DocumentViewProps {
@@ -41,8 +48,8 @@ interface DocumentViewProps {
 
 export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProps) {
   const queryClient = useQueryClient();
+  const me = useQuery(meQuery);
   const metaQuery = useQuery(documentMetaQuery(workspaceId, documentId));
-  const bodyQuery = useQuery(documentBodyQuery(workspaceId, documentId));
   const ancestors = useQuery(ancestorsQuery(workspaceId, documentId));
   const tree = useQuery(treeQuery(workspaceId));
 
@@ -50,6 +57,9 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
   const [icon, setIcon] = useState("");
   const [status, setStatus] = useState<string>("draft");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [persistError, setPersistError] = useState<string | null>(null);
+  const [persisting, setPersisting] = useState(false);
+  const [editor, setEditor] = useState<TiptapEditor | null>(null);
 
   useEffect(() => {
     if (!metaQuery.data) return;
@@ -57,6 +67,18 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
     setIcon(metaQuery.data.icon ?? "");
     setStatus(metaQuery.data.status);
   }, [metaQuery.data]);
+
+  const collabUser = useMemo(() => {
+    if (!me.data) return null;
+    return collabUserOf(me.data.userId, formatPersonName(me.data, me.data.locale));
+  }, [me.data]);
+  const collabSession = useCollabSession(collabUser);
+
+  useEffect(() => {
+    const awareness = collabSession?.provider.awareness;
+    if (!editor || !isBlockPresenceAwareness(awareness)) return;
+    return bindBlockPresence(editor, awareness);
+  }, [editor, collabSession?.provider.awareness]);
 
   const patchMeta = useMutation({
     mutationFn: async (body: PatchDocumentBody) =>
@@ -112,6 +134,22 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
   const crumbAncestors = ancestors.data?.items ?? [];
   const meta = metaQuery.data;
   const saving = patchMeta.isPending;
+  const archived = meta.status === "archived";
+  const readOnly = archived || (collabSession?.readOnly ?? false);
+  const ready = Boolean(collabSession?.synced && collabUser);
+  const badge = collabSession
+    ? collabBadge(
+        collabSession.status,
+        collabSession.pending || persisting,
+        collabSession.durableSaved,
+      )
+    : null;
+  const canPersist =
+    ready &&
+    !readOnly &&
+    collabSession !== null &&
+    collabSession.status === "connected" &&
+    !persisting;
 
   async function saveTitle() {
     const next = title.trim();
@@ -144,11 +182,21 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
     }
   }
 
-  const bodyNote = bodyQuery.data
-    ? isEmptyBody(bodyQuery.data.contentJson)
-      ? t("doc.empty")
-      : t("doc.body.unavailable")
-    : null;
+  async function persistBody() {
+    if (!collabSession || !canPersist) return;
+    setPersistError(null);
+    setPersisting(true);
+    try {
+      await collabSession.persistNow();
+    } catch (error) {
+      const timedOut = error instanceof Error && error.message.includes("timed out");
+      setPersistError(timedOut ? t("collab timeout — retry") : t("collab unavailable"));
+    } finally {
+      setPersisting(false);
+    }
+  }
+
+  const awareness = collabSession?.provider.awareness;
 
   return (
     <article className="document-page" data-testid={`document-${displayRef}`}>
@@ -170,9 +218,17 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
             value={title}
             aria-label={t("doc.title")}
             maxLength={TITLE_MAX}
-            disabled={saving}
+            disabled={saving || readOnly}
             onChange={(event) => setTitle(event.target.value)}
+            onFocus={() => {
+              if (!readOnly && isBlockPresenceAwareness(awareness)) {
+                setTitleEditing(awareness, true);
+              }
+            }}
             onBlur={() => {
+              if (isBlockPresenceAwareness(awareness)) {
+                setTitleEditing(awareness, false);
+              }
               void saveTitle();
             }}
             onKeyDown={(event) => {
@@ -189,7 +245,7 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
                 className="document-page__field-input"
                 value={icon}
                 maxLength={ICON_MAX}
-                disabled={saving}
+                disabled={saving || readOnly}
                 onChange={(event) => setIcon(event.target.value)}
                 onBlur={() => {
                   void saveIcon();
@@ -203,7 +259,7 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
                 className="document-page__field-select"
                 value={status}
                 aria-label={t("doc.status.a11y")}
-                disabled={saving}
+                disabled={saving || readOnly}
                 onChange={(event) => {
                   const next = event.target.value;
                   setStatus(next);
@@ -227,22 +283,63 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
             {treeNode?.status === "draft" ? (
               <span className="document-page__badge">{t("doc.status.draft")}</span>
             ) : null}
+            {readOnly ? (
+              <span className="document-page__badge">{t("doc.readOnly")}</span>
+            ) : null}
+          </div>
+          <div className="document-page__collab">
+            {badge ? (
+              <span
+                className={`document-page__collab-status document-page__collab-status--${badge.tone}`}
+                data-collab-status={collabSession?.status}
+                data-collab-pending={collabSession?.pending ? "true" : "false"}
+                data-collab-persisted={collabSession?.durableSaved ? "true" : "false"}
+              >
+                {t(badge.label)}
+              </span>
+            ) : (
+              <span
+                className="document-page__collab-status document-page__collab-status--wait"
+                data-collab-persisted="false"
+              >
+                {t("doc.collab.connecting")}
+              </span>
+            )}
+            <Button type="button" size="sm" disabled={!canPersist} onClick={() => void persistBody()}>
+              {persisting ? t("doc.title.saving") : t("doc.title.save")}
+            </Button>
+            {collabSession ? (
+              <CollabPresence peers={collabSession.peers} onJump={flashBlock} />
+            ) : null}
           </div>
           {saveError ? <p role="alert" className="document-page__error">{saveError}</p> : null}
+          {persistError ? <p role="alert" className="document-page__error">{persistError}</p> : null}
         </div>
       </header>
-      <section className="document-page__body" aria-label={t("doc.body.a11y")}>
-        <h2 className="document-page__body-title">{t("doc.readOnly")}</h2>
-        {bodyQuery.isLoading ? <QueryLoading /> : null}
-        {bodyQuery.isError ? (
-          <QueryError
-            message={loadErrorMessage(bodyQuery.error)}
-            onRetry={() => {
-              void bodyQuery.refetch();
-            }}
+      <section
+        className="document-page__body document-page__body--editor"
+        aria-label={t("doc.body.a11y")}
+      >
+        {collabSession?.status === "unauthorized" ? (
+          <p className="document-page__body-note" role="alert">
+            {t("doc.collab.unauthorized")}
+          </p>
+        ) : null}
+        {!ready && collabSession?.status !== "unauthorized" ? <QueryLoading /> : null}
+        {ready && collabSession && collabUser ? (
+          <FvociEditor
+            ydoc={collabSession.doc}
+            provider={collabSession.provider}
+            user={collabUser}
+            editable={!readOnly}
+            ariaLabel={t("doc.body.a11y")}
+            workspaceSlug={slug}
+            gutterAddLabel={t("editor.gutter.add")}
+            gutterMoveLabel={t("editor.gutter.move")}
+            insertLabel={t("editor.mobile.insert")}
+            onReady={setEditor}
           />
         ) : null}
-        {bodyNote ? <p className="document-page__body-note">{bodyNote}</p> : null}
       </section>
     </article>
   );

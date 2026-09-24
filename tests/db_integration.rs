@@ -150,6 +150,7 @@ async fn app_state(app_url: &str) -> AppState {
         public_origin: "http://localhost".to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
+        collab: None,
     }
 }
 

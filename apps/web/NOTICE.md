@@ -7,6 +7,16 @@ UI components adapted from fvoci/FVOCI apps/web at pinned reference
 - src/features/documents/{document-view,document-shell.css}
 - src/features/settings/settings-shell.css (workspace name/identity section styles)
 
-Unsupported source auth flows (magic link, OIDC, MFA, consent) and workspace
-settings (members, import, export, delete) are not wired in this slice.
-Document body editing and collaborative editing are not wired in this slice.
+Unsupported source auth flows (magic link, OIDC, MFA, consent) are not wired
+in this slice. Workspace settings members UI is not copied; the member
+role/removal HTTP API is used by collab revoke E2E once /collab is live.
+Document body uses FvociEditor + collab-session against cookie /collab.
+Attachment upload, mention search, unfurl, comments, AI, tags, collections,
+revisions, share, and md/PDF export stay unavailable without fake success.
+
+Additionally adapted from the same source SHA:
+
+- packages/editor (schema, FvociEditor, collab constants; no export/office)
+- apps/web/src/features/documents/{collab-session,block-presence}
+- packages/ui/presence.ts → src/lib/presence.ts
+
