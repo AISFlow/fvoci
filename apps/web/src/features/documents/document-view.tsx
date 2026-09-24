@@ -183,6 +183,8 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
   const treeNode = tree.data?.items.find((node) => node.id === documentId);
   const crumbAncestors = ancestors.data?.items ?? [];
   const meta = metaQuery.data;
+  const docPath = meta.path;
+  const docPathPrefix = `${docPath}.`;
   const saving = patchMeta.isPending;
   const archived = meta.status === "archived";
   const readOnly = archived || (collabSession?.readOnly ?? false);
@@ -354,7 +356,8 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
                       (node) =>
                         node.id !== documentId &&
                         node.projectId === null &&
-                        !crumbAncestors.some((crumb) => crumb.id === node.id),
+                        node.path !== docPath &&
+                        !node.path.startsWith(docPathPrefix),
                     )
                     .map((node) => (
                       <option key={node.id} value={node.id}>
@@ -388,7 +391,7 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
                   trashDoc.mutate();
                 }}
               >
-                {trashDoc.isPending ? t("doc.create.pending") : t("doc.trash.action")}
+                {trashDoc.isPending ? t("doc.trash.pending") : t("doc.trash.action")}
               </Button>
             </div>
           ) : null}

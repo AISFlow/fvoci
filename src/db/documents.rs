@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::db::context::{lock_tree, set_tenant};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::db::projects::{lock_project, project_permission};
 use crate::db::workspace::WorkspaceRole;
 use crate::projects::{workspace_base_permission, ProjectPermission};
 
@@ -1209,6 +1210,26 @@ pub async fn move_wiki_document(
         return Ok(Err(DocumentDbError::NotFound));
     }
 
+    if let Some(project_id) = new_parent_project_id {
+        if doc_project_id != Some(project_id) {
+            let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+            let Some(locked) = locked else {
+                tx.rollback().await?;
+                return Ok(Err(DocumentDbError::NotFound));
+            };
+            if locked.status == "archived" {
+                tx.rollback().await?;
+                return Ok(Err(DocumentDbError::NotFound));
+            }
+            let permission =
+                project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+            if !permission.at_least(ProjectPermission::Edit) {
+                tx.rollback().await?;
+                return Ok(Err(DocumentDbError::NotFound));
+            }
+        }
+    }
+
     if is_descendant(&mut tx, workspace_id, new_parent_id, document_id).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Cycle));
@@ -1276,7 +1297,6 @@ pub async fn move_wiki_document(
     let row = fetch_document_row(&mut tx, workspace_id, document_id).await?;
     tx.commit().await?;
     match row {
-        Some(row) if row.8.is_some() => Ok(Ok(row_to_meta(row, false))),
         Some(row) => Ok(Ok(row_to_meta(row, false))),
         None => Ok(Err(DocumentDbError::NotFound)),
     }

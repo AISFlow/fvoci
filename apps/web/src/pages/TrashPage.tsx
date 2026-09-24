@@ -1,5 +1,6 @@
 import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,7 @@ export function TrashPage() {
   const queryClient = useQueryClient();
   const { slug, workspace } = useWorkspaceContext();
   const trash = useQuery(trashQuery(workspace?.id ?? ""));
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   const restore = useMutation({
     mutationFn: async (documentId: string) =>
@@ -24,10 +26,14 @@ export function TrashPage() {
         }),
       ),
     onSuccess: async () => {
+      setRestoreError(null);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["trash", workspace?.id] }),
         queryClient.invalidateQueries({ queryKey: ["tree", workspace?.id] }),
       ]);
+    },
+    onError: (error: unknown) => {
+      setRestoreError(loadErrorMessage(error));
     },
   });
 
@@ -46,6 +52,11 @@ export function TrashPage() {
           <Link to={wikiPath(slug)}>{t("nav.toWiki")}</Link>
         </div>
         <p className="trash-page__note">{t("doc.trash.retention")}</p>
+        {restoreError ? (
+          <p role="alert" className="trash-page__error">
+            {restoreError}
+          </p>
+        ) : null}
         {trash.isLoading ? <QueryLoading /> : null}
         {trash.isError ? (
           <QueryError
@@ -75,6 +86,7 @@ export function TrashPage() {
                   disabled={restore.isPending}
                   aria-label={`${t("trash.restore")} ${item.title}`}
                   onClick={() => {
+                    setRestoreError(null);
                     restore.mutate(item.id);
                   }}
                 >
