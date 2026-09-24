@@ -342,6 +342,12 @@ impl TestRun {
         addr
     }
 
+    pub async fn shutdown_last_server(&mut self) {
+        if let Some(server) = self.servers.pop() {
+            server.shutdown().await;
+        }
+    }
+
     pub async fn finish(mut self) {
         while let Some(server) = self.servers.pop() {
             server.shutdown().await;

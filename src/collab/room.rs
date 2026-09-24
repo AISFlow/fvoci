@@ -602,8 +602,36 @@ impl RoomActor {
         tombstone
     }
 
+    async fn evict_connection_ordered(
+        &mut self,
+        conn_id: Uuid,
+        code: u16,
+        reason: &str,
+    ) -> Option<Vec<u8>> {
+        if let Some(conn) = self.connections.get_mut(&conn_id) {
+            conn.revoked = true;
+        }
+        let tombstone = if let Some(conn) = self.connections.get(&conn_id) {
+            self.awareness
+                .remove_client(conn.client_id, conn.conn_generation)
+        } else {
+            None
+        };
+        if let Some(conn) = self.connections.remove(&conn_id) {
+            Self::enqueue_close_ordered(&conn.events, &conn.cancel, code, reason);
+        }
+        tombstone
+    }
+
     async fn close_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
         if let Some(encoded) = self.evict_connection(conn_id, code, reason).await {
+            self.pending_awareness.push_back(encoded);
+        }
+        self.flush_pending_awareness().await;
+    }
+
+    async fn close_connection_ordered(&mut self, conn_id: Uuid, code: u16, reason: &str) {
+        if let Some(encoded) = self.evict_connection_ordered(conn_id, code, reason).await {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
@@ -634,6 +662,24 @@ impl RoomActor {
             reason: reason.into(),
         };
         let _ = events.try_send(close);
+    }
+
+    /// Queue Close after any already-enqueued Data frames. Used for post-commit
+    /// server faults so a committed `SyncStatus` ack is not preempted. Falls back
+    /// to the preemptive cancel path only when the outbound queue is full/closed.
+    fn enqueue_close_ordered(
+        events: &mpsc::Sender<RoomClientEvent>,
+        cancel: &Option<watch::Sender<Option<ConnectionCancel>>>,
+        code: u16,
+        reason: &str,
+    ) {
+        let close = RoomClientEvent::Close {
+            code,
+            reason: reason.into(),
+        };
+        if events.try_send(close).is_err() {
+            Self::enqueue_close(events, cancel, code, reason);
+        }
     }
 
     async fn handle_join(&mut self, join: RoomJoin) -> Result<(), JoinError> {
@@ -1395,7 +1441,7 @@ impl RoomActor {
             let _ = self.reload_primary_from_committed().await;
         }
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.close_connection(conn_id, 1011, "primary engine unhealthy")
+            self.close_connection_ordered(conn_id, 1011, "primary engine unhealthy")
                 .await;
         }
     }
@@ -1512,7 +1558,7 @@ impl RoomActor {
                 return ProjectDerivedOutcome::EngineFailed;
             }
             EngineStatus::ResourceLimit { kind, detail } => {
-                if Self::is_deterministic_project_limit(kind, &detail) {
+                if Self::is_deterministic_project_limit(kind) {
                     self.recover_primary_after_engine_fault().await;
                     tracing::warn!(
                         target: "collab.derive_failed",
@@ -1644,13 +1690,10 @@ impl RoomActor {
         }
     }
 
-    fn is_deterministic_project_limit(kind: LimitKind, detail: &str) -> bool {
-        match kind {
-            LimitKind::Output | LimitKind::Stack => true,
-            // Project node budget only; engine/process Memory stays operational.
-            LimitKind::Memory => detail.starts_with("project node count"),
-            _ => false,
-        }
+    /// Only Project `Output` budget refusals are deterministic today. Memory,
+    /// Stack, depth and node budgets share kinds with operational failures.
+    fn is_deterministic_project_limit(kind: LimitKind) -> bool {
+        matches!(kind, LimitKind::Output)
     }
 
     fn manual_persist_derived_ok(outcome: ProjectDerivedOutcome) -> bool {
@@ -2146,29 +2189,21 @@ mod project_limit_tests {
 
     #[test]
     fn deterministic_project_limit_classifier() {
-        for kind in [LimitKind::Output, LimitKind::Stack] {
-            assert!(
-                RoomActor::is_deterministic_project_limit(kind, ""),
-                "{kind:?} must be deterministic"
-            );
-        }
         assert!(
-            RoomActor::is_deterministic_project_limit(
-                LimitKind::Memory,
-                "project node count 100000 reached max 100000",
-            ),
-            "project node budget must be deterministic"
+            RoomActor::is_deterministic_project_limit(LimitKind::Output),
+            "Project Output budget is the only deterministic limit today"
         );
-        for (kind, detail) in [
-            (LimitKind::Ops, ""),
-            (LimitKind::Input, ""),
-            (LimitKind::Frame, ""),
-            (LimitKind::Time, ""),
-            (LimitKind::Memory, "child rss exceeded"),
+        for kind in [
+            LimitKind::Memory,
+            LimitKind::Stack,
+            LimitKind::Ops,
+            LimitKind::Input,
+            LimitKind::Frame,
+            LimitKind::Time,
         ] {
             assert!(
-                !RoomActor::is_deterministic_project_limit(kind, detail),
-                "{kind:?} ({detail}) must stay operational"
+                !RoomActor::is_deterministic_project_limit(kind),
+                "{kind:?} must stay operational"
             );
         }
     }

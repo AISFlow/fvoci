@@ -469,6 +469,7 @@ async fn collab_catch_up_after_server_restart_without_retransmit() {
                 .await
                 .unwrap();
 
+            run.shutdown_last_server().await;
             let addr2 = run.spawn_router(&app_url, cfg).await;
             let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
             let mut writer = connect_member(addr2, &wiki.session.session_token).await;
