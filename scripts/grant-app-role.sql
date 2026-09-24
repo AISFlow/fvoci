@@ -10,6 +10,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA fvoci TO :"app_role
 GRANT USAGE ON SEQUENCE fvoci.events_seq TO :"app_role";
 
 REVOKE ALL ON fvoci.schema_migrations FROM :"app_role";
+GRANT SELECT ON fvoci.schema_migrations TO :"app_role";
 
 REVOKE UPDATE, DELETE ON fvoci.events FROM :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.audit_log FROM :"app_role";
@@ -47,6 +48,10 @@ REVOKE EXECUTE ON FUNCTION public.app_system_ctx_on() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.app_system_ctx_on() TO :"app_role";
 REVOKE EXECUTE ON FUNCTION public.app_self_user_id() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.app_self_user_id() TO :"app_role";
+REVOKE EXECUTE ON FUNCTION public.app_invitation_token_hash() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.app_invitation_token_hash() TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_quota_billable_users(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_quota_billable_users(uuid) TO :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.documents TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_states TO :"app_role";
@@ -61,6 +66,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.project_members TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.workflows TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.statuses TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.tasks TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.invitations TO :"app_role";
 
 REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() TO :"app_role";

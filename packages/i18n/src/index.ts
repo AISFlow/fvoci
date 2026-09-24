@@ -33,6 +33,15 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   rate_limit_exceeded: "Rate limit exceeded",
   conflict: "conflict",
   project_archived: "project.archivedReadOnly",
+  cannot_invite_a_role_above_your_own: "cannot invite a role above your own",
+  cannot_manage_a_role_above_your_own: "cannot manage a workspace role above your own",
+  invitation_not_found_or_expired: "invitation not found or expired",
+  expired: "expired",
+  already_accepted: "already_accepted",
+  cannot_accept_invitation: "cannot accept invitation",
+  consent_required: "consent_required",
+  "limit.seats": "seat limit reached",
+  "limit.guests": "guest limit reached",
   internal_error: "error.http.fallback",
 };
 

@@ -411,7 +411,6 @@ pub fn server_env_for_harness(
     extractor_bin: Option<&Path>,
 ) -> Vec<(String, String)> {
     let mut env = vec![
-        ("DATABASE_URL".into(), harness.admin_url.clone()),
         ("DATABASE_APP_URL".into(), harness.app_url.clone()),
         ("PASSWORD_PEPPER_KEYS".into(), PEPPER.to_string()),
         ("PASSWORD_PEPPER_ACTIVE_KEY_ID".into(), "test".to_string()),
@@ -574,6 +573,8 @@ pub fn spawn_server_process_guarded(
     // with only the extractor settings explicitly requested by this fixture.
     command.env_remove("FVOCI_EXTRACTOR_BIN");
     command.env_remove("FVOCI_EXTRACT_POLL_SECS");
+    command.env_remove("DATABASE_URL");
+    command.env_remove("FVOCI_MIGRATION_URL");
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

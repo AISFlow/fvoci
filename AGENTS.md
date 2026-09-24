@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | 코디네이터 | Claude Code / Opus 5.5 / medium | 인계, 계획, 공통 파일, task 배정, 통합, 수락, 원격 push·PR·머지 |
 | 독립 자문·검토 | 코디네이터와 별도의 Claude Code 세션 / Opus 5.5 / medium | 고정 SHA의 읽기 전용 설계·보안·데이터·동시성·원본 계약 검토 |
+| 상시 코디네이터 자문 | 별도 Claude Code 세션 / Opus 5.5 / medium | 우선순위·설계·위험 질의에 읽기 전용 자문(결정은 코디네이터), PR 수락 검토자가 아님 |
 | 구현 워커 | cursor-agent / Composer 2.5 | 제품 구현과 관련 테스트 |
 | 조사·검증 및 독립 구현 워커 | cursor-agent / Grok 4.6 | 원본 계약, 호환성 재현, 교차 검증, 배정된 구현 |
 

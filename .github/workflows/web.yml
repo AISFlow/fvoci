@@ -29,6 +29,8 @@ jobs:
             specs: e2e/workspace-flow.spec.ts e2e/workspace-wiki-flow.spec.ts
           - flow: project-task-flow
             specs: e2e/project-task-flow.spec.ts
+          - flow: invite-flow
+            specs: e2e/workspace-invite-flow.spec.ts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

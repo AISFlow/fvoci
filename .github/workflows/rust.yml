@@ -92,7 +92,7 @@ jobs:
       - name: PostgreSQL integration tests
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
-        run: cargo test --locked --offline --features db-tests --test db_integration --test document_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration
+        run: cargo test --locked --offline --no-fail-fast --features db-tests --test db_integration --test document_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration --test invitation_integration
 
   collaboration:
     name: ${{ matrix.check }}

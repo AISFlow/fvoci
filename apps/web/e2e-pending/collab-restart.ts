@@ -25,7 +25,6 @@ const CHILD_ENV_ALLOW = [
   "TZ",
   "LD_LIBRARY_PATH",
   "RUST_LOG",
-  "DATABASE_URL",
   "DATABASE_APP_URL",
   "PASSWORD_PEPPER_KEYS",
   "PASSWORD_PEPPER_ACTIVE_KEY_ID",
@@ -35,6 +34,8 @@ const CHILD_ENV_ALLOW = [
 ] as const;
 
 const CHILD_ENV_DENY = [
+  "DATABASE_URL",
+  "FVOCI_MIGRATION_URL",
   "FVOCI_E2E_ADMIN_DATABASE_URL",
   "TEST_DATABASE_URL",
   "FVOCI_TEST_PG_CONTAINER",
@@ -266,11 +267,6 @@ export class OwnedServer {
     }
     if (!process.env.DATABASE_APP_URL) {
       throw new Error("DATABASE_APP_URL is required");
-    }
-    if (!process.env.DATABASE_URL) {
-      throw new Error(
-        "DATABASE_URL is required by fvoci-server Config::from_env for migrations; FVOCI_E2E_ADMIN_DATABASE_URL is not passed to the child",
-      );
     }
     this.logs = "";
     if (this.runDir === "") {
