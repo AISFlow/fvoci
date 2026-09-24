@@ -10,16 +10,18 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use fvoci_server::collab::hub::{
-    arm_hub_join_barrier, disarm_hub_join_barrier, CollabHub, IdleEvictDecision,
-    RoomLifecyclePhase, HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY, HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN,
+    arm_hub_join_barrier, arm_reclaim_barrier, disarm_hub_join_barrier, disarm_reclaim_barrier,
+    room_start_count, CollabHub, IdleEvictDecision, RoomLifecyclePhase,
+    HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY, HUB_JOIN_BARRIER_AFTER_SLOT_READY,
+    HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN,
 };
 use fvoci_server::collab::room::{
     arm_actor_panic_after_join_barrier, arm_actor_panic_on_next_frame, arm_engine_stop_witness,
     arm_join_barrier, arm_join_channel_admission_witness, arm_join_reply_barrier,
     arm_teardown_barrier, disarm_actor_panic_after_join_barrier, disarm_actor_panic_on_next_frame,
     disarm_engine_stop_witness, disarm_join_barrier, disarm_join_channel_admission_witness,
-    disarm_teardown_barrier, AuthenticatedConnection, CollabSession, ConnectionLease, JoinError,
-    RoomClientEvent, RoomJoin,
+    disarm_teardown_barrier, join_delivery_attempt_count, AuthenticatedConnection, CollabSession,
+    ConnectionLease, JoinError, RoomClientEvent, RoomJoin,
 };
 use fvoci_server::collab::wire::{CollabKind, CollabRoomName, DocumentMessage, WireFrame};
 use fvoci_server::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
@@ -257,6 +259,19 @@ async fn wait_for_member_count(hub: &CollabHub, key: (Uuid, Uuid), expected: usi
     })
     .await
     .expect("room member count did not reach expected value");
+}
+
+async fn wait_for_phase(hub: &CollabHub, key: (Uuid, Uuid), expected: RoomLifecyclePhase) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if hub.room_lifecycle_phase(key).await == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("room phase {expected:?} not observed"));
 }
 
 async fn admin_pool(admin_url: &str) -> sqlx::PgPool {
@@ -1039,5 +1054,606 @@ async fn collab_lifecycle_actor_panic_preserves_committed_state_without_uncommit
             })
         },
     )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_panic_rejoin_restores_committed_bytes_and_allows_edit() {
+    run_lifecycle_test(
+        "collab_lifecycle_panic_rejoin_restores_committed_bytes_and_allows_edit",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run.register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )));
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let admin = admin_pool(&run.inner.harness.admin_url).await;
+
+                let (conn_id, lease, mut events_rx) =
+                    hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+                run.retain_lease(lease);
+                assert_eq!(room_start_count(wiki.document_id).await, 1);
+                let committed_frame = sync_update_frame(
+                    &routing_key(wiki.session.workspace_id, wiki.document_id),
+                    &sample_hi_update(),
+                );
+                hub.send_frame(key, conn_id, committed_frame).await;
+                wait_for_sync_status_applied(&mut events_rx).await;
+                let committed_tail = tail_seq(&admin, wiki.document_id).await;
+                let committed_rows = tail_row_count(&admin, wiki.document_id).await;
+                assert!(committed_tail >= 1, "fixture update must commit");
+
+                arm_actor_panic_on_next_frame(wiki.document_id).await;
+                hub.send_frame(
+                    key,
+                    conn_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        &support::delete_only_update(),
+                    ),
+                )
+                .await;
+                wait_for_close(&mut events_rx, 1011).await;
+                wait_until_guard(&admin, wiki.document_id, false).await;
+                disarm_actor_panic_on_next_frame(wiki.document_id).await;
+
+                let (rejoin_id, rejoin_lease, mut rejoin_events) =
+                    hub_join_with_events(&hub, &wiki, 2).await.expect("rejoin");
+                run.retain_lease(rejoin_lease);
+                assert_eq!(
+                    room_start_count(wiki.document_id).await,
+                    2,
+                    "dead slot must start exactly one successor actor"
+                );
+                assert_eq!(
+                    tail_seq(&admin, wiki.document_id).await,
+                    committed_tail,
+                    "rejoin must restore the previously committed tail"
+                );
+                assert_eq!(
+                    tail_row_count(&admin, wiki.document_id).await,
+                    committed_rows
+                );
+                assert_eq!(
+                    hub.room_lifecycle_phase(key).await,
+                    RoomLifecyclePhase::Live
+                );
+
+                hub.send_frame(
+                    key,
+                    rejoin_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        &support::delete_only_update(),
+                    ),
+                )
+                .await;
+                wait_for_sync_status_applied(&mut rejoin_events).await;
+                assert!(
+                    tail_seq(&admin, wiki.document_id).await > committed_tail,
+                    "successor actor must persist a further edit"
+                );
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_old_guard_held_until_teardown_then_next_owner() {
+    run_lifecycle_test(
+        "collab_lifecycle_old_guard_held_until_teardown_then_next_owner",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run.register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )));
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let admin = admin_pool(&run.inner.harness.admin_url).await;
+
+                let (conn_id, lease, mut events_rx) =
+                    hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+                run.retain_lease(lease);
+                wait_until_guard(&admin, wiki.document_id, true).await;
+                let slots_before = hub.available_room_slots();
+
+                let (reached_rx, proceed_tx) = arm_teardown_barrier(wiki.document_id).await;
+                arm_actor_panic_on_next_frame(wiki.document_id).await;
+                hub.send_frame(
+                    key,
+                    conn_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        &sample_hi_update(),
+                    ),
+                )
+                .await;
+                wait_for_close(&mut events_rx, 1011).await;
+                tokio::time::timeout(Duration::from_secs(5), reached_rx)
+                    .await
+                    .expect("teardown barrier")
+                    .expect("barrier signal");
+                assert!(room_guard_held(&admin, wiki.document_id).await);
+                assert_eq!(room_start_count(wiki.document_id).await, 1);
+
+                let rejoin = tokio::spawn({
+                    let hub = hub.clone();
+                    let wiki = clone_wiki(&wiki);
+                    async move { hub_join_with_lease(&hub, &wiki, 2).await }
+                });
+                wait_for_phase(&hub, key, RoomLifecyclePhase::Closing).await;
+                assert_eq!(
+                    room_start_count(wiki.document_id).await,
+                    1,
+                    "successor must wait for the old guard"
+                );
+                assert!(
+                    room_guard_held(&admin, wiki.document_id).await,
+                    "old owner keeps the advisory lock until teardown proceeds"
+                );
+                assert_eq!(hub.available_room_slots(), slots_before);
+
+                proceed_tx.send(()).expect("release teardown");
+                let (_, lease) = tokio::time::timeout(Duration::from_secs(5), rejoin)
+                    .await
+                    .expect("rejoin after old owner")
+                    .expect("rejoin task")
+                    .expect("next owner join");
+                run.retain_lease(lease);
+                assert_eq!(room_start_count(wiki.document_id).await, 2);
+                wait_until_guard(&admin, wiki.document_id, true).await;
+                disarm_actor_panic_on_next_frame(wiki.document_id).await;
+                disarm_teardown_barrier(wiki.document_id).await;
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_concurrent_first_rejoin_starts_one_actor() {
+    run_lifecycle_test(
+        "collab_lifecycle_concurrent_first_rejoin_starts_one_actor",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run.register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )));
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+                let (conn_id, lease, mut events_rx) =
+                    hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+                run.retain_lease(lease);
+                arm_actor_panic_on_next_frame(wiki.document_id).await;
+                hub.send_frame(
+                    key,
+                    conn_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        &sample_hi_update(),
+                    ),
+                )
+                .await;
+                wait_for_close(&mut events_rx, 1011).await;
+                wait_for_member_count(&hub, key, 0).await;
+                disarm_actor_panic_on_next_frame(wiki.document_id).await;
+
+                let left = tokio::spawn({
+                    let hub = hub.clone();
+                    let wiki = clone_wiki(&wiki);
+                    async move { hub_join_with_lease(&hub, &wiki, 3).await }
+                });
+                let right = tokio::spawn({
+                    let hub = hub.clone();
+                    let wiki = clone_wiki(&wiki);
+                    async move { hub_join_with_lease(&hub, &wiki, 4).await }
+                });
+                let (left, right) = tokio::join!(left, right);
+                let (_, left_lease) = left.expect("left task").expect("left rejoin");
+                let (_, right_lease) = right.expect("right task").expect("right rejoin");
+                run.retain_lease(left_lease);
+                run.retain_lease(right_lease);
+                assert_eq!(
+                    room_start_count(wiki.document_id).await,
+                    2,
+                    "concurrent first rejoin must start one successor actor"
+                );
+                wait_for_probe_connections(&hub, key, 2).await;
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_cancel_reclaimer_or_joiner_cleanup_continues() {
+    run_lifecycle_test(
+        "collab_lifecycle_cancel_reclaimer_or_joiner_cleanup_continues",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run.register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )));
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let admin = admin_pool(&run.inner.harness.admin_url).await;
+
+                let (conn_id, lease, mut events_rx) =
+                    hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+                run.retain_lease(lease);
+                let slots_held = hub.available_room_slots();
+                let (teardown_reached, teardown_proceed) =
+                    arm_teardown_barrier(wiki.document_id).await;
+                arm_actor_panic_on_next_frame(wiki.document_id).await;
+                hub.send_frame(
+                    key,
+                    conn_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        &sample_hi_update(),
+                    ),
+                )
+                .await;
+                wait_for_close(&mut events_rx, 1011).await;
+                tokio::time::timeout(Duration::from_secs(5), teardown_reached)
+                    .await
+                    .expect("teardown reached")
+                    .expect("teardown signal");
+
+                let (reclaim_reached, reclaim_proceed) =
+                    arm_reclaim_barrier(wiki.document_id).await;
+                let join_task = tokio::spawn({
+                    let hub = hub.clone();
+                    let wiki = clone_wiki(&wiki);
+                    async move { hub_join_with_lease(&hub, &wiki, 5).await }
+                });
+                tokio::time::timeout(Duration::from_secs(5), reclaim_reached)
+                    .await
+                    .expect("reclaim must start on the hub task")
+                    .expect("reclaim signal");
+                wait_for_phase(&hub, key, RoomLifecyclePhase::Closing).await;
+
+                join_task.abort();
+                assert!(join_task.await.unwrap_err().is_cancelled());
+                assert_eq!(
+                    hub.room_lifecycle_phase(key).await,
+                    RoomLifecyclePhase::Closing,
+                    "cancelling the joiner must not strand or steal Closing"
+                );
+                assert_eq!(hub.available_room_slots(), slots_held);
+
+                reclaim_proceed.send(()).expect("release reclaim");
+                assert!(
+                    room_guard_held(&admin, wiki.document_id).await,
+                    "cleanup must still wait for finished/helper/guard"
+                );
+
+                teardown_proceed.send(()).expect("release teardown");
+                wait_until_guard(&admin, wiki.document_id, false).await;
+                wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
+                assert_eq!(
+                    hub.available_room_slots(),
+                    slots_held + 1,
+                    "reclaim must drop the permit after cancelled join"
+                );
+
+                let (_, lease) = hub_join_with_lease(&hub, &wiki, 6)
+                    .await
+                    .expect("join after cancelled reclaim");
+                run.retain_lease(lease);
+                disarm_actor_panic_on_next_frame(wiki.document_id).await;
+                disarm_teardown_barrier(wiki.document_id).await;
+                disarm_reclaim_barrier(wiki.document_id).await;
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_closing_between_slot_return_and_phase_lock_retries() {
+    run_lifecycle_test(
+        "collab_lifecycle_closing_between_slot_return_and_phase_lock_retries",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run.register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )));
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+                let (conn_id, lease, mut events_rx) =
+                    hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+                run.retain_lease(lease);
+                let (teardown_reached, teardown_proceed) =
+                    arm_teardown_barrier(wiki.document_id).await;
+                arm_actor_panic_on_next_frame(wiki.document_id).await;
+                hub.send_frame(
+                    key,
+                    conn_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        &sample_hi_update(),
+                    ),
+                )
+                .await;
+                wait_for_close(&mut events_rx, 1011).await;
+                tokio::time::timeout(Duration::from_secs(5), teardown_reached)
+                    .await
+                    .expect("teardown reached")
+                    .expect("teardown signal");
+
+                let (slot_ready_rx, slot_ready_tx) =
+                    arm_hub_join_barrier(wiki.document_id, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
+                let rejoin = tokio::spawn({
+                    let hub = hub.clone();
+                    let wiki = clone_wiki(&wiki);
+                    async move { hub_join_with_lease(&hub, &wiki, 7).await }
+                });
+                tokio::time::timeout(Duration::from_secs(5), slot_ready_rx)
+                    .await
+                    .expect("slot-ready barrier")
+                    .expect("barrier signal");
+                assert_eq!(
+                    hub.room_lifecycle_phase(key).await,
+                    RoomLifecyclePhase::Live
+                );
+
+                let evict = tokio::spawn({
+                    let hub = hub.clone();
+                    async move { hub.execute_idle_evict_if_eligible(key).await }
+                });
+                wait_for_phase(&hub, key, RoomLifecyclePhase::Closing).await;
+                slot_ready_tx.send(()).expect("release slot-ready");
+                teardown_proceed.send(()).expect("release teardown");
+
+                let evicted = evict.await.expect("evict task");
+                assert!(evicted, "idle owner must win Live to Closing in the window");
+                let (_, lease) = tokio::time::timeout(Duration::from_secs(5), rejoin)
+                    .await
+                    .expect("retry after Closing race")
+                    .expect("rejoin task")
+                    .expect("bounded retry must succeed on the next owner");
+                run.retain_lease(lease);
+                assert_eq!(room_start_count(wiki.document_id).await, 2);
+                disarm_hub_join_barrier(wiki.document_id, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
+                disarm_actor_panic_on_next_frame(wiki.document_id).await;
+                disarm_teardown_barrier(wiki.document_id).await;
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_queue_full_is_not_stale_reclamation() {
+    run_lifecycle_test(
+        "collab_lifecycle_queue_full_is_not_stale_reclamation",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let mut cfg = test_collab_config(4, 200);
+                cfg.max_queued_room_ops = 1;
+                let hub =
+                    run.register_hub(Arc::new(CollabHub::new(cfg, wiki.session.pool.clone())));
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+                hub_join(run, &hub, &wiki, 1).await.expect("seed");
+                let (reached_rx, proceed_tx) = arm_join_barrier(wiki.document_id).await;
+                let blocked = tokio::spawn({
+                    let hub = hub.clone();
+                    let wiki = clone_wiki(&wiki);
+                    async move { hub_join_with_lease(&hub, &wiki, 8).await }
+                });
+                tokio::time::timeout(Duration::from_secs(5), reached_rx)
+                    .await
+                    .expect("join barrier")
+                    .expect("barrier signal");
+
+                let conn_c = Uuid::now_v7();
+                let admitted_c = arm_join_channel_admission_witness(conn_c).await;
+                let queued = tokio::spawn({
+                    let hub = hub.clone();
+                    let wiki = clone_wiki(&wiki);
+                    async move { hub_join_with_id(&hub, &wiki, 9, conn_c).await }
+                });
+                tokio::time::timeout(Duration::from_secs(5), admitted_c)
+                    .await
+                    .expect("queued join must occupy the mailbox")
+                    .expect("admission witness");
+
+                let overflow = hub_join_with_lease(&hub, &wiki, 10).await;
+                assert!(
+                    matches!(overflow, Err(JoinError::RoomFull)),
+                    "QueueFull must surface as backpressure, got {overflow:?}"
+                );
+                assert_eq!(
+                    hub.room_lifecycle_phase(key).await,
+                    RoomLifecyclePhase::Live,
+                    "a full mailbox is not a dead slot"
+                );
+                assert_eq!(room_start_count(wiki.document_id).await, 1);
+
+                proceed_tx.send(()).expect("release join barrier");
+                let (_, blocked_lease) =
+                    blocked.await.expect("blocked task").expect("blocked join");
+                let (_, queued_lease) = queued.await.expect("queued task").expect("queued join");
+                run.retain_lease(blocked_lease);
+                run.retain_lease(queued_lease);
+                disarm_join_channel_admission_witness(conn_c).await;
+                disarm_join_barrier(wiki.document_id).await;
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_noreply_is_not_retried_for_same_conn() {
+    run_lifecycle_test(
+        "collab_lifecycle_noreply_is_not_retried_for_same_conn",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run.register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )));
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+                let (_member, lease, mut events_rx) =
+                    hub_join_with_events(&hub, &wiki, 1).await.expect("seed");
+                run.retain_lease(lease);
+
+                let conn_b = Uuid::now_v7();
+                let (reached_rx, proceed_tx) = arm_join_barrier(wiki.document_id).await;
+                let join_b = tokio::spawn({
+                    let hub = hub.clone();
+                    let wiki = clone_wiki(&wiki);
+                    async move { hub_join_with_id(&hub, &wiki, 11, conn_b).await }
+                });
+                tokio::time::timeout(Duration::from_secs(5), reached_rx)
+                    .await
+                    .expect("join barrier")
+                    .expect("barrier signal");
+
+                arm_actor_panic_after_join_barrier(wiki.document_id).await;
+                proceed_tx.send(()).expect("panic after enqueue");
+                wait_for_close(&mut events_rx, 1011).await;
+
+                let blocked = join_b.await.expect("in-flight join task");
+                assert!(
+                    matches!(blocked, Err(JoinError::EngineUnavailable)),
+                    "NoReply must fail without inventing success, got {blocked:?}"
+                );
+                assert_eq!(
+                    join_delivery_attempt_count(conn_b).await,
+                    1,
+                    "NoReply must never retry the same conn_id"
+                );
+                assert_eq!(
+                    room_start_count(wiki.document_id).await,
+                    1,
+                    "NoReply itself must not spawn a successor"
+                );
+
+                let (_, lease) = hub_join_with_lease(&hub, &wiki, 12)
+                    .await
+                    .expect("fresh conn after NoReply");
+                run.retain_lease(lease);
+                assert_eq!(join_delivery_attempt_count(conn_b).await, 1);
+                assert_eq!(room_start_count(wiki.document_id).await, 2);
+                wait_for_probe_connections(&hub, key, 1).await;
+                disarm_join_barrier(wiki.document_id).await;
+                disarm_actor_panic_after_join_barrier(wiki.document_id).await;
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_shutdown_waits_for_reclaim() {
+    run_lifecycle_test("collab_lifecycle_shutdown_waits_for_reclaim", |run| {
+        Box::pin(async {
+            let wiki = setup_wiki_doc(&run.inner.harness).await;
+            let hub = run.register_hub(Arc::new(CollabHub::new(
+                test_collab_config(4, 200),
+                wiki.session.pool.clone(),
+            )));
+            let key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let admin = admin_pool(&run.inner.harness.admin_url).await;
+
+            let (conn_id, lease, mut events_rx) =
+                hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+            run.retain_lease(lease);
+            let slots_held = hub.available_room_slots();
+            let (teardown_reached, teardown_proceed) = arm_teardown_barrier(wiki.document_id).await;
+            arm_actor_panic_on_next_frame(wiki.document_id).await;
+            hub.send_frame(
+                key,
+                conn_id,
+                sync_update_frame(
+                    &routing_key(wiki.session.workspace_id, wiki.document_id),
+                    &sample_hi_update(),
+                ),
+            )
+            .await;
+            wait_for_close(&mut events_rx, 1011).await;
+            tokio::time::timeout(Duration::from_secs(5), teardown_reached)
+                .await
+                .expect("teardown reached")
+                .expect("teardown signal");
+
+            let (reclaim_reached, reclaim_proceed) = arm_reclaim_barrier(wiki.document_id).await;
+            let rejoin = tokio::spawn({
+                let hub = hub.clone();
+                let wiki = clone_wiki(&wiki);
+                async move { hub_join_with_lease(&hub, &wiki, 13).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), reclaim_reached)
+                .await
+                .expect("reclaim started")
+                .expect("reclaim signal");
+            wait_for_phase(&hub, key, RoomLifecyclePhase::Closing).await;
+
+            let shutdown_task = tokio::spawn({
+                let hub = hub.clone();
+                async move { hub.shutdown().await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if hub.is_shutting_down() {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("shutdown must begin while reclaim owns the slot");
+            assert!(
+                !shutdown_task.is_finished(),
+                "shutdown must wait for the hub-owned reclaim task"
+            );
+            assert_eq!(
+                hub.room_lifecycle_phase(key).await,
+                RoomLifecyclePhase::Closing
+            );
+            assert!(room_guard_held(&admin, wiki.document_id).await);
+            assert_eq!(hub.available_room_slots(), slots_held);
+
+            reclaim_proceed.send(()).expect("release reclaim pause");
+            assert!(
+                !shutdown_task.is_finished(),
+                "shutdown must still wait for finished/helper/guard"
+            );
+            assert!(room_guard_held(&admin, wiki.document_id).await);
+
+            teardown_proceed.send(()).expect("release teardown");
+            let status = shutdown_task.await.expect("shutdown task");
+            assert_eq!(
+                hub.available_room_slots(),
+                slots_held + 1,
+                "reclaim must release the permit before shutdown returns ({status:?})"
+            );
+            wait_until_guard(&admin, wiki.document_id, false).await;
+            let rejoin_result = rejoin.await.expect("rejoin task");
+            assert!(
+                matches!(rejoin_result, Err(JoinError::EngineUnavailable)),
+                "in-flight rejoin must fail once shutdown owns admission, got {rejoin_result:?}"
+            );
+            disarm_actor_panic_on_next_frame(wiki.document_id).await;
+            disarm_teardown_barrier(wiki.document_id).await;
+            disarm_reclaim_barrier(wiki.document_id).await;
+        })
+    })
     .await;
 }

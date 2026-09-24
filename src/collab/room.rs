@@ -500,6 +500,29 @@ async fn signal_join_channel_admitted(conn_id: Uuid) {
     }
 }
 
+#[cfg(feature = "db-tests")]
+static JOIN_DELIVERY_ATTEMPTS: std::sync::LazyLock<tokio::sync::Mutex<HashMap<Uuid, usize>>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn join_delivery_attempt_count(conn_id: Uuid) -> usize {
+    JOIN_DELIVERY_ATTEMPTS
+        .lock()
+        .await
+        .get(&conn_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "db-tests")]
+async fn record_join_delivery_attempt(conn_id: Uuid) {
+    *JOIN_DELIVERY_ATTEMPTS
+        .lock()
+        .await
+        .entry(conn_id)
+        .or_insert(0) += 1;
+}
+
 const OUTBOUND_FRAME_OVERHEAD: usize = 48;
 
 async fn wait_spawn_room_block(_document_id: Uuid) {
@@ -685,13 +708,15 @@ pub enum JoinError {
     DbError,
 }
 
-#[allow(dead_code)]
 pub(crate) enum JoinDelivery {
     Replied(Result<ConnectionLease, JoinError>),
-    /// Actor mailbox closed; eligible for stale-slot retry when F7 lands.
+    /// Mailbox closed before enqueue; the only delivery that proves the join
+    /// never reached the actor and may retry on a later generation.
     NotDelivered(RoomJoin),
-    /// Mailbox full; not eligible for stale-slot retry.
-    QueueFull(RoomJoin),
+    /// Mailbox full; backpressure, not stale-slot proof. Do not reclaim.
+    QueueFull,
+    /// Actor accepted the command then dropped the reply. This does not prove
+    /// the join was undelivered; never retry the same conn_id.
     NoReply,
 }
 
@@ -700,7 +725,7 @@ impl std::fmt::Debug for JoinDelivery {
         match self {
             Self::Replied(result) => f.debug_tuple("Replied").field(result).finish(),
             Self::NotDelivered(_) => f.write_str("NotDelivered(..)"),
-            Self::QueueFull(_) => f.write_str("QueueFull(..)"),
+            Self::QueueFull => f.write_str("QueueFull"),
             Self::NoReply => f.write_str("NoReply"),
         }
     }
@@ -758,18 +783,24 @@ impl RoomHandle {
         let _ = self.tx.send(RoomCommand::Shutdown).await;
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn deliver_join(&self, join: RoomJoin) -> JoinDelivery {
+        #[cfg(feature = "db-tests")]
+        let conn_id = join.conn.conn_id;
+        #[cfg(feature = "db-tests")]
+        record_join_delivery_attempt(conn_id).await;
         let (reply_tx, reply_rx) = oneshot::channel();
         match self.tx.try_send(RoomCommand::Join(join, reply_tx)) {
-            Ok(()) => match reply_rx.await {
-                Ok(result) => JoinDelivery::Replied(result),
-                Err(_) => JoinDelivery::NoReply,
-            },
-            Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => match cmd {
-                RoomCommand::Join(join, _) => JoinDelivery::QueueFull(join),
-                _ => JoinDelivery::NoReply,
-            },
+            Ok(()) => {
+                #[cfg(feature = "db-tests")]
+                signal_join_channel_admitted(conn_id).await;
+                #[cfg(feature = "db-tests")]
+                pause_before_join_reply(conn_id).await;
+                match reply_rx.await {
+                    Ok(result) => JoinDelivery::Replied(result),
+                    Err(_) => JoinDelivery::NoReply,
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_cmd)) => JoinDelivery::QueueFull,
             Err(tokio::sync::mpsc::error::TrySendError::Closed(cmd)) => match cmd {
                 RoomCommand::Join(join, _) => JoinDelivery::NotDelivered(join),
                 _ => JoinDelivery::NoReply,

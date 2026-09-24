@@ -14,13 +14,20 @@ use uuid::Uuid;
 
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
-use crate::collab::room::{ConnectionLease, JoinError, RoomHandle, RoomJoin, RoomKey};
+use crate::collab::room::{
+    ConnectionLease, JoinDelivery, JoinError, RoomHandle, RoomJoin, RoomKey,
+};
 use crate::db::collab::resolve_collab_admission;
 
 #[cfg(feature = "db-tests")]
 pub const HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN: u8 = 0;
 #[cfg(feature = "db-tests")]
 pub const HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY: u8 = 1;
+#[cfg(feature = "db-tests")]
+pub const HUB_JOIN_BARRIER_AFTER_SLOT_READY: u8 = 2;
+
+/// One pre-enqueue retry after a proven undelivered join or a Closing race.
+const MAX_PRE_ENQUEUE_RETRIES: u8 = 1;
 
 #[cfg(feature = "db-tests")]
 struct HubJoinBarrier {
@@ -61,6 +68,69 @@ async fn pause_for_hub_join_barrier(document_id: Uuid, point: u8) {
         let _ = barrier.reached_tx.send(());
         let _ = barrier.proceed_rx.await;
     }
+}
+
+#[cfg(feature = "db-tests")]
+struct ReclaimBarrier {
+    reached_tx: oneshot::Sender<()>,
+    proceed_rx: oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "db-tests")]
+static RECLAIM_BARRIERS: std::sync::LazyLock<Mutex<HashMap<Uuid, ReclaimBarrier>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_reclaim_barrier(
+    document_id: Uuid,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    RECLAIM_BARRIERS.lock().await.insert(
+        document_id,
+        ReclaimBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_reclaim_barrier(document_id: Uuid) {
+    RECLAIM_BARRIERS.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_reclaim_barrier(document_id: Uuid) {
+    let barrier = RECLAIM_BARRIERS.lock().await.remove(&document_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
+#[cfg(feature = "db-tests")]
+static ROOM_START_COUNTS: std::sync::LazyLock<Mutex<HashMap<Uuid, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn room_start_count(document_id: Uuid) -> usize {
+    ROOM_START_COUNTS
+        .lock()
+        .await
+        .get(&document_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "db-tests")]
+async fn increment_room_start_count(document_id: Uuid) {
+    *ROOM_START_COUNTS
+        .lock()
+        .await
+        .entry(document_id)
+        .or_insert(0) += 1;
 }
 
 struct LiveRoom {
@@ -342,6 +412,9 @@ impl CollabHub {
     }
 
     fn idle_evict_decision_for(live: &LiveRoom, idle_ms: u64) -> IdleEvictDecision {
+        if live.handle.is_closed() {
+            return IdleEvictDecision::WouldEvict;
+        }
         if live.joining.load(Ordering::Acquire) > 0 {
             return IdleEvictDecision::DeferredJoining;
         }
@@ -431,7 +504,7 @@ impl CollabHub {
     pub async fn join_room(
         &self,
         key: RoomKey,
-        join: RoomJoin,
+        mut join: RoomJoin,
     ) -> Result<ConnectionLease, JoinError> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(JoinError::EngineUnavailable);
@@ -447,24 +520,111 @@ impl CollabHub {
         .map_err(|_| JoinError::DbError)?;
         admission.map_err(|_| JoinError::AdmissionDenied)?;
 
-        let slot = self.get_or_create_room(key).await?;
-        let (handle, joining_lease) = {
-            let mut phase = slot.phase.lock().await;
-            match &mut *phase {
-                RoomPhase::Live(live) => {
-                    live.last_activity = Instant::now();
-                    (live.handle.clone(), JoiningLease::register(&live.joining))
-                }
-                _ => return Err(JoinError::EngineUnavailable),
+        let mut retries = 0u8;
+        loop {
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Err(JoinError::EngineUnavailable);
             }
-        };
-        #[cfg(feature = "db-tests")]
-        pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN).await;
-        let lease = handle.join(join).await;
-        drop(joining_lease);
-        #[cfg(feature = "db-tests")]
-        pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY).await;
-        lease
+            let slot = self.get_or_create_room(key).await?;
+            #[cfg(feature = "db-tests")]
+            pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
+
+            let deliver = {
+                let mut phase = slot.phase.lock().await;
+                let closed_live =
+                    matches!(&*phase, RoomPhase::Live(live) if live.handle.is_closed());
+                if closed_live {
+                    Self::take_dead_live(&mut phase).map(Err)
+                } else if let RoomPhase::Live(live) = &mut *phase {
+                    live.last_activity = Instant::now();
+                    Some(Ok((
+                        live.handle.clone(),
+                        JoiningLease::register(&live.joining),
+                    )))
+                } else {
+                    None
+                }
+            };
+
+            match deliver {
+                Some(Ok((handle, joining_lease))) => {
+                    #[cfg(feature = "db-tests")]
+                    pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN).await;
+                    let delivery = handle.deliver_join(join).await;
+                    drop(joining_lease);
+                    #[cfg(feature = "db-tests")]
+                    pause_for_hub_join_barrier(key.1, HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY).await;
+                    match delivery {
+                        JoinDelivery::Replied(result) => return result,
+                        JoinDelivery::QueueFull => return Err(JoinError::RoomFull),
+                        JoinDelivery::NoReply => return Err(JoinError::EngineUnavailable),
+                        JoinDelivery::NotDelivered(recovered) => {
+                            if let Some(live) = self.claim_dead_live(key, &slot).await {
+                                self.spawn_reclaim(key, slot, live);
+                            }
+                            join = recovered;
+                            if !Self::allow_pre_enqueue_retry(&mut retries) {
+                                return Err(JoinError::EngineUnavailable);
+                            }
+                        }
+                    }
+                }
+                Some(Err(live)) => {
+                    self.spawn_reclaim(key, slot, live);
+                    if !Self::allow_pre_enqueue_retry(&mut retries) {
+                        return Err(JoinError::EngineUnavailable);
+                    }
+                }
+                None => {
+                    let _ = self.wait_for_live_or_retry(key, slot).await?;
+                    if !Self::allow_pre_enqueue_retry(&mut retries) {
+                        return Err(JoinError::EngineUnavailable);
+                    }
+                }
+            }
+        }
+    }
+
+    fn allow_pre_enqueue_retry(retries: &mut u8) -> bool {
+        if *retries >= MAX_PRE_ENQUEUE_RETRIES {
+            return false;
+        }
+        *retries += 1;
+        true
+    }
+
+    fn take_dead_live(phase: &mut RoomPhase) -> Option<LiveRoom> {
+        match &*phase {
+            RoomPhase::Live(live) if live.handle.is_closed() => {}
+            _ => return None,
+        }
+        match std::mem::replace(phase, RoomPhase::Closing) {
+            RoomPhase::Live(live) => Some(live),
+            other => {
+                *phase = other;
+                None
+            }
+        }
+    }
+
+    async fn claim_dead_live(&self, key: RoomKey, slot: &Arc<RoomSlot>) -> Option<LiveRoom> {
+        let current = self.room_slot(key).await?;
+        if !Arc::ptr_eq(&current, slot) {
+            return None;
+        }
+        let mut phase = current.phase.lock().await;
+        Self::take_dead_live(&mut phase)
+    }
+
+    fn spawn_reclaim(&self, key: RoomKey, slot: Arc<RoomSlot>, live: LiveRoom) {
+        let rooms = self.rooms.clone();
+        let mut starts = self.starts.lock().expect("room start task list");
+        starts.retain(|task| !task.is_finished());
+        starts.push(tokio::spawn(async move {
+            #[cfg(feature = "db-tests")]
+            pause_for_reclaim_barrier(key.1).await;
+            complete_owned_room_cleanup(rooms, key, slot, live).await;
+        }));
     }
 
     pub async fn leave_room(&self, key: RoomKey, conn_id: Uuid) {
@@ -473,7 +633,9 @@ impl CollabHub {
             let handle = {
                 let mut phase = slot.phase.lock().await;
                 if let RoomPhase::Live(live) = &mut *phase {
-                    live.last_activity = Instant::now();
+                    if !live.handle.is_closed() {
+                        live.last_activity = Instant::now();
+                    }
                     Some(live.handle.clone())
                 } else {
                     None
@@ -494,7 +656,9 @@ impl CollabHub {
             let handle = {
                 let mut phase = slot.phase.lock().await;
                 if let RoomPhase::Live(live) = &mut *phase {
-                    live.last_activity = Instant::now();
+                    if !live.handle.is_closed() {
+                        live.last_activity = Instant::now();
+                    }
                     Some(live.handle.clone())
                 } else {
                     None
@@ -566,8 +730,21 @@ impl CollabHub {
             }
             failures
         };
-        let (idle_task_failed, start_task_failures, mut actor_failures) =
+        let (idle_task_failed, mut start_task_failures, mut actor_failures) =
             tokio::join!(idle_join, starts_join, rooms_join);
+
+        loop {
+            let more = std::mem::take(&mut *self.starts.lock().expect("room start task list"));
+            if more.is_empty() {
+                break;
+            }
+            for result in join_all(more).await {
+                if let Err(error) = result {
+                    tracing::error!(%error, "collaboration startup task failed");
+                    start_task_failures += 1;
+                }
+            }
+        }
 
         let leftover = self
             .rooms
@@ -577,6 +754,14 @@ impl CollabHub {
             .map(|(key, slot)| (*key, slot.clone()))
             .collect::<Vec<_>>();
         for (key, slot) in leftover {
+            let closing = {
+                let phase = slot.phase.lock().await;
+                matches!(*phase, RoomPhase::Closing)
+            };
+            if closing {
+                self.wait_for_closing_owner(key, slot).await;
+                continue;
+            }
             if self.force_close_slot(key, slot).await {
                 actor_failures += 1;
             }
@@ -750,11 +935,35 @@ impl CollabHub {
         Ok(ReserveOutcome::Creator(slot))
     }
 
+    async fn wait_for_closing_owner(&self, key: RoomKey, slot: Arc<RoomSlot>) {
+        loop {
+            let notified = slot.ready.notified();
+            {
+                let phase = slot.phase.lock().await;
+                if !matches!(*phase, RoomPhase::Closing) {
+                    return;
+                }
+            }
+            if self
+                .rooms
+                .read()
+                .await
+                .get(&key)
+                .is_none_or(|existing| !Arc::ptr_eq(existing, &slot))
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     async fn start_room(
         &self,
         key: RoomKey,
         slot: Arc<RoomSlot>,
     ) -> Result<Arc<RoomSlot>, JoinError> {
+        #[cfg(feature = "db-tests")]
+        increment_room_start_count(key.1).await;
         if self.shutting_down.load(Ordering::Acquire) {
             self.cleanup_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
@@ -1024,9 +1233,21 @@ async fn complete_idle_eviction(
     slot: Arc<RoomSlot>,
     live: LiveRoom,
 ) {
+    complete_owned_room_cleanup(rooms, key, slot, live).await;
+}
+
+async fn complete_owned_room_cleanup(
+    rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
+    key: RoomKey,
+    slot: Arc<RoomSlot>,
+    live: LiveRoom,
+) {
     live.handle.shutdown().await;
     if live.finished.await.is_err() {
-        tracing::error!(document_id = %key.1, "idle eviction actor failed");
+        tracing::error!(
+            document_id = %key.1,
+            "collaboration actor exited without completion"
+        );
     }
     drop(live.permit);
     *slot.phase.lock().await = RoomPhase::Failed;
