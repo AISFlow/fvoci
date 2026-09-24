@@ -218,7 +218,10 @@ if [[ "$RUNNING_UID" != "1000" || "$SERVER_PID1_UID" != "1000" ]]; then
   exit 1
 fi
 log_assert "server runs as non-root uid 1000: ok"
-if docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SERVER_CID" | grep -Eq '^(DATABASE_URL|FVOCI_MIGRATION_URL)='; then
+# Capture first: a failing inspect must fail the smoke, and grep -q must not
+# SIGPIPE the producer under pipefail.
+SERVER_ENV="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SERVER_CID")"
+if grep -Eq '^(DATABASE_URL|FVOCI_MIGRATION_URL)=' <<<"$SERVER_ENV"; then
   echo "server container must not receive the migration owner URL" >&2
   exit 1
 fi
