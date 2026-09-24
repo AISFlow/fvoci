@@ -63,5 +63,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # scripts/install-smoke-collab.mjs needs Node's global WebSocket with headers.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.21.0'
       - name: Run container install smoke
         run: bash scripts/install-smoke.sh

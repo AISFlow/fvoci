@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# Binaries and static assets are root-owned and read-only to the service user;
+# only /data/storage is writable by it.
 # Multi-stage install image for the Rust FVOCI slice: server, migrate, collab-engine,
 # document-extract, and built React static assets. Runtime ships helpers enabled via env.
 
@@ -46,10 +48,10 @@ RUN apt-get update \
  && groupadd --gid 1000 fvoci \
  && useradd --uid 1000 --gid fvoci --no-create-home --home-dir /nonexistent fvoci
 WORKDIR /opt/fvoci
-COPY --from=rust-build --chown=fvoci:fvoci /src/target/release/fvoci-server /src/target/release/fvoci-migrate ./bin/
-COPY --from=rust-build --chown=fvoci:fvoci /src/target/release/collab-engine ./bin/
-COPY --from=rust-build --chown=fvoci:fvoci /src/target/release/document-extract ./bin/
-COPY --from=web-build --chown=fvoci:fvoci /src/apps/web/dist ./static/
+COPY --from=rust-build --chown=root:root /src/target/release/fvoci-server /src/target/release/fvoci-migrate ./bin/
+COPY --from=rust-build --chown=root:root /src/target/release/collab-engine ./bin/
+COPY --from=rust-build --chown=root:root /src/target/release/document-extract ./bin/
+COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --chown=root:root infra/rust/init-db.sh ./sbin/init-db.sh
 RUN chmod 755 ./sbin/init-db.sh ./bin/* \
  && mkdir -p /data/storage \

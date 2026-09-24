@@ -12,7 +12,7 @@ COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" --env-file 
 
 OWNER_PASSWORD="$(openssl rand -hex 16)"
 APP_PASSWORD="$(openssl rand -hex 16)"
-PEPPER='{"install":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+PEPPER="{\"install\":\"$(openssl rand -hex 32)\"}"
 FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
 ASSERT_LOG="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-assert.${RUN_ID}.XXXXXX")"
 
@@ -211,17 +211,12 @@ if [[ "$DOWNLOAD_SHA" != "$FIXTURE_SHA" ]]; then
 fi
 log_assert "attachment download bytes match upload sha256: ok"
 
-SERVER_UID="$(docker inspect -f '{{.Config.User}}' "$SERVER_CID")"
-case "$SERVER_UID" in
-  1000|fvoci|"") ;;
-  *)
-    RUNNING_UID="$(docker exec "$SERVER_CID" sh -c 'id -u')"
-    if [[ "$RUNNING_UID" != "1000" ]]; then
-      echo "server process uid expected 1000, got ${RUNNING_UID}" >&2
-      exit 1
-    fi
-    ;;
-esac
+RUNNING_UID="$(docker exec "$SERVER_CID" id -u)"
+SERVER_PID1_UID="$(docker exec "$SERVER_CID" stat -c '%u' /proc/1)"
+if [[ "$RUNNING_UID" != "1000" || "$SERVER_PID1_UID" != "1000" ]]; then
+  echo "server must run as uid 1000, got exec=${RUNNING_UID} pid1=${SERVER_PID1_UID}" >&2
+  exit 1
+fi
 log_assert "server runs as non-root uid 1000: ok"
 
 STORAGE_SAMPLE="$(docker exec "$SERVER_CID" sh -c 'find /data/storage -type f | head -1')"
@@ -236,18 +231,24 @@ if [[ "$STORAGE_OWNER" != "1000" ]]; then
 fi
 log_assert "storage files owned by service uid: ok"
 
-log_assert "== restart server (SIGTERM)"
+log_assert "== stop server (SIGTERM), then recreate the container"
 STOP_CID="$SERVER_CID"
-"${COMPOSE[@]}" restart -t 45 server
-"${COMPOSE[@]}" up -d --wait server
-STOP_EXIT="$(docker inspect -f '{{.State.ExitCode}}' "$STOP_CID")"
-if [[ "$STOP_EXIT" != "0" ]]; then
-  echo "server restart stop exit code expected 0, got ${STOP_EXIT}" >&2
+"${COMPOSE[@]}" stop -t 45 server
+# Read the exit status of the stopped container before anything restarts it;
+# `docker restart` would reset State.ExitCode.
+STOP_STATE="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$STOP_CID")"
+if [[ "$STOP_STATE" != "exited 0 false" ]]; then
+  echo "server stop expected 'exited 0 false', got '${STOP_STATE}'" >&2
   exit 1
 fi
+"${COMPOSE[@]}" up -d --force-recreate --wait server
 SERVER_CID="$("${COMPOSE[@]}" ps -q server)"
+if [[ -z "$SERVER_CID" || "$SERVER_CID" == "$STOP_CID" ]]; then
+  echo "server container was not recreated (old=${STOP_CID} new=${SERVER_CID})" >&2
+  exit 1
+fi
 wait_http "/api/v1/setup"
-log_assert "server SIGTERM clean exit 0 + restart: ok"
+log_assert "server SIGTERM clean exit 0 + new container on the same volumes: ok"
 
 curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" \
   "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
