@@ -950,3 +950,12 @@ rust-collab-projection에서 native engine Project와 독립 JS fixture를 담�
 cursor-grok-4.6-high. root 계약의 Project/content_json 변경만 명시 위임했고
 DB/manifest/CI/UI 소유권은 위임하지 않았다. Fable 주간 한도 시에만 검증된
 Claude Code Opus5.5 medium으로 대체한다는 기존 조건은 유지하며 전환 미실행.
+
+원격 acab4115839edfa2e805c381c509364eafb19487 결과: Rust35941007365,
+Documents35941007309, Engine35941007302 성공; Web35941007368은 기존
+workspace-flow 성공, 신규 collaboration-flow 실패(8 pass/1 fail/5 미실행,
+1.1분). 실패는 structured 검사에서 table[data-id]가 null인 경로다. 설치된
+Tiptap resizable TableView는 node.attrs.id를 DOM에 복사하지 않음을 확인했다.
+검사 oracle은 Tiptap이 DOM에 노출한 실제 editor.getJSON()을 읽기 전용으로
+조회하고 전체 구조를 비교하도록 수정한다. 표 ID를 실제 문서에서 확인하고
+UUID 검증을 강화하며, 문서를 JSON으로 재생성하거나 문자열을 정규화하지 않는다.

@@ -97,7 +97,16 @@ export type BlockShape = {
   text: string;
 };
 
+type EditorNode = {
+  type: string;
+  attrs?: Record<string, unknown>;
+  text?: string;
+  marks?: Array<{ type: string; attrs?: Record<string, unknown> }>;
+  content?: EditorNode[];
+};
+
 export type EditorShape = {
+  document: EditorNode;
   text: string;
   blocks: BlockShape[];
   bold: string[];
@@ -274,16 +283,31 @@ export async function editorShape(page: Page): Promise<EditorShape> {
       id: el.getAttribute("data-id") ?? "",
       text: contentText(el),
     }));
-    const tableEl = root.querySelector("table[data-id]");
+    // Tiptap exposes the actual editor on its DOM root (Editor.ts). Read only:
+    // resizable TableView deliberately omits node attrs such as id from its DOM.
+    const editor = (root as HTMLElement & { editor?: { getJSON(): EditorNode } }).editor;
+    if (!editor) throw new Error("missing live Tiptap editor for structural inspection");
+    const documentNode = editor.getJSON();
+    const tableNodes: EditorNode[] = [];
+    const visit = (node: EditorNode) => {
+      if (node.type === "table") tableNodes.push(node);
+      for (const child of node.content ?? []) visit(child);
+    };
+    visit(documentNode);
+    const tableEl = root.querySelector("table");
+    if (Boolean(tableEl) !== (tableNodes.length > 0)) {
+      throw new Error("rendered table and live document structure disagree");
+    }
     const table = tableEl
       ? {
-          id: tableEl.getAttribute("data-id") ?? "",
+          id: typeof tableNodes[0]?.attrs?.id === "string" ? tableNodes[0].attrs.id : "",
           rows: [...tableEl.querySelectorAll("tr")].map((row) =>
             [...row.querySelectorAll("th, td")].map((cell) => contentText(cell)),
           ),
         }
       : null;
     return {
+      document: documentNode,
       text: contentText(root),
       blocks,
       bold: [...root.querySelectorAll("strong")]
@@ -336,8 +360,18 @@ export async function placeContentCaret(page: Page, where: "start" | "end"): Pro
 }
 
 export function uniqueBlockIds(shape: EditorShape): string[] {
-  const ids = shape.blocks.map((block) => block.id).filter((id) => UUID_RE.test(id));
-  expect(ids.length, "UniqueID blocks must expose RFC UUID data-id").toBeGreaterThan(0);
+  const ids: string[] = [];
+  const visit = (node: EditorNode) => {
+    if (node.attrs && "id" in node.attrs) {
+      expect(node.attrs.id, `${node.type} must retain its UniqueID`).toEqual(expect.any(String));
+      expect(node.attrs.id as string).toMatch(UUID_RE);
+      ids.push(node.attrs.id as string);
+    }
+    for (const child of node.content ?? []) visit(child);
+  };
+  visit(shape.document);
+  expect(ids.length, "live document must retain UniqueID blocks").toBeGreaterThan(0);
+  if (shape.table) expect(shape.table.id).toMatch(UUID_RE);
   expect(new Set(ids).size).toBe(ids.length);
   return ids;
 }
