@@ -10,8 +10,9 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use fvoci_server::collab::hub::{
-    arm_hub_join_barrier, arm_reclaim_barrier, disarm_hub_join_barrier, disarm_reclaim_barrier,
-    room_start_count, CollabHub, IdleEvictDecision, RoomLifecyclePhase,
+    arm_hub_join_barrier, arm_reclaim_barrier, arm_shutdown_drain_witness,
+    disarm_hub_join_barrier, disarm_reclaim_barrier, disarm_shutdown_drain_witness,
+    room_start_count, CollabHub, IdleEvictDecision, IdleEvictionHold, RoomLifecyclePhase,
     HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY, HUB_JOIN_BARRIER_AFTER_SLOT_READY,
     HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN,
 };
@@ -1272,88 +1273,86 @@ async fn collab_lifecycle_concurrent_first_rejoin_starts_one_actor() {
 }
 
 #[tokio::test]
-async fn collab_lifecycle_cancel_reclaimer_or_joiner_cleanup_continues() {
-    run_lifecycle_test(
-        "collab_lifecycle_cancel_reclaimer_or_joiner_cleanup_continues",
-        |run| {
-            Box::pin(async {
-                let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
-                let key = room_key(wiki.session.workspace_id, wiki.document_id);
-                let admin = admin_pool(&run.inner.harness.admin_url).await;
+async fn collab_lifecycle_cancel_joiner_cleanup_continues() {
+    run_lifecycle_test("collab_lifecycle_cancel_joiner_cleanup_continues", |run| {
+        Box::pin(async {
+            let wiki = setup_wiki_doc(&run.inner.harness).await;
+            let hub = run.register_hub(Arc::new(CollabHub::new(
+                test_collab_config(4, 200),
+                wiki.session.pool.clone(),
+            )));
+            let key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let admin = admin_pool(&run.inner.harness.admin_url).await;
+            let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
-                let (conn_id, lease, mut events_rx) =
-                    hub_join_with_events(&hub, &wiki, 1).await.expect("join");
-                run.retain_lease(lease);
-                let slots_held = hub.available_room_slots();
-                let (teardown_reached, teardown_proceed) =
-                    arm_teardown_barrier(wiki.document_id).await;
-                arm_actor_panic_on_next_frame(wiki.document_id).await;
-                hub.send_frame(
-                    key,
-                    conn_id,
-                    sync_update_frame(
-                        &routing_key(wiki.session.workspace_id, wiki.document_id),
-                        &sample_hi_update(),
-                    ),
-                )
-                .await;
-                wait_for_close(&mut events_rx, 1011).await;
-                tokio::time::timeout(Duration::from_secs(5), teardown_reached)
-                    .await
-                    .expect("teardown reached")
-                    .expect("teardown signal");
+            let (conn_id, lease, mut events_rx) =
+                hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+            run.retain_lease(lease);
+            let slots_held = hub.available_room_slots();
+            let (teardown_reached, teardown_proceed) =
+                arm_teardown_barrier(wiki.document_id).await;
+            arm_actor_panic_on_next_frame(wiki.document_id).await;
+            hub.send_frame(
+                key,
+                conn_id,
+                sync_update_frame(
+                    &routing_key(wiki.session.workspace_id, wiki.document_id),
+                    &sample_hi_update(),
+                ),
+            )
+            .await;
+            wait_for_close(&mut events_rx, 1011).await;
+            tokio::time::timeout(Duration::from_secs(5), teardown_reached)
+                .await
+                .expect("teardown reached")
+                .expect("teardown signal");
 
-                let (reclaim_reached, reclaim_proceed) =
-                    arm_reclaim_barrier(wiki.document_id).await;
-                let join_task = tokio::spawn({
-                    let hub = hub.clone();
-                    let wiki = clone_wiki(&wiki);
-                    async move { hub_join_with_lease(&hub, &wiki, 5).await }
-                });
-                tokio::time::timeout(Duration::from_secs(5), reclaim_reached)
-                    .await
-                    .expect("reclaim must start on the hub task")
-                    .expect("reclaim signal");
-                wait_for_phase(&hub, key, RoomLifecyclePhase::Closing).await;
+            let (reclaim_reached, reclaim_proceed) =
+                arm_reclaim_barrier(wiki.document_id).await;
+            let join_task = tokio::spawn({
+                let hub = hub.clone();
+                let wiki = clone_wiki(&wiki);
+                async move { hub_join_with_lease(&hub, &wiki, 5).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), reclaim_reached)
+                .await
+                .expect("reclaim must start on the hub task")
+                .expect("reclaim signal");
+            wait_for_phase(&hub, key, RoomLifecyclePhase::Closing).await;
 
-                join_task.abort();
-                assert!(join_task.await.unwrap_err().is_cancelled());
-                assert_eq!(
-                    hub.room_lifecycle_phase(key).await,
-                    RoomLifecyclePhase::Closing,
-                    "cancelling the joiner must not strand or steal Closing"
-                );
-                assert_eq!(hub.available_room_slots(), slots_held);
+            join_task.abort();
+            assert!(join_task.await.unwrap_err().is_cancelled());
+            assert_eq!(
+                hub.room_lifecycle_phase(key).await,
+                RoomLifecyclePhase::Closing,
+                "cancelling the joiner must not strand or steal Closing"
+            );
+            assert_eq!(hub.available_room_slots(), slots_held);
 
-                reclaim_proceed.send(()).expect("release reclaim");
-                assert!(
-                    room_guard_held(&admin, wiki.document_id).await,
-                    "cleanup must still wait for finished/helper/guard"
-                );
+            reclaim_proceed.send(()).expect("release reclaim");
+            assert!(
+                room_guard_held(&admin, wiki.document_id).await,
+                "cleanup must still wait for finished/helper/guard"
+            );
 
-                teardown_proceed.send(()).expect("release teardown");
-                wait_until_guard(&admin, wiki.document_id, false).await;
-                wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
-                assert_eq!(
-                    hub.available_room_slots(),
-                    slots_held + 1,
-                    "reclaim must drop the permit after cancelled join"
-                );
+            teardown_proceed.send(()).expect("release teardown");
+            wait_until_guard(&admin, wiki.document_id, false).await;
+            wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
+            assert_eq!(
+                hub.available_room_slots(),
+                slots_held + 1,
+                "reclaim must drop the permit after cancelled join"
+            );
 
-                let (_, lease) = hub_join_with_lease(&hub, &wiki, 6)
-                    .await
-                    .expect("join after cancelled reclaim");
-                run.retain_lease(lease);
-                disarm_actor_panic_on_next_frame(wiki.document_id).await;
-                disarm_teardown_barrier(wiki.document_id).await;
-                disarm_reclaim_barrier(wiki.document_id).await;
-            })
-        },
-    )
+            let (_, lease) = hub_join_with_lease(&hub, &wiki, 6)
+                .await
+                .expect("join after cancelled reclaim");
+            run.retain_lease(lease);
+            disarm_actor_panic_on_next_frame(wiki.document_id).await;
+            disarm_teardown_barrier(wiki.document_id).await;
+            disarm_reclaim_barrier(wiki.document_id).await;
+        })
+    })
     .await;
 }
 
@@ -1369,6 +1368,7 @@ async fn collab_lifecycle_closing_between_slot_return_and_phase_lock_retries() {
                     wiki.session.pool.clone(),
                 )));
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
                 let (conn_id, lease, mut events_rx) =
                     hub_join_with_events(&hub, &wiki, 1).await.expect("join");
@@ -1571,6 +1571,7 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
             )));
             let key = room_key(wiki.session.workspace_id, wiki.document_id);
             let admin = admin_pool(&run.inner.harness.admin_url).await;
+            let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
             let (conn_id, lease, mut events_rx) =
                 hub_join_with_events(&hub, &wiki, 1).await.expect("join");
@@ -1605,6 +1606,7 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
                 .expect("reclaim signal");
             wait_for_phase(&hub, key, RoomLifecyclePhase::Closing).await;
 
+            let drain_witness = arm_shutdown_drain_witness().await;
             let shutdown_task = tokio::spawn({
                 let hub = hub.clone();
                 async move { hub.shutdown().await }
@@ -1619,6 +1621,10 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
             })
             .await
             .expect("shutdown must begin while reclaim owns the slot");
+            tokio::time::timeout(Duration::from_secs(5), drain_witness)
+                .await
+                .expect("shutdown must reach the reclaim drain")
+                .expect("drain witness");
             assert!(
                 !shutdown_task.is_finished(),
                 "shutdown must wait for the hub-owned reclaim task"
@@ -1639,6 +1645,14 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
 
             teardown_proceed.send(()).expect("release teardown");
             let status = shutdown_task.await.expect("shutdown task");
+            assert!(
+                !status.is_clean(),
+                "panic reclaim during shutdown must report abnormal actor completion: {status:?}"
+            );
+            assert!(
+                status.actor_failures >= 1,
+                "panic reclaim must be counted once: {status:?}"
+            );
             assert_eq!(
                 hub.available_room_slots(),
                 slots_held + 1,
@@ -1653,7 +1667,93 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
             disarm_actor_panic_on_next_frame(wiki.document_id).await;
             disarm_teardown_barrier(wiki.document_id).await;
             disarm_reclaim_barrier(wiki.document_id).await;
+            disarm_shutdown_drain_witness().await;
         })
     })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_lifecycle_idle_timer_reclaims_dead_slot_after_hold_release() {
+    run_lifecycle_test(
+        "collab_lifecycle_idle_timer_reclaims_dead_slot_after_hold_release",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let hub = run.register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )));
+                let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let admin = admin_pool(&run.inner.harness.admin_url).await;
+                let idle_hold = IdleEvictionHold::arm(wiki.document_id);
+
+                let (conn_id, lease, mut events_rx) =
+                    hub_join_with_events(&hub, &wiki, 1).await.expect("join");
+                run.retain_lease(lease);
+                let slots_held = hub.available_room_slots();
+                assert_eq!(room_start_count(wiki.document_id).await, 1);
+
+                let (teardown_reached, teardown_proceed) =
+                    arm_teardown_barrier(wiki.document_id).await;
+                arm_actor_panic_on_next_frame(wiki.document_id).await;
+                hub.send_frame(
+                    key,
+                    conn_id,
+                    sync_update_frame(
+                        &routing_key(wiki.session.workspace_id, wiki.document_id),
+                        &sample_hi_update(),
+                    ),
+                )
+                .await;
+                wait_for_close(&mut events_rx, 1011).await;
+                tokio::time::timeout(Duration::from_secs(5), teardown_reached)
+                    .await
+                    .expect("teardown reached")
+                    .expect("teardown signal");
+                teardown_proceed.send(()).expect("release teardown");
+                wait_until_guard(&admin, wiki.document_id, false).await;
+                assert_eq!(
+                    hub.room_lifecycle_phase(key).await,
+                    RoomLifecyclePhase::Live,
+                    "dead actor stays Live until an owner reclaims it"
+                );
+
+                drop(idle_hold);
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if hub.room_lifecycle_phase(key).await == RoomLifecyclePhase::Absent {
+                            return;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("idle timer must reclaim the closed Live");
+                assert_eq!(
+                    hub.available_room_slots(),
+                    slots_held + 1,
+                    "timer reclaim must return the room permit"
+                );
+                assert_eq!(
+                    room_start_count(wiki.document_id).await,
+                    1,
+                    "timer reclaim must not start a successor actor"
+                );
+
+                let (_, lease) = hub_join_with_lease(&hub, &wiki, 14)
+                    .await
+                    .expect("rejoin after timer reclaim");
+                run.retain_lease(lease);
+                assert_eq!(
+                    room_start_count(wiki.document_id).await,
+                    2,
+                    "successor actor must start after timer reclaim"
+                );
+                disarm_actor_panic_on_next_frame(wiki.document_id).await;
+                disarm_teardown_barrier(wiki.document_id).await;
+            })
+        },
+    )
     .await;
 }
