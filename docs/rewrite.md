@@ -1515,3 +1515,20 @@ bridge가 대상이며, current document parent를 재사용한다. 결과는 �
 서버에 직접 연결하면 rhwp graph가 빠른 경로에 들어오므로 제품 연결 전에 작은
 client/worker 빌드 경계를 유지해야 한다. 다음은 PR7 차단 수정·Opus delta와
 원격수락 후 최신main의 첨부 수직 기능이다. auto-merge 미설정, 미병합.
+
+F7修正 통합: worker0697f28(74a0a96 후속)을ae791eb/4b54606으로 반영했다.
+자동idle 경로만 제어하는 per-document hold, hub 수명 비정상 actor 완료 집계,
+hub 인스턴스별 shutdown witness를 사용한다. 전역 witness의 거짓 성공은
+74a0a96 단독 실행0/1 실패(body7.50s)로 재현했고, 수정 후 단독1/1(body2.52s),
+격리PG lifecycle20/20(body15.13s,4threads)을 확인했다. worker는 release했다.
+워커 보고서의 crates/collab-engine/target helper 경로는 실재하지 않았으며,
+검사 resolver가 worktree target/debug/collab-engine으로 fallback한 것이 실제
+실행 경로다. 명시한 잘못된 FVOCI_COLLAB_ENGINE은 이제 fallback 없이 실패한다.
+코디네이터 음성 검사(의도적 missing helper)는0/1 실패(exit101), 올바른 integration
+helper의 huge-varint native 검사1/1 성공(body0.10s)이다. all-target/db-tests
+clippy 성공3.08s와 fmt 성공; 전체 수락은 새 원격 HEAD/Opus delta를 기다린다.
+
+Grok task35941578aad5/ctxde9b76aa5f60은 main ba19932의 별도
+rust-attachment-native-client에서 얇은 추출 process client를 구현 중이다.
+단독 소유는 crates/document-extract-client 및 필요한 기존 native crate 경계이며,
+root manifest/CI/서버/프론트는 제외한다. 첨부 제품 연결 완료가 아니다.

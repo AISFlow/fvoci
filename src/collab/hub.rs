@@ -849,9 +849,7 @@ impl CollabHub {
                 drop(held);
             }
         }
-        let actor_failures = self
-            .abnormal_actor_completions
-            .load(Ordering::Acquire);
+        let actor_failures = self.abnormal_actor_completions.load(Ordering::Acquire);
         ShutdownStatus {
             idle_task_failed,
             start_task_failures,
@@ -1331,11 +1329,7 @@ async fn complete_owned_room_cleanup(
     abnormal_actor_completions: Arc<AtomicUsize>,
 ) {
     live.handle.shutdown().await;
-    note_abnormal_actor_completion(
-        &abnormal_actor_completions,
-        key.1,
-        live.finished.await,
-    );
+    note_abnormal_actor_completion(&abnormal_actor_completions, key.1, live.finished.await);
     drop(live.permit);
     *slot.phase.lock().await = RoomPhase::Failed;
     let mut map = rooms.write().await;

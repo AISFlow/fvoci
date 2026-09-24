@@ -145,9 +145,8 @@ impl CollabConfig {
 pub fn collab_engine_path_for_tests() -> Option<PathBuf> {
     if let Ok(path) = env::var("FVOCI_COLLAB_ENGINE") {
         let p = PathBuf::from(path.trim());
-        if p.is_file() {
-            return Some(p);
-        }
+        // An explicit selection must not silently run a different helper.
+        return p.is_file().then_some(p);
     }
     [
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/collab-engine"),

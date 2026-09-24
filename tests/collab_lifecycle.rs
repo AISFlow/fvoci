@@ -1291,8 +1291,7 @@ async fn collab_lifecycle_cancel_joiner_cleanup_continues() {
                 hub_join_with_events(&hub, &wiki, 1).await.expect("join");
             run.retain_lease(lease);
             let slots_held = hub.available_room_slots();
-            let (teardown_reached, teardown_proceed) =
-                arm_teardown_barrier(wiki.document_id).await;
+            let (teardown_reached, teardown_proceed) = arm_teardown_barrier(wiki.document_id).await;
             arm_actor_panic_on_next_frame(wiki.document_id).await;
             hub.send_frame(
                 key,
@@ -1309,8 +1308,7 @@ async fn collab_lifecycle_cancel_joiner_cleanup_continues() {
                 .expect("teardown reached")
                 .expect("teardown signal");
 
-            let (reclaim_reached, reclaim_proceed) =
-                arm_reclaim_barrier(wiki.document_id).await;
+            let (reclaim_reached, reclaim_proceed) = arm_reclaim_barrier(wiki.document_id).await;
             let join_task = tokio::spawn({
                 let hub = hub.clone();
                 let wiki = clone_wiki(&wiki);
@@ -1653,8 +1651,7 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
                 "panic reclaim during shutdown must report abnormal actor completion: {status:?}"
             );
             assert_eq!(
-                status.actor_failures,
-                1,
+                status.actor_failures, 1,
                 "panic reclaim must be counted exactly once: {status:?}"
             );
             assert_eq!(
