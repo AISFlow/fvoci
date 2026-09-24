@@ -19,10 +19,10 @@ import type { CreateProjectBody } from "./queries";
 
 const createSchema = z.object({
   key: z.string().min(1, "i18n:form.too_small"),
-  name: z.string().trim().min(1, "i18n:form.too_small").max(PROJECT_NAME_MAX, "i18n:form.too_small"),
+  name: z.string().trim().min(1, "i18n:form.too_small").max(PROJECT_NAME_MAX, "i18n:form.too_big"),
   visibility: z.enum(["workspace", "private"]),
-  description: z.string().max(PROJECT_DESCRIPTION_MAX, "i18n:form.too_small").optional(),
-  icon: z.string().max(PROJECT_ICON_MAX, "i18n:form.too_small").optional(),
+  description: z.string().max(PROJECT_DESCRIPTION_MAX, "i18n:form.too_big").optional(),
+  icon: z.string().max(PROJECT_ICON_MAX, "i18n:form.too_big").optional(),
 });
 
 type CreateForm = z.infer<typeof createSchema>;
@@ -49,7 +49,9 @@ export function CreateProjectForm({
   });
   const fieldError =
     formFieldMessage(form.formState.errors.key, "key") ??
-    formFieldMessage(form.formState.errors.name, "name");
+    formFieldMessage(form.formState.errors.name, "name") ??
+    formFieldMessage(form.formState.errors.description, "description") ??
+    formFieldMessage(form.formState.errors.icon, "icon");
 
   return (
     <form
@@ -63,6 +65,8 @@ export function CreateProjectForm({
             form.setError("key", { message: "i18n:project.key.reserved" });
           } else if (parsed.issue.field === "key" && parsed.issue.code === "pattern") {
             form.setError("key", { message: "i18n:form.pattern.key" });
+          } else if (parsed.issue.code === "too_big") {
+            form.setError(parsed.issue.field, { message: "i18n:form.too_big" });
           } else {
             form.setError(parsed.issue.field, { message: "i18n:form.too_small" });
           }

@@ -2,7 +2,7 @@ import { t } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
 import { formatDisplayId, projectTasksPath } from "@/lib/href";
 import type { WorkflowStatus } from "@/features/projects/queries";
-import { formatEstimate, stringIds, type TaskDetail } from "./queries";
+import type { TaskDetail } from "./queries";
 import { taskTypeLabel } from "./task-types";
 import "@/features/projects/projects.css";
 
@@ -21,9 +21,9 @@ export function TaskDetailView({
 }) {
   const displayId = formatDisplayId(projectKey, task.number);
   const status = statuses.find((item) => item.id === task.statusId);
-  const estimate = formatEstimate(task.estimate);
-  const assignees = stringIds(task.assigneeIds);
-  const labels = stringIds(task.labelIds);
+  const estimate = task.estimate;
+  const assignees = task.assigneeIds;
+  const labels = task.labelIds;
 
   return (
     <div className="task-home">

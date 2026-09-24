@@ -40,13 +40,3 @@ export function taskQuery(workspaceId: string, taskId: string) {
     retry: false,
   });
 }
-
-export function stringIds(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string");
-}
-
-export function formatEstimate(value: unknown): string | null {
-  if (value == null || value === "") return null;
-  return String(value);
-}

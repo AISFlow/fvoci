@@ -47,3 +47,30 @@ export async function login(page: Page, email: string, password: string): Promis
   await page.getByRole("button", { name: "로그인", exact: true }).click();
   await page.waitForURL(/\/$/);
 }
+
+export async function createTasksViaApi(
+  page: Page,
+  workspaceId: string,
+  projectId: string,
+  titles: readonly string[],
+  statusId: string,
+): Promise<void> {
+  const chunkSize = 10;
+  for (let offset = 0; offset < titles.length; offset += chunkSize) {
+    const chunk = titles.slice(offset, offset + chunkSize);
+    const responses = await Promise.all(
+      chunk.map((title) =>
+        page.request.post(`/api/v1/workspaces/${workspaceId}/projects/${projectId}/tasks`, {
+          data: { title, type: "task", statusId },
+        }),
+      ),
+    );
+    for (const [index, response] of responses.entries()) {
+      if (response.status() !== 201) {
+        throw new Error(
+          `create task failed: title=${chunk[index]} status=${response.status()} body=${await response.text()}`,
+        );
+      }
+    }
+  }
+}

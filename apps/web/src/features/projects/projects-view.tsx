@@ -6,6 +6,7 @@ import { QueryError, QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { projectTasksPath } from "@/lib/href";
 import { CreateProjectForm } from "./create-project-form";
+import { NativeModal } from "./native-modal";
 import "./projects.css";
 import type { CreateProjectBody, ProjectListItem } from "./queries";
 
@@ -44,9 +45,9 @@ export function ProjectsView({
       </div>
       {loading ? <QueryLoading /> : null}
       {!loading && error ? <QueryError message={error} onRetry={onRetry} /> : null}
-      {!loading && !error && projects.length === 0 ? (
+      {!loading && !error && active.length === 0 ? (
         <EmptyState
-          title={t("project.emptyHint")}
+          title={projects.length === 0 ? t("project.emptyHint") : t("project.emptyArchived")}
           actionLabel={t("project.new")}
           onAction={() => setCreateOpen(true)}
           actionDisabled={creating}
@@ -72,28 +73,19 @@ export function ProjectsView({
           ))}
         </ul>
       ) : null}
-      {createOpen ? (
-        <div className="project-dialog-backdrop">
-          <div
-            className="project-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={titleId}
-          >
-            <h2 id={titleId} className="project-dialog__title">
-              {t("project.new")}
-            </h2>
-            <CreateProjectForm
-              pending={creating}
-              onSubmit={async (input) => {
-                await onCreate(input);
-                setCreateOpen(false);
-              }}
-              onCancel={() => setCreateOpen(false)}
-            />
-          </div>
-        </div>
-      ) : null}
+      <NativeModal open={createOpen} labelledBy={titleId} onClose={() => setCreateOpen(false)}>
+        <h2 id={titleId} className="project-dialog__title">
+          {t("project.new")}
+        </h2>
+        <CreateProjectForm
+          pending={creating}
+          onSubmit={async (input) => {
+            await onCreate(input);
+            setCreateOpen(false);
+          }}
+          onCancel={() => setCreateOpen(false)}
+        />
+      </NativeModal>
     </div>
   );
 }

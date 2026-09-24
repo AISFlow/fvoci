@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { createE2eUser, login } from "./helpers";
+import { createE2eUser, createTasksViaApi, login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -44,7 +44,13 @@ async function workspaceId(page: Page, slug: string): Promise<string> {
 
 async function ensureSetup(page: Page): Promise<void> {
   await page.goto("/");
-  if (page.url().includes("/setup")) {
+  await expect(
+    page
+      .getByRole("button", { name: "시작하기" })
+      .or(page.getByRole("button", { name: "로그아웃" }))
+      .or(page.getByRole("button", { name: "로그인", exact: true })),
+  ).toBeVisible();
+  if ((await page.getByRole("button", { name: "시작하기" }).count()) > 0) {
     await page.getByLabel("성").fill(admin.familyName);
     await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
     await page.getByLabel("이메일").fill(admin.email);
@@ -53,9 +59,15 @@ async function ensureSetup(page: Page): Promise<void> {
     await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
     await page.getByRole("button", { name: "시작하기" }).click();
     await expect(page).toHaveURL(/\/$/);
+    await expect.poll(async () => {
+      const res = await page.request.get("/api/v1/me/workspaces");
+      if (!res.ok()) return [];
+      const body = (await res.json()) as { items: { slug: string }[] };
+      return body.items.map((item) => item.slug);
+    }).toContain(admin.workspaceSlug);
     return;
   }
-  if (page.url().includes("/login")) {
+  if (page.url().includes("/login") || (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0) {
     await login(page, admin.email, admin.password);
   }
 }
@@ -106,6 +118,31 @@ test("member creates a workspace project, task, and sees counts after reload", a
   await expect(page.getByRole("heading", { name: "첫 일" })).toBeVisible();
   await expect(page.getByText("LAB-2")).toBeVisible();
 
+  await page.goto("/w/acme/LAB-1");
+  const labRootLookup = await page.request.get(
+    `/api/v1/workspaces/${idAfterCreate}/lookup/LAB-1`,
+  );
+  expect(labRootLookup.status()).toBe(200);
+  const labRootBody = await labRootLookup.json();
+  expect(
+    labRootBody.items.some(
+      (entry: { kind: string; displayId: string; projectId: string | null }) =>
+        entry.kind === "document" && entry.displayId === "LAB-1" && entry.projectId,
+    ),
+  ).toBe(true);
+  await expect(
+    page.getByText("프로젝트 문서는 이 슬라이스에서 아직 지원하지 않습니다."),
+  ).toBeVisible();
+  await expect(page.getByText("태스크를 찾을 수 없습니다")).toHaveCount(0);
+  await expect(page).toHaveURL(/\/w\/acme\/LAB-1$/);
+
+  await page.goto("/w/acme/x");
+  await expect(page.getByRole("alert")).toContainText("요청한 항목을 찾을 수 없습니다");
+  await expect(page).toHaveURL(/\/w\/acme\/x$/);
+  await expect(page.getByRole("heading", { name: "위키" })).toHaveCount(0);
+
+  await page.goto("/w/acme/LAB-2");
+  await expect(page.getByRole("heading", { name: "첫 일" })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("heading", { name: "첫 일" })).toBeVisible();
   await expect(page.getByText("LAB-2")).toBeVisible();
@@ -142,7 +179,7 @@ test("guest create is rejected with a visible error and wiki still loads", async
   await page.getByLabel("키").fill("GST");
   await page.getByLabel("이름", { exact: true }).fill("Guest project");
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("찾을 수 없습니다");
   await expect(page).toHaveURL(/\/w\/acme\/projects$/);
 
   await page.goto("/w/acme/wiki");
@@ -214,7 +251,7 @@ test("private project is absent for non-members and viewer writes fail visibly",
   await page.getByRole("button", { name: "새 태스크" }).click();
   await page.getByLabel("제목").fill("비밀 일");
   await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
-  await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("찾을 수 없습니다");
   await expect(page).toHaveURL(/\/w\/acme\/HID\/tasks$/);
 });
 
@@ -225,7 +262,9 @@ test("duplicate and reserved keys keep the form and show errors", async ({ page 
   await page.getByLabel("키").fill("LAB");
   await page.getByLabel("이름", { exact: true }).fill("Lab copy");
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
-  await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "다른 곳에서 먼저 수정되었습니다",
+  );
   await expect(page).toHaveURL(/\/w\/acme\/projects$/);
 
   await page.getByLabel("키").fill("WIKI");
@@ -263,8 +302,66 @@ test("wiki shell and foreign workspace denial still hold after project flow", as
   await page.getByRole("button", { name: "닫기" }).click();
   await expect(page).not.toHaveURL(/\?denied=workspace/);
 
-  await page.goto("/login");
+  await page.getByRole("button", { name: "로그아웃" }).click();
   await login(page, admin.email, admin.password);
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
+});
+
+test("task list uses server statusCounts and paginates without duplicate rows", async ({
+  page,
+}) => {
+  await login(page, member.email, member.password);
+  const id = await workspaceId(page, "acme");
+  const createProject = await page.request.post(`/api/v1/workspaces/${id}/projects`, {
+    data: { key: "PAG", name: "Pages", visibility: "workspace" },
+  });
+  expect(
+    createProject.status(),
+    `create PAG project failed: ${createProject.status()} ${await createProject.text()}`,
+  ).toBe(201);
+  const project = await createProject.json();
+
+  const workflowRes = await page.request.get(
+    `/api/v1/workspaces/${id}/projects/${project.id}/workflow`,
+  );
+  expect(
+    workflowRes.ok(),
+    `workflow failed: ${workflowRes.status()} ${await workflowRes.text()}`,
+  ).toBe(true);
+  const workflow = await workflowRes.json();
+  const backlog =
+    workflow.statuses.find((status: { category: string }) => status.category === "backlog") ??
+    workflow.statuses[0];
+  expect(backlog).toBeTruthy();
+
+  const created = 55;
+  const titles = Array.from({ length: created }, (_, index) => `페이지 일 ${index + 1}`);
+  await createTasksViaApi(page, id, project.id, titles, backlog.id);
+
+  const listUrl = `/api/v1/workspaces/${id}/projects/${project.id}/tasks`;
+  const listRes = await page.request.get(listUrl);
+  const listText = await listRes.text();
+  expect(listRes.ok(), `list tasks failed: ${listRes.status()} ${listText}`).toBe(true);
+  const firstPage = JSON.parse(listText) as {
+    items: { id: string }[];
+    nextCursor: string | null;
+    statusCounts: { statusId: string; count: number }[];
+  };
+  expect(firstPage.items.length).toBeGreaterThan(0);
+  expect(firstPage.nextCursor).toBeTruthy();
+  const serverCount = firstPage.statusCounts.find((row) => row.statusId === backlog.id)?.count;
+  expect(serverCount).toBe(created);
+
+  await page.goto("/w/acme/PAG/tasks");
+  await expect(page.getByRole("heading", { name: "Pages" })).toBeVisible();
+  const countBadge = page.locator(".task-status__count").first();
+  await expect(countBadge).toHaveText(String(serverCount));
+  await expect(page.locator(".task-row")).toHaveCount(firstPage.items.length);
+
+  await page.getByRole("button", { name: "더 보기" }).click();
+  await expect(page.locator(".task-row")).toHaveCount(created);
+  const ids = await page.locator(".task-row__id").allTextContents();
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(ids).toHaveLength(created);
 });

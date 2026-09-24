@@ -3,11 +3,12 @@ import test from "node:test";
 import { projectCreatePayload } from "../features/projects/create-payload.ts";
 import { TASK_TITLE_MAX, taskCreatePayload } from "../features/tasks/create-payload.ts";
 import type { components, paths } from "../generated/api.ts";
-import { pickLookupTask, type LookupItem } from "../features/tasks/lookup.ts";
+import { pickLookupTask, resolveLookupTarget, type LookupItem } from "../features/tasks/lookup.ts";
 import {
   appendTaskListPage,
   mergeTaskListPages,
   statusCountFor,
+  visibleTaskStatusSections,
   taskListHasMore,
 } from "../features/tasks/task-list-page.ts";
 
@@ -60,6 +61,32 @@ test("project create payload matches source NFKC, reserved, KEY-n, and blank-to-
     }).ok,
     false,
   );
+  assert.deepEqual(
+    projectCreatePayload({
+      key: "LAB",
+      name: "Lab",
+      visibility: "workspace",
+      description: "x".repeat(2001),
+    }),
+    { ok: false, issue: { field: "description", code: "too_big" } },
+  );
+  assert.deepEqual(
+    projectCreatePayload({
+      key: "LAB",
+      name: "Lab",
+      visibility: "workspace",
+      icon: "x".repeat(51),
+    }),
+    { ok: false, issue: { field: "icon", code: "too_big" } },
+  );
+  assert.deepEqual(
+    projectCreatePayload({
+      key: "LAB",
+      name: "x".repeat(201),
+      visibility: "workspace",
+    }),
+    { ok: false, issue: { field: "name", code: "too_big" } },
+  );
 });
 
 test("task create payload trims title, defaults type, and never sends parentId", () => {
@@ -78,7 +105,7 @@ test("task create payload trims title, defaults type, and never sends parentId",
 const doc: LookupItem = {
   kind: "document",
   id: "doc-1",
-  displayId: "LAB-2",
+  displayId: "LAB-1",
   title: "문서",
   projectId: "p1",
 };
@@ -90,12 +117,21 @@ const task: LookupItem = {
   projectId: "p1",
 };
 
-test("lookup selection uses kind===task; empty or document-only is a miss", () => {
-  assert.equal(pickLookupTask([], "LAB-2"), null);
-  assert.equal(pickLookupTask([doc], "LAB-2"), null);
+test("lookup branches project documents, tasks, and empty misses", () => {
+  assert.deepEqual(resolveLookupTarget([], "LAB-1"), { kind: "miss" });
+  assert.deepEqual(resolveLookupTarget([doc], "LAB-1"), {
+    kind: "project-document",
+    item: doc,
+  });
+  assert.equal(pickLookupTask([doc], "LAB-1"), null);
+  assert.deepEqual(resolveLookupTarget([doc, task], "lab-2"), { kind: "task", item: task });
   assert.deepEqual(pickLookupTask([doc, task], "lab-2"), task);
-  assert.equal(pickLookupTask([task], "HID-2"), null);
-  assert.equal(pickLookupTask([{ ...task, kind: "document" }], "LAB-2"), null);
+  assert.deepEqual(resolveLookupTarget([task], "HID-2"), { kind: "miss" });
+  assert.deepEqual(resolveLookupTarget([{ ...task, kind: "document" }], "LAB-2"), {
+    kind: "project-document",
+    item: { ...task, kind: "document" },
+  });
+  assert.deepEqual(resolveLookupTarget([{ ...doc, projectId: null }], "LAB-1"), { kind: "miss" });
 });
 
 test("appendTaskListPage concatenates items, keeps first statusCounts, and uses page cursor", () => {
@@ -122,4 +158,33 @@ test("appendTaskListPage concatenates items, keeps first statusCounts, and uses 
   assert.equal(statusCountFor(first.statusCounts, "missing"), undefined);
   const fromPages = mergeTaskListPages([first, second]);
   assert.deepEqual(fromPages, merged);
+});
+
+test("visibleTaskStatusSections keeps zero-count loaded items and unknown statuses", () => {
+  const items = [
+    { id: "t1", statusId: "s-backlog" },
+    { id: "t2", statusId: "s-gone" },
+  ];
+  const sections = visibleTaskStatusSections(
+    items,
+    [
+      { id: "s-backlog", name: "백로그" },
+      { id: "s-done", name: "완료" },
+    ],
+    [{ statusId: "s-backlog", count: 0 }],
+    "기타",
+  );
+  assert.deepEqual(
+    sections.map((section) => ({
+      id: section.id,
+      name: section.name,
+      ids: section.items.map((item) => item.id),
+      count: section.count,
+      known: section.known,
+    })),
+    [
+      { id: "s-backlog", name: "백로그", ids: ["t1"], count: 0, known: true },
+      { id: "__other", name: "기타", ids: ["t2"], count: 1, known: false },
+    ],
+  );
 });
