@@ -1,3 +1,4 @@
+pub mod attachment_extract;
 pub mod attachments;
 pub mod collab;
 pub mod collab_delivery;
