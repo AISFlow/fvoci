@@ -3,10 +3,12 @@
 //! Parser: `edwardkim/rhwp` git rev [`RHWP_REV`], default-features off
 //! (`native-skia` / `gpu` not enabled). This crate does not run Node, Bun,
 //! WASM, or a browser. Attachment HTTP is out of scope.
+//!
+//! Killable process client, outcome/limits, and revision constants are defined
+//! in `document-extract-client` and reexported here. `extract_in_process` stays
+//! on the parser side.
 
-pub const RHWP_REV: &str = "e8800c8def63449808a4092798442652ed460552";
-pub const RHWP_REPO: &str = "https://github.com/edwardkim/rhwp";
-pub const RHWP_LICENSE: &str = "MIT";
+pub use document_extract_client::{RHWP_LICENSE, RHWP_REPO, RHWP_REV};
 
 pub mod classify;
 pub mod gen;

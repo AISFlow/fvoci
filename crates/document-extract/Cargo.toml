@@ -26,10 +26,11 @@ path = "src/bin/document-extract.rs"
 [features]
 default = []
 # Compiles `--test-hang-ms` into the helper binary. Production builds omit it.
-test-hang = []
+test-hang = ["document-extract-client/test-hang"]
 
 [dependencies]
 cfb = "0.14"
+document-extract-client = { path = "../document-extract-client" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 libc = { version = "0.2", default-features = false }
 rhwp = { path = ".vendor-src/rhwp", default-features = false }
