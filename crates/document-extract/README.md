@@ -44,6 +44,7 @@ exact rev here only if compile requires the patch.
 | Input | 20 MiB |
 | Output chars | 500_000 |
 | Child timeout | 120 s default (tests use 8 s / 500 ms) |
+| Child parent-death | Linux `PR_SET_PDEATHSIG(SIGKILL)` in `pre_exec`, with `getppid` vs expected-parent race check |
 | Child address space | Linux `RLIMIT_AS` via `pre_exec` + child `setrlimit`, same number as the RSS ceiling (default 1536 MiB). This is virtual size, not RSS. |
 | Child CPU | Linux `RLIMIT_CPU` = `timeout_ms/1000` (min 1s) as backup to wall-clock kill |
 | Observed RSS | parent poll; kill+reap if `VmRSS` exceeds the ceiling |
@@ -56,11 +57,14 @@ exact rev here only if compile requires the patch.
 | Upstream rhwp HWP5 stream / total | 256 MiB / 512 MiB |
 | Upstream rhwp HWPX XML entry | 256 MiB |
 
-`extract_killable` is **synchronous**. The only cancel mechanism is the
-`timeout_ms` deadline (and RSS/CPU rlimits). There is no external cancel token.
-Dropping a `JoinHandle` that wraps this call does **not** kill the child.
-Product async callers must run it off the runtime executor (or use a real
-process kill path) and must not treat task cancellation as process termination.
+`extract_killable` is **synchronous** and has no cancel flag. `extract_killable_with_cancel`
+observes a caller-owned `AtomicBool` before slot admission, before spawn, and on
+the existing `try_wait` poll. On cancel of a running child it kill+reaps and
+joins stdin/stdout/stderr threads, then returns a client-only `Cancelled` result
+(not an `ExtractStatus` wire variant, never empty/ok). Dropping a `JoinHandle`
+that wraps this call does **not** kill the child. Product async callers must run
+it off the runtime executor and must not treat task cancellation as process
+termination.
 
 ## Outcomes
 
@@ -136,6 +140,12 @@ Follow-up SHA times below; earlier first-compile numbers are historical.
 | crate clippy | `cargo clippy --locked --offline --all-targets --features test-hang -- -D warnings` | 0.32s, exit 0 |
 
 Those numbers are evidence of the commands, not product acceptance.
+
+Child-IO unit tests (3) moved to `crates/document-extract-client` with PR8
+(`125ef25`). Historical rows above describe the pre-split crate layout and are
+kept as the original measurement record. Current parser lib tests no longer
+include those 3; client crate tests cover them plus cancel-flag unit tests.
+Cancellation/parent-death process-boundary counts are in `VERIFY.md`.
 
 CI for this crate must run prep, then `cargo fetch --locked`, then offline
 build/tests. Tests and `build.rs` must not download.
