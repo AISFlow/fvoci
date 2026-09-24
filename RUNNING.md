@@ -49,6 +49,8 @@ export FVOCI_STORAGE_DIR='/path/to/persistent/fvoci-storage'
 cargo run --bin fvoci-server
 ```
 
+The current durability implementation requires the server account to read/search every ancestor of the storage directory up to `/`, as well as write within it, because those directory entries are synchronized. Validate permissions for the actual service account before deployment.
+
 Local attachment storage must be on persistent storage. A new empty directory
 does not restore the files referenced by an existing database. Uploads retain
 their original bytes separately from derived extraction results; native
