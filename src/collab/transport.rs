@@ -329,6 +329,17 @@ async fn handle_socket(
     let mut auth_wait = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
         auth_deadline,
     )));
+    let mut shutdown_rx = hub.subscribe_shutdown();
+    let mut shutdown_wait = Box::pin(async move {
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+            if shutdown_rx.changed().await.is_err() {
+                break;
+            }
+        }
+    });
     let mut collab_authenticated = false;
     let mut pre_auth_outbound = PreAuthOutboundAllowance::new(config);
     let mut inbound_window_start = Instant::now();
@@ -337,6 +348,20 @@ async fn handle_socket(
     loop {
         tokio::select! {
             _ = auth_wait.as_mut(), if !collab_authenticated => {
+                break;
+            }
+            // Current live join (authenticated room), not the sticky collab_authenticated
+            // flag: a socket that authenticated then lost its room must still drop the
+            // permit on shutdown. Live joins keep actor-driven close/commit ordering.
+            _ = shutdown_wait.as_mut(), if !matches!(joined_room, Some((_, _, true, _))) => {
+                send_close(
+                    &mut sender,
+                    1012,
+                    "service restart",
+                    send_deadline,
+                    max_frame_bytes,
+                )
+                .await;
                 break;
             }
             room_event = events_rx.recv() => {
@@ -545,6 +570,28 @@ async fn handle_socket(
                                         .await;
                                         break;
                                     }
+                                    AuthAttempt::Unavailable => {
+                                        send_close(
+                                            &mut sender,
+                                            1011,
+                                            "collab unavailable",
+                                            send_deadline,
+                                            max_frame_bytes,
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                    AuthAttempt::Restarting => {
+                                        send_close(
+                                            &mut sender,
+                                            1012,
+                                            "service restart",
+                                            send_deadline,
+                                            max_frame_bytes,
+                                        )
+                                        .await;
+                                        break;
+                                    }
                                 }
                             }
                         } else {
@@ -578,6 +625,28 @@ async fn handle_socket(
                                         &mut sender,
                                         1013,
                                         "pre-auth outbound exhausted",
+                                        send_deadline,
+                                        max_frame_bytes,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                                FirstRoom::Unavailable => {
+                                    send_close(
+                                        &mut sender,
+                                        1011,
+                                        "collab unavailable",
+                                        send_deadline,
+                                        max_frame_bytes,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                                FirstRoom::Restarting => {
+                                    send_close(
+                                        &mut sender,
+                                        1012,
+                                        "service restart",
                                         send_deadline,
                                         max_frame_bytes,
                                     )
@@ -666,6 +735,8 @@ async fn first_room_from_frame(
                 routing: routing_key,
             },
             AuthAttempt::Closed => FirstRoom::Closed,
+            AuthAttempt::Unavailable => FirstRoom::Unavailable,
+            AuthAttempt::Restarting => FirstRoom::Restarting,
         }
     } else {
         FirstRoom::Pending {
@@ -688,6 +759,8 @@ enum FirstRoom {
     },
     None,
     Closed,
+    Unavailable,
+    Restarting,
 }
 
 enum AuthAttempt {
@@ -697,6 +770,14 @@ enum AuthAttempt {
     },
     Denied,
     Closed,
+    /// Operational join failure (`EngineUnavailable`, `WriterStale`, `RoomFull`,
+    /// or `DbError`). Close 1011 `"collab unavailable"` with no auth frame so a
+    /// Hocuspocus 4.6 provider reconnects (`onClose` + `shouldConnect`) instead
+    /// of emitting `authenticationFailed`.
+    Unavailable,
+    /// Hub is shutting down. Close 1012 so an unauthenticated socket releases
+    /// its permit instead of waiting out `auth_wait_ms`.
+    Restarting,
 }
 
 fn signal_pre_auth_close(cancel: &watch::Sender<Option<ConnectionCancel>>) {
@@ -758,13 +839,21 @@ async fn try_authenticate(
     .await
     {
         Ok(Ok(admission)) => admission,
-        _ => {
+        Ok(Err(_)) => {
             if !send_auth_denied(pre_auth_outbound, events, routing_key, "not found") {
                 signal_pre_auth_close(cancel);
                 return AuthAttempt::Closed;
             }
             return AuthAttempt::Denied;
         }
+        // sqlx/pool failure is not an access decision. Source `onAuthenticate`
+        // throws during the auth phase (client `authenticationFailed`). Mapping
+        // that to PermissionDenied here would be a false denial, so this path
+        // closes 1011 (or 1012 while shutting down) instead. Intentional
+        // difference; the two `JoinError::DbError` call sites cannot be split
+        // without a new variant in room.rs.
+        Err(_) if hub.is_shutting_down() => return AuthAttempt::Restarting,
+        Err(_) => return AuthAttempt::Unavailable,
     };
     let read_only = admission.read_only;
     let join = RoomJoin {
@@ -808,13 +897,18 @@ async fn try_authenticate(
             }
             AuthAttempt::Denied
         }
-        Err(_) => {
-            if !send_auth_denied(pre_auth_outbound, events, routing_key, "unauthorized") {
-                signal_pre_auth_close(cancel);
-                return AuthAttempt::Closed;
-            }
-            AuthAttempt::Denied
-        }
+        Err(
+            JoinError::EngineUnavailable
+            | JoinError::WriterStale
+            | JoinError::RoomFull
+            | JoinError::DbError,
+        ) if hub.is_shutting_down() => AuthAttempt::Restarting,
+        Err(
+            JoinError::EngineUnavailable
+            | JoinError::WriterStale
+            | JoinError::RoomFull
+            | JoinError::DbError,
+        ) => AuthAttempt::Unavailable,
     }
 }
 

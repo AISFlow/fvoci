@@ -209,6 +209,17 @@ impl CollabHub {
         let _ = self.idle_stop.send(true);
     }
 
+    /// Becomes `true` when [`Self::begin_shutdown`] runs. Transport waits on this
+    /// so unauthenticated sockets can close instead of holding a permit until
+    /// `auth_wait_ms`.
+    pub fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
+        self.idle_stop.subscribe()
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
     pub fn shutdown_progress(&self) -> ShutdownProgress {
         let rooms = self.rooms.try_read().map(|guard| guard.len()).ok();
         let sockets_held = self
@@ -257,11 +268,6 @@ impl CollabHub {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
-    }
-
-    #[cfg(feature = "db-tests")]
-    pub fn is_shutting_down(&self) -> bool {
-        self.shutting_down.load(Ordering::Acquire)
     }
 
     #[cfg(feature = "db-tests")]
@@ -948,13 +954,18 @@ impl CollabHub {
     }
 
     async fn forget_closed_room(&self, key: RoomKey) {
-        let slot = {
-            let mut rooms = self.rooms.write().await;
-            rooms.remove(&key)
+        let Some(slot) = self.rooms.read().await.get(&key).cloned() else {
+            return;
         };
-        if let Some(slot) = slot {
-            slot.ready.notify_waiters();
+        *slot.phase.lock().await = RoomPhase::Failed;
+        let mut rooms = self.rooms.write().await;
+        if rooms
+            .get(&key)
+            .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
+        {
+            rooms.remove(&key);
         }
+        slot.ready.notify_waiters();
     }
 
     async fn take_live_rooms_for_shutdown(&self) -> Vec<(RoomKey, LiveRoom)> {

@@ -991,6 +991,254 @@ async fn collab_nonmember_is_denied() {
     harness.cleanup().await;
 }
 
+async fn wait_for_unavailable_close_without_auth_denied(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = ws_close_code(&frame);
+                assert_eq!(
+                    code, 1011,
+                    "operational join failure CloseFrame {code} ({:?}), expected 1011; reason {:?}",
+                    frame.code, frame.reason
+                );
+                assert!(
+                    frame.reason.to_string().contains("collab unavailable"),
+                    "Close 1011 reason must be collab unavailable, got {:?}",
+                    frame.reason
+                );
+                return;
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("Close without code, expected CloseFrame 1011 collab unavailable");
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::Auth(AuthMessage::PermissionDenied { reason }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    panic!(
+                        "operational join failure must not send PermissionDenied ({reason}); expected Close 1011"
+                    );
+                }
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::Auth(AuthMessage::Authenticated { scope }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    panic!("operational join failure must not authenticate (scope={scope})");
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(None) => {
+                panic!("bare TCP EOF without CloseFrame, expected close code 1011");
+            }
+            Ok(Some(Err(err))) => {
+                panic!("websocket error before CloseFrame 1011: {err}");
+            }
+            Err(_) => {}
+        }
+    }
+    panic!("did not receive CloseFrame 1011 within {within:?}");
+}
+
+#[tokio::test]
+async fn collab_ws_writer_stale_lock_closes_1011_then_join_after_release() {
+    run_lifecycle_test(
+        "collab_ws_writer_stale_lock_closes_1011_then_join_after_release",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let held = RoomGuard::try_acquire(&wiki.session.pool, wiki.document_id)
+                .await
+                .expect("db")
+                .expect("room lock should be free");
+            let app =
+                fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+            let addr = spawn_server(app).await;
+            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let mut ws = connect_member(addr, &wiki.session.session_token).await;
+            ws.send(Message::Binary(auth_token_frame(&routing_key, 31).into()))
+                .await
+                .unwrap();
+            wait_for_unavailable_close_without_auth_denied(&mut ws, Duration::from_secs(5)).await;
+
+            held.release().await;
+            let mut recovered = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut recovered, &routing_key, 32).await;
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_ws_pending_room_writer_stale_closes_1011() {
+    run_lifecycle_test("collab_ws_pending_room_writer_stale_closes_1011", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let held = RoomGuard::try_acquire(&wiki.session.pool, wiki.document_id)
+            .await
+            .expect("db")
+            .expect("room lock should be free");
+        let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+        let addr = spawn_server(app).await;
+        let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+        let mut ws = connect_member(addr, &wiki.session.session_token).await;
+        ws.send(Message::Binary(
+            sync_step1_frame(&routing_key, &[0, 0]).into(),
+        ))
+        .await
+        .unwrap();
+        ws.send(Message::Binary(auth_token_frame(&routing_key, 33).into()))
+            .await
+            .unwrap();
+        wait_for_unavailable_close_without_auth_denied(&mut ws, Duration::from_secs(5)).await;
+        held.release().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
+    run_lifecycle_test(
+        "collab_ws_missing_helper_closes_1011_then_valid_join",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let other = setup_wiki_doc(&harness).await;
+            let missing =
+                std::env::temp_dir().join(format!("fvoci-f7-missing-engine-{}", Uuid::now_v7()));
+            let mut cfg = test_collab_config(4, 30_000);
+            cfg.engine_bin = missing;
+            let app = fvoci_server::http::router(
+                collab_app_state_with_config(&harness.app_url, cfg).await,
+                None,
+            );
+            let addr = spawn_server(app).await;
+            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let mut ws = connect_member(addr, &wiki.session.session_token).await;
+            ws.send(Message::Binary(auth_token_frame(&routing_key, 41).into()))
+                .await
+                .unwrap();
+            wait_for_unavailable_close_without_auth_denied(&mut ws, Duration::from_secs(5)).await;
+
+            let healthy =
+                fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+            let healthy_addr = spawn_server(healthy).await;
+            let other_key = room_key(other.session.workspace_id, other.document_id);
+            let mut recovered = connect_member(healthy_addr, &other.session.session_token).await;
+            auth_and_join(&mut recovered, &other_key, 42).await;
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_ws_room_full_closes_1011_without_auth_denied() {
+    run_lifecycle_test(
+        "collab_ws_room_full_closes_1011_without_auth_denied",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let docs = setup_wiki_doc_batch(&harness, 2).await;
+            let mut cfg = test_collab_config(1, 30_000);
+            cfg.max_collab_sockets = 8;
+            let app = fvoci_server::http::router(
+                collab_app_state_with_config(&harness.app_url, cfg).await,
+                None,
+            );
+            let addr = spawn_server(app).await;
+            let first_key = room_key(docs[0].session.workspace_id, docs[0].document_id);
+            let mut first = connect_member(addr, &docs[0].session.session_token).await;
+            auth_and_join(&mut first, &first_key, 51).await;
+            let second_key = room_key(docs[1].session.workspace_id, docs[1].document_id);
+            let mut second = connect_member(addr, &docs[1].session.session_token).await;
+            second
+                .send(Message::Binary(auth_token_frame(&second_key, 52).into()))
+                .await
+                .unwrap();
+            wait_for_unavailable_close_without_auth_denied(&mut second, Duration::from_secs(5))
+                .await;
+            drop(first);
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_ws_true_access_denial_stays_auth_frame() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let outsider = setup_owner_session(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut ws = connect_member(addr, &outsider.session_token).await;
+    ws.send(Message::Binary(auth_token_frame(&routing_key, 7).into()))
+        .await
+        .unwrap();
+    let frame = recv_document_frame(&mut ws, 4).await.expect("denial frame");
+    match frame {
+        WireFrame::Document {
+            message: DocumentMessage::Auth(AuthMessage::PermissionDenied { reason }),
+            ..
+        } => assert_eq!(reason, "not found"),
+        other => panic!("true access denial must be PermissionDenied, got {other:?}"),
+    }
+    match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
+        Ok(Some(Ok(Message::Close(Some(frame))))) => {
+            panic!(
+                "true access denial must not Close {}, expected the socket to stay for retry",
+                ws_close_code(&frame)
+            );
+        }
+        Ok(Some(Ok(Message::Close(None)))) | Ok(None) => {
+            panic!("true access denial must not close the socket");
+        }
+        _ => {}
+    }
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_ws_unsupported_kind_stays_auth_frame() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = CollabRoomName {
+        workspace_id: wiki.session.workspace_id,
+        kind: CollabKind::Task,
+        resource_id: wiki.document_id,
+    }
+    .routing_key();
+    let mut ws = connect_member(addr, &wiki.session.session_token).await;
+    ws.send(Message::Binary(auth_token_frame(&routing_key, 8).into()))
+        .await
+        .unwrap();
+    let frame = recv_document_frame(&mut ws, 4)
+        .await
+        .expect("unsupported kind frame");
+    match frame {
+        WireFrame::Document {
+            message: DocumentMessage::Auth(AuthMessage::PermissionDenied { reason }),
+            ..
+        } => assert_eq!(reason, "unsupported kind"),
+        other => panic!("unsupported kind must be PermissionDenied, got {other:?}"),
+    }
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn collab_two_clients_update_persists_and_broadcasts() {
     let harness = TestDb::bootstrap().await;

@@ -12,12 +12,14 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
-use futures_util::{FutureExt, SinkExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use fvoci_server::collab::hub::{CollabHub, RoomLifecyclePhase};
 use fvoci_server::collab::room::{
     AuthenticatedConnection, CollabSession, ConnectionLease, JoinError, RoomJoin,
 };
-use fvoci_server::collab::wire::{CollabKind, CollabRoomName};
+use fvoci_server::collab::wire::{
+    AuthMessage, CollabKind, CollabRoomName, DocumentMessage, WireFrame,
+};
 use fvoci_server::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
 use fvoci_server::db::context::lock_key_from_uuid;
 use sqlx::postgres::PgPoolOptions;
@@ -436,6 +438,14 @@ fn spawn_server_process(
     harness: &TestDb,
     deadline_ms: u64,
 ) -> (OwnedChild, SocketAddr, Arc<Mutex<Vec<String>>>) {
+    spawn_server_process_with_auth_wait(harness, deadline_ms, None)
+}
+
+fn spawn_server_process_with_auth_wait(
+    harness: &TestDb,
+    deadline_ms: u64,
+    auth_wait_ms: Option<u64>,
+) -> (OwnedChild, SocketAddr, Arc<Mutex<Vec<String>>>) {
     let engine = fvoci_server::collab::config::require_collab_engine_for_tests();
     let logs = Arc::new(Mutex::new(Vec::new()));
     let mut command = Command::new(server_bin());
@@ -453,6 +463,9 @@ fn spawn_server_process(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(auth_wait_ms) = auth_wait_ms {
+        command.env("FVOCI_COLLAB_AUTH_WAIT_MS", auth_wait_ms.to_string());
+    }
     let mut child = command.spawn().expect("spawn fvoci-server");
     let stderr = child.stderr.take().expect("stderr");
     let stdout = child.stdout.take().expect("stdout");
@@ -850,5 +863,91 @@ async fn process_http_drain_deadline_exits_nonzero() {
             run.retain_child(child);
         })
     })
+    .await;
+}
+
+async fn wait_for_restart_close_without_auth_denied(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = u16::from(frame.code);
+                assert!(
+                    code == 1012 || code == 1001,
+                    "pre-auth shutdown CloseFrame {code} ({:?}), expected 1012 or 1001; reason {:?}",
+                    frame.code, frame.reason
+                );
+                return;
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("Close without code, expected CloseFrame 1012/1001");
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::Auth(AuthMessage::PermissionDenied { reason }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    panic!(
+                        "pre-auth shutdown must not send PermissionDenied ({reason}); expected Close 1012"
+                    );
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(None) => panic!("bare TCP EOF without CloseFrame, expected 1012/1001"),
+            Ok(Some(Err(err))) => panic!("websocket error before CloseFrame 1012: {err}"),
+            Err(_) => {}
+        }
+    }
+    panic!("did not receive CloseFrame 1012/1001 within {within:?}");
+}
+
+#[tokio::test]
+async fn process_sigterm_releases_pre_auth_socket_before_auth_wait() {
+    run_shutdown_test(
+        "process_sigterm_releases_pre_auth_socket_before_auth_wait",
+        |run| {
+            Box::pin(async {
+                let wiki = setup_wiki_doc(&run.inner.harness).await;
+                let deadline_ms = 800u64;
+                let auth_wait_ms = 5_000u64;
+                let (mut child, addr, logs) = spawn_server_process_with_auth_wait(
+                    &run.inner.harness,
+                    deadline_ms,
+                    Some(auth_wait_ms),
+                );
+                let mut ws = support::connect_member(addr, &wiki.session.session_token).await;
+                let signaled = Instant::now();
+                child.send_sigterm();
+                wait_for_restart_close_without_auth_denied(
+                    &mut ws,
+                    Duration::from_millis(deadline_ms),
+                )
+                .await;
+                let status = wait_for_exit(
+                    &mut child,
+                    Duration::from_millis(deadline_ms.saturating_mul(2) + 1_000),
+                );
+                let elapsed = signaled.elapsed();
+                assert!(
+                    status.success(),
+                    "pre-auth SIGTERM must exit 0 before auth_wait, got {status}; logs={:?}",
+                    logs.lock().unwrap()
+                );
+                assert!(
+                    elapsed < Duration::from_millis(auth_wait_ms),
+                    "pre-auth socket must not hold shutdown for auth_wait, elapsed={elapsed:?} auth_wait_ms={auth_wait_ms}"
+                );
+                drop(ws);
+                run.retain_child(child);
+            })
+        },
+    )
     .await;
 }
