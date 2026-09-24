@@ -133,3 +133,8 @@ required-features = ["db-tests"]
 name = "collab_shutdown"
 path = "tests/collab_shutdown.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "api_token_integration"
+path = "tests/api_token_integration.rs"
+required-features = ["db-tests"]

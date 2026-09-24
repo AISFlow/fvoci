@@ -12,8 +12,7 @@ use uuid::Uuid;
 use crate::api::dto::{LookupItemOutput, LookupListResponse};
 use crate::auth::session::SessionUser;
 use crate::db::lookup::{lookup_display_id, LookupDbError};
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
-use crate::http::guard::reject_bearer;
+use crate::error::{AppError, ProblemCode};
 use crate::http::rate_limit::peer_ip;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
@@ -42,7 +41,6 @@ async fn lookup_display_id_route(
     Path((workspace_id, display_id)): Path<(Uuid, String)>,
     query: Result<Query<LookupQuery>, QueryRejection>,
 ) -> Result<Json<LookupListResponse>, AppError> {
-    reject_bearer(&headers)?;
     if display_id.trim().is_empty() || display_id.chars().count() > 64 {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
@@ -55,7 +53,14 @@ async fn lookup_display_id_route(
     {
         return Err(AppError::rate_limited(retry_after));
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Any,
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     if let Err(retry_after) = state
         .rate_limiter
@@ -98,21 +103,14 @@ async fn lookup_display_id_route(
 
 async fn require_session(
     state: &AppState,
+    headers: &HeaderMap,
     jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
+    access: crate::http::authz::Access,
+    workspace_id: Option<Uuid>,
+) -> Result<(SessionUser, Uuid, Uuid), AppError> {
+    let auth =
+        crate::http::authz::require_request_auth(state, headers, jar, access, workspace_id).await?;
+    Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
 fn parse_user_id(value: &str) -> Result<Uuid, AppError> {

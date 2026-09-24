@@ -627,6 +627,18 @@ async fn patch_me_rejects_bearer_token_auth() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _) = setup_session(&harness).await;
     let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        "/api/v1/auth/me",
+        None,
+        None,
+        &[("authorization", "Bearer deadbeef")],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "authentication_required");
+    let (status, body, _, _) = json_request(
         app,
         "GET",
         "/api/v1/auth/me",
@@ -636,8 +648,8 @@ async fn patch_me_rejects_bearer_token_auth() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["code"], "not_found");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["email"], "admin@example.com");
     harness.cleanup().await;
 }
 
@@ -852,7 +864,7 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .unwrap();
     assert_eq!(
         versions,
-        i64::from(fvoci_server::db::migrate::latest_migration_version())
+        fvoci_server::db::migrate::compiled_migration_count()
     );
     admin.close().await;
     harness.cleanup().await;
@@ -878,7 +890,7 @@ async fn versioned_migrations_are_idempotent_on_rerun() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::latest_migration_version())
+        fvoci_server::db::migrate::compiled_migration_count()
     );
     admin.close().await;
     harness.cleanup().await;
@@ -2167,7 +2179,7 @@ async fn migration_001_002_database_upgrades_to_003() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::latest_migration_version())
+        fvoci_server::db::migrate::compiled_migration_count()
     );
     reapply_app_grants(&harness.admin_url, &harness.role_name).await;
     let app_pool = pool::connect_app(&harness.app_url).await.unwrap();

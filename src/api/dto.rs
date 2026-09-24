@@ -227,6 +227,65 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ApiTokenCreateBody {
+    pub name: String,
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub unlimited: Option<bool>,
+    #[serde(default)]
+    pub service: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MeApiTokenCreateBody {
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ApiTokenOutput {
+    pub id: String,
+    pub workspace_id: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub user_id: Option<String>,
+    pub name: String,
+    pub scopes: Vec<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ApiTokenCreatedOutput {
+    pub id: String,
+    pub workspace_id: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub user_id: Option<String>,
+    pub name: String,
+    pub scopes: Vec<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ApiTokenListResponse {
+    pub items: Vec<ApiTokenOutput>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]

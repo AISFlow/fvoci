@@ -52,3 +52,16 @@ export function invitationPublicQuery(token: string) {
     retry: false,
   });
 }
+
+export function workspaceApiTokensQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["workspaces", workspaceId, "api-tokens"],
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/api-tokens", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    retry: false,
+  });
+}

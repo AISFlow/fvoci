@@ -992,8 +992,8 @@ async fn invalid_auth_and_input_are_source_errors() {
         &[("authorization", "Bearer nope")],
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["code"], "not_found");
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["items"].as_array().is_some());
     harness.cleanup().await;
 }
 

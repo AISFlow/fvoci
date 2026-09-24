@@ -29,8 +29,8 @@ use crate::db::attachments::{
     authorize_upload_part, commit_upload_part, complete_upload, create_upload, get_attachment_meta,
     open_download, resume_upload, AttachmentDbError, AttachmentRow, CreateUploadInput,
 };
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
-use crate::http::guard::{check_origin, reject_bearer};
+use crate::error::{AppError, ProblemCode};
+use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::validate::utf16_len;
@@ -125,11 +125,16 @@ async fn create_upload_session(
     body: Result<Json<CreateAttachmentUploadBody>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     validate_create_upload(&body)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let rate_key = format!("upload_create:{}", user_id);
     if let Err(retry_after) = state
         .rate_limiter
@@ -193,13 +198,18 @@ async fn put_upload_part(
     Path((workspace_id, attachment_id, part_number)): Path<(Uuid, Uuid, i32)>,
     body: Body,
 ) -> Result<Response, AppError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if !(1..=10_000).contains(&part_number) {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Any,
+        Some(workspace_id),
+    )
+    .await?;
     let auth = authorize_upload_part(
         &state.auth.db.pool,
         workspace_id,
@@ -295,9 +305,14 @@ async fn resume_upload_session(
     jar: CookieJar,
     Path((workspace_id, attachment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ResumeAttachmentUploadResponse>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Any,
+        Some(workspace_id),
+    )
+    .await?;
     let result = resume_upload(
         &state.auth.db.pool,
         &state.storage,
@@ -350,11 +365,16 @@ async fn complete_upload_session(
     body: Result<Json<CompleteAttachmentUploadBody>, JsonRejection>,
 ) -> Result<Json<AttachmentOutput>, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     validate_complete_parts(&body.parts)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Any,
+        Some(workspace_id),
+    )
+    .await?;
     let parts = body
         .parts
         .into_iter()
@@ -398,9 +418,14 @@ async fn get_attachment(
     jar: CookieJar,
     Path((workspace_id, attachment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<AttachmentOutput>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Any,
+        Some(workspace_id),
+    )
+    .await?;
     let result = get_attachment_meta(
         &state.auth.db.pool,
         workspace_id,
@@ -468,10 +493,15 @@ async fn serve_download(
     query: &AttachmentDownloadQuery,
     head_only: bool,
 ) -> Result<Response, AppError> {
-    reject_bearer(headers)?;
     original_download_or_error(query)?;
-    let (user, session_id) = require_session(state, jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        state,
+        headers,
+        jar,
+        crate::http::authz::Access::Session,
+        None,
+    )
+    .await?;
     let result = open_download(
         &state.auth.db.pool,
         workspace_id,
@@ -589,25 +619,14 @@ fn map_storage_error(err: StorageError) -> AppError {
 
 async fn require_session(
     state: &AppState,
+    headers: &HeaderMap,
     jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
-}
-
-fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
-    Uuid::parse_str(value).map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))
+    access: crate::http::authz::Access,
+    workspace_id: Option<Uuid>,
+) -> Result<(SessionUser, Uuid, Uuid), AppError> {
+    let auth =
+        crate::http::authz::require_request_auth(state, headers, jar, access, workspace_id).await?;
+    Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
 fn internal(err: sqlx::Error) -> AppError {

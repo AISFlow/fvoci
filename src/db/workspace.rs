@@ -160,7 +160,7 @@ pub(crate) async fn record_workspace_event_and_audit(
     Ok(())
 }
 
-async fn membership_role(
+pub(crate) async fn membership_role(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,

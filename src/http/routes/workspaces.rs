@@ -15,8 +15,8 @@ use crate::api::dto::{
 };
 use crate::auth::session::SessionUser;
 use crate::db::workspace::{WorkspaceDbError, WorkspaceRole};
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
-use crate::http::guard::{check_origin, reject_bearer};
+use crate::error::{AppError, ProblemCode};
+use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::validate::{normalize_slug, validate_given_name};
@@ -45,9 +45,14 @@ async fn list_my_workspaces(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<WorkspaceListResponse>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, _) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, _) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Session,
+        None,
+    )
+    .await?;
     let listed = crate::db::workspace::list_workspaces_for_user(&state.auth.db.pool, user_id)
         .await
         .map_err(internal)?;
@@ -74,9 +79,14 @@ async fn get_workspace(
     jar: CookieJar,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Json<WorkspaceMetaResponse>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Any,
+        Some(workspace_id),
+    )
+    .await?;
     let result = crate::db::workspace::get_workspace_meta(
         &state.auth.db.pool,
         workspace_id,
@@ -97,9 +107,14 @@ async fn list_members(
     jar: CookieJar,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Json<MembersResponse>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::WorkspaceManage),
+        Some(workspace_id),
+    )
+    .await?;
     let result =
         crate::db::workspace::list_members(&state.auth.db.pool, workspace_id, user_id, session_id)
             .await
@@ -130,15 +145,20 @@ async fn patch_workspace(
     body: Result<Json<PatchWorkspaceBody>, JsonRejection>,
 ) -> Result<Json<WorkspaceMetaResponse>, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if body.name.is_none() {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     let name = body.name.as_ref().unwrap();
     validate_given_name(name.trim())?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::WorkspaceManage),
+        Some(workspace_id),
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::update_workspace_meta(
         &state.auth.db.pool,
@@ -164,12 +184,17 @@ async fn create_workspace(
     body: Result<Json<CreateWorkspaceBody>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     validate_given_name(body.name.trim())?;
     let slug = normalize_slug(&body.slug)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Session,
+        None,
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::create_workspace_as_instance_admin(
         &state.auth.db.pool,
@@ -197,10 +222,15 @@ async fn personal_workspace(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<WorkspaceMetaResponse>, AppError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Session,
+        None,
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::ensure_personal_workspace(
         &state.auth.db.pool,
@@ -225,11 +255,17 @@ async fn patch_member(
     body: Result<Json<MemberRoleBody>, JsonRejection>,
 ) -> Result<Json<MemberResponse>, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let next_role = WorkspaceRole::parse(&body.role)
         .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput))?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Session,
+        None,
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::set_member_role(
@@ -262,9 +298,15 @@ async fn remove_member(
     jar: CookieJar,
     Path((workspace_id, target_user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<OkResponse>, AppError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Session,
+        None,
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::remove_member(
@@ -315,21 +357,14 @@ fn map_workspace_error(err: WorkspaceDbError, create_route: bool) -> AppError {
 
 async fn require_session(
     state: &AppState,
+    headers: &HeaderMap,
     jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
+    access: crate::http::authz::Access,
+    workspace_id: Option<Uuid>,
+) -> Result<(SessionUser, Uuid, Uuid), AppError> {
+    let auth =
+        crate::http::authz::require_request_auth(state, headers, jar, access, workspace_id).await?;
+    Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
 fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
