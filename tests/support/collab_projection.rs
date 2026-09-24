@@ -628,16 +628,37 @@ pub async fn wait_for_stateless_exact(
     let deadline = tokio::time::Instant::now() + within;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if let Some(WireFrame::Document {
-            message: DocumentMessage::Stateless(body),
-            ..
-        }) = recv_document_frame(ws, 1).await
-        {
-            if body == expected {
-                return true;
+        match tokio::time::timeout(remaining.min(Duration::from_millis(200)), ws.next()).await {
+            Err(_) => continue,
+            Ok(None) => panic!("bare TCP EOF while waiting for stateless {expected}"),
+            Ok(Some(Err(err))) => {
+                panic!("websocket error while waiting for stateless {expected}: {err}")
             }
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                panic!("CloseFrame while waiting for stateless {expected}: {frame:?}")
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => match fvoci_server::collab::wire::decode(&bytes)
+            {
+                Ok(WireFrame::Document {
+                    message: DocumentMessage::Stateless(body),
+                    ..
+                }) if body == expected => return true,
+                Ok(WireFrame::Document {
+                    message: DocumentMessage::Stateless(body),
+                    ..
+                }) if body.starts_with("persisted:") || body.starts_with("persist-failed:") => {
+                    panic!("unexpected persist stateless {body}, expected {expected}");
+                }
+                Ok(WireFrame::Document {
+                    message: DocumentMessage::Close { reason },
+                    ..
+                }) => {
+                    panic!("document Close while waiting for stateless {expected}: {reason:?}")
+                }
+                Ok(_) | Err(_) => {}
+            },
+            Ok(Some(Ok(_))) => {}
         }
-        tokio::time::sleep(remaining.min(Duration::from_millis(20))).await;
     }
     false
 }
@@ -702,8 +723,48 @@ pub async fn wait_for_sync_applied(
     false
 }
 
+pub async fn wait_for_sync_update(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(200)), ws.next()).await {
+            Err(_) => continue,
+            Ok(None) => panic!("bare TCP EOF while waiting for Sync Update"),
+            Ok(Some(Err(err))) => panic!("websocket error while waiting for Sync Update: {err}"),
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                panic!("CloseFrame while waiting for Sync Update: {frame:?}")
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if matches!(
+                    fvoci_server::collab::wire::decode(&bytes),
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Update,
+                            ..
+                        }),
+                        ..
+                    })
+                ) {
+                    return true;
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+    false
+}
+
 pub fn ws_close_code(frame: &CloseFrame) -> u16 {
     u16::from(frame.code)
+}
+
+fn close_reason_str(frame: &CloseFrame) -> &str {
+    frame.reason.as_str()
 }
 
 pub async fn wait_for_ws_close_code(
@@ -713,9 +774,12 @@ pub async fn wait_for_ws_close_code(
     expected: u16,
     within: Duration,
     reject_sync_update: bool,
+    expected_reason: Option<&str>,
 ) {
     let deadline = tokio::time::Instant::now() + within;
     let mut saw_applied_false = false;
+    let mut saw_applied_true = false;
+    let mut last_frame = String::from("none");
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
@@ -726,6 +790,13 @@ pub async fn wait_for_ws_close_code(
                     "CloseFrame {code} ({:?}), expected {expected}; reason {:?}",
                     frame.code, frame.reason
                 );
+                if let Some(expected_reason) = expected_reason {
+                    assert_eq!(
+                        close_reason_str(&frame),
+                        expected_reason,
+                        "CloseFrame {expected} reason mismatch"
+                    );
+                }
                 assert!(
                     !saw_applied_false,
                     "must not receive applied:false before CloseFrame {expected}"
@@ -738,12 +809,20 @@ pub async fn wait_for_ws_close_code(
             Ok(None) => panic!("bare TCP EOF, expected CloseFrame {expected}"),
             Ok(Some(Err(err))) => panic!("websocket error before CloseFrame {expected}: {err}"),
             Ok(Some(Ok(Message::Binary(bytes)))) => {
+                last_frame = format!("{:?}", fvoci_server::collab::wire::decode(&bytes));
                 if let Ok(WireFrame::Document {
                     message: DocumentMessage::SyncStatus { applied: false },
                     ..
                 }) = fvoci_server::collab::wire::decode(&bytes)
                 {
                     saw_applied_false = true;
+                }
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::SyncStatus { applied: true },
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    saw_applied_true = true;
                 }
                 if reject_sync_update
                     && matches!(
@@ -760,10 +839,196 @@ pub async fn wait_for_ws_close_code(
                     panic!("rejected update must not broadcast Sync Update before close");
                 }
             }
+            Ok(Some(Ok(other))) => {
+                last_frame = format!("non-binary {other:?}");
+            }
+            Err(_) => {}
+        }
+    }
+    panic!(
+        "timed out waiting for CloseFrame {expected}; saw_applied_false={saw_applied_false}; saw_applied_true={saw_applied_true}; last={last_frame}"
+    );
+}
+
+pub async fn wait_for_writer_close_without_peer_update(
+    writer: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    peer: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    expected: u16,
+    within: Duration,
+    expected_reason: Option<&str>,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut saw_applied_false = false;
+    let mut last_frame = String::from("none");
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let slice = remaining.min(Duration::from_millis(100));
+        tokio::select! {
+            biased;
+            msg = tokio::time::timeout(slice, writer.next()) => {
+                match msg {
+                    Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                        let code = ws_close_code(&frame);
+                        assert_eq!(
+                            code, expected,
+                            "CloseFrame {code} ({:?}), expected {expected}; reason {:?}",
+                            frame.code, frame.reason
+                        );
+                        if let Some(expected_reason) = expected_reason {
+                            assert_eq!(
+                                close_reason_str(&frame),
+                                expected_reason,
+                                "CloseFrame {expected} reason mismatch"
+                            );
+                        }
+                        assert!(
+                            !saw_applied_false,
+                            "must not receive applied:false before CloseFrame {expected}"
+                        );
+                        return;
+                    }
+                    Ok(Some(Ok(Message::Close(None)))) => {
+                        panic!("Close without code, expected CloseFrame {expected}");
+                    }
+                    Ok(None) => panic!("bare TCP EOF, expected CloseFrame {expected}"),
+                    Ok(Some(Err(err))) => {
+                        panic!("websocket error before CloseFrame {expected}: {err}")
+                    }
+                    Ok(Some(Ok(Message::Binary(bytes)))) => {
+                        last_frame = format!("{:?}", fvoci_server::collab::wire::decode(&bytes));
+                        if let Ok(WireFrame::Document {
+                            message: DocumentMessage::SyncStatus { applied: false },
+                            ..
+                        }) = fvoci_server::collab::wire::decode(&bytes)
+                        {
+                            saw_applied_false = true;
+                        }
+                        if matches!(
+                            fvoci_server::collab::wire::decode(&bytes),
+                            Ok(WireFrame::Document {
+                                message: DocumentMessage::Sync(SyncMessage {
+                                    step: SyncStep::Update,
+                                    ..
+                                }),
+                                ..
+                            })
+                        ) {
+                            panic!("rejected update must not broadcast Sync Update before close");
+                        }
+                    }
+                    Ok(Some(Ok(_))) | Err(_) => {}
+                }
+            }
+            msg = tokio::time::timeout(slice, peer.next()) => {
+                match msg {
+                    Ok(Some(Ok(Message::Binary(bytes)))) => {
+                        if let Ok(WireFrame::Document {
+                            message: DocumentMessage::SyncStatus { applied: false },
+                            ..
+                        }) = fvoci_server::collab::wire::decode(&bytes)
+                        {
+                            panic!("peer must not receive applied:false for a pre-commit engine close");
+                        }
+                        if matches!(
+                            fvoci_server::collab::wire::decode(&bytes),
+                            Ok(WireFrame::Document {
+                                message: DocumentMessage::Sync(SyncMessage {
+                                    step: SyncStep::Update,
+                                    ..
+                                }),
+                                ..
+                            })
+                        ) {
+                            panic!("peer must not receive Sync Update for a pre-commit rejected edit");
+                        }
+                    }
+                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) | Err(_) => {}
+                    Ok(Some(Ok(_))) => {}
+                }
+            }
+        }
+    }
+    panic!(
+        "timed out waiting for writer CloseFrame {expected}; saw_applied_false={saw_applied_false}; last={last_frame}"
+    );
+}
+
+pub async fn wait_for_committed_update_then_close(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    expected: u16,
+    within: Duration,
+    expected_reason: Option<&str>,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut saw_applied_false = false;
+    let mut saw_update = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = ws_close_code(&frame);
+                assert_eq!(
+                    code, expected,
+                    "CloseFrame {code} ({:?}), expected {expected}; reason {:?}",
+                    frame.code, frame.reason
+                );
+                if let Some(expected_reason) = expected_reason {
+                    assert_eq!(
+                        close_reason_str(&frame),
+                        expected_reason,
+                        "CloseFrame {expected} reason mismatch"
+                    );
+                }
+                assert!(
+                    !saw_applied_false,
+                    "must not receive applied:false before CloseFrame {expected}"
+                );
+                assert!(
+                    saw_update,
+                    "committed update must broadcast Sync Update before CloseFrame {expected}"
+                );
+                return;
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("Close without code, expected CloseFrame {expected} after Sync Update");
+            }
+            Ok(None) => panic!("bare TCP EOF, expected CloseFrame {expected} after Sync Update"),
+            Ok(Some(Err(err))) => {
+                panic!("websocket error before CloseFrame {expected} after Sync Update: {err}")
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::SyncStatus { applied: false },
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    saw_applied_false = true;
+                }
+                if matches!(
+                    fvoci_server::collab::wire::decode(&bytes),
+                    Ok(WireFrame::Document {
+                        message: DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Update,
+                            ..
+                        }),
+                        ..
+                    })
+                ) {
+                    saw_update = true;
+                }
+            }
             Ok(Some(Ok(_))) | Err(_) => {}
         }
     }
-    panic!("timed out waiting for CloseFrame {expected}; saw_applied_false={saw_applied_false}");
+    panic!(
+        "timed out waiting for CloseFrame {expected} after committed Update; saw_update={saw_update}; saw_applied_false={saw_applied_false}"
+    );
 }
 
 pub async fn join_denied(

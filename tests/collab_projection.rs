@@ -22,9 +22,10 @@ use support::{
     auth_and_join, complete_sync_handshake, connect_member, delete_only_base_update,
     delete_only_json_after, delete_only_json_before, delete_only_update, engine_fixture,
     expectations, get_document_body, join_denied, persist_barrier, recv_document_frame,
-    setup_wiki_doc, stateless_frame, sync_update_frame, test_collab_config,
-    tiny_output_project_collab_config, wait_for_stateless_exact, wait_for_sync_applied,
-    wait_for_ws_close_code, TestDb, TestRun, WikiDocFixture,
+    setup_wiki_doc, stateless_frame, sync_step1_frame, sync_update_frame, test_collab_config,
+    tiny_output_project_collab_config, wait_for_committed_update_then_close,
+    wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update, wait_for_ws_close_code,
+    wait_for_writer_close_without_peer_update, TestDb, TestRun, WikiDocFixture,
 };
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -338,8 +339,22 @@ async fn collab_primary_unhealthy_skips_projection_until_catch_up() {
                     wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
                     "durable commit must still ack when primary reload fails"
                 );
-                wait_for_ws_close_code(&mut writer, 1011, Duration::from_secs(5), true).await;
-                wait_for_ws_close_code(&mut reader, 1011, Duration::from_secs(5), true).await;
+                wait_for_ws_close_code(
+                    &mut writer,
+                    1011,
+                    Duration::from_secs(5),
+                    true,
+                    Some("primary engine unhealthy"),
+                )
+                .await;
+                wait_for_ws_close_code(
+                    &mut reader,
+                    1011,
+                    Duration::from_secs(5),
+                    true,
+                    Some("primary engine unhealthy"),
+                )
+                .await;
 
                 let body_before = get_document_body(
                     addr,
@@ -396,6 +411,10 @@ async fn collab_derived_event_failure_preserves_binary_then_retries() {
                     .await
                     .unwrap();
                 assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
+
+                let mut second = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut second, &routing_key, 98).await;
+                complete_sync_handshake(&mut second, &routing_key).await;
 
                 let body_stale = get_document_body(
                     addr,
@@ -609,15 +628,6 @@ async fn collab_operational_project_failure_recovers_primary() {
                     "durable append must ack when project is operationally malformed"
                 );
 
-                let body = get_document_body(
-                    addr,
-                    &wiki.session.session_token,
-                    wiki.session.workspace_id,
-                    wiki.document_id,
-                )
-                .await;
-                assert_eq!(body["contentJson"], empty_document_json());
-
                 let load = fvoci_server::db::collab::load_collab_document(
                     &wiki.session.pool,
                     wiki.session.workspace_id,
@@ -651,6 +661,15 @@ async fn collab_operational_project_failure_recovers_primary() {
                     .await,
                     "operational project failure must yield persist-failed"
                 );
+
+                let body = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(body["contentJson"], empty_document_json());
 
                 let admin = PgPoolOptions::new()
                     .max_connections(2)
@@ -693,6 +712,8 @@ async fn collab_projection_recovery_failure_closes_room() {
 
             let mut writer = connect_member(addr, &wiki.session.session_token).await;
             auth_and_join(&mut writer, &routing_key, 85).await;
+            let mut peer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut peer, &routing_key, 88).await;
             arm_force_primary_load_fail(wiki.document_id).await;
             writer
                 .send(Message::Binary(
@@ -704,7 +725,21 @@ async fn collab_projection_recovery_failure_closes_room() {
                 wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
                 "durable append must ack before room closes when recovery reload fails"
             );
-            wait_for_ws_close_code(&mut writer, 1011, Duration::from_secs(5), true).await;
+            wait_for_ws_close_code(
+                &mut writer,
+                1011,
+                Duration::from_secs(5),
+                true,
+                Some("primary engine unhealthy"),
+            )
+            .await;
+            wait_for_committed_update_then_close(
+                &mut peer,
+                1011,
+                Duration::from_secs(5),
+                Some("primary engine unhealthy"),
+            )
+            .await;
 
             let mut denied = connect_member(addr, &wiki.session.session_token).await;
             join_denied(&mut denied, &routing_key, 86).await;
@@ -762,6 +797,8 @@ async fn collab_post_commit_stale_writer_acks_before_close() {
 
             let mut writer = connect_member(addr, &wiki.session.session_token).await;
             auth_and_join(&mut writer, &routing_key, 89).await;
+            let mut peer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut peer, &routing_key, 99).await;
             let (reached_rx, proceed_tx) = arm_append_projection_barrier(wiki.document_id).await;
             writer
                 .send(Message::Binary(
@@ -789,7 +826,21 @@ async fn collab_post_commit_stale_writer_acks_before_close() {
                 wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
                 "committed append must ack before post-commit stale-writer close"
             );
-            wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), true).await;
+            wait_for_ws_close_code(
+                &mut writer,
+                1008,
+                Duration::from_secs(5),
+                true,
+                Some("writer stale"),
+            )
+            .await;
+            wait_for_committed_update_then_close(
+                &mut peer,
+                1008,
+                Duration::from_secs(5),
+                Some("writer stale"),
+            )
+            .await;
         })
     })
     .await;
@@ -822,15 +873,6 @@ async fn collab_deterministic_project_failure_recovers_primary() {
                     "durable append must still ack when project is deterministically skipped"
                 );
 
-                let body = get_document_body(
-                    addr,
-                    &wiki.session.session_token,
-                    wiki.session.workspace_id,
-                    wiki.document_id,
-                )
-                .await;
-                assert_eq!(body["contentJson"], empty_document_json());
-
                 let mut second = connect_member(addr, &wiki.session.session_token).await;
                 auth_and_join(&mut second, &routing_key, 82).await;
                 complete_sync_handshake(&mut second, &routing_key).await;
@@ -852,6 +894,15 @@ async fn collab_deterministic_project_failure_recovers_primary() {
                     "persist must succeed after deterministic project skip"
                 );
 
+                let body = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(body["contentJson"], empty_document_json());
+
                 let follow_up = delete_only_update();
                 second
                     .send(Message::Binary(
@@ -862,6 +913,167 @@ async fn collab_deterministic_project_failure_recovers_primary() {
                 assert!(
                     wait_for_sync_applied(&mut second, Duration::from_secs(5)).await,
                     "follow-up edit must ack after primary recovery"
+                );
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_unloaded_primary_precommit_update_closes_without_broadcast() {
+    run_test(
+        "collab_unloaded_primary_precommit_update_closes_without_broadcast",
+        |run| {
+            Box::pin(async {
+                let app_url = run.harness.app_url.clone();
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let addr = run
+                    .spawn_router(&app_url, tiny_output_project_collab_config(4, 30_000))
+                    .await;
+                let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let initial = delete_only_base_update();
+
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 101).await;
+                let mut peer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut peer, &routing_key, 102).await;
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &initial).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+                    "initial committed content must ack before persist recovery"
+                );
+                assert!(
+                    wait_for_sync_update(&mut peer, Duration::from_secs(5)).await,
+                    "peer must receive the committed initial Sync Update"
+                );
+
+                let barrier_id = Uuid::now_v7();
+                writer
+                    .send(Message::Binary(
+                        stateless_frame(&routing_key, &format!("persist:{barrier_id}")).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_stateless_exact(
+                        &mut writer,
+                        &format!("persisted:{barrier_id}"),
+                        Duration::from_secs(5),
+                    )
+                    .await,
+                    "initial persist must finish after committed content"
+                );
+
+                arm_force_primary_load_fail(wiki.document_id).await;
+                let request_id = Uuid::now_v7();
+                writer
+                    .send(Message::Binary(
+                        stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_stateless_exact(
+                        &mut writer,
+                        &format!("persisted:{request_id}"),
+                        Duration::from_secs(5),
+                    )
+                    .await,
+                    "tiny-output persist must succeed while leaving primary unloaded"
+                );
+
+                let load_after_persist = fvoci_server::db::collab::load_collab_document(
+                    &wiki.session.pool,
+                    wiki.session.workspace_id,
+                    wiki.session.user_id,
+                    wiki.session.session_id,
+                    wiki.document_id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let persist_snapshot = load_after_persist.snapshot.clone();
+                let persist_tail_seq = load_after_persist.tail_seq;
+                let persist_tail: Vec<Vec<u8>> = load_after_persist
+                    .tail
+                    .iter()
+                    .map(|row| row.payload.clone())
+                    .collect();
+                assert!(
+                    persist_tail_seq >= 1,
+                    "persist must compact real committed content, tail_seq={persist_tail_seq}"
+                );
+
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &delete_only_update()).into(),
+                    ))
+                    .await
+                    .unwrap();
+                wait_for_writer_close_without_peer_update(
+                    &mut writer,
+                    &mut peer,
+                    1011,
+                    Duration::from_secs(5),
+                    Some("engine unavailable"),
+                )
+                .await;
+                peer.send(Message::Binary(
+                    sync_step1_frame(&routing_key, &[0, 0]).into(),
+                ))
+                .await
+                .unwrap();
+                wait_for_ws_close_code(
+                    &mut peer,
+                    1011,
+                    Duration::from_secs(5),
+                    true,
+                    Some("engine unavailable"),
+                )
+                .await;
+
+                let load_after_close = fvoci_server::db::collab::load_collab_document(
+                    &wiki.session.pool,
+                    wiki.session.workspace_id,
+                    wiki.session.user_id,
+                    wiki.session.session_id,
+                    wiki.document_id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(load_after_close.snapshot, persist_snapshot);
+                assert_eq!(load_after_close.tail_seq, persist_tail_seq);
+                assert_eq!(
+                    load_after_close
+                        .tail
+                        .iter()
+                        .map(|row| row.payload.clone())
+                        .collect::<Vec<_>>(),
+                    persist_tail,
+                    "pre-commit 1011 must not append the rejected update"
+                );
+
+                disarm_force_primary_load_fail(wiki.document_id).await;
+
+                let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut recovery, &routing_key, 103).await;
+                complete_sync_handshake(&mut recovery, &routing_key).await;
+                recovery
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &delete_only_update()).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_sync_applied(&mut recovery, Duration::from_secs(5)).await,
+                    "follow-up edit must ack after unloaded primary is restored"
                 );
             })
         },
@@ -905,15 +1117,6 @@ async fn collab_manual_persist_fails_when_derived_event_insert_blocked() {
                     .unwrap();
                 assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
 
-                let body_after_edit = get_document_body(
-                    addr,
-                    &wiki.session.session_token,
-                    wiki.session.workspace_id,
-                    wiki.document_id,
-                )
-                .await;
-                assert_eq!(body_after_edit["contentJson"], empty_document_json());
-
                 writer
                     .send(Message::Binary(
                         stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
@@ -938,6 +1141,15 @@ async fn collab_manual_persist_fails_when_derived_event_insert_blocked() {
                     saw_persist_failed,
                     "manual persist must fail when derived event insert is blocked"
                 );
+
+                let body_after_edit = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(body_after_edit["contentJson"], empty_document_json());
 
                 sqlx::query("DROP TRIGGER fvoci_test_manual_persist_derive_fail ON fvoci.events")
                     .execute(&admin)
