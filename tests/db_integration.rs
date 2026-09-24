@@ -862,7 +862,7 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions, 5);
+    assert_eq!(versions, 6);
     admin.close().await;
     harness.cleanup().await;
 }
@@ -885,7 +885,7 @@ async fn versioned_migrations_are_idempotent_on_rerun() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 5);
+    assert_eq!(versions.0, 6);
     admin.close().await;
     harness.cleanup().await;
 }
@@ -2158,7 +2158,7 @@ async fn migration_001_002_database_upgrades_to_003() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 5);
+    assert_eq!(versions.0, 6);
     reapply_app_grants(&harness.admin_url, &harness.role_name).await;
     let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
     let mut tx = app_pool.begin().await.unwrap();
