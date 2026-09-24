@@ -20,12 +20,27 @@ const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
 const APP_ROLE_GRANTS: &str = include_str!("../../scripts/grant-app-role.sql");
 const APP_ROLE_PLACEHOLDER: &str = ":\"app_role\"";
 
-const SCHEMA_GATE_OPERATOR_HINT: &str =
+pub const SCHEMA_GATE_OPERATOR_HINT: &str =
     "run `fvoci-migrate` then `fvoci-migrate --grant-app-role <app-role>` before starting fvoci-server";
 
 /// Latest migration version compiled into this binary.
 pub fn latest_migration_version() -> i32 {
     MIGRATIONS.last().map(|(_, version)| *version).unwrap_or(0)
+}
+
+pub fn schema_version_gate(actual: Option<i32>, expected: i32) -> Result<(), String> {
+    match actual {
+        Some(version) if version == expected => Ok(()),
+        Some(version) if version > expected => Err(format!(
+            "database schema version {version} is newer than this binary ({expected}); deploy a matching fvoci-server"
+        )),
+        Some(version) => Err(format!(
+            "database schema version {version} is behind compiled version {expected}; {SCHEMA_GATE_OPERATOR_HINT}"
+        )),
+        None => Err(format!(
+            "database has no applied migrations (expected version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
+        )),
+    }
 }
 
 /// Verifies the connected database matches the compiled migration set.
@@ -40,15 +55,7 @@ pub async fn assert_schema_current(pool: &PgPool) -> Result<(), String> {
                     "cannot read fvoci.schema_migrations ({error}); {SCHEMA_GATE_OPERATOR_HINT}"
                 )
             })?;
-    match actual {
-        Some(version) if version == expected => Ok(()),
-        Some(version) => Err(format!(
-            "database schema version {version} is behind compiled version {expected}; {SCHEMA_GATE_OPERATOR_HINT}"
-        )),
-        None => Err(format!(
-            "database has no applied migrations (expected version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
-        )),
-    }
+    schema_version_gate(actual, expected)
 }
 
 // PostgreSQL grants EXECUTE to PUBLIC when a function is created. Revoke it for
@@ -372,8 +379,25 @@ mod tests {
     }
 
     #[test]
-    fn latest_migration_version_matches_last_entry() {
-        assert_eq!(latest_migration_version(), MIGRATIONS.last().unwrap().1);
+    fn schema_version_gate_distinguishes_ahead_behind_and_empty() {
+        let expected = latest_migration_version();
+        assert!(schema_version_gate(Some(expected), expected).is_ok());
+        let behind = schema_version_gate(Some(expected - 1), expected).unwrap_err();
+        assert!(
+            behind.contains(&format!("behind compiled version {expected}")),
+            "{behind}"
+        );
+        assert!(behind.contains(SCHEMA_GATE_OPERATOR_HINT), "{behind}");
+        let ahead = schema_version_gate(Some(expected + 1), expected).unwrap_err();
+        assert!(
+            ahead.contains(&format!("newer than this binary ({expected})")),
+            "{ahead}"
+        );
+        assert!(ahead.contains("deploy a matching fvoci-server"), "{ahead}");
+        assert!(!ahead.contains("fvoci-migrate"), "{ahead}");
+        let empty = schema_version_gate(None, expected).unwrap_err();
+        assert!(empty.contains("no applied migrations"), "{empty}");
+        assert!(empty.contains(SCHEMA_GATE_OPERATOR_HINT), "{empty}");
     }
 
     #[test]

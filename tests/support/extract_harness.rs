@@ -573,6 +573,8 @@ pub fn spawn_server_process_guarded(
     // with only the extractor settings explicitly requested by this fixture.
     command.env_remove("FVOCI_EXTRACTOR_BIN");
     command.env_remove("FVOCI_EXTRACT_POLL_SECS");
+    command.env_remove("DATABASE_URL");
+    command.env_remove("FVOCI_MIGRATION_URL");
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

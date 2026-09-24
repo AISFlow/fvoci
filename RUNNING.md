@@ -29,12 +29,18 @@ Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. Th
 
 ## Migrate and grant before server
 
-Run migrations and app-role grants **before** starting or upgrading `fvoci-server`. The server
-connects only through `DATABASE_APP_URL`, verifies that `fvoci.schema_migrations` matches the
-compiled migration set, and exits nonzero with an operator message if the schema is missing, stale,
-or unreadable. It does not run migrations and ignores `DATABASE_URL` / `FVOCI_MIGRATION_URL` if set.
+Run migrations and app-role grants **before** starting or upgrading `fvoci-server`. Stop old
+instances first: old binaries refuse a newer `fvoci.schema_migrations` version and cannot restart
+after migrate. Upgrade order is stop old → `fvoci-migrate` → `fvoci-migrate --grant-app-role` →
+start new; mixed-version rolling restart is not supported. The server connects only through
+`DATABASE_APP_URL`, requires the applied version to equal the compiled set, and exits nonzero
+with an operator message if the schema is missing, behind, newer than this binary, or unreadable.
+A newer database needs a matching or newer `fvoci-server`; do not run migrate from the old
+binary. The gate does not detect stale grants after a later migration; re-run `--grant-app-role`
+after every upgrade that applies new migrations. The server does not run migrations and ignores
+`DATABASE_URL` / `FVOCI_MIGRATION_URL` if set.
 
-## Provision app role (after migrate)
+## Create role, migrate, then grant
 
 Create the dedicated app LOGIN role first, then run migrations, then apply grants:
 
@@ -68,7 +74,7 @@ export FVOCI_STORAGE_DIR='/path/to/persistent/fvoci-storage'
 cargo run --bin fvoci-server
 ```
 
-Only `DATABASE_APP_URL` is required for the server process.
+The only database URL the server process requires is `DATABASE_APP_URL`.
 
 The current durability implementation requires the server account to read/search every ancestor of the storage directory up to `/`, as well as write within it, because those directory entries are synchronized. Validate permissions for the actual service account before deployment.
 
@@ -82,7 +88,7 @@ After applying migration 006 to an existing Rust slice database, re-run
 `fvoci-migrate --grant-app-role` for the same application role before serving requests.
 This does not provide an importer for the original TypeScript installation.
 
-The app pool is closed explicitly on shutdown and startup failures.
+The app pool is closed explicitly on shutdown and before exiting on startup gate failures.
 
 Rate limits use the direct socket peer. Forwarded headers are ignored; behind a reverse proxy, clients share the proxy's IP bucket. Trusted-proxy configuration and distributed limits are not implemented yet.
 

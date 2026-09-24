@@ -566,6 +566,8 @@ fn spawn_server_process_with_auth_wait(
     let mut command = Command::new(server_bin());
     command
         .env("DATABASE_APP_URL", &harness.app_url)
+        .env_remove("DATABASE_URL")
+        .env_remove("FVOCI_MIGRATION_URL")
         .env("PASSWORD_PEPPER_KEYS", PEPPER)
         .env("PASSWORD_PEPPER_ACTIVE_KEY_ID", "test")
         .env("FVOCI_BIND", "127.0.0.1:0")

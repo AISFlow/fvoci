@@ -92,9 +92,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
 
     let pool = pool::connect_app(&config.app_database_url).await?;
-    migrate::assert_schema_current(&pool)
-        .await
-        .map_err(|message| -> Box<dyn std::error::Error> { message.into() })?;
+    if let Err(message) = migrate::assert_app_role(&pool).await {
+        pool.close().await;
+        return Err(message.into());
+    }
+    if let Err(message) = migrate::assert_schema_current(&pool).await {
+        pool.close().await;
+        return Err(message.into());
+    }
     run_server(config, pool).await
 }
 
@@ -169,7 +174,6 @@ where
 }
 
 async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    migrate::assert_app_role(&pool).await?;
     // Replace the default SIGTERM/SIGINT handlers before bind or any readiness
     // advertisement. Tokio buffers signals received between install and recv.
     let shutdown_signals = install_shutdown_signals()?;

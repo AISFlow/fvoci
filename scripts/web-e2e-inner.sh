@@ -64,6 +64,8 @@ export FVOCI_E2E_ADMIN_DATABASE_URL="$DATABASE_URL"
 export FVOCI_E2E_SERVER_BIN="$SERVER_BIN"
 export FVOCI_E2E_RESULT_DIR="$RUN_DIR"
 
+unset DATABASE_URL FVOCI_MIGRATION_URL
+
 if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]]; then
   cd "$ROOT/apps/web"
   "$ROOT/apps/web/node_modules/.bin/playwright" test \
@@ -71,7 +73,6 @@ if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]]; then
   exit 0
 fi
 
-unset DATABASE_URL FVOCI_MIGRATION_URL
 "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
