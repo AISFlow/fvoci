@@ -42,16 +42,36 @@ fn deserialize_optional_non_null_uuid<'de, D: Deserializer<'de>>(
     }
 }
 
+fn strict_date<E: serde::de::Error>(value: String) -> Result<NaiveDate, E> {
+    crate::tasks::parse_iso_date(&value).ok_or_else(|| {
+        serde::de::Error::invalid_value(serde::de::Unexpected::Str(&value), &"YYYY-MM-DD date")
+    })
+}
+
 fn deserialize_optional_non_null_date<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<NaiveDate>, D::Error> {
-    match Option::<NaiveDate>::deserialize(deserializer)? {
-        Some(value) => Ok(Some(value)),
+    match Option::<String>::deserialize(deserializer)? {
+        Some(value) => strict_date(value).map(Some),
         None => Err(serde::de::Error::invalid_type(
             serde::de::Unexpected::Unit,
             &"date",
         )),
     }
+}
+
+fn deserialize_nullable_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NaiveDate>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(strict_date)
+        .transpose()
+}
+
+fn deserialize_double_option_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<NaiveDate>>, D::Error> {
+    deserialize_nullable_date(deserializer).map(Some)
 }
 
 fn deserialize_optional_recurrence<'de, D: Deserializer<'de>>(
@@ -631,8 +651,10 @@ fn default_task_priority() -> String {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct ExpectedDatesBody {
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    #[serde(deserialize_with = "deserialize_nullable_date")]
     pub start_date: Option<NaiveDate>,
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    #[serde(deserialize_with = "deserialize_nullable_date")]
     pub due_date: Option<NaiveDate>,
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub due_at: Option<DateTime<Utc>>,
@@ -652,9 +674,9 @@ pub struct PatchTaskBody {
     pub priority: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
     pub status_id: Option<Uuid>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[serde(default, deserialize_with = "deserialize_double_option_date")]
     pub start_date: Option<Option<NaiveDate>>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[serde(default, deserialize_with = "deserialize_double_option_date")]
     pub due_date: Option<Option<NaiveDate>>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub due_at: Option<Option<DateTime<Utc>>>,

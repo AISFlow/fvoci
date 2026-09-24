@@ -203,51 +203,46 @@ fn allowed_child_types(task_type: &str) -> &'static [&'static str] {
     }
 }
 
-fn days_in_month(year: i32, month: u32) -> u32 {
+fn days_in_month(year: i32, month: u32) -> Option<u32> {
     use chrono::Datelike;
     let (next_year, next_month) = if month == 12 {
-        (year + 1, 1)
+        (year.checked_add(1)?, 1)
     } else {
         (year, month + 1)
     };
-    NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .and_then(|d| d.pred_opt())
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)?
+        .pred_opt()
         .map(|d| d.day())
-        .expect("valid month length")
 }
 
 /// Matches source `shiftDate` monthly rollover (e.g. 2026-01-31 → 2026-03-03).
-fn shift_recurrence_date_monthly(date: NaiveDate) -> NaiveDate {
+fn shift_recurrence_date_monthly(date: NaiveDate) -> Option<NaiveDate> {
     use chrono::Datelike;
-    let year = date.year();
-    let month = date.month();
-    let day = date.day();
-    let (new_year, new_month) = if month == 12 {
-        (year + 1, 1)
+    let (new_year, new_month) = if date.month() == 12 {
+        (date.year().checked_add(1)?, 1)
     } else {
-        (year, month + 1)
+        (date.year(), date.month() + 1)
     };
-    let days_in_target = days_in_month(new_year, new_month);
-    if day <= days_in_target {
-        NaiveDate::from_ymd_opt(new_year, new_month, day).expect("valid monthly shift")
-    } else {
-        let overflow = day - days_in_target;
-        let (overflow_year, overflow_month) = if new_month == 12 {
-            (new_year + 1, 1)
-        } else {
-            (new_year, new_month + 1)
-        };
-        NaiveDate::from_ymd_opt(overflow_year, overflow_month, overflow)
-            .expect("valid monthly overflow shift")
+    let days_in_target = days_in_month(new_year, new_month)?;
+    if date.day() <= days_in_target {
+        return NaiveDate::from_ymd_opt(new_year, new_month, date.day());
     }
+    let (overflow_year, overflow_month) = if new_month == 12 {
+        (new_year.checked_add(1)?, 1)
+    } else {
+        (new_year, new_month + 1)
+    };
+    NaiveDate::from_ymd_opt(overflow_year, overflow_month, date.day() - days_in_target)
 }
 
-fn shift_recurrence_date(date: NaiveDate, kind: &str) -> NaiveDate {
+/// Input dates are limited to four-digit years (`tasks::parse_iso_date`), so a
+/// shift cannot leave chrono's range; it is still checked instead of panicking.
+fn shift_recurrence_date(date: NaiveDate, kind: &str) -> Option<NaiveDate> {
     match kind {
-        "daily" => date + chrono::Duration::days(1),
-        "weekly" => date + chrono::Duration::days(7),
+        "daily" => date.checked_add_signed(chrono::Duration::days(1)),
+        "weekly" => date.checked_add_signed(chrono::Duration::days(7)),
         "monthly" => shift_recurrence_date_monthly(date),
-        _ => date,
+        _ => Some(date),
     }
 }
 
@@ -1455,14 +1450,20 @@ async fn spawn_recurring_next_task(
     let parent_id = spawn_fields
         .map(|fields| fields.parent_id)
         .unwrap_or(task.record.parent_id);
-    let next_start = task
-        .record
-        .start_date
-        .map(|date| shift_recurrence_date(date, recurrence_kind));
-    let next_due = task
-        .record
-        .due_date
-        .map(|date| shift_recurrence_date(date, recurrence_kind));
+    let shift = |date: Option<NaiveDate>| match date {
+        None => Ok(None),
+        Some(date) => shift_recurrence_date(date, recurrence_kind)
+            .map(Some)
+            .ok_or(ProjectDbError::Conflict),
+    };
+    let next_start = match shift(task.record.start_date) {
+        Ok(date) => date,
+        Err(err) => return Ok(Err(err)),
+    };
+    let next_due = match shift(task.record.due_date) {
+        Ok(date) => date,
+        Err(err) => return Ok(Err(err)),
+    };
     let recurrence = json!({ "kind": recurrence_kind });
     sqlx::query(
         r#"

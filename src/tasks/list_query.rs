@@ -143,9 +143,9 @@ pub fn parse_task_list_query(
 fn parse_optional_date(raw: Option<&str>) -> Result<Option<NaiveDate>, TaskListQueryError> {
     match raw {
         None => Ok(None),
-        Some(value) => NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        Some(value) => crate::tasks::parse_iso_date(value)
             .map(Some)
-            .map_err(|_| TaskListQueryError::InvalidInput),
+            .ok_or(TaskListQueryError::InvalidInput),
     }
 }
 

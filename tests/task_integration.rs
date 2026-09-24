@@ -3105,7 +3105,7 @@ async fn task_move_to_done_spawns_recurring_occurrence_with_source_parity() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    let rows: Vec<(
+    type SpawnRow = (
         uuid::Uuid,
         String,
         String,
@@ -3114,7 +3114,8 @@ async fn task_move_to_done_spawns_recurring_occurrence_with_source_parity() {
         Option<serde_json::Value>,
         Option<String>,
         uuid::Uuid,
-    )> = sqlx::query_as(
+    );
+    let rows: Vec<SpawnRow> = sqlx::query_as(
         "SELECT t.id, t.title, t.priority, t.start_date, t.due_date, t.recurrence, t.estimate::text, t.status_id FROM fvoci.tasks t WHERE t.project_id=$1 ORDER BY number",
     )
     .bind(pid)
@@ -3411,6 +3412,40 @@ async fn task_concurrent_move_to_done_on_recurring_task_spawns_once() {
     assert!(r1.0 == StatusCode::OK || r2.0 == StatusCode::OK);
     assert_eq!(after.0, before + 1, "only one recurring spawn must succeed");
 
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_dates_accept_only_source_iso_format() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    for bad in ["2026-1-5", "+262142-12-31", "2026-02-30"] {
+        let (st, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+            Some(json!({"title": "T", "dueDate": bad})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "create dueDate {bad}");
+    }
+    let t =
+        create_task_with_title(app.clone(), &cookie, ws, &project_id, json!({"title": "T"})).await;
+    let tid = t["id"].as_str().unwrap();
+    for bad in ["2026-1-5", "+262142-12-31"] {
+        let (st, _) = patch_task(app.clone(), ws, tid, json!({"dueDate": bad}), &cookie).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "patch dueDate {bad}");
+    }
+    let (st, body) = patch_task(
+        app.clone(),
+        ws,
+        tid,
+        json!({"dueDate": "9999-12-31"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
     admin.close().await;
     harness.cleanup().await;
 }
