@@ -10,10 +10,11 @@
 ## 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
-최신 main `9c39532a0c3be57b60b93bade633219b5991d2c4`는 PR1–7의 수락 결과다.
+최신 main `125ef2568d17fba961e569a9d4c0bc007860a643`는 PR1–8의 수락 결과다.
 PR7 https://github.com/AISFlow/fvoci/pull/7 은 검토 HEAD04f67ae,
 CI 합성merge5a8d0aa(baseba19932)에서11job 성공 후 squash merge했다.
-실제 merged/main 반영을 확인했으며 post-merge CI는 진행 중이다.
+PR7의 실제 merged/main 반영과 post-merge11job 성공을 확인했다.
+PR8 native client 분리도 merged이며 해당 post-merge CI는 진행 중이다.
 협업은 검증된 opt-in 범위만 수락했다. 실제 OS IME, 과거 단발 브라우저 timeout의
 원인 및 전체 제품 동등성은 미완료다. 다음은 기존 wiki의 인가된 첨부 흐름이다.
 
@@ -22,7 +23,7 @@ CI 합성merge5a8d0aa(baseba19932)에서11job 성공 후 squash merge했다.
 | --- | --- | --- | --- | --- | --- |
 | 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 첫 slice 수락, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | PAT/OIDC/MFA·계정 생명주기·확장 정책 |
 | 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락, PR4 merged | 실제 앱 역할DB66·양 아키텍처·React·CI·독립 검토 | counts·quota·groups·members-list 등 |
-| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component 수락, PR2 merged | 실제 문서/native52+52·CI·독립 검토 | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
+| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component PR2 + 얇은 client PR8 수락 | native49+49/client6+6 양 아키텍처·CI·독립 검토 | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
 | 기본 위키 문서 | domains/documents | 생성·조회·metadata·현재 문서 권한 | 첫 backend/React 수락, PR5 merged | 실제 앱 역할DB13·UI·CI·독립 검토 | 댓글·공유·리비전·확장 문서 기능 |
 | 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 opt-in 수락 | x64/ARM64 lifecycle20/product56/projection19/shutdown7·React14·Opus 검토 | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계 추가 검증, 과거 단발 timeout 원인 미확정. 명시적 opt-in이며 전체 협업 수락 아님 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
@@ -1557,3 +1558,24 @@ CI에 client 정적/실행/graph 검사와 해당 source를 포함한 캐시 키
 Composer task3a54b691e844/ctx1ebeaac1d3ac는 rust-wiki-attachments의 backend,
 migration006/공통 연결 파일을 단독 소유한다. native/client와 frontend/CI는 제외.
 Grok은 release, target/vendor는 보존. Composer가 로컬 heavy slot을 이어받았다.
+
+
+PR8 https://github.com/AISFlow/fvoci/pull/8 수락: head aa95bb21348622cf084bcd1000dfa1c0965f07fe,
+base9c39532, CI 합성cb919a2. Rust35973687237/Web35973687287/
+Documents35973687203/Engine35973687192 총11job 성공. 양 아키텍처 client6×2와
+native(4+37+8)×2 실제 실행, 기존 React13/14 및 DB/협업 회귀 성공.
+Opus task7b0a6bc6e4b9/ctx6402be6b82ec 읽기 전용 delta 차단0, 검토자는
+테스트를 실행하지 않았다. expected-head squash merge125ef25 및 main 반영 확인.
+비차단 metadata pin 일치/README·VERIFY counts/default clippy는 다음 native
+수명주기 작업에 포함한다. 첨부 HTTP/추출 상태 제품 연결은 아직 미수락이다.
+
+현재 코디네이터 통합은 rust-attachment-integration, base125ef25다.
+Composer task3a54b691e844/ctx1ebeaac1d3ac (rust-wiki-attachments)는 실제
+wiki 첨부 backend+006migration+root 계약/설정, Grok task68ef73d3089d/
+ctxba282929dad4 (rust-extract-cancellation)는 native/client 취소·parent-death와
+해당 process 검사만 소유한다. 둘 다 구현 중이며 미수락이다. Composer가 로컬
+heavy slot을 소유하고 Grok은 native 검사 전 인계 요청한다. frontend/CI/진행
+기록은 코디네이터 소유; canonical Rust DTO 제출 이후 기존 React bridge를 연결한다.
+다음 명령: 검증된 orca-ide orchestration check로 두 dispatch 제출/질문 처리,
+고정 제출 SHA를 이 통합 branch에 하나씩 반영하고 관련 검사/Opus/PR 진행.
+원본/이전 retained 자원은 정리하지 않았고 완료 리뷰어는 모두 release했다.
