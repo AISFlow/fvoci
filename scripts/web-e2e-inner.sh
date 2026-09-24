@@ -71,6 +71,7 @@ if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]]; then
   exit 0
 fi
 
+unset DATABASE_URL FVOCI_MIGRATION_URL
 "$SERVER_BIN" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

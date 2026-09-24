@@ -13,7 +13,6 @@ pub const DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN: u32 = 120;
 
 pub struct Config {
     pub bind: SocketAddr,
-    pub migration_url: String,
     pub app_database_url: String,
     pub password_keys: Keyring,
     pub branding_name: String,
@@ -30,7 +29,6 @@ impl Clone for Config {
     fn clone(&self) -> Self {
         Self {
             bind: self.bind,
-            migration_url: self.migration_url.clone(),
             app_database_url: self.app_database_url.clone(),
             password_keys: self.password_keys.clone(),
             branding_name: self.branding_name.clone(),
@@ -48,7 +46,6 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("bind", &self.bind)
-            .field("migration_url", &"<redacted>")
             .field("app_database_url", &"<redacted>")
             .field("branding_name", &self.branding_name)
             .field("public_origin", &self.public_origin)
@@ -68,28 +65,15 @@ impl Config {
             .parse()
             .map_err(|e| format!("invalid FVOCI_BIND: {e}"))?;
 
-        let migration_url = env::var("DATABASE_URL")
-            .or_else(|_| env::var("FVOCI_MIGRATION_URL"))
-            .map_err(|_| "DATABASE_URL or FVOCI_MIGRATION_URL is required".to_string())?;
+        if env::var("DATABASE_URL").is_ok() || env::var("FVOCI_MIGRATION_URL").is_ok() {
+            tracing::warn!(
+                "DATABASE_URL/FVOCI_MIGRATION_URL is set but ignored by fvoci-server; use fvoci-migrate for schema changes"
+            );
+        }
 
         let app_database_url = env::var("DATABASE_APP_URL")
             .or_else(|_| env::var("FVOCI_APP_DATABASE_URL"))
-            .map_err(|_| {
-                "DATABASE_APP_URL is required and must not fall back to migration URL".to_string()
-            })?;
-
-        if app_database_url == migration_url {
-            return Err("DATABASE_APP_URL must differ from the migration owner URL".into());
-        }
-
-        let migration_role = database_role(&migration_url)?;
-        let app_role = database_role(&app_database_url)?;
-        if !migration_role.is_empty() && migration_role == app_role {
-            return Err(
-                "DATABASE_APP_URL must use a different database role than the migration owner"
-                    .into(),
-            );
-        }
+            .map_err(|_| "DATABASE_APP_URL is required".to_string())?;
 
         let pepper_keys = env::var("PASSWORD_PEPPER_KEYS").map_err(|_| {
             "PASSWORD_PEPPER_KEYS is required (JSON map of key id to 64-char hex)".to_string()
@@ -123,7 +107,6 @@ impl Config {
 
         Ok(Self {
             bind,
-            migration_url,
             app_database_url,
             password_keys,
             branding_name,
@@ -253,12 +236,6 @@ fn parse_shutdown_deadline_ms(raw: Option<&str>) -> Result<Duration, String> {
         return Err("FVOCI_SHUTDOWN_DEADLINE_MS must be at least 1".into());
     }
     Ok(Duration::from_millis(millis))
-}
-
-fn database_role(url: &str) -> Result<String, String> {
-    url::Url::parse(url)
-        .map(|parsed| parsed.username().to_string())
-        .map_err(|e| format!("invalid database url: {e}"))
 }
 
 #[cfg(test)]

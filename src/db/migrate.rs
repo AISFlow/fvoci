@@ -20,6 +20,37 @@ const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
 const APP_ROLE_GRANTS: &str = include_str!("../../scripts/grant-app-role.sql");
 const APP_ROLE_PLACEHOLDER: &str = ":\"app_role\"";
 
+const SCHEMA_GATE_OPERATOR_HINT: &str =
+    "run `fvoci-migrate` then `fvoci-migrate --grant-app-role <app-role>` before starting fvoci-server";
+
+/// Latest migration version compiled into this binary.
+pub fn latest_migration_version() -> i32 {
+    MIGRATIONS.last().map(|(_, version)| *version).unwrap_or(0)
+}
+
+/// Verifies the connected database matches the compiled migration set.
+pub async fn assert_schema_current(pool: &PgPool) -> Result<(), String> {
+    let expected = latest_migration_version();
+    let actual =
+        sqlx::query_scalar::<_, Option<i32>>("SELECT max(version) FROM fvoci.schema_migrations")
+            .fetch_one(pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "cannot read fvoci.schema_migrations ({error}); {SCHEMA_GATE_OPERATOR_HINT}"
+                )
+            })?;
+    match actual {
+        Some(version) if version == expected => Ok(()),
+        Some(version) => Err(format!(
+            "database schema version {version} is behind compiled version {expected}; {SCHEMA_GATE_OPERATOR_HINT}"
+        )),
+        None => Err(format!(
+            "database has no applied migrations (expected version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
+        )),
+    }
+}
+
 // PostgreSQL grants EXECUTE to PUBLIC when a function is created. Revoke it for
 // the migration owner's SECURITY DEFINER functions inside the same transaction
 // that created them, so no window exists before grant-app-role.sql runs.
@@ -338,6 +369,11 @@ mod tests {
                 "accepted migration {version:03} changed; add a new migration instead"
             );
         }
+    }
+
+    #[test]
+    fn latest_migration_version_matches_last_entry() {
+        assert_eq!(latest_migration_version(), MIGRATIONS.last().unwrap().1);
     }
 
     #[test]

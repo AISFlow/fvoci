@@ -565,7 +565,6 @@ fn spawn_server_process_with_auth_wait(
     std::fs::create_dir_all(&storage_root).expect("collab shutdown storage root");
     let mut command = Command::new(server_bin());
     command
-        .env("DATABASE_URL", &harness.admin_url)
         .env("DATABASE_APP_URL", &harness.app_url)
         .env("PASSWORD_PEPPER_KEYS", PEPPER)
         .env("PASSWORD_PEPPER_ACTIVE_KEY_ID", "test")

@@ -90,9 +90,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env()?;
-    migrate::run_migrations(&config.migration_url).await?;
 
     let pool = pool::connect_app(&config.app_database_url).await?;
+    migrate::assert_schema_current(&pool)
+        .await
+        .map_err(|message| -> Box<dyn std::error::Error> { message.into() })?;
     run_server(config, pool).await
 }
 

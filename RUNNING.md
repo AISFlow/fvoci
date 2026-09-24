@@ -10,8 +10,8 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Migration owner connection (superuser or schema owner). Used only by `fvoci-migrate` and startup migration — **never** for request handling. |
-| `DATABASE_APP_URL` | Application DML role (non-superuser, no `BYPASSRLS`). Required; must differ from `DATABASE_URL` in URL and role name. |
+| `DATABASE_URL` | Migration owner connection (superuser or schema owner). Used only by `fvoci-migrate` — **never** by `fvoci-server`. |
+| `DATABASE_APP_URL` | Application DML role (non-superuser, no `BYPASSRLS`). Required by the server; must use a dedicated app role, not the migration owner. |
 | `PASSWORD_PEPPER_KEYS` | JSON map of pepper key id → 64-char hex. |
 | `PASSWORD_PEPPER_ACTIVE_KEY_ID` | Active pepper id. |
 | `FVOCI_BIND` | Listen address (default `127.0.0.1:0`). |
@@ -26,6 +26,13 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
 
 Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. The crate uses SQLx `runtime-tokio-rustls`.
+
+## Migrate and grant before server
+
+Run migrations and app-role grants **before** starting or upgrading `fvoci-server`. The server
+connects only through `DATABASE_APP_URL`, verifies that `fvoci.schema_migrations` matches the
+compiled migration set, and exits nonzero with an operator message if the schema is missing, stale,
+or unreadable. It does not run migrations and ignores `DATABASE_URL` / `FVOCI_MIGRATION_URL` if set.
 
 ## Provision app role (after migrate)
 
@@ -53,10 +60,15 @@ Never grant the app role before the role exists. Keep database credentials and p
 
 ## Start server
 
+After `fvoci-migrate` and `fvoci-migrate --grant-app-role` succeed:
+
 ```sh
+export DATABASE_APP_URL='postgres://fvoci_app_prod:***@host:5432/fvoci?sslmode=require'
 export FVOCI_STORAGE_DIR='/path/to/persistent/fvoci-storage'
 cargo run --bin fvoci-server
 ```
+
+Only `DATABASE_APP_URL` is required for the server process.
 
 The current durability implementation requires the server account to read/search every ancestor of the storage directory up to `/`, as well as write within it, because those directory entries are synchronized. Validate permissions for the actual service account before deployment.
 
@@ -70,7 +82,7 @@ After applying migration 006 to an existing Rust slice database, re-run
 `fvoci-migrate --grant-app-role` for the same application role before serving requests.
 This does not provide an importer for the original TypeScript installation.
 
-Migrations run once at startup via the owner URL; the server connects only through `DATABASE_APP_URL`. The app pool is closed explicitly on shutdown and startup failures.
+The app pool is closed explicitly on shutdown and startup failures.
 
 Rate limits use the direct socket peer. Forwarded headers are ignored; behind a reverse proxy, clients share the proxy's IP bucket. Trusted-proxy configuration and distributed limits are not implemented yet.
 

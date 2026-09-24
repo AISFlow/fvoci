@@ -411,7 +411,6 @@ pub fn server_env_for_harness(
     extractor_bin: Option<&Path>,
 ) -> Vec<(String, String)> {
     let mut env = vec![
-        ("DATABASE_URL".into(), harness.admin_url.clone()),
         ("DATABASE_APP_URL".into(), harness.app_url.clone()),
         ("PASSWORD_PEPPER_KEYS".into(), PEPPER.to_string()),
         ("PASSWORD_PEPPER_ACTIVE_KEY_ID".into(), "test".to_string()),
