@@ -142,18 +142,24 @@ async fn wait_installed_shutdown_signals(mut signals: InstalledShutdownSignals) 
     }
 }
 
-async fn announce_listening_after_first_poll<F>(addr: SocketAddr, fut: F) -> F::Output
+/// Runs `announce` once, after the first poll of `fut` left it pending (the
+/// accept loop and shutdown wait are armed). A future that completes on its
+/// first poll never announces readiness.
+async fn announce_after_first_pending_poll<F, A>(fut: F, announce: A) -> F::Output
 where
     F: Future,
+    A: FnOnce(),
 {
     tokio::pin!(fut);
-    let mut announced = false;
+    let mut announce = Some(announce);
     poll_fn(move |cx| {
         let output = fut.as_mut().poll(cx);
-        if !announced {
-            announced = true;
-            eprintln!("fvoci-server listening on http://{addr}");
-            let _ = std::io::stderr().flush();
+        if output.is_pending() {
+            if let Some(announce) = announce.take() {
+                announce();
+            }
+        } else {
+            announce = None;
         }
         output
     })
@@ -211,8 +217,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
 
-    let serve = announce_listening_after_first_poll(
-        addr,
+    let serve = announce_after_first_pending_poll(
         axum::serve(
             listener,
             router(state, config.static_dir.clone())
@@ -242,6 +247,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             let _ = signaled_tx.send(started);
         })
         .into_future(),
+        move || {
+            eprintln!("fvoci-server listening on http://{addr}");
+            let _ = std::io::stderr().flush();
+        },
     );
 
     let mut serve_task = tokio::spawn(serve);
@@ -561,20 +570,44 @@ mod shutdown_outcome_tests {
     }
 
     #[tokio::test]
-    async fn listen_line_is_emitted_only_after_inner_future_is_polled() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    async fn readiness_is_announced_only_after_a_pending_first_poll() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::task::Poll;
 
-        let polled = Arc::new(AtomicBool::new(false));
-        let seen_poll = polled.clone();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let announced_after = Arc::new(AtomicUsize::new(usize::MAX));
+        let seen = polls.clone();
         let inner = poll_fn(move |cx| {
-            seen_poll.store(true, Ordering::SeqCst);
-            cx.waker().wake_by_ref();
-            Poll::Ready(())
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
         });
-        assert!(!polled.load(Ordering::SeqCst));
-        announce_listening_after_first_poll("127.0.0.1:0".parse().unwrap(), inner).await;
-        assert!(polled.load(Ordering::SeqCst));
+        let observed = polls.clone();
+        let record = announced_after.clone();
+        announce_after_first_pending_poll(inner, move || {
+            record.store(observed.load(Ordering::SeqCst), Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(
+            announced_after.load(Ordering::SeqCst),
+            1,
+            "announce must follow the first poll"
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn readiness_is_not_announced_when_first_poll_completes() {
+        let announced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = announced.clone();
+        announce_after_first_pending_poll(std::future::ready(()), move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+        assert!(!announced.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

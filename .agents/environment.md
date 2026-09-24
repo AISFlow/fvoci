@@ -104,14 +104,14 @@ term582f3fbb-7a5a-416d-921b-3ee6e6ebb2ac의 해당 고정 SHA 읽기 전용 검�
 교체한다. 주간 한도 확인은 더 이상 전환 조건이 아니다. 기존 검토의 모델·결과
 이력은 변경하지 않는다. 실행 경로는 검증된 Claude Code2.1.281이며, 앞선
 ctx9edaf2220d96 및 ctx2297b3adb75a의 요청·유효 Opus/medium 검증을 유지한다.
-새 검토도 실제 dispatch 설정을 대조한다. 코디네이터·구현·조사 역할은 불변이다.
+새 검토도 실제 dispatch 설정을 대조한다. 코디네이터·구현·조사 역할은 불변이다(13:00Z 이전 기록; 코디네이터는 아래 절에서 교체).
 
 ## 코디네이터 교체 (2026-09-24 13:00Z 이후)
 
 사용자 지시로 코디네이터를 Claude Code2.1.281 `claude-opus-5-5`, medium으로 교체했다.
-실제 세션 모델 ID `claude-opus-5-5[1m]`, `/effort medium` 설정을 확인했다. Orca Run
+실제 세션 모델 ID `claude-opus-5-5[1m]`(같은 모델의 1M context 변형이며 대체 모델이 아님), `/effort medium` 설정을 확인했다. Orca Run
 `run_b01d432a9dee`에 `run-use`로 이 terminal(term_7123bc52)을 바인딩했다. 위 표의 codex
-Astra 행은 과거 기록으로 보존한다. 독립 자문은 별도 Orca dispatch의 Claude Code
+Astra 코디네이터 행은 **과거** 기록으로 보존한다. 독립 자문은 별도 Orca dispatch의 Claude Code
 `claude-opus-5-5`/medium이며 launch requested/effective를 대조한다. 첫 재개 dispatch:
 Grok `ctx_c97ebb20c9b0`(requested/effective `cursor-grok-4.6-high`), Composer
 `ctx_cfdccc3dbce5`/`ctx_a796df4ecf21`(requested/effective `composer-2.5`).

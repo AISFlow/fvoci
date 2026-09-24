@@ -85,6 +85,8 @@ impl ShutdownRun {
     }
 }
 
+const LOG_PUMP_EOF_WITHIN: Duration = Duration::from_secs(5);
+
 struct OwnedChild {
     child: Option<Child>,
     helper_pids: Vec<u32>,
@@ -112,10 +114,21 @@ impl OwnedChild {
             .status();
     }
 
-    fn join_log_pumps(&mut self) {
+    /// Joins the stdout/stderr pumps once they reach EOF. Returns false (and
+    /// detaches them) if a descendant still holds the pipes after `within`.
+    fn join_log_pumps_within(&mut self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while self.log_pumps.iter().any(|pump| !pump.is_finished()) {
+            if Instant::now() >= deadline {
+                self.log_pumps.clear();
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         for pump in self.log_pumps.drain(..) {
             let _ = pump.join();
         }
+        true
     }
 
     fn kill_and_wait(&mut self) {
@@ -132,7 +145,6 @@ impl OwnedChild {
                 }
             }
         }
-        self.join_log_pumps();
         self.helper_pids
             .retain(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
         for helper in &self.helper_pids {
@@ -141,6 +153,8 @@ impl OwnedChild {
                 .status();
         }
         self.helper_pids.clear();
+        // Cleanup path (also runs from Drop): never block forever on the pipes.
+        let _ = self.join_log_pumps_within(LOG_PUMP_EOF_WITHIN);
     }
 }
 
@@ -632,7 +646,10 @@ fn wait_for_exit(child: &mut OwnedChild, within: Duration) -> ExitStatus {
         match child.try_wait() {
             Ok(Some(status)) => {
                 child.child = None;
-                child.join_log_pumps();
+                assert!(
+                    child.join_log_pumps_within(LOG_PUMP_EOF_WITHIN),
+                    "server exited ({status}) but its stdout/stderr stayed open for {LOG_PUMP_EOF_WITHIN:?}; a descendant inherited the pipes"
+                );
                 return status;
             }
             Ok(None) => {
