@@ -1417,3 +1417,27 @@ notification/slot 제거, shutdown 검사 소유; F5-B1을 기존 F7에 추가 �
 로컬 crash 좁은2개 검사는 기존29.7s→24.5s(동일scope 단일warm관찰), 실제
 CI 속도 개선으로 아직 주장하지 않는다. 다음 명령은 기존 Run inbox 확인 후
 두 제출SHA delta 통합·관련 검사·Opus 추가 검토다.
+
+1684412 통합/push: F6 actor run_loop panic 이후 mailbox 폐쇄·join 실패·peer1011·
+engine stop/join 뒤 guard release를 구현했다. Composer7fda5dc+9f9993e를 읽고
+통합 시 유실 가능한 try_lock witness를 await로, 실패 update의 Close 이전 성공
+ack도 검출하도록 보강했다. 미사용 bridge 관측 코드는 제거했다. Opus
+task4208145ecb50/ctxa21e45523398 고정64bff49..1684412 검토 차단 없음/release.
+증거는 append 이전 주입 panic 범위이며 mid-transaction panic까지 확대하지 않는다.
+Rust35968235789 5jobs 및 Documents35968234741/Engine35968235090 성공; 합성
+4199fd2=1684412+mainba19932. 양 아키텍처 lifecycle11/product50/projection19/
+shutdown6, DB30/66/13 실행. fast50/bin5/wire11; helper 의존 lib1개를 빠른
+경로에서 분리해 테스트 수가 달라졌으며 해당 검사는 로컬 실제helper로 통과했다.
+
+Web35968234899: workspace13 성공, 협업13/14 실패. crash 시나리오는 fresh
+DB-only client exact 구조 복원14.56s까지 성공, 이후 재편집 단계30초timeout.
+context.close 오류가 원래 실패 위치를 가려 Composer task51410aa23bde/
+ctx3811075aeb40(rust-collab-crash-e2e, spec/helpers만 소유)가 조사 중이다.
+Grok ctxf3bd4b856d79는 종료/일시 장애 수정 PG에서54/56 실패: append revoke
+barrier5초와 client-ID 소유권 검사30초. shutdown target은 앞선 실패로 미실행.
+로컬32코어와 프로세스당native helper8개 한도의 포화 가능성을 실제 원인과
+구분해 조사한다. timeout/retry/전체직렬화로 성공 처리하지 않는다. 무거운 로컬
+슬롯은 Grok; Composer E2E는 다음 grant를 기다린다. 현재 미수락 코디네이터
+diff는 engine.stop 성공bool witness와 실제 helper lib검사의 CI 연결이다.
+PR7 Draft/미병합/auto-merge 없음. 다음은 기존 Run inbox와 두 제출·실패 원인
+확인, F5-B1 및 F7 dead-slot/Closing 경합 해소 후 고정delta Opus/원격 검사다.

@@ -844,10 +844,13 @@ async fn collab_lifecycle_actor_panic_teardown_closes_peer_and_releases_resource
                 );
                 hub.send_frame(key, conn_id, frame).await;
                 wait_for_close(&mut events_rx, 1011).await;
-                tokio::time::timeout(Duration::from_secs(5), engine_stop_witness)
-                    .await
-                    .expect("this room's engine bridge must stop before teardown finishes")
-                    .expect("engine stop witness");
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(5), engine_stop_witness)
+                        .await
+                        .expect("this room's engine bridge must stop before teardown finishes")
+                        .expect("engine stop witness"),
+                    "this bridge must successfully stop and join"
+                );
                 wait_for_member_count(&hub, key, 0).await;
                 wait_until_guard(&admin, wiki.document_id, false).await;
                 disarm_engine_stop_witness(wiki.document_id).await;
@@ -954,10 +957,13 @@ async fn collab_lifecycle_actor_panic_guard_held_until_teardown_barrier() {
                 hub.send_frame(key, conn_id, frame).await;
                 wait_for_close(&mut events_rx, 1011).await;
 
-                tokio::time::timeout(Duration::from_secs(5), engine_stop_witness)
-                    .await
-                    .expect("this room's engine bridge must stop before guard release")
-                    .expect("engine stop witness");
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(5), engine_stop_witness)
+                        .await
+                        .expect("this room's engine bridge must stop before guard release")
+                        .expect("engine stop witness"),
+                    "this bridge must successfully stop and join"
+                );
                 tokio::time::timeout(Duration::from_secs(5), reached_rx)
                     .await
                     .expect("teardown barrier must be reached after engine stop")

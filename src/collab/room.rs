@@ -446,11 +446,11 @@ async fn pause_before_guard_release(document_id: Uuid) {
 
 #[cfg(feature = "db-tests")]
 static ENGINE_STOP_WITNESSES: std::sync::LazyLock<
-    tokio::sync::Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
+    tokio::sync::Mutex<HashMap<Uuid, oneshot::Sender<bool>>>,
 > = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 #[cfg(feature = "db-tests")]
-pub async fn arm_engine_stop_witness(document_id: Uuid) -> oneshot::Receiver<()> {
+pub async fn arm_engine_stop_witness(document_id: Uuid) -> oneshot::Receiver<bool> {
     let (tx, rx) = oneshot::channel();
     assert!(ENGINE_STOP_WITNESSES
         .lock()
@@ -466,9 +466,9 @@ pub async fn disarm_engine_stop_witness(document_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
-async fn signal_engine_stopped(document_id: Uuid) {
+async fn signal_engine_stopped(document_id: Uuid, succeeded: bool) {
     if let Some(tx) = ENGINE_STOP_WITNESSES.lock().await.remove(&document_id) {
-        let _ = tx.send(());
+        let _ = tx.send(succeeded);
     }
 }
 
@@ -1044,7 +1044,7 @@ impl RoomActor {
         let engine = self.engine;
         let engine_stop_ok = engine.stop().await.is_ok();
         #[cfg(feature = "db-tests")]
-        signal_engine_stopped(self.document_id).await;
+        signal_engine_stopped(self.document_id, engine_stop_ok).await;
 
         #[cfg(feature = "db-tests")]
         pause_before_guard_release(self.document_id).await;

@@ -150,4 +150,6 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
-        run: cargo test --locked --offline --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown
+        run: |
+          cargo test --locked --offline --features db-tests --lib validate_recovery_bundle_huge_varint_memory_is_rejected
+          cargo test --locked --offline --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown
