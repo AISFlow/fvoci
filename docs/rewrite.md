@@ -12,9 +12,10 @@
 전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
 최신 main `ba19932b03a98a69b24479e33ade68946b5bbd47`은 PR1–6의 수락 결과다.
 PR7은 Draft/미병합이며 협업 제품 경로의 결함 보강·독립 검토 중이다.
-최신 원격 검증 HEAD는 `8855c64e13c37cde0b4804d007b73b117eaa03b3`:
-4 workflow 성공, 실제 React13/협업14 및 양 아키텍처 DB/native 검사 완료.
-그 뒤 로컬 통합과 미수락 변경은 문서 끝의 최신 기록을 따른다.
+최신 원격 검사 HEAD는 `f46587645ee4d389f9044cd358638298c48fdcac`:
+Web/두 native workflow 성공, Rust collaboration은 양 아키텍처48/50으로 실패.
+이전8855c64의4 workflow 성공은 과거 증거다. 후속 로컬 복구 수정과 활성 작업은
+문서 끝의 최신 기록을 따른다. 전체 협업은 아직 수락되지 않았다.
 
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
@@ -1223,3 +1224,47 @@ Composer0d4ef6c의 projection11/11(body20.37s)을ec323bd로 통합 후,
 compile2.38s,10filtered) 성공, 임시 자원 정리 exit0. Composer 완료·release.
 현재 진행 중인 워커 없음. 다음은 이 배치의 원격 CI 후 lifecycle F4–F7 및
 위 M1–M3 제품 보강이며 PR7은 Draft/미병합, 전체 동시편집 수락 전이다.
+
+f46587645ee4d389f9044cd358638298c48fdcac 일반 push 완료, PR7 Draft/미병합 유지.
+원격 Web35951376871 성공(React13/13 38.5s, 협업14/14 2.2분),
+Documents35951376866 및 Engine35951376868 양 아키텍처 성공.
+Rust35951376889 fast(lib44/wire11)와 양 아키텍처 DB30+66+13 성공이나
+collaboration 양쪽은48성공/2실패(skip0, x64 122.31s/ARM102.57s)로 실패다.
+실패는 collab_persist_barrier_and_id_correlation 및
+collab_primary_recycles_after_op_cap_then_edits_persist의 persist 기대값이다.
+같은 cargo 명령의 다음 collab_projection target은 앞선 실패 때문에 원격 미실행.
+전체 CI 성공/수락으로 표시하지 않는다. 원격 로그는 로컬 /tmp/fvoci-ci-{rust,web}-f465876.log.
+
+현재 task: Composer task7af6a0e397a3/ctx69459122bc7f, 새 Orca
+rust-collab-recovery-followup(basef465876), room.rs/projectiontest/support만 소유해
+M1–M3 복구·writer 변경 경계를 구현한다. local heavy bundle 소유.
+Grok task4da18a69ee94/ctxebfb786491aa, 새 Orca rust-collab-ci-fixtures(base동일),
+collab_product 및 필요한 새 fixture만 소유해 두 CI 실패를 조사·수정한다.
+raw Y.Text probe와 실제 Tiptap XML 성공 fixture를 구분하며 제품 실패 처리를
+완화하지 않는다. host39GiB available/818GiB disk 확인 후 jobs2로 해당 두 검사만
+독립된 좁은 실행을 허용했고 전체 collab_product 반복은 금지했다.
+두 모델의 요청/유효 receipt 일치, 추가 추론 설정 없음. 원격 쓰기는 코디네이터만.
+
+### 지속 진행 재개·Opus 고정
+
+사용자 최신 지시에 따라 자문은 조건 없이 Claude Code Opus5.5 medium이다.
+역할 정본 AGENTS.md를4cf8d89에서 변경했으며 과거 Fable 이력은 보존했다.
+현재 Opus task7235c1e9a720/ctx4e1860ad6ca6는 고정e18dc29 복구 delta를 검토한다.
+요청·유효 claude-opus-5-5/medium 일치, 실제 turnStart observed; 결과 대기.
+
+Composer e18dc29를ded4b16으로 통합: Project 복구 실패 시 committed ack 뒤1011,
+postcommit StaleWriter도 ack 뒤 종료, unloaded primary의 join 거부. 워커는 격리
+PG projection14/14(body26.84s)을 보고했고, 통합ded4b16 fmt/clippy3.32s 및
+lib44/44(body5.79s/compile3.75s)는 코디네이터가 확인했다. 원격 수락은 아직이다.
+워커의 잘못된 고정5433 URL 시도는 PoolTimedOut/admin 연결 실패와 SIGINT로 종료,
+성공 근거에서 제외한다. 성공 연결/쓰기 증거 없음; 이후 지정된 격리 DB 스크립트로
+검사했다. 소유 불명 기존 컨테이너·cargo는 변경하지 않았다.
+
+현재 Composer taskdebeac540f38/ctx10af50ef9c4a: 같은worktree/e18dc29에서 F4
+phase lock을 actor await 밖으로 이동하고 취소된 join의 누수를 검사한다. 소유
+hub.rs, room.rs의 handle/hooks만, 새collab_lifecycle.rs 및 Cargo test등록 stanza만.
+Grok taskebcf4b50da4f/ctx902336d49663: rust-collab-ci-fixtures/839e547에서
+실제WS Close/EOF fail-fast와 두 순차 XML 편집 저장 내용 검증을 보강한다.
+collab_product.rs만 소유. 새 target CI 연결은 코디네이터 담당이다.
+PR7 Draft/미병합, auto-merge 미설정. 다음은 두 제출 통합·Opus delta 검토와
+관련 원격CI 후 남은 lifecycle F5–F7을 처리한다. 전체 포팅 완료가 아니다.
