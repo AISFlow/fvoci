@@ -403,6 +403,7 @@ name = "document-extract"
 version = "0.1.0"
 dependencies = [
  "cfb",
+ "document-extract-client",
  "flate2",
  "libc",
  "rhwp",
@@ -410,6 +411,15 @@ dependencies = [
  "serde_json",
  "thiserror",
  "zip",
+]
+
+[[package]]
+name = "document-extract-client"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

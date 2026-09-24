@@ -28,7 +28,9 @@ jobs:
         with:
           node-version: '24.21.0'
           cache: npm
-          cache-dependency-path: apps/web/package-lock.json
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            packages/editor/package-lock.json
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -41,12 +43,20 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**') }}
+          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/collab-engine/src/**') }}
           restore-keys: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+      - name: Restore production collaboration helper outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: crates/collab-engine/target
+          key: v1-web-collab-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+          restore-keys: v1-web-collab-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           npm ci --prefix apps/web --no-audit --no-fund
+          npm ci --prefix packages/editor --ignore-scripts --no-audit --no-fund
       - name: Prepare Chromium and system libraries
         working-directory: apps/web
         run: npm exec --no -- playwright install --with-deps chromium
@@ -59,7 +69,79 @@ jobs:
           cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
           cargo test --locked --offline --test static_api
           cargo test --locked --offline --lib --features api-schema api::openapi::tests
-      - name: Wiki tree unit regression
-        run: node --experimental-strip-types --test apps/web/src/features/workspace/wiki-tree.test.ts
+      - name: Web and editor unit regressions
+        run: |
+          npm test --prefix apps/web
+          npm run typecheck --prefix packages/editor
+          npm test --prefix packages/editor
       - name: Real React workspace flow with PostgreSQL app role
+        id: browser
         run: bash scripts/run-web-e2e.sh
+      - name: Retain failed browser DOM diagnostics
+        if: failure() && steps.browser.outputs.failure-artifacts != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: workspace-browser-failure-${{ github.run_attempt }}
+          # Traces contain network headers/cookies; retain only rendered test DOM.
+          path: ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
+          retention-days: 3
+          if-no-files-found: warn
+
+  collaboration-flow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            packages/editor/package-lock.json
+      - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - name: Restore Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: v2-cargo-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Restore web gate Rust outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target
+          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/collab-engine/src/**') }}
+          restore-keys: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+      - name: Restore production collaboration helper outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: crates/collab-engine/target
+          key: v1-web-collab-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+          restore-keys: v1-web-collab-helper-${{ runner.os }}-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
+      - name: Prepare locked dependencies
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
+          npm ci --prefix apps/web --no-audit --no-fund
+          npm ci --prefix packages/editor --ignore-scripts --no-audit --no-fund
+      - name: Prepare Chromium and system libraries
+        working-directory: apps/web
+        run: npm exec --no -- playwright install --with-deps chromium
+      - name: Check collaborative browser fixtures
+        run: |
+          node --experimental-strip-types --test apps/web/e2e-pending/collab-wire.test.ts apps/web/e2e-pending/collab-restart.test.ts
+          apps/web/node_modules/.bin/tsc -p apps/web/e2e-pending/collab-tsconfig.json
+      - name: Real React collaborative editing with PostgreSQL app role
+        id: browser
+        env:
+          FVOCI_E2E_PENDING: '1'
+        run: bash scripts/run-web-e2e.sh
+      - name: Retain failed browser DOM diagnostics
+        if: failure() && steps.browser.outputs.failure-artifacts != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: collaboration-browser-failure-${{ github.run_attempt }}
+          path: ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
+          retention-days: 3
+          if-no-files-found: warn

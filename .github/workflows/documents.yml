@@ -42,13 +42,30 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/registry
-          key: v2-cargo-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock') }}
+          key: v2-cargo-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
       - name: Restore document build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: crates/document-extract/target
-          key: v2-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
-          restore-keys: v2-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'rust-toolchain.toml') }}-
+          path: |
+            crates/document-extract/target
+            crates/document-extract-client/target
+          key: v2-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
+          restore-keys: v2-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Thin process client without native parser dependencies
+        working-directory: crates/document-extract-client
+        run: |
+          cargo fetch --locked
+          cargo fmt --check
+          cargo clippy --locked --offline --all-targets --features test-hang -- -D warnings
+          cargo test --locked --offline --all-targets
+          cargo test --locked --offline --all-targets --features test-hang
+          cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/extract-client-metadata.json"
+          python3 - "$RUNNER_TEMP/extract-client-metadata.json" <<'PYTHON'
+          import json, sys
+          names = {p["name"] for p in json.load(open(sys.argv[1]))["packages"]}
+          forbidden = names & {"rhwp", "cfb", "zip", "flate2", "skia-safe", "skia-bindings"}
+          assert not forbidden, f"native dependencies leaked into process client: {forbidden}"
+          PYTHON
       - name: Restore pinned public rhwp source
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:

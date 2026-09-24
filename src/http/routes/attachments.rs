@@ -22,8 +22,8 @@ use crate::attachments::{content_disposition_attachment, parse_range, ParsedRang
 use crate::attachments::StorageError;
 use crate::auth::session::SessionUser;
 use crate::db::attachments::{
-    authorize_upload_part, complete_upload, create_upload, get_attachment_meta, open_download,
-    resume_upload, AttachmentDbError, AttachmentRow, CreateUploadInput,
+    authorize_upload_part, commit_upload_part, complete_upload, create_upload, get_attachment_meta,
+    open_download, resume_upload, AttachmentDbError, AttachmentRow, CreateUploadInput,
 };
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::guard::{check_origin, reject_bearer};
@@ -208,7 +208,7 @@ async fn put_upload_part(
     )
     .await
     .map_err(internal)?;
-    let (att, _meta, max_bytes) = match auth {
+    let (storage_key, max_bytes) = match auth {
         Ok(v) => v,
         Err(AttachmentDbError::UploadForbidden) => {
             return Err(AppError::from_code(ProblemCode::OnlyTheUploaderMayContinueThisUpload));
@@ -228,11 +228,42 @@ async fn put_upload_part(
         Err(_) => return Err(AppError::internal()),
     };
     let stream = body.into_data_stream().map(|r| r.map_err(|e| e));
-    let part = state
+    let staged = state
         .storage
-        .put_part_stream(&att.storage_key, part_number, stream, max_bytes)
+        .stage_part_stream(&storage_key, part_number, stream, max_bytes)
         .await
         .map_err(map_storage_error)?;
+    let part = commit_upload_part(
+        &state.auth.db.pool,
+        &state.storage,
+        workspace_id,
+        attachment_id,
+        user_id,
+        session_id,
+        part_number,
+        &staged,
+    )
+    .await
+    .map_err(internal)?;
+    let part = match part {
+        Ok(part) => part,
+        Err(AttachmentDbError::UploadForbidden) => {
+            return Err(AppError::from_code(ProblemCode::OnlyTheUploaderMayContinueThisUpload));
+        }
+        Err(AttachmentDbError::UploadState) => {
+            return Err(AppError::from_code(ProblemCode::UploadIsNotInTheRequiredState));
+        }
+        Err(AttachmentDbError::PartTooLarge) => {
+            return Err(AppError::from_code(ProblemCode::PartExceedsUploadPartSizeMb));
+        }
+        Err(AttachmentDbError::Forbidden) | Err(AttachmentDbError::NotFound) => {
+            return Err(AppError::from_code(ProblemCode::NotFound));
+        }
+        Err(AttachmentDbError::InvalidInput) => {
+            return Err(AppError::from_code(ProblemCode::InvalidInput));
+        }
+        Err(_) => return Err(AppError::internal()),
+    };
     let _ip = peer_ip(peer.ip());
     Ok((
         StatusCode::OK,
@@ -329,7 +360,7 @@ async fn complete_upload_session(
         Some(&ip),
     )
     .await
-    .map_err(map_complete_error)?;
+    .map_err(internal)?;
     match result {
         Ok(att) => Ok(Json(attachment_output(&att))),
         Err(AttachmentDbError::UploadForbidden) => {
@@ -517,19 +548,6 @@ fn map_storage_error(err: StorageError) -> AppError {
             AppError::from_code(ProblemCode::SubmittedPartsDoNotMatchUploadedParts)
         }
         _ => AppError::internal(),
-    }
-}
-
-fn map_complete_error(err: sqlx::Error) -> AppError {
-    let msg = err.to_string();
-    if msg.contains("etag mismatch") {
-        AppError::from_code(ProblemCode::SubmittedPartsDoNotMatchUploadedParts)
-    } else if msg.contains("invalid input") {
-        AppError::from_code(ProblemCode::InvalidInput)
-    } else if msg.contains("upload state") {
-        AppError::from_code(ProblemCode::UploadIsNotInTheRequiredState)
-    } else {
-        internal(err)
     }
 }
 

@@ -12,12 +12,23 @@ export default defineConfig({
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),
     },
+    dedupe: [
+      "react",
+      "react-dom",
+      "yjs",
+      "@hocuspocus/provider",
+      "@hocuspocus/provider-react",
+    ],
   },
   server: {
     port: 5173,
     strictPort: true,
     proxy: {
       "/api": apiProxyTarget,
+      "/collab": {
+        target: apiProxyTarget,
+        ws: true,
+      },
     },
   },
   build: {

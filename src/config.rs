@@ -2,6 +2,7 @@ use std::env;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use uuid::Uuid;
 
@@ -23,6 +24,8 @@ pub struct Config {
     pub static_dir: Option<PathBuf>,
     pub storage_root: PathBuf,
     pub upload: UploadLimits,
+    /// Wall deadline covering HTTP drain, hub join, and pool close after the stop signal.
+    pub shutdown_deadline: Duration,
 }
 
 impl Clone for Config {
@@ -38,6 +41,7 @@ impl Clone for Config {
             static_dir: self.static_dir.clone(),
             storage_root: self.storage_root.clone(),
             upload: self.upload.clone(),
+            shutdown_deadline: self.shutdown_deadline,
         }
     }
 }
@@ -54,6 +58,7 @@ impl fmt::Debug for Config {
             .field("static_dir", &self.static_dir)
             .field("storage_root", &self.storage_root)
             .field("upload", &self.upload)
+            .field("shutdown_deadline", &self.shutdown_deadline)
             .finish()
     }
 }
@@ -129,6 +134,9 @@ impl Config {
                 .unwrap_or(DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN),
         };
 
+        let shutdown_deadline =
+            parse_shutdown_deadline_ms(env::var("FVOCI_SHUTDOWN_DEADLINE_MS").ok().as_deref())?;
+
         Ok(Self {
             bind,
             migration_url,
@@ -140,6 +148,7 @@ impl Config {
             static_dir,
             storage_root,
             upload,
+            shutdown_deadline,
         })
     }
 }
@@ -156,6 +165,20 @@ fn env_parse_u32(name: &str) -> Option<u32> {
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&v| v > 0)
+}
+
+/// Default 30s; values below 1ms are rejected so expiry cannot be confused with success.
+fn parse_shutdown_deadline_ms(raw: Option<&str>) -> Result<Duration, String> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Duration::from_millis(30_000));
+    };
+    let millis: u64 = raw
+        .parse()
+        .map_err(|e| format!("invalid FVOCI_SHUTDOWN_DEADLINE_MS: {e}"))?;
+    if millis == 0 {
+        return Err("FVOCI_SHUTDOWN_DEADLINE_MS must be at least 1".into());
+    }
+    Ok(Duration::from_millis(millis))
 }
 
 fn database_role(url: &str) -> Result<String, String> {

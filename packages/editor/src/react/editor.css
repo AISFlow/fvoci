@@ -1,0 +1,1083 @@
+/*
+ * Editor skin — Tiptap DOM under .fvoci-editor .ProseMirror.
+ * Tokens only (no hex). Max width lives on the page.
+ */
+.fvoci-editor {
+	position: relative;
+}
+.fvoci-gutter {
+	display: flex;
+	align-items: center;
+	gap: 0.125rem;
+	pointer-events: auto;
+}
+.fvoci-gutter-hidden [data-gutter] {
+	visibility: hidden;
+	pointer-events: none;
+}
+.fvoci-gutter [data-gutter] {
+	box-sizing: border-box;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 2.75rem;
+	height: 2.75rem;
+	padding: 0;
+	margin: 0;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--muted-foreground);
+	font-size: 1rem;
+	line-height: 1;
+	cursor: pointer;
+}
+@media (pointer: fine) and (min-width: 48rem) {
+	.fvoci-gutter [data-gutter] {
+		width: 1.75rem;
+		height: 2rem;
+	}
+}
+.fvoci-gutter [data-gutter]:hover {
+	background: var(--muted);
+	color: var(--foreground);
+}
+.fvoci-gutter-keyboard:not(:focus-visible) {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+}
+.fvoci-gutter-keyboard:focus-visible {
+	position: absolute;
+	inset-inline-start: 0;
+	top: 0;
+	width: 2.75rem;
+	height: 2.75rem;
+	z-index: 30;
+	background: var(--background);
+}
+
+.fvoci-block-menu {
+	z-index: 50;
+	display: flex;
+	flex-direction: column;
+	min-width: 10rem;
+	padding: 0.25rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	background: var(--popover);
+	color: var(--popover-foreground);
+}
+.fvoci-block-menu [role="menuitem"] {
+	display: block;
+	width: 100%;
+	padding: 0.375rem 0.5rem;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: inherit;
+	text-align: start;
+	cursor: pointer;
+}
+.fvoci-block-menu [role="menuitem"]:hover,
+.fvoci-block-menu [role="menuitem"]:focus-visible {
+	background: var(--muted);
+}
+.fvoci-editor .ProseMirror-dropcursor {
+	border-top: 1px solid var(--ring);
+}
+.fvoci-ui-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.125rem;
+}
+.fvoci-mobile-toolbar {
+	position: fixed;
+	bottom: 0;
+	left: 0;
+	right: 0;
+	z-index: 30;
+	display: none;
+	align-items: center;
+	gap: 0.25rem;
+	padding: 0.5rem 0.5rem max(0.5rem, env(safe-area-inset-bottom));
+	overflow-x: auto;
+	border-top: 1px solid var(--border);
+	background: var(--background);
+}
+.fvoci-mobile-toolbar .fvoci-ui-toolbar {
+	flex-shrink: 0;
+	flex-wrap: nowrap;
+}
+.fvoci-mobile-toolbar button {
+	min-width: 2.75rem;
+	min-height: 2.75rem;
+}
+@media (max-width: 47.999rem) {
+	.fvoci-gutter {
+		display: none;
+	}
+	.fvoci-gutter.fvoci-gutter-touch {
+		display: flex;
+	}
+	.fvoci-mobile-toolbar {
+		display: flex;
+	}
+	.fvoci-editor .ProseMirror {
+		padding-inline-start: 0;
+		padding-bottom: 4.5rem;
+		scroll-padding-bottom: 4.5rem;
+	}
+}
+.fvoci-editor .ProseMirror {
+	min-height: 16rem;
+	padding-inline-start: 0;
+	font-family: var(--font-sans);
+	font-size: var(--text-doc);
+	line-height: 1.6;
+	color: var(--foreground);
+	word-break: keep-all;
+	overflow-wrap: break-word;
+	outline: none;
+	white-space: pre-wrap;
+}
+/* Archived task bodies keep their content height without editing canvas space. */
+[data-task-archived="true"]
+:is(.fvoci-editor-host, .fvoci-editor, .ProseMirror) {
+	min-height: 0;
+}
+[data-task-archived="true"] .ProseMirror {
+	padding-bottom: 0;
+}
+
+.fvoci-editor .ProseMirror:focus,
+.fvoci-editor .ProseMirror:focus-visible {
+	outline: none;
+	box-shadow: none;
+}
+.fvoci-editor .ProseMirror ::selection {
+	background: var(
+		--selection,
+		color-mix(in oklch, var(--accent) 72%, var(--ring) 28%)
+	);
+}
+.fvoci-editor .ProseMirror p {
+	margin: 0;
+	padding-block: 0.4em;
+}
+.fvoci-editor .ProseMirror h1,
+.fvoci-editor .ProseMirror h2,
+.fvoci-editor .ProseMirror h3 {
+	letter-spacing: -0.01em;
+	line-height: 1.25;
+	margin-bottom: 0.25em;
+	font-weight: 650;
+}
+.fvoci-editor .ProseMirror h1 {
+	font-size: calc(var(--text-doc) * 1.75);
+	font-weight: 700;
+	margin-top: 4.5rem;
+}
+.fvoci-editor .ProseMirror h2 {
+	font-size: calc(var(--text-doc) * 1.375);
+	margin-top: 3.125rem;
+}
+.fvoci-editor .ProseMirror h3 {
+	font-size: calc(var(--text-doc) * 1.125);
+	margin-top: 1em;
+}
+.fvoci-editor .ProseMirror h4,
+.fvoci-editor .ProseMirror h5,
+.fvoci-editor .ProseMirror h6 {
+	font-size: var(--text-doc);
+	font-weight: 600;
+	margin-top: 0.85em;
+	margin-bottom: 0.2em;
+}
+.fvoci-editor .ProseMirror > :first-child {
+	margin-top: 0;
+}
+.fvoci-editor .ProseMirror blockquote {
+	margin: 0.4em 0;
+	padding: 0.15em 0 0.15em 1rem;
+	border-inline-start: 0.1875rem solid var(--border);
+	color: var(--muted-foreground);
+}
+.fvoci-editor .ProseMirror hr {
+	border: none;
+	border-block-start: 1px solid var(--border);
+	margin-block: 1.25em;
+}
+.fvoci-editor .ProseMirror ul,
+.fvoci-editor .ProseMirror ol {
+	margin: 0.25em 0;
+	padding-inline-start: 1.5em;
+}
+.fvoci-editor .ProseMirror ul {
+	list-style: disc;
+}
+.fvoci-editor .ProseMirror ul ul {
+	list-style: circle;
+}
+.fvoci-editor .ProseMirror ul ul ul {
+	list-style: square;
+}
+.fvoci-editor .ProseMirror ol {
+	list-style: decimal;
+}
+.fvoci-editor .ProseMirror ol ol {
+	list-style: lower-alpha;
+}
+.fvoci-editor .ProseMirror ol ol ol {
+	list-style: lower-roman;
+}
+.fvoci-editor .ProseMirror li {
+	margin-block: 0.15em;
+}
+.fvoci-editor .ProseMirror li::marker {
+	color: var(--muted-foreground);
+}
+.fvoci-editor .ProseMirror li p {
+	padding-block: 0;
+}
+.fvoci-editor .ProseMirror :is(ul, ol) :is(ul, ol) {
+	margin-block: 0;
+}
+.fvoci-editor .ProseMirror ul[data-type="taskList"] {
+	list-style: none;
+	padding-inline-start: 0;
+}
+.fvoci-editor .ProseMirror ul[data-type="taskList"] li {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.5em;
+}
+.fvoci-editor .ProseMirror ul[data-type="taskList"] li > label {
+	flex: none;
+	margin-block-start: 0.35em;
+}
+.fvoci-editor .ProseMirror pre {
+	margin: 0.5em 0;
+	padding: 1rem;
+	border: 1px solid var(--border);
+	border-radius: 0.375rem;
+	background: var(--muted);
+	overflow-x: auto;
+	white-space: pre;
+	tab-size: 2;
+}
+.fvoci-editor .ProseMirror pre code {
+	font-family: var(--font-mono);
+	font-size: var(--text-dense);
+	background: none;
+	padding: 0;
+	border: 0;
+}
+.fvoci-editor .ProseMirror :not(pre) > code {
+	font-family: var(--font-mono);
+	font-size: var(--text-ui);
+	padding: 0.05rem 0.4rem;
+	border: 1px solid var(--border);
+	border-radius: 0.375rem;
+	background: var(--muted);
+}
+.fvoci-editor .ProseMirror a {
+	color: var(--primary);
+	text-decoration: underline;
+	text-underline-offset: 0.15em;
+}
+.fvoci-editor .ProseMirror .is-empty::before {
+	content: attr(data-placeholder);
+	color: var(--muted-foreground);
+	float: left;
+	height: 0;
+	pointer-events: none;
+}
+.fvoci-editor .ProseMirror .tableWrapper {
+	overflow-x: auto;
+	/* Keep contextual table controls above the table and inside narrow pages. */
+	margin-block: 3rem 1rem;
+}
+.fvoci-editor .ProseMirror table {
+	border-collapse: collapse;
+	table-layout: fixed;
+	width: 100%;
+}
+.fvoci-editor .ProseMirror th,
+.fvoci-editor .ProseMirror td {
+	position: relative;
+	box-sizing: border-box;
+	border: 1px solid var(--border);
+	padding: 0.5rem;
+	vertical-align: top;
+	min-width: 3rem;
+}
+.fvoci-editor .ProseMirror th {
+	background: var(--muted);
+	font-weight: 600;
+	text-align: start;
+}
+.fvoci-editor .ProseMirror :is(th, td) > p {
+	min-height: 1.5em;
+}
+.fvoci-editor .ProseMirror .selectedCell::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	background: color-mix(in oklch, var(--ring) 18%, transparent);
+	pointer-events: none;
+}
+.fvoci-editor .ProseMirror .column-resize-handle {
+	position: absolute;
+	inset-block: 0;
+	inset-inline-end: -0.125rem;
+	width: 0.25rem;
+	z-index: 20;
+	background: var(--ring);
+	pointer-events: none;
+}
+.fvoci-editor .ProseMirror.resize-cursor {
+	cursor: col-resize;
+}
+
+@keyframes afn-flash {
+	from {
+		background-color: var(--accent);
+	}
+	to {
+		background-color: transparent;
+	}
+}
+.fvoci-editor [data-afn-flash] {
+	animation: afn-flash 1.5s ease-out;
+	border-radius: var(--radius-sm);
+	mix-blend-mode: multiply;
+}
+.fvoci-editor [data-ychange-type="added"] {
+	background: color-mix(in oklch, var(--status-done) 28%, transparent);
+}
+.fvoci-editor [data-ychange-type="removed"] {
+	background: color-mix(in oklch, var(--destructive) 28%, transparent);
+}
+.dark .fvoci-editor [data-afn-flash] {
+	mix-blend-mode: screen;
+}
+@media (prefers-reduced-motion: reduce) {
+	.fvoci-editor [data-afn-flash] {
+		animation: none;
+		background-color: var(--accent);
+	}
+}
+
+[data-fvoci-bubble] {
+	/* WHY: A flipped bubble overlaps the block gutter's z-index: 10 wrapper. */
+	z-index: 20;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.125rem;
+	padding: 0.2rem;
+	max-width: calc(100vw - 1rem);
+	border: 1px solid var(--border);
+	border-radius: 9999rem;
+	background: var(--popover);
+	color: var(--popover-foreground);
+	box-shadow: 0 0.5rem 1.25rem
+		color-mix(in oklch, var(--foreground) 16%, transparent);
+}
+[data-fvoci-bubble] button {
+	min-width: 1.75rem;
+	height: 1.75rem;
+	padding: 0 0.45rem;
+	border: 0;
+	border-radius: 9999rem;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	font-size: var(--text-ui);
+	font-weight: 600;
+	cursor: pointer;
+}
+[data-fvoci-bubble] button:hover {
+	background: var(--accent);
+}
+/* 정렬 항목은 menuitemradio 라 상태를 aria-checked 로 말한다 — 두 표기를 같이 본다. */
+[data-fvoci-bubble] button[aria-pressed="true"],
+[data-fvoci-bubble] button[aria-checked="true"] {
+	background: var(--accent);
+	color: var(--accent-foreground);
+}
+[data-fvoci-bubble] button:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+/* 프리미티브 Button — 지금까지 컨테이너 선택자에 우연히 걸려서만 스타일을 받았다. */
+.fvoci-ui-button {
+	padding: 0.375rem 0.5rem;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: none;
+	color: inherit;
+	cursor: pointer;
+}
+.fvoci-ui-button:focus-visible {
+	outline: 0.125rem solid var(--ring);
+	outline-offset: 0.125rem;
+}
+.fvoci-ui-dropdown,
+.fvoci-ui-popover {
+	position: relative;
+	display: inline-flex;
+}
+.fvoci-ui-dropdown-content,
+.fvoci-ui-popover-content {
+	z-index: 50;
+	display: flex;
+	flex-direction: column;
+	min-width: 8rem;
+	padding: 0.25rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	background: var(--popover);
+	color: var(--popover-foreground);
+}
+.fvoci-block-menu,
+.fvoci-ui-dropdown-content,
+.fvoci-ui-popover-content {
+	max-width: min(
+		calc(100vw - 1rem),
+		var(--radix-popover-content-available-width)
+	);
+	max-height: var(--radix-popover-content-available-height);
+	overflow: auto;
+	overscroll-behavior: contain;
+}
+.fvoci-block-menu > *,
+.fvoci-ui-dropdown-content > *,
+.fvoci-ui-popover-content > * {
+	flex-shrink: 0;
+}
+.fvoci-ui-popover-content button,
+.fvoci-ui-dropdown-content button {
+	min-height: 2.75rem;
+}
+
+.fvoci-ui-input {
+	min-width: 10rem;
+	height: 2rem;
+	padding: 0 0.5rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--background);
+	color: var(--foreground);
+}
+.fvoci-ui-separator {
+	display: block;
+	height: 1px;
+	margin: 0.25rem 0;
+	background: var(--border);
+}
+.fvoci-table-handles {
+	position: absolute;
+	z-index: 15;
+	pointer-events: none;
+}
+.fvoci-table-handles [data-table-handle] {
+	pointer-events: auto;
+	position: absolute;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 2.75rem;
+	height: 2.75rem;
+	padding: 0;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--popover);
+	color: var(--popover-foreground);
+	cursor: grab;
+}
+.fvoci-table-handles [data-table-handle="col-plus"],
+.fvoci-table-handles [data-table-handle="row-plus"] {
+	cursor: pointer;
+}
+.fvoci-code-chrome {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.25rem;
+	margin-block: 0.25rem;
+}
+/* 크롬 버튼은 언어 <select> 와 나란히 선다 — 프리미티브의 플랫 스킨(모바일 툴바용)을
+ * 그대로 받으면 테두리 없는 글리프가 되므로 버튼으로 읽히는 테두리를 유지한다. */
+.fvoci-code-chrome .fvoci-ui-button {
+	border: 1px solid var(--border);
+	background: var(--popover);
+	color: var(--popover-foreground);
+	font-size: var(--text-ui);
+}
+.fvoci-code-linenos {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	color: var(--muted-foreground);
+	font-family: var(--font-mono);
+	font-size: var(--text-dense-size);
+}
+.fvoci-editor[data-code-folded="true"] .ProseMirror pre {
+	max-height: 8rem;
+	overflow: hidden;
+}
+.fvoci-editor[data-code-wrap="true"] .ProseMirror pre {
+	white-space: pre-wrap;
+}
+.fvoci-suggestion {
+	z-index: 50;
+	display: flex;
+	flex-direction: column;
+	gap: 0.125rem;
+	min-width: 12rem;
+	max-width: min(22rem, 90vw);
+	max-height: 50vh;
+	overflow: auto;
+	padding: 0.3rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--popover);
+	color: var(--popover-foreground);
+	box-shadow: 0 1rem 2rem
+		color-mix(in oklch, var(--foreground) 18%, transparent);
+}
+.fvoci-suggestion [role="option"] {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	width: 100%;
+	margin: 0;
+	padding: 0.35rem 0.5rem;
+	border: 0;
+	border-radius: var(--radius-md);
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	font-size: var(--text-ui);
+	text-align: start;
+	cursor: pointer;
+}
+.fvoci-suggestion [role="option"]:hover,
+.fvoci-suggestion [role="option"][aria-selected="true"] {
+	background: var(--accent);
+	color: var(--accent-foreground);
+}
+.fvoci-suggestion-emoji {
+	flex: none;
+	font-size: calc(var(--text-ui) * 1.4);
+	line-height: 1;
+}
+.fvoci-editor .ProseMirror span[data-mention] {
+	padding: 0.05em 0.35em;
+	border-radius: 0.4em;
+	background: var(--accent);
+	color: var(--accent-foreground);
+	font-weight: 500;
+	cursor: pointer;
+}
+.fvoci-editor .ProseMirror span[data-type="emoji"] {
+	font-size: 1.15em;
+	line-height: 1;
+}
+.fvoci-editor .ProseMirror [data-embed] {
+	display: block;
+	/* Keep contextual table controls above the table and inside narrow pages. */
+	margin-block: 3rem 1rem;
+	padding: 0.75rem 1rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	background: var(--card);
+	min-height: 2.5rem;
+}
+/* WHY: #738 — 피어 색은 fvoci-editor.tsx 의 collabCaretRender 가 CSSOM 으로 넘기는
+   --afn-caret-color 하나로 들어온다(style= 속성은 nonce style-src 아래서 차단). 라벨은
+   캐럿의 자식이라 같은 변수를 상속한다. 변수가 없으면 캐럿은 본문 색, 라벨은 브랜드 잉크로
+   그려진다(사라지지 않는다). background 가 아니라 background-color 인 것은 의도다 —
+   단축 속성은 <image> 를 받아 커스텀 속성이 url() 싱크가 될 수 있다.
+   #652 — 브로드캐스트 색은 테마와 무관한 고정값이다(packages/ui/presence.ts). 그래서 라벨
+   칩도 테마와 무관해야 한다: 글자를 테마 토큰이 아니라 흰색으로 고정하면 8색 전부 ≥4.5:1 이다.
+   다크 보정은 보는 쪽에서 캐럿 획만 밝힌다 — 라벨 배경까지 밝히면 흰 글자가 깨진다. */
+.fvoci-editor .collaboration-carets__caret {
+	position: relative;
+	border-left: 1px solid var(--afn-caret-color, currentColor);
+	margin-left: -1px;
+	pointer-events: none;
+	word-break: normal;
+}
+.fvoci-editor .collaboration-carets__label {
+	position: absolute;
+	top: -1.35em;
+	left: -1px;
+	background-color: var(--afn-caret-color, #00133d);
+	padding: 0 0.25rem;
+	border-radius: var(--radius-sm);
+	font-size: var(--text-caption);
+	line-height: 1.3;
+	color: #fff;
+	white-space: nowrap;
+	user-select: none;
+	pointer-events: none;
+}
+.dark .fvoci-editor .collaboration-carets__caret {
+	border-left-color: color-mix(
+		in oklch,
+		var(--afn-caret-color, currentColor),
+		white 40%
+	);
+}
+.fvoci-toc-dial {
+	pointer-events: none;
+	position: fixed;
+	top: 50%;
+	right: 0.75rem;
+	z-index: 20;
+	display: none;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.5rem;
+	transform: translateY(-50%);
+}
+@media (min-width: 48rem) {
+	.fvoci-toc-dial {
+		display: flex;
+	}
+}
+/* WHY: 장식 다이얼은 넓은 마우스 화면에만 보이며 실제 목차 버튼은 모든 화면에 있다. */
+@media (pointer: coarse) {
+	.fvoci-toc-dial {
+		display: none;
+	}
+}
+.fvoci-toc-dial [data-toc-dot] {
+	position: relative;
+	width: 0.5rem;
+	height: 0.5rem;
+	padding: 0;
+	border: 0;
+	border-radius: 50%;
+	background: var(--muted-foreground);
+	opacity: 0.45;
+}
+.fvoci-toc-dial [data-toc-dot][data-level="1"] {
+	width: 0.625rem;
+	height: 0.625rem;
+}
+.fvoci-toc-dial [data-toc-dot][data-active] {
+	opacity: 1;
+	background: var(--foreground);
+}
+
+/* WHY: #738 — Tiptap 기본 injectCSS 는 nonce 없는 <style> 을 head 에 꽂아 nonce style-src
+   아래서 통째로 차단된다. useEditor 에서 injectCSS:false 로 끄고 @tiptap/core 가 넣던 규칙을
+   여기로 옮긴다 — px 는 rem 으로, gapcursor 색은 토큰으로.
+   옮기지 않은 것: 벤더 접두 사본(-webkit-font-variant-ligatures · ::-moz-selection)은
+   표준 속성이 이미 보편이고, word-wrap 은 :293 의 현대 별칭 overflow-wrap 과 같으며,
+   `pre { white-space: pre-wrap }` 은 스코프를 붙이면 스킨의 `white-space: pre`(:400)를
+   특이도 동률 + 소스 순서로 눌러 코드블록 줄바꿈 토글을 죽인다(rev-744 F1 — 업스트림
+   원본은 특이도가 낮아 애초에 적용된 적이 없다).
+   break-spaces 는 복구가 아니라 이 슬라이스가 처음 넣는 동작 변경이다 — 이식 전 실효값은
+   :285 블록의 pre-wrap 이었고, 업스트림 의도(행말 공백도 줄바꿈)를 따른다.
+   :285 블록의 white-space 를 덮어야 하므로 그 블록 뒤에 둔다. */
+.fvoci-editor .ProseMirror {
+	position: relative;
+	white-space: break-spaces;
+	font-variant-ligatures: none;
+	font-feature-settings: "liga" 0;
+}
+.fvoci-editor .ProseMirror [contenteditable="false"] {
+	white-space: normal;
+}
+.fvoci-editor .ProseMirror [contenteditable="false"] [contenteditable="true"] {
+	white-space: pre-wrap;
+}
+/* 커서 위치 계산용 0 크기 자리표시 img — 업스트림의 !important 없이 Tailwind preflight 를
+   이긴다. 이 시트는 비계층(unlayered)이고 preflight 은 @layer base 라 레이어 순서로 이긴다
+   (특이도가 아니다 — 비계층 img 규칙이 뒤에 생기면 조용히 진다). */
+.fvoci-editor img.ProseMirror-separator {
+	display: inline;
+	width: 0;
+	height: 0;
+	margin: 0;
+	border: none;
+}
+.fvoci-editor .ProseMirror-gapcursor {
+	display: none;
+	position: absolute;
+	margin: 0;
+	pointer-events: none;
+}
+.fvoci-editor .ProseMirror-gapcursor::after {
+	content: "";
+	display: block;
+	position: absolute;
+	top: -0.125rem;
+	width: 1.25rem;
+	border-top: 1px solid var(--foreground);
+	animation: ProseMirror-cursor-blink 1.1s steps(2, start) infinite;
+}
+@keyframes ProseMirror-cursor-blink {
+	to {
+		visibility: hidden;
+	}
+}
+.fvoci-editor .ProseMirror-focused .ProseMirror-gapcursor {
+	display: block;
+}
+.fvoci-editor .ProseMirror-hideselection *::selection {
+	background: transparent;
+}
+.fvoci-editor .ProseMirror-hideselection * {
+	caret-color: transparent;
+}
+
+/* 콜아웃 — kind별 좌측 강조 바(색은 shadcn 토큰 파생, hex 없음). */
+.afn-callout {
+	display: flex;
+	gap: 0.5rem;
+	padding: 0.5rem 0.625rem 0.5rem 0.5rem;
+	border-radius: var(--radius-md);
+	border-inline-start: 4px solid var(--border);
+	background: color-mix(in oklch, var(--muted) 72%, var(--background));
+}
+.afn-callout[data-kind="warn"],
+.afn-callout[data-kind="danger"] {
+	border-inline-start-color: var(--destructive);
+}
+.afn-callout-icon {
+	flex: none;
+}
+.afn-callout-body {
+	flex: 1;
+	min-width: 0;
+}
+
+/* 수식·mermaid — 중앙, 편집 표면. */
+.afn-math {
+	display: block;
+	width: 100%;
+	padding: 0.5rem;
+	text-align: center;
+	background: none;
+	border: 0;
+	cursor: pointer;
+}
+.afn-math[data-empty="true"] {
+	color: var(--muted-foreground);
+}
+/* WHY: #656 F8 — katex 가 던지거나 청크를 못 받으면 LaTeX 원문에 머문다. 그 사실이 보여야 한다. */
+.afn-math[data-failed="true"] {
+	color: var(--destructive);
+}
+/* WHY: #738 — katex 오류 스팬의 style="color:#cc0000" 은 nonce style-src 아래서 차단되므로
+   렌더 뒤 걷어낸다(packages/editor/src/react/katex.ts). 색은 여기가 정본이다. */
+.katex-error {
+	color: var(--destructive);
+}
+.afn-math-edit {
+	width: 100%;
+	min-height: 3rem;
+	font-family: var(--font-mono);
+	font-size: var(--text-ui-size);
+}
+/* 인라인 수식 — 문장 흐름 안. 버튼이지만 글자처럼 앉는다. */
+.afn-math-inline {
+	display: inline;
+	padding: 0;
+	background: none;
+	border: 0;
+	font: inherit;
+	color: inherit;
+	cursor: pointer;
+}
+.afn-math-inline[data-empty="true"] {
+	color: var(--muted-foreground);
+}
+.afn-math-inline[data-failed="true"] {
+	color: var(--destructive);
+}
+.afn-math-inline-edit {
+	width: 8rem;
+	font-family: var(--font-mono);
+	font-size: var(--text-ui-size);
+}
+.afn-mermaid {
+	display: flex;
+	justify-content: center;
+	padding: 0.5rem;
+}
+/* mermaid svg는 width="100%" 속성 + 자체 max-width 인라인 스타일 — flex 안에서 폭이 0으로
+ * 붕괴하는 사례 실측(preview 프로브). 뷰박스 비율대로 자연 크기를 갖게 강제한다. */
+.afn-mermaid svg {
+	width: auto;
+	height: auto;
+	max-width: 100%;
+	min-width: 8rem;
+}
+.afn-mermaid-source {
+	width: 100%;
+	padding: 0.5rem;
+	text-align: start;
+	font-family: var(--font-mono);
+	font-size: var(--text-dense-size);
+	background: var(--muted);
+	border: 0;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+}
+.afn-mermaid-source[data-failed="true"] {
+	color: var(--destructive);
+}
+
+/* embed·attachment 카드 — 인라인 블록 카드(테두리·muted 배경). */
+.afn-embed,
+.afn-attachment {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.375rem 0.75rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	background: var(--card);
+	font-size: var(--text-ui-size);
+}
+.afn-embed-icon {
+	flex-shrink: 0;
+	line-height: 1;
+}
+.afn-embed-kind {
+	color: var(--muted-foreground);
+	font-size: var(--text-dense-size);
+}
+.afn-embed-meta {
+	color: var(--muted-foreground);
+	font-size: var(--text-dense-size);
+}
+button.afn-embed {
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+	text-align: start;
+}
+button.afn-embed:disabled {
+	cursor: default;
+}
+.afn-embed-edit {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem;
+	width: 100%;
+}
+.afn-embed-edit textarea {
+	flex: 1 1 12rem;
+	min-height: 2.75rem;
+	font-family: var(--font-mono);
+	font-size: var(--text-ui-size);
+}
+.afn-embed-edit select {
+	min-height: 2.75rem;
+	font-size: var(--text-ui-size);
+}
+button.afn-embed-host {
+	display: block;
+	width: 100%;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	font: inherit;
+	text-align: start;
+	cursor: pointer;
+}
+.afn-mention {
+	display: inline-flex;
+	align-items: center;
+	max-width: 100%;
+	padding: 1px 0.375rem 1px 0.25rem;
+	border-radius: 0.5rem;
+	background: color-mix(in oklch, var(--muted) 80%, var(--background));
+	color: var(--foreground);
+	font-weight: 500;
+	font-size: 0.9em;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	vertical-align: bottom;
+}
+
+/* P1-07a — attachment 카드 상태(업로드 중·실패·stored 링크). 터치 44px·keep-all(WORKFLOW
+ * 체크리스트), 진행 바는 폭 %만(파트 완료 비율 — 파트 내 진행 없음). */
+a.afn-attachment {
+	color: inherit;
+	text-decoration: none;
+}
+.afn-attachment-name {
+	word-break: keep-all;
+	overflow-wrap: break-word;
+}
+a.afn-attachment:hover .afn-attachment-name {
+	text-decoration: underline;
+}
+.afn-attachment-button {
+	min-height: 2.75rem; /* 터치 44px */
+	padding: 0 0.75rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	background: var(--secondary);
+	font-size: var(--text-ui-size);
+	cursor: pointer;
+}
+.afn-attachment-input {
+	display: none;
+}
+.afn-attachment-progress {
+	display: inline-block;
+	width: 8rem;
+	height: 0.375rem;
+	border-radius: var(--radius-xl);
+	background: var(--muted);
+	overflow: hidden;
+}
+.afn-attachment-progress-bar {
+	display: block;
+	height: 100%;
+	background: var(--primary);
+	transition: width 0.2s ease;
+}
+.afn-attachment-percent {
+	font-size: var(--text-caption-size);
+	color: var(--muted-foreground);
+}
+.afn-attachment-error {
+	font-size: var(--text-dense-size);
+	color: var(--muted-foreground);
+}
+.afn-attachment[data-state="error"] {
+	border-color: var(--destructive);
+}
+.afn-attachment[data-state="error"] .afn-attachment-error {
+	color: var(--destructive);
+}
+
+/* P1-07b T7 — 인라인 이미지 preview(figure·클릭 = 원본 다운로드). 폭 100% 상한(모바일
+ * 390 포함)·원본 폭 이상 확대 안 함(preview는 최대 1600px — 계획 스케치). */
+.afn-attachment-inline {
+	margin: 0.5rem 0;
+	max-width: 100%;
+}
+.afn-attachment-inline img {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--border);
+}
+.afn-attachment-inline-caption {
+	color: var(--muted-foreground);
+	font-size: var(--text-dense-size);
+	word-break: keep-all;
+	margin-top: 0.25rem;
+}
+/* 첨부 이미지 figure — 정렬은 margin, 폭은 inline style(%), 편집 도구는 호버·포커스에만. */
+.afn-attachment-inline[data-align="left"] {
+	margin-inline: 0 auto;
+}
+.afn-attachment-inline[data-align="center"] {
+	margin-inline: auto;
+}
+.afn-attachment-inline[data-align="right"] {
+	margin-inline: auto 0;
+}
+.afn-attachment-inline[data-afn-editable] {
+	position: relative;
+}
+.afn-attachment-inline-open {
+	display: block;
+	width: 100%;
+	padding: 0;
+	border: 0;
+	background: none;
+	cursor: zoom-in;
+}
+input.afn-attachment-inline-caption {
+	width: 100%;
+	/* WHY: 캡션 입력도 터치 타깃 — axe target-size 24px 하한(AC15·AC17). */
+	min-height: 1.5rem;
+	border: 0;
+	background: transparent;
+	text-align: center;
+}
+input.afn-attachment-inline-caption:focus {
+	outline: 1px solid var(--ring);
+	border-radius: var(--radius-sm);
+}
+.afn-attachment-resize {
+	position: absolute;
+	top: 0;
+	right: -0.25rem;
+	width: 0.5rem;
+	height: calc(100% - 1.5rem);
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	cursor: col-resize;
+}
+.afn-attachment-tools {
+	position: absolute;
+	top: 0.25rem;
+	right: 0.5rem;
+	display: none;
+	gap: 0.125rem;
+	padding: 0.125rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--popover);
+	color: var(--popover-foreground);
+	font-size: var(--text-dense-size);
+}
+.afn-attachment-tools button {
+	padding: 0.125rem 0.375rem;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+}
+.afn-attachment-tools button[aria-pressed="true"] {
+	background: var(--accent);
+}
+.afn-attachment-inline[data-afn-editable]:hover .afn-attachment-tools,
+.afn-attachment-inline[data-afn-editable]:focus-within .afn-attachment-tools {
+	display: flex;
+}
+.afn-attachment-inline[data-afn-editable]:hover .afn-attachment-resize {
+	background: var(--accent);
+}
+.afn-attachment-badge {
+	margin-inline-start: 0.5rem;
+	color: var(--muted-foreground);
+	font-size: var(--text-dense-size);
+	white-space: nowrap;
+}
+.fvoci-format-cluster {
+	display: inline-flex;
+	flex-shrink: 0;
+	align-items: center;
+	gap: 0.125rem;
+}
+
+@media (max-width: 47.999rem) {
+	[data-fvoci-bubble] {
+		display: none;
+	}
+}

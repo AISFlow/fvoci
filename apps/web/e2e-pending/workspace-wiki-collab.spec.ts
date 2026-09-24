@@ -1,0 +1,620 @@
+/**
+ * Product /collab acceptance for two real FvociEditor clients.
+ * Registered separately in the collaboration-flow CI job. Full product
+ * acceptance still requires the recorded security/review gates. Invocation:
+ * FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh
+ */
+import {
+  admin,
+  applyBoldToSelection,
+  applyLinkToSelection,
+  attachCollabWire,
+  closeCollabContext,
+  createE2eUser,
+  createWikiDoc,
+  editorLocator,
+  editorShape,
+  ensureInstanceSetup,
+  expectAwarenessTokenNotSession,
+  expectConverged,
+  expectMatchingPersistAck,
+  expectNotDurablySaved,
+  expectTokens,
+  expectTokensAbsent,
+  indexedDbNames,
+  insertSlashTable,
+  installCollabMember,
+  installCollabPeer,
+  login,
+  MEMBER_PRESENCE,
+  member,
+  newCollabContext,
+  openEditor,
+  PEER_PRESENCE,
+  peer,
+  persistBody,
+  placeContentCaret,
+  readEditorSelection,
+  sentPersistRequests,
+  sessionCookie,
+  test,
+  expect,
+  uniqueBlockIds,
+  waitConnected,
+  workspaceId,
+} from "./collab-helpers";
+
+// One worker preserves setup order. Scenarios own separate documents/users;
+// a failed scenario must not skip the remaining independent acceptance cases.
+
+test("instance setup then member fixture", async ({ page }) => {
+  await ensureInstanceSetup(page);
+  installCollabMember();
+  await login(page, member.email, member.password);
+});
+
+test("Korean, Han, and emoji keep UniqueID across persist and reload", async ({
+  page,
+  context,
+}) => {
+  const wire = attachCollabWire(page);
+  await login(page, member.email, member.password);
+  const session = await sessionCookie(context);
+  const doc = await createWikiDoc(page, "협업 본문");
+  const editor = await openEditor(page, doc.url);
+  await expectAwarenessTokenNotSession(wire, session);
+  await editor.click();
+  await page.keyboard.type("본문 한글과 漢字🙂");
+  await expectNotDurablySaved(page);
+  await persistBody(page);
+  await expectMatchingPersistAck(page, wire);
+  const before = await editorShape(page);
+  const ids = uniqueBlockIds(before);
+  expect(before.text).toContain("본문 한글과 漢字🙂");
+  await page.reload();
+  await waitConnected(page);
+  const after = await editorShape(page);
+  expect(after.text).toContain("본문 한글과 漢字🙂");
+  expect(uniqueBlockIds(after)).toEqual(ids);
+});
+
+test("two clients insert at the same caret and both tokens survive", async ({
+  browser,
+  collabApp,
+}) => {
+  const ctxA = await newCollabContext(browser, collabApp.baseUrl);
+  const ctxB = await newCollabContext(browser, collabApp.baseUrl);
+  const pageA = await ctxA.newPage();
+  const pageB = await ctxB.newPage();
+  try {
+    await login(pageA, member.email, member.password);
+    await login(pageB, member.email, member.password);
+    const doc = await createWikiDoc(pageA, "같은 위치 삽입");
+    const editorA = await openEditor(pageA, doc.url);
+    const editorB = await openEditor(pageB, doc.url);
+    await editorA.click();
+    await editorB.click();
+    await Promise.all([pageA.keyboard.type("가나다토큰"), pageB.keyboard.type("🙂BETA")]);
+    await expectTokens(pageA, ["가나다토큰", "🙂BETA"]);
+    await expectTokens(pageB, ["가나다토큰", "🙂BETA"]);
+    await expectConverged(pageA, pageB);
+  } finally {
+    await ctxA.close();
+    await ctxB.close();
+  }
+});
+
+test("insert and delete conflict keeps the insertion and applies the deletion", async ({
+  browser,
+  collabApp,
+}) => {
+  const ctxA = await newCollabContext(browser, collabApp.baseUrl);
+  const ctxB = await newCollabContext(browser, collabApp.baseUrl);
+  const pageA = await ctxA.newPage();
+  const pageB = await ctxB.newPage();
+  try {
+    await login(pageA, member.email, member.password);
+    await login(pageB, member.email, member.password);
+    const doc = await createWikiDoc(pageA, "삽입 삭제 충돌");
+    const editorA = await openEditor(pageA, doc.url);
+    await editorA.click();
+    await pageA.keyboard.type("한글본문");
+    await expectTokens(pageA, ["한글본문"]);
+    const editorB = await openEditor(pageB, doc.url);
+    await expectTokens(pageB, ["한글본문"]);
+    await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
+    await Promise.all([
+      (async () => {
+        await pageA.keyboard.type("앞쪽삽입");
+      })(),
+      (async () => {
+        await pageB.keyboard.press("Backspace");
+        await pageB.keyboard.press("Backspace");
+      })(),
+    ]);
+    await expectTokens(pageA, ["앞쪽삽입", "한글"]);
+    await expectTokens(pageB, ["앞쪽삽입", "한글"]);
+    await expectTokensAbsent(pageA, ["한글본문"]);
+    await expectTokensAbsent(pageB, ["한글본문"]);
+    await expectConverged(pageA, pageB);
+  } finally {
+    await ctxA.close();
+    await ctxB.close();
+  }
+});
+
+test("Korean plus emoji middle insert and delete converge without dropping IDs", async ({
+  browser,
+  collabApp,
+}) => {
+  const ctxA = await newCollabContext(browser, collabApp.baseUrl);
+  const ctxB = await newCollabContext(browser, collabApp.baseUrl);
+  const pageA = await ctxA.newPage();
+  const pageB = await ctxB.newPage();
+  try {
+    await login(pageA, member.email, member.password);
+    await login(pageB, member.email, member.password);
+    const doc = await createWikiDoc(pageA, "중간 한글 이모지");
+    const editorA = await openEditor(pageA, doc.url);
+    await editorA.click();
+    await pageA.keyboard.type("안녕🙂세계");
+    const editorB = await openEditor(pageB, doc.url);
+    await expectTokens(pageA, ["안녕🙂세계"]);
+    await expectTokens(pageB, ["안녕🙂세계"]);
+    await expectConverged(pageA, pageB);
+    const beforeIds = uniqueBlockIds(await editorShape(pageA));
+    await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
+    await Promise.all([
+      (async () => {
+        await pageA.keyboard.press("ArrowRight");
+        await pageA.keyboard.press("ArrowRight");
+        await pageA.keyboard.type("중간");
+      })(),
+      (async () => {
+        await pageB.keyboard.press("ArrowLeft");
+        await pageB.keyboard.press("ArrowLeft");
+        await pageB.keyboard.press("ArrowLeft");
+        await pageB.keyboard.press("Delete");
+      })(),
+    ]);
+    await expectTokens(pageA, ["안녕", "중간", "세계"]);
+    await expectTokens(pageB, ["안녕", "중간", "세계"]);
+    await expectTokensAbsent(pageA, ["🙂"]);
+    await expectTokensAbsent(pageB, ["🙂"]);
+    await expectConverged(pageA, pageB);
+    expect(uniqueBlockIds(await editorShape(pageA))).toEqual(beforeIds);
+    expect(uniqueBlockIds(await editorShape(pageB))).toEqual(beforeIds);
+  } finally {
+    await ctxA.close();
+    await ctxB.close();
+  }
+});
+
+test("offline typing reconnects with unsent text and without a persist ack", async ({
+  page,
+  context,
+  collabApp,
+}) => {
+  const wire = attachCollabWire(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "재접속");
+  const editor = await openEditor(page, doc.url);
+  await collabApp.shutdownGraceful();
+  try {
+    await expect(page.locator('[data-collab-status="connected"]')).toHaveCount(0);
+    await expect(editor).toBeVisible();
+    await editor.focus();
+    await page.keyboard.type("오프라인에서 쓴 줄");
+    await expect(editor).toContainText("오프라인에서 쓴 줄");
+    await expectNotDurablySaved(page);
+    expect(sentPersistRequests(wire)).toEqual([]);
+  } finally {
+    await collabApp.recycle();
+  }
+  await waitConnected(page);
+  await expect(editor).toContainText("오프라인에서 쓴 줄");
+  await expectNotDurablySaved(page);
+  expect(sentPersistRequests(wire)).toEqual([]);
+  const observer = await context.newPage();
+  try {
+    await openEditor(observer, doc.url);
+    await expectTokens(observer, ["오프라인에서 쓴 줄"]);
+    await expectConverged(page, observer);
+  } finally {
+    await observer.close();
+  }
+});
+
+test("archived document stays connected and read-only", async ({ page }) => {
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "보관 문서");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("보관 전 문장");
+  await persistBody(page);
+  await page.getByLabel("문서 상태").selectOption("archived");
+  await expect(page.getByLabel("문서 상태")).toHaveValue("archived");
+  await expect(page.getByText("읽기 전용")).toBeVisible();
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible();
+  await expectNotDurablySaved(page);
+  await expect(page.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+  await editor.click();
+  await page.keyboard.type("보관 후 문장");
+  await expect(editor).toContainText("보관 전 문장");
+  await expect(editor).not.toContainText("보관 후 문장");
+});
+
+test("membership revoke while connected stops further edits", async ({
+  browser,
+  collabApp,
+}) => {
+  installCollabPeer();
+  const ownerCtx = await newCollabContext(browser, collabApp.baseUrl);
+  const memberCtx = await newCollabContext(browser, collabApp.baseUrl);
+  const ownerPage = await ownerCtx.newPage();
+  const memberPage = await memberCtx.newPage();
+  try {
+    await login(memberPage, peer.email, peer.password);
+    const me = await memberPage.request.get("/api/v1/auth/me");
+    expect(me.ok()).toBe(true);
+    const memberId = (await me.json()).userId as string;
+
+    await login(ownerPage, admin.email, admin.password);
+    const doc = await createWikiDoc(ownerPage, "철회 문서");
+    const editor = await openEditor(memberPage, doc.url);
+    await editor.click();
+    await memberPage.keyboard.type("철회 전 문장");
+    await expect(editor).toContainText("철회 전 문장");
+
+    const ws = await workspaceId(ownerPage, admin.workspaceSlug);
+    const revoke = await ownerPage.request.delete(
+      `/api/v1/workspaces/${ws}/members/${memberId}`,
+    );
+    expect(revoke.ok()).toBe(true);
+
+    await expect(memberPage.locator('[data-collab-status="unauthorized"]')).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect(memberPage.getByRole("alert")).toHaveText("권한 없음 · 다시 로그인");
+    await expect(editorLocator(memberPage)).toHaveCount(0);
+    await expect(memberPage.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+  } finally {
+    await ownerCtx.close();
+    await memberCtx.close();
+  }
+});
+
+test("delete-only save then structured marks, table, and IDs persist", async ({ page }) => {
+  const wire = attachCollabWire(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "삭제만");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("지울 문장");
+  await persistBody(page);
+  const firstId = sentPersistRequests(wire).at(-1);
+  expect(firstId).toBeTruthy();
+  await editor.click();
+  await page.keyboard.press("Control+A");
+  await page.keyboard.press("Backspace");
+  await expectNotDurablySaved(page);
+  await persistBody(page);
+  const secondId = sentPersistRequests(wire).at(-1);
+  expect(secondId).not.toBe(firstId);
+  await expectMatchingPersistAck(page, wire);
+
+  await editor.click();
+  await page.keyboard.type("굵은링크");
+  await page.keyboard.press("Shift+Home");
+  // Native keyboard selectionchange and ProseMirror selection update are
+  // separate events. Assert both before exercising the selection toolbar;
+  // a lost selection must fail here, not look like a missing format button.
+  await expect.poll(() => editor.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: {
+        state: {
+          selection: { from: number; to: number };
+          doc: { textBetween(from: number, to: number): string };
+        };
+      };
+    }).editor;
+    const selection = live?.state.selection;
+    return {
+      browser: window.getSelection()?.toString() ?? "",
+      editor: live && selection
+        ? live.state.doc.textBetween(selection.from, selection.to)
+        : null,
+    };
+  }), { message: "native and editor selection must cover the intended marked text" })
+    .toEqual({ browser: "굵은링크", editor: "굵은링크" });
+  await applyBoldToSelection(page);
+  await applyLinkToSelection(page, "https://example.com");
+  await persistBody(page);
+  await insertSlashTable(page);
+  await persistBody(page);
+  const structured = await editorShape(page);
+  const ids = uniqueBlockIds(structured);
+  expect(structured.table).not.toBeNull();
+  expect(structured.table?.rows.length).toBeGreaterThan(0);
+  expect(structured.bold.join("")).toContain("굵은링크");
+  expect(structured.hrefs.some((link) => link.href === "https://example.com")).toBe(true);
+  expect(structured.text).not.toContain("지울 문장");
+
+  await page.reload();
+  await waitConnected(page);
+  const restored = await editorShape(page);
+  expect(restored).toEqual(structured);
+  expect(restored.table).not.toBeNull();
+  expect(restored.table?.id).toBe(structured.table?.id);
+  expect(restored.table?.rows).toEqual(structured.table?.rows);
+  expect(uniqueBlockIds(restored)).toEqual(ids);
+  expect(restored.bold.join("")).toContain("굵은링크");
+  expect(restored.hrefs.some((link) => link.href === "https://example.com")).toBe(true);
+  expect(restored.text).not.toContain("지울 문장");
+});
+
+test("persist ack correlates request id on the real /collab socket", async ({ page }) => {
+  const wire = attachCollabWire(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "ack 상관");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("상관 본문");
+  await expectNotDurablySaved(page);
+  await persistBody(page);
+  const requestId = await expectMatchingPersistAck(page, wire);
+  expect(sentPersistRequests(wire).filter((id) => id === requestId)).toHaveLength(1);
+  const foreignDone = wire.received.filter(
+    (frame) =>
+      frame.kind === "stateless" &&
+      frame.payload.startsWith("persisted:") &&
+      frame.payload !== `persisted:${requestId}`,
+  );
+  expect(foreignDone).toEqual([]);
+});
+
+test("fresh context after process-tree crash SIGKILL reloads two-client persisted delete and structure", async ({
+  browser,
+  collabApp,
+}) => {
+  const started = Date.now();
+  const phase = (name: string) => console.info("crash recovery phase", {
+    name, elapsedMs: Date.now() - started,
+  });
+  const logSelection = async (page: import("@playwright/test").Page, label: string) => {
+    console.info("crash recovery selection", {
+      label,
+      ...(await readEditorSelection(page)),
+    });
+  };
+  const logEditorText = async (page: import("@playwright/test").Page, label: string) => {
+    console.info("crash recovery editor text", {
+      label,
+      text: (await editorShape(page)).text,
+    });
+  };
+  const seedA = await newCollabContext(browser, collabApp.baseUrl);
+  const seedB = await newCollabContext(browser, collabApp.baseUrl);
+  const pageA = await seedA.newPage();
+  const pageB = await seedB.newPage();
+  const wire = attachCollabWire(pageA);
+  let url = "";
+  let seeded: Awaited<ReturnType<typeof editorShape>> | undefined;
+  let seedBodyFailed = false;
+  try {
+    await test.step("authenticate independent seed clients", () => Promise.all([
+      login(pageA, member.email, member.password),
+      login(pageB, member.email, member.password),
+    ]));
+    phase("seed clients authenticated");
+    const doc = await createWikiDoc(pageA, "크래시 복원");
+    url = doc.url;
+    const editorA = await openEditor(pageA, doc.url);
+    const editorB = await openEditor(pageB, doc.url);
+    await editorA.click();
+    await pageA.keyboard.type("살아남을한글");
+    await persistBody(pageA);
+    await expectMatchingPersistAck(pageA, wire);
+    await expectTokens(pageB, ["살아남을한글"]);
+
+    await editorB.click();
+    await placeContentCaret(pageB, "end");
+    await pageB.keyboard.type("지울토큰XYZ");
+    await expectTokens(pageA, ["살아남을한글", "지울토큰XYZ"]);
+    await expectTokens(pageB, ["살아남을한글", "지울토큰XYZ"]);
+    await expectConverged(pageA, pageB);
+    await persistBody(pageB);
+
+    await editorA.click();
+    await placeContentCaret(pageA, "end");
+    for (let i = 0; i < "지울토큰XYZ".length; i += 1) {
+      await pageA.keyboard.press("Backspace");
+    }
+    await expectTokensAbsent(pageA, ["지울토큰XYZ"]);
+    await expectTokens(pageB, ["살아남을한글"]);
+    await persistBody(pageA);
+    await expectMatchingPersistAck(pageA, wire);
+    await insertSlashTable(pageA);
+    await persistBody(pageA);
+    await expectMatchingPersistAck(pageA, wire);
+    await expect(pageB.locator(".fvoci-editor table")).toBeVisible({ timeout: 15_000 });
+
+    seeded = await editorShape(pageA);
+    expect(uniqueBlockIds(seeded).length).toBeGreaterThan(0);
+    expect(seeded.table).not.toBeNull();
+    expect(seeded.text).toContain("살아남을한글");
+    expect(seeded.text).not.toContain("지울토큰XYZ");
+    await expectConverged(pageA, pageB);
+  } catch (error) {
+    seedBodyFailed = true;
+    throw error;
+  } finally {
+    await Promise.all([
+      closeCollabContext(seedA, seedBodyFailed),
+      closeCollabContext(seedB, seedBodyFailed),
+    ]);
+  }
+  phase("persist acknowledged and old clients closed");
+  await test.step("kill owned process tree and restart from DB", () => collabApp.crashAndRestart());
+  phase("server restarted");
+
+  const freshA = await newCollabContext(browser, collabApp.baseUrl);
+  const freshB = await newCollabContext(browser, collabApp.baseUrl);
+  const restoredA = await freshA.newPage();
+  const restoredB = await freshB.newPage();
+  const restoredWires = [attachCollabWire(restoredA), attachCollabWire(restoredB)];
+  let restoreBodyFailed = false;
+  try {
+    await test.step("authenticate independent fresh clients", () => Promise.all([
+      login(restoredA, member.email, member.password),
+      login(restoredB, member.email, member.password),
+    ]));
+    phase("fresh clients authenticated");
+    expect(await indexedDbNames(restoredA)).toEqual([]);
+    expect(await indexedDbNames(restoredB)).toEqual([]);
+    expect(
+      (await indexedDbNames(restoredA)).some((name) => /yjs|y-indexeddb|hocus/i.test(name)),
+    ).toBe(false);
+    await openEditor(restoredA, url);
+    expect(seeded).toBeTruthy();
+    const restored = await editorShape(restoredA);
+    expect(restored).toEqual(seeded);
+    phase("fresh client recovered exact structure from DB");
+
+    await test.step("open second fresh client on recovered document", async () => {
+      await openEditor(restoredB, url);
+      await expectTokens(restoredB, ["살아남을한글"]);
+      await expectTokensAbsent(restoredB, ["지울토큰XYZ"]);
+      await expect(await editorShape(restoredB)).toEqual(seeded);
+    });
+    phase("second fresh client verified against DB structure");
+
+    await test.step("subsequent A edit at document end", async () => {
+      await editorLocator(restoredA).click();
+      await logSelection(restoredA, "restoredA before placeContentCaret end");
+      await placeContentCaret(restoredA, "end");
+      await logSelection(restoredA, "restoredA after placeContentCaret end");
+      await restoredA.keyboard.type("후속A");
+      await logSelection(restoredA, "restoredA after type 후속A");
+      await logEditorText(restoredA, "restoredA after type 후속A");
+      await logEditorText(restoredB, "restoredB after A type 후속A");
+    });
+    phase("client A typed subsequent edit");
+
+    await test.step("subsequent B edit at document start", async () => {
+      await editorLocator(restoredB).focus();
+      await logSelection(restoredB, "restoredB after focus before Control+Home");
+      await restoredB.keyboard.press("Control+Home");
+      await logSelection(restoredB, "restoredB after Control+Home");
+      await restoredB.keyboard.press("Enter");
+      await logSelection(restoredB, "restoredB after Enter");
+      await restoredB.keyboard.type("후속B");
+      await logSelection(restoredB, "restoredB after type 후속B");
+      await logEditorText(restoredB, "restoredB after type 후속B");
+      await logEditorText(restoredA, "restoredA after B type 후속B");
+    });
+    phase("client B typed subsequent edit");
+
+    await test.step("subsequent edits converged across fresh clients", async () => {
+      await expectTokens(restoredB, ["후속B"]);
+      await expectTokens(restoredA, ["살아남을한글", "후속A", "후속B"]);
+      await expectTokens(restoredB, ["살아남을한글", "후속A", "후속B"]);
+      await expectConverged(restoredA, restoredB);
+      await expectTokensAbsent(restoredA, ["지울토큰XYZ"]);
+      expect((await editorShape(restoredA)).table?.id).toBe(seeded?.table?.id);
+    });
+    phase("subsequent edits converged");
+  } catch (error) {
+    restoreBodyFailed = true;
+    // Only frame categories: never print cookies, auth tokens or document data.
+    for (const [client, wire] of restoredWires.entries()) {
+      const category = (frame: (typeof wire.sent)[number]) =>
+        frame.kind === "other" ? `document-type-${frame.type}` : frame.kind;
+      console.info("crash recovery fresh wire", {
+        client,
+        sentCount: wire.sent.length,
+        receivedCount: wire.received.length,
+        sentTail: wire.sent.slice(-32).map(category),
+        receivedTail: wire.received.slice(-32).map(category),
+      });
+    }
+    throw error;
+  } finally {
+    await Promise.all([
+      closeCollabContext(freshA, restoreBodyFailed),
+      closeCollabContext(freshB, restoreBodyFailed),
+    ]);
+  }
+});
+
+test("slash attachment and @ mention do not call unsupported APIs", async ({ page }) => {
+  const attachmentHits: string[] = [];
+  const mentionHits: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (url.includes("/attachments")) attachmentHits.push(url);
+    if (url.includes("/search") || url.includes("/lookup") || url.includes("/members")) {
+      mentionHits.push(url);
+    }
+  });
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "미지원 메뉴");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("/첨부");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("@");
+  expect(attachmentHits).toEqual([]);
+  expect(mentionHits).toEqual([]);
+});
+
+test("guest still cannot read wiki documents", async ({ page }) => {
+  createE2eUser("collab-guest@example.com", "guestpass1", "게스트", {
+    familyName: "위키",
+    workspaceSlug: "acme",
+    membershipRole: "guest",
+  });
+  await login(page, "collab-guest@example.com", "guestpass1");
+  await page.goto("/w/acme/wiki");
+  await expect(page.getByText("현재 역할: 게스트")).toBeVisible();
+  await expect(page.getByRole("button", { name: "새 문서" })).toHaveCount(0);
+});
+
+test("two users show presence and drop it when the peer closes", async ({
+  browser,
+  collabApp,
+}, testInfo) => {
+  const presencePeer = { ...peer, email: "collab-presence@example.com" };
+  installCollabPeer(presencePeer);
+  const ctxA = await newCollabContext(browser, collabApp.baseUrl);
+  const ctxB = await newCollabContext(browser, collabApp.baseUrl);
+  const pageA = await ctxA.newPage();
+  const pageB = await ctxB.newPage();
+  const wireA = attachCollabWire(pageA);
+  const wireB = attachCollabWire(pageB);
+  try {
+    await login(pageA, member.email, member.password);
+    const doc = await createWikiDoc(pageA, "프레즌스");
+    await openEditor(pageA, doc.url);
+    await login(pageB, presencePeer.email, presencePeer.password);
+    await openEditor(pageB, doc.url);
+    await expect(pageA.getByLabel(/동시 접속 1명/)).toBeVisible({ timeout: 15_000 });
+    await expect(pageB.getByLabel(/동시 접속 1명/)).toBeVisible();
+    await expect(pageA.getByRole("button", { name: `${PEER_PRESENCE} 커서 위치로 이동` })).toBeVisible();
+    await expect(pageB.getByRole("button", { name: `${MEMBER_PRESENCE} 커서 위치로 이동` })).toBeVisible();
+    await ctxB.close();
+    await expect(pageA.getByLabel(/동시 접속 \d+명/)).toBeHidden({ timeout: 20_000 });
+    await expect(pageA.getByRole("button", { name: `${PEER_PRESENCE} 커서 위치로 이동` })).toHaveCount(0);
+  } finally {
+    const summary = {
+      a: { sent: wireA.sent.map((frame) => frame.kind), received: wireA.received.map((frame) => frame.kind) },
+      b: { sent: wireB.sent.map((frame) => frame.kind), received: wireB.received.map((frame) => frame.kind) },
+    };
+    await testInfo.attach("collab-wire-kinds.json", {
+      body: Buffer.from(JSON.stringify(summary)),
+      contentType: "application/json",
+    });
+    await ctxA.close();
+    await ctxB.close().catch(() => undefined);
+  }
+});

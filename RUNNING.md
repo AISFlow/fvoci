@@ -106,8 +106,44 @@ enforced by product operations. This is not a claim that arbitrary SQL executed
 with the app credentials is restricted to an authenticated end user's authority.
 
 Document/task count fields currently return zero because those domains are not
-implemented. Counts, quotas, member listing, invitations, exports, deletion and
-collaborative editing remain unsupported in this slice.
+implemented. Counts, quotas, member listing, invitations, exports, and deletion
+remain unsupported in this slice.
+
+## Collaboration (`/collab`)
+
+Collaboration is **opt-in**. The HTTP server exposes `GET /collab` (426 without
+WebSocket upgrade) and upgrades to Hocuspocus 4.6.0 only when
+`FVOCI_COLLAB_ENGINE` points at a built `collab-engine` helper binary. Without
+that variable the route returns 503 `collab_unavailable`.
+
+Build the helper (separate crate graph; parent depends on `collab-engine` with
+`default-features = false` and talks to the child through framed JSON only):
+
+```sh
+cd crates/collab-engine
+cargo build --bin collab-engine --features worker
+export FVOCI_COLLAB_ENGINE="$PWD/target/debug/collab-engine"
+```
+
+Optional tuning: `FVOCI_COLLAB_MAX_ROOMS` (default 4), `FVOCI_COLLAB_MAX_CONNECTIONS`,
+`FVOCI_COLLAB_IDLE_MS`, `FVOCI_COLLAB_REVOKE_POLL_MS`.
+
+`FVOCI_SHUTDOWN_DEADLINE_MS` sets the whole server shutdown deadline (default
+30000, positive milliseconds). SIGTERM/Ctrl+C stops collaboration admission
+before HTTP draining; independent rooms drain concurrently. Normal shutdown
+joins room helpers and releases their database guards before closing the pool.
+An observed shutdown failure or deadline expiry exits nonzero. Expiry is not a
+successful flush or proof that an in-flight transaction rolled back; recovery
+uses the durable CRDT state and operation receipts. Actor panic/rejoin handling
+is still under acceptance review, so collaboration remains opt-in.
+
+Product tests require `TEST_DATABASE_URL`, the helper path above, and run as:
+
+```sh
+export TEST_DATABASE_URL='postgres://admin@host:5432/postgres?sslmode=require'
+export FVOCI_COLLAB_ENGINE=/path/to/collab-engine
+cargo test --features db-tests --test collab_product
+```
 
 ## Web UI (React)
 
@@ -147,3 +183,10 @@ scripts/run-web-e2e.sh
 The UI reuses source auth/workspace/settings styling for setup, login, workspace
 list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,
 import/export, and deletion surfaces are shown as unavailable rather than faked.
+
+
+문서 추출 클라이언트는 `crates/document-extract-client`에서 parser 의존성 없이
+빌드·검사한다 (`cargo test --locked --offline --all-targets`). 실제 추출 실행은
+별도 `document-extract` native helper가 필요하며 클라이언트만으로 지원 완료가 아니다.
+협업 Live actor의 비정상 완료를 복구했더라도 해당 hub의 수명 동안 실패 기록이
+유지되어 이후 정상 종료 요청의 프로세스 exit가 non-zero가 될 수 있다.

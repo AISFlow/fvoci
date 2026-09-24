@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Navigate, useParams } from "react-router-dom";
 import { DocumentView } from "@/features/documents/document-view";
+import { CollabRoom } from "@/features/documents/collab-session";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { parseWikiRef, wikiPath } from "@/lib/href";
@@ -46,7 +47,9 @@ export function DocumentPage() {
       workspaceName={workspace.name}
       activeNav="wiki"
     >
-      <DocumentView workspaceId={workspace.id} slug={slug} documentId={node.id} />
+      <CollabRoom workspaceId={workspace.id} kind="document" id={node.id}>
+        <DocumentView workspaceId={workspace.id} slug={slug} documentId={node.id} />
+      </CollabRoom>
     </WorkspaceShell>
   );
 }

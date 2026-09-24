@@ -3,12 +3,13 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::pool::PoolConnection;
+use sqlx::{Acquire, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::attachments::{
     initial_extract_status, is_image_mime, ATTACHMENT_LOCK_NAMESPACE, MAX_PART_COUNT,
-    STORAGE_LOCK_NAMESPACE, UploadLimits,
+    STORAGE_LOCK_NAMESPACE, StagedPart, UploadLimits,
 };
 use crate::attachments::{LocalStorage, StorageError};
 use crate::db::context::{lock_key_from_uuid, set_tenant};
@@ -65,6 +66,53 @@ pub struct CreateUploadInput {
     pub name: String,
     pub size_bytes: i64,
     pub declared_mime: Option<String>,
+}
+
+struct AttachmentSessionLock {
+    conn: PoolConnection<Postgres>,
+    lock_key: i32,
+    held: bool,
+}
+
+impl AttachmentSessionLock {
+    async fn try_acquire(
+        pool: &PgPool,
+        attachment_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        let mut conn = pool.acquire().await?;
+        let lock_key = lock_key_from_uuid(attachment_id);
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, $2)")
+            .bind(ATTACHMENT_LOCK_NAMESPACE)
+            .bind(lock_key)
+            .fetch_one(&mut *conn)
+            .await?;
+        if !locked {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            conn,
+            lock_key,
+            held: true,
+        }))
+    }
+
+    async fn begin(&mut self) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+        self.conn.begin().await
+    }
+
+    async fn release(mut self) {
+        if self.held {
+            let unlock = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+                .bind(ATTACHMENT_LOCK_NAMESPACE)
+                .bind(self.lock_key)
+                .execute(&mut *self.conn)
+                .await;
+            if let Err(err) = unlock {
+                tracing::warn!("attachment advisory unlock failed: {}", err);
+            }
+            self.held = false;
+        }
+    }
 }
 
 fn parse_upload_meta(value: &Value) -> Result<UploadMeta, AttachmentDbError> {
@@ -205,6 +253,31 @@ async fn require_view_access(
     Ok(Ok(()))
 }
 
+async fn recheck_upload_write_access(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<Result<AttachmentRow, AttachmentDbError>, sqlx::Error> {
+    lock_membership_users(tx, &[actor_user_id]).await?;
+    if !recheck_session(tx, actor_user_id, session_id).await? {
+        return Ok(Err(AttachmentDbError::Forbidden));
+    }
+    let att = match fetch_attachment(tx, workspace_id, attachment_id).await? {
+        Some(att) => att,
+        None => return Ok(Err(AttachmentDbError::NotFound)),
+    };
+    match require_upload_access(tx, workspace_id, actor_user_id, &att).await? {
+        Ok(()) => {}
+        Err(err) => return Ok(Err(err)),
+    }
+    if att.status != "uploading" && att.status != "assembling" {
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
+    Ok(Ok(att))
+}
+
 async fn record_attachment_event(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -257,7 +330,8 @@ pub async fn create_upload(
     if input.size_bytes > limits.max_file_size_bytes {
         return Ok(Err(AttachmentDbError::TooLarge));
     }
-    let part_count = ((input.size_bytes + limits.part_size_bytes - 1) / limits.part_size_bytes) as i32;
+    let part_count =
+        ((input.size_bytes + limits.part_size_bytes - 1) / limits.part_size_bytes) as i32;
     if part_count > MAX_PART_COUNT {
         return Ok(Err(AttachmentDbError::InvalidInput));
     }
@@ -316,7 +390,8 @@ pub async fn create_upload(
     tx.commit().await?;
 
     if let Err(err) = storage.create_multipart(&storage_key).await {
-        let _ = cleanup_reserved_upload(pool, storage, workspace_id, attachment_id, &storage_key).await;
+        let _ =
+            cleanup_reserved_upload(pool, storage, workspace_id, attachment_id, &storage_key).await;
         return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
     }
 
@@ -365,7 +440,7 @@ pub async fn authorize_upload_part(
     actor_user_id: Uuid,
     session_id: Uuid,
     part_number: i32,
-) -> Result<Result<(AttachmentRow, UploadMeta, u64), AttachmentDbError>, sqlx::Error> {
+) -> Result<Result<(String, u64), AttachmentDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     lock_membership_users(&mut tx, &[actor_user_id]).await?;
@@ -407,8 +482,67 @@ pub async fn authorize_upload_part(
     } else {
         (meta.declared_size_bytes - meta.part_size_bytes * (meta.part_count as i64 - 1)) as u64
     };
+    let storage_key = att.storage_key.clone();
     tx.commit().await?;
-    Ok(Ok((att, meta, max_bytes)))
+    Ok(Ok((storage_key, max_bytes)))
+}
+
+pub async fn commit_upload_part(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    part_number: i32,
+    staged: &StagedPart,
+) -> Result<Result<crate::attachments::PartInfo, AttachmentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let att = match recheck_upload_write_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+    )
+    .await?
+    {
+        Ok(att) => att,
+        Err(err) => {
+            tx.rollback().await?;
+            LocalStorage::discard_staged_part(staged).await;
+            return Ok(Err(err));
+        }
+    };
+    if att.status != "uploading" {
+        tx.rollback().await?;
+        LocalStorage::discard_staged_part(staged).await;
+        return Ok(Err(AttachmentDbError::UploadState));
+    }
+    let meta = parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&json!({})))
+        .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
+    if part_number > meta.part_count {
+        tx.rollback().await?;
+        LocalStorage::discard_staged_part(staged).await;
+        return Ok(Err(AttachmentDbError::InvalidInput));
+    }
+    tx.commit().await?;
+
+    let published = match storage
+        .publish_staged_part(&att.storage_key, part_number, staged)
+        .await
+    {
+        Ok(part) => part,
+        Err(StorageError::UploadGone) => {
+            return Ok(Err(AttachmentDbError::UploadState));
+        }
+        Err(StorageError::PartTooLarge) => {
+            return Ok(Err(AttachmentDbError::PartTooLarge));
+        }
+        Err(err) => return Err(sqlx::Error::Io(std::io::Error::other(err.to_string()))),
+    };
+    Ok(Ok(published))
 }
 
 pub async fn resume_upload(
@@ -460,7 +594,10 @@ pub async fn resume_upload(
         .iter()
         .map(|p| (p.part_number, p.etag.clone()))
         .collect::<Vec<_>>();
-    let done_set = done.iter().map(|(n, _)| *n).collect::<std::collections::HashSet<_>>();
+    let done_set = done
+        .iter()
+        .map(|(n, _)| *n)
+        .collect::<std::collections::HashSet<_>>();
     let remaining = (1..=meta.part_count)
         .filter(|n| !done_set.contains(n))
         .collect();
@@ -482,7 +619,7 @@ pub async fn complete_upload(
     let deadline = std::time::Instant::now() + ASSEMBLE_WAIT;
 
     loop {
-        if let Some(row) = try_complete_owned(
+        match try_complete_owned(
             pool,
             storage,
             workspace_id,
@@ -494,40 +631,22 @@ pub async fn complete_upload(
         )
         .await?
         {
-            return Ok(Ok(row));
+            CompleteAttempt::Done(row) => return Ok(Ok(row)),
+            CompleteAttempt::Denied(err) => return Ok(Err(err)),
+            CompleteAttempt::Retry => {}
         }
 
-        let mut tx = pool.begin().await?;
-        set_tenant(&mut tx, workspace_id).await?;
-        lock_membership_users(&mut tx, &[actor_user_id]).await?;
-        if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-            tx.rollback().await?;
-            return Ok(Err(AttachmentDbError::Forbidden));
-        }
-        let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
-            Some(att) => att,
-            None => {
-                tx.rollback().await?;
-                return Ok(Err(AttachmentDbError::NotFound));
-            }
-        };
-        match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
-            Ok(()) => {}
-            Err(err) => {
-                tx.rollback().await?;
-                return Ok(Err(err));
-            }
-        }
-        if att.status == "stored" {
-            tx.commit().await?;
-            return Ok(Ok(att));
-        }
-        tx.rollback().await?;
         if std::time::Instant::now() >= deadline {
             return Ok(Err(AttachmentDbError::UploadState));
         }
         tokio::time::sleep(ASSEMBLE_POLL).await;
     }
+}
+
+enum CompleteAttempt {
+    Done(AttachmentRow),
+    Denied(AttachmentDbError),
+    Retry,
 }
 
 async fn try_complete_owned(
@@ -539,22 +658,39 @@ async fn try_complete_owned(
     session_id: Uuid,
     parts: &[(i32, String)],
     client_ip: Option<&str>,
-) -> Result<Option<AttachmentRow>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
-    let key = lock_key_from_uuid(attachment_id);
-    let locked: Option<(bool,)> = sqlx::query_as(
-        "SELECT pg_try_advisory_lock($1, $2) AS locked",
-    )
-    .bind(ATTACHMENT_LOCK_NAMESPACE)
-    .bind(key)
-    .fetch_optional(&mut *conn)
-    .await?;
-    if !locked.map(|(v,)| v).unwrap_or(false) {
-        return Ok(None);
-    }
+) -> Result<CompleteAttempt, sqlx::Error> {
+    let Some(mut lock) = AttachmentSessionLock::try_acquire(pool, attachment_id).await? else {
+        let mut tx = pool.begin().await?;
+        set_tenant(&mut tx, workspace_id).await?;
+        lock_membership_users(&mut tx, &[actor_user_id]).await?;
+        if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Denied(AttachmentDbError::Forbidden));
+        }
+        let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
+            Some(att) => att,
+            None => {
+                tx.rollback().await?;
+                return Ok(CompleteAttempt::Denied(AttachmentDbError::NotFound));
+            }
+        };
+        match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
+            Ok(()) => {}
+            Err(err) => {
+                tx.rollback().await?;
+                return Ok(CompleteAttempt::Denied(err));
+            }
+        }
+        if att.status == "stored" {
+            tx.commit().await?;
+            return Ok(CompleteAttempt::Done(att));
+        }
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Retry);
+    };
 
     let result = complete_owned_inner(
-        pool,
+        &mut lock,
         storage,
         workspace_id,
         attachment_id,
@@ -564,18 +700,12 @@ async fn try_complete_owned(
         client_ip,
     )
     .await;
-
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-        .bind(ATTACHMENT_LOCK_NAMESPACE)
-        .bind(key)
-        .execute(&mut *conn)
-        .await;
-
+    lock.release().await;
     result
 }
 
 async fn complete_owned_inner(
-    pool: &PgPool,
+    lock: &mut AttachmentSessionLock,
     storage: &LocalStorage,
     workspace_id: Uuid,
     attachment_id: Uuid,
@@ -583,88 +713,94 @@ async fn complete_owned_inner(
     session_id: Uuid,
     parts: &[(i32, String)],
     client_ip: Option<&str>,
-) -> Result<Option<AttachmentRow>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+) -> Result<CompleteAttempt, sqlx::Error> {
+    let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
-        return Ok(None);
-    }
     with_upload_xact_lock(&mut tx, attachment_id).await?;
-    let att = match fetch_attachment(&mut tx, workspace_id, attachment_id).await? {
-        Some(att) => att,
-        None => {
+    let att = match recheck_upload_write_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+    )
+    .await?
+    {
+        Ok(att) => att,
+        Err(err) => {
             tx.rollback().await?;
-            return Ok(None);
+            return Ok(CompleteAttempt::Denied(err));
         }
     };
-    match require_upload_access(&mut tx, workspace_id, actor_user_id, &att).await? {
-        Ok(()) => {}
-        Err(_) => {
-            tx.rollback().await?;
-            return Ok(None);
-        }
-    }
     if att.status == "stored" {
         tx.commit().await?;
-        return Ok(Some(att));
+        return Ok(CompleteAttempt::Done(att));
     }
-    if att.status == "assembling" {
-        tx.commit().await?;
-        return Ok(None);
-    }
-    if att.status != "uploading" {
-        tx.rollback().await?;
-        return Err(sqlx::Error::Io(std::io::Error::other("upload state")));
-    }
+
     let meta = parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&json!({})))
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     if parts.len() as i32 != meta.part_count {
         tx.rollback().await?;
-        return Err(sqlx::Error::Io(std::io::Error::other("invalid input")));
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::InvalidInput));
     }
-    let rows = sqlx::query(
-        "UPDATE fvoci.attachments SET status = 'assembling' WHERE workspace_id = $1 AND id = $2 AND status = 'uploading'",
-    )
-    .bind(workspace_id)
-    .bind(attachment_id)
-    .execute(&mut *tx)
-    .await?;
-    if rows.rows_affected() == 0 {
-        tx.rollback().await?;
-        return Ok(None);
-    }
+
     let storage_key = att.storage_key.clone();
     let att_name = att.name.clone();
     let document_id = att.document_id;
+    let payload_exists = storage
+        .payload_exists(&storage_key)
+        .await
+        .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
+    let needs_assembly = if att.status == "assembling" {
+        !payload_exists
+    } else if att.status == "uploading" {
+        let rows = sqlx::query(
+            "UPDATE fvoci.attachments SET status = 'assembling' WHERE workspace_id = $1 AND id = $2 AND status = 'uploading'",
+        )
+        .bind(workspace_id)
+        .bind(attachment_id)
+        .execute(&mut *tx)
+        .await?;
+        if rows.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Retry);
+        }
+        true
+    } else {
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    };
     tx.commit().await?;
 
-    let assemble = storage.complete_multipart(&storage_key, parts).await;
-    let size_bytes = match assemble {
-        Ok(size) => size,
-        Err(StorageError::EtagMismatch) => {
-            revert_assembling(pool, workspace_id, attachment_id).await?;
-            return Err(sqlx::Error::Io(std::io::Error::other("etag mismatch")));
+    if needs_assembly {
+        let assemble = storage.assemble_multipart(&storage_key, parts).await;
+        match assemble {
+            Ok(size) if size as i64 != meta.declared_size_bytes => {
+                let _ = storage.delete_object(&storage_key).await;
+                delete_attachment_row(lock, workspace_id, attachment_id).await?;
+                return Ok(CompleteAttempt::Denied(AttachmentDbError::InvalidInput));
+            }
+            Err(StorageError::EtagMismatch) => {
+                revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
+                return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+            }
+            Err(err) => {
+                revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
+                return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
+            }
+            Ok(_) => {}
         }
-        Err(err) => {
-            revert_assembling(pool, workspace_id, attachment_id).await?;
-            return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
-        }
-    };
+    }
 
+    let size_bytes = storage
+        .head(&storage_key)
+        .await
+        .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?
+        .ok_or_else(|| sqlx::Error::Io(std::io::Error::other("missing payload")))?;
     if size_bytes as i64 != meta.declared_size_bytes {
         let _ = storage.delete_object(&storage_key).await;
-        let mut tx = pool.begin().await?;
-        set_tenant(&mut tx, workspace_id).await?;
-        with_upload_xact_lock(&mut tx, attachment_id).await?;
-        sqlx::query("DELETE FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2")
-            .bind(workspace_id)
-            .bind(attachment_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        return Err(sqlx::Error::Io(std::io::Error::other("invalid input")));
+        delete_attachment_row(lock, workspace_id, attachment_id).await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::InvalidInput));
     }
 
     let mime = storage
@@ -674,9 +810,34 @@ async fn complete_owned_inner(
     let image = is_image_mime(&mime);
     let extract_status = initial_extract_status(&att_name, &mime);
 
-    let mut tx = pool.begin().await?;
+    let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
+    let att = match recheck_upload_write_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        attachment_id,
+    )
+    .await?
+    {
+        Ok(att) => att,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(CompleteAttempt::Denied(err));
+        }
+    };
+    if att.status == "stored" {
+        tx.commit().await?;
+        let _ = storage.finalize_multipart(&storage_key).await;
+        return Ok(CompleteAttempt::Done(att));
+    }
+    if att.status != "uploading" && att.status != "assembling" {
+        tx.rollback().await?;
+        return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
+    }
+
     let updated = sqlx::query(
         r#"
         UPDATE fvoci.attachments
@@ -696,7 +857,7 @@ async fn complete_owned_inner(
     .await?;
     if updated.rows_affected() == 0 {
         tx.rollback().await?;
-        return Ok(None);
+        return Ok(CompleteAttempt::Retry);
     }
     record_attachment_event(
         &mut tx,
@@ -716,15 +877,33 @@ async fn complete_owned_inner(
         .await?
         .expect("stored row");
     tx.commit().await?;
-    Ok(Some(row))
+    let _ = storage.finalize_multipart(&storage_key).await;
+    Ok(CompleteAttempt::Done(row))
 }
 
-async fn revert_assembling(
-    pool: &PgPool,
+async fn delete_attachment_row(
+    lock: &mut AttachmentSessionLock,
     workspace_id: Uuid,
     attachment_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = lock.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    with_upload_xact_lock(&mut tx, attachment_id).await?;
+    sqlx::query("DELETE FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id)
+        .bind(attachment_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn revert_assembling_on_conn(
+    lock: &mut AttachmentSessionLock,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     with_upload_xact_lock(&mut tx, attachment_id).await?;
     sqlx::query(

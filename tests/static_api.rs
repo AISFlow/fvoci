@@ -38,6 +38,7 @@ async fn app_state() -> AppState {
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
         },
+        collab: None,
     }
 }
 

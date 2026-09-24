@@ -18,6 +18,13 @@ pub struct PartInfo {
     pub size_bytes: u64,
 }
 
+#[derive(Debug)]
+pub struct StagedPart {
+    pub etag: String,
+    pub size_bytes: u64,
+    writing_path: PathBuf,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("storage key rejected")]
@@ -96,13 +103,13 @@ impl LocalStorage {
         Ok(())
     }
 
-    pub async fn put_part_stream<S, E>(
+    pub async fn stage_part_stream<S, E>(
         &self,
         key: &str,
         part_number: i32,
         mut stream: S,
         max_bytes: u64,
-    ) -> Result<PartInfo, StorageError>
+    ) -> Result<StagedPart, StorageError>
     where
         S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -115,7 +122,6 @@ impl LocalStorage {
         if fs::metadata(&dir).await.is_err() {
             return Err(StorageError::UploadGone);
         }
-        let final_path = dir.join(part_number.to_string());
         let writing_path = dir.join(format!("{part_number}.{writing}.writing", writing = Uuid::now_v7()));
         let mut file = fs::File::create(&writing_path).await?;
         let mut hasher = Sha256::new();
@@ -132,8 +138,28 @@ impl LocalStorage {
         }
         file.flush().await?;
         let etag = hex::encode(hasher.finalize());
-        fs::rename(&writing_path, &final_path).await.map_err(|err| {
-            let _ = fs::remove_file(&writing_path);
+        Ok(StagedPart {
+            etag,
+            size_bytes,
+            writing_path,
+        })
+    }
+
+    pub async fn publish_staged_part(
+        &self,
+        key: &str,
+        part_number: i32,
+        staged: &StagedPart,
+    ) -> Result<PartInfo, StorageError> {
+        Self::assert_key(key)?;
+        let dir = self.parts_dir(key);
+        if fs::metadata(&dir).await.is_err() {
+            let _ = fs::remove_file(&staged.writing_path).await;
+            return Err(StorageError::UploadGone);
+        }
+        let final_path = dir.join(part_number.to_string());
+        fs::rename(&staged.writing_path, &final_path).await.map_err(|err| {
+            let _ = fs::remove_file(&staged.writing_path);
             if err.kind() == io::ErrorKind::NotFound {
                 StorageError::UploadGone
             } else {
@@ -142,9 +168,13 @@ impl LocalStorage {
         })?;
         Ok(PartInfo {
             part_number,
-            etag,
-            size_bytes,
+            etag: staged.etag.clone(),
+            size_bytes: staged.size_bytes,
         })
+    }
+
+    pub async fn discard_staged_part(staged: &StagedPart) {
+        let _ = fs::remove_file(&staged.writing_path).await;
     }
 
     pub async fn list_parts(&self, key: &str) -> Result<Vec<PartInfo>, StorageError> {
@@ -176,12 +206,24 @@ impl LocalStorage {
         Ok(parts)
     }
 
-    pub async fn complete_multipart(
+    pub async fn payload_exists(&self, key: &str) -> Result<bool, StorageError> {
+        Self::assert_key(key)?;
+        match fs::metadata(self.object_path(key)).await {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(StorageError::Io(err)),
+        }
+    }
+
+    pub async fn assemble_multipart(
         &self,
         key: &str,
         submitted: &[(i32, String)],
     ) -> Result<u64, StorageError> {
         Self::assert_key(key)?;
+        if self.payload_exists(key).await? {
+            return self.head(key).await?.ok_or(StorageError::UploadGone);
+        }
         let actual = self.list_parts(key).await?;
         let mut submitted = submitted.to_vec();
         submitted.sort_by_key(|(n, _)| *n);
@@ -210,8 +252,16 @@ impl LocalStorage {
         }
         out.flush().await?;
         fs::rename(&assembly_path, self.object_path(key)).await?;
-        fs::remove_dir_all(self.parts_dir(key)).await?;
         Ok(size_bytes)
+    }
+
+    pub async fn finalize_multipart(&self, key: &str) -> Result<(), StorageError> {
+        Self::assert_key(key)?;
+        let parts = self.parts_dir(key);
+        if fs::metadata(&parts).await.is_ok() {
+            fs::remove_dir_all(&parts).await?;
+        }
+        Ok(())
     }
 
     pub async fn head(&self, key: &str) -> Result<Option<u64>, StorageError> {

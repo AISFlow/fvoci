@@ -269,6 +269,12 @@
   background: color-mix(in oklab, var(--muted) 35%, transparent);
 }
 
+.document-page__body--editor {
+  border: none;
+  padding: 0;
+  background: transparent;
+}
+
 .document-page__body-title {
   margin: 0 0 0.5rem;
   font-size: var(--text-ui-size);
@@ -287,6 +293,45 @@
   margin: 0;
   color: var(--destructive);
   font-size: var(--text-ui-size);
+}
+
+.document-page__collab {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.document-page__collab-status {
+  font-size: var(--text-dense-size);
+  line-height: var(--text-dense-leading);
+}
+
+.document-page__collab-status--live {
+  color: var(--foreground);
+}
+
+.document-page__collab-status--wait,
+.document-page__collab-status--danger {
+  color: var(--muted-foreground);
+}
+
+.document-page__collab-status--danger {
+  color: var(--destructive);
+}
+
+.document-page__presence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fvoci-editor [data-afn-flash] {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .sr-only {

@@ -19,6 +19,7 @@ CREATE TABLE fvoci.attachments (
     created_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz,
     CONSTRAINT attachments_workspace_id_id_unique UNIQUE (workspace_id, id),
+    CONSTRAINT attachments_storage_key_unique UNIQUE (storage_key),
     CONSTRAINT attachments_status_check CHECK (status IN ('uploading', 'assembling', 'stored')),
     CONSTRAINT attachments_scan_status_check CHECK (scan_status IN ('skipped', 'clean', 'infected')),
     CONSTRAINT attachments_extract_status_check CHECK (
@@ -28,11 +29,20 @@ CREATE TABLE fvoci.attachments (
         )
     ),
     CONSTRAINT attachments_reserved_size_check CHECK (
-        reserved_size_bytes >= 0 AND reserved_size_bytes <= 9007199254740991
+        reserved_size_bytes > 0 AND reserved_size_bytes <= 9007199254740991
     ),
     CONSTRAINT attachments_stored_size_check CHECK (
-        (status = 'stored' AND size_bytes = reserved_size_bytes)
-        OR (status <> 'stored' AND size_bytes IS NULL)
+        (
+            status = 'stored'
+            AND size_bytes IS NOT NULL
+            AND size_bytes = reserved_size_bytes
+            AND completed_at IS NOT NULL
+        )
+        OR (
+            status <> 'stored'
+            AND size_bytes IS NULL
+            AND completed_at IS NULL
+        )
     ),
     CONSTRAINT attachments_workspace_document_fk
         FOREIGN KEY (workspace_id, document_id)
@@ -52,7 +62,4 @@ CREATE INDEX attachments_uploader_id_stored_idx
 ALTER TABLE fvoci.attachments ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON fvoci.attachments
     AS PERMISSIVE FOR ALL TO public
-    USING (
-        workspace_id = (SELECT public.app_tenant_id())
-        OR (SELECT public.app_system_ctx_on())
-    );
+    USING (workspace_id = (SELECT public.app_tenant_id()));
