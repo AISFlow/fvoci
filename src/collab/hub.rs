@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
-use crate::collab::room::{JoinError, RoomHandle, RoomJoin, RoomKey};
+use crate::collab::room::{CollabSession, JoinError, RoomHandle, RoomJoin, RoomKey};
 use crate::db::collab::resolve_collab_admission;
 
 struct LiveRoom {
@@ -54,6 +54,7 @@ pub struct CollabHub {
     pool: PgPool,
     rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
     room_permits: Arc<Semaphore>,
+    socket_permits: Arc<Semaphore>,
     shutting_down: Arc<AtomicBool>,
     idle_stop: watch::Sender<bool>,
     idle_task: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -66,6 +67,7 @@ impl CollabHub {
         let room_cap = config.max_rooms;
         let rooms = Arc::new(RwLock::new(HashMap::new()));
         let room_permits = Arc::new(Semaphore::new(room_cap));
+        let socket_permits = Arc::new(Semaphore::new(config.max_collab_sockets));
         let idle_ms = config.idle_evict_ms;
         let idle_rooms = rooms.clone();
         let (idle_stop, stopped) = watch::channel(false);
@@ -77,6 +79,7 @@ impl CollabHub {
             pool,
             rooms,
             room_permits,
+            socket_permits,
             shutting_down: Arc::new(AtomicBool::new(false)),
             idle_stop,
             idle_task: Arc::new(Mutex::new(Some(idle_task))),
@@ -87,6 +90,43 @@ impl CollabHub {
 
     pub fn config(&self) -> &CollabConfig {
         &self.config
+    }
+
+    pub fn try_acquire_socket(&self) -> Option<OwnedSemaphorePermit> {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.socket_permits.clone().try_acquire_owned().ok()
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub fn available_collab_sockets(&self) -> usize {
+        self.socket_permits.available_permits()
+    }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    pub async fn session_still_authorized(
+        &self,
+        workspace_id: Uuid,
+        document_id: Uuid,
+        session: &CollabSession,
+        read_only: bool,
+    ) -> bool {
+        match resolve_collab_admission(
+            &self.pool,
+            workspace_id,
+            session.user_id,
+            session.session_id,
+            document_id,
+        )
+        .await
+        {
+            Ok(Ok(admission)) => read_only || !admission.read_only,
+            _ => false,
+        }
     }
 
     #[cfg(feature = "db-tests")]

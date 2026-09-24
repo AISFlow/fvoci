@@ -306,10 +306,18 @@ pub fn user_color(user_id: &uuid::Uuid) -> String {
     PRESENCE_COLORS[index].to_string()
 }
 
-pub fn display_name(given: &str, family: Option<&str>) -> String {
-    match family {
-        Some(f) if !f.trim().is_empty() => format!("{} {}", given.trim(), f.trim()),
-        _ => given.trim().to_string(),
+pub fn display_name(given: &str, family: Option<&str>, locale: &str) -> String {
+    let given = given.trim();
+    let family = family.map(str::trim).filter(|f| !f.is_empty());
+    match locale {
+        "ko" => match family {
+            Some(f) => format!("{f}{given}"),
+            None => given.to_string(),
+        },
+        _ => match family {
+            Some(f) => format!("{given} {f}"),
+            None => given.to_string(),
+        },
     }
 }
 
@@ -344,6 +352,31 @@ impl AwarenessRegistry {
     pub fn connection_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
         self.generation
+    }
+
+    /// Establish generation ownership at join, independent of awareness clocks.
+    pub fn claim_connection_client(&mut self, client_id: u32, conn_generation: u64) {
+        match self.by_client.get_mut(&client_id) {
+            Some(record) if record.generation > conn_generation => {}
+            Some(record) => {
+                record.generation = conn_generation;
+            }
+            None => {
+                if !self.fits_new_client(client_id) {
+                    return;
+                }
+                let seq = self.next_seq();
+                self.by_client.insert(
+                    client_id,
+                    ClientRecord {
+                        clock: 0,
+                        generation: conn_generation,
+                        state: None,
+                        seq,
+                    },
+                );
+            }
+        }
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -844,8 +877,10 @@ mod tests {
 
     #[test]
     fn display_name_joins_family() {
-        assert_eq!(display_name("김", Some("연구")), "김 연구");
-        assert_eq!(display_name("김", Some("  ")), "김");
-        assert_eq!(display_name(" 김 ", None), "김");
+        assert_eq!(display_name("김", Some("연구"), "ko"), "연구김");
+        assert_eq!(display_name("김", Some("  "), "ko"), "김");
+        assert_eq!(display_name(" 김 ", None, "ko"), "김");
+        assert_eq!(display_name("John", Some("Doe"), "en"), "John Doe");
+        assert_eq!(display_name("협업", Some("멤버"), "ko"), "멤버협업");
     }
 }

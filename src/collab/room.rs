@@ -1,21 +1,24 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::MissedTickBehavior;
 
 use collab_engine::b64;
 use collab_engine::outcome::EngineStatus;
 use collab_engine::protocol::Request;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPool;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
 use crate::collab::engine_bridge::{BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
-use crate::collab::validation::{
-    validate_recovery_bundle, validate_snapshot_only, BundleValidation,
-};
+use crate::collab::validation::{validate_recovery_bundle, validate_snapshot_only, BundleValidation};
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::verify_collab_operation;
@@ -87,6 +90,52 @@ async fn primary_load_fail_armed(document_id: Uuid) -> bool {
     FORCE_PRIMARY_LOAD_FAIL.lock().await.contains(&document_id)
 }
 
+#[cfg(feature = "db-tests")]
+struct AppendRevokeBarrier {
+    reached_tx: oneshot::Sender<()>,
+    proceed_rx: oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "db-tests")]
+static APPEND_REVOKE_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_append_revoke_barrier(
+    document_id: Uuid,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    APPEND_REVOKE_BARRIERS
+        .lock()
+        .await
+        .insert(
+            document_id,
+            AppendRevokeBarrier {
+                reached_tx,
+                proceed_rx,
+            },
+        );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_append_revoke_barrier(document_id: Uuid) {
+    APPEND_REVOKE_BARRIERS.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_append_revoke_barrier(document_id: Uuid) {
+    let barrier = APPEND_REVOKE_BARRIERS.lock().await.remove(&document_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
+const OUTBOUND_FRAME_OVERHEAD: usize = 48;
+
 async fn wait_spawn_room_block(_document_id: Uuid) {
     #[cfg(feature = "db-tests")]
     {
@@ -105,6 +154,7 @@ pub struct CollabSession {
     pub user_id: Uuid,
     pub given_name: String,
     pub family_name: Option<String>,
+    pub locale: String,
 }
 
 impl From<LiveSession> for CollabSession {
@@ -114,8 +164,61 @@ impl From<LiveSession> for CollabSession {
             user_id: live.user_id,
             given_name: live.given_name,
             family_name: live.family_name,
+            locale: if live.locale.is_empty() {
+                "en".into()
+            } else {
+                live.locale
+            },
         }
     }
+}
+
+struct ConnectionOutboundBudget {
+    frame_sem: Arc<Semaphore>,
+    queued_bytes: AtomicUsize,
+    max_bytes: usize,
+}
+
+pub(crate) struct OutboundDeliveryPermit {
+    #[allow(dead_code)]
+    frame_permit: OwnedSemaphorePermit,
+    accounted_bytes: usize,
+    budget: Arc<ConnectionOutboundBudget>,
+}
+
+impl Drop for OutboundDeliveryPermit {
+    fn drop(&mut self) {
+        self.budget
+            .queued_bytes
+            .fetch_sub(self.accounted_bytes, Ordering::Relaxed);
+    }
+}
+
+pub struct OutboundFrame {
+    pub bytes: Vec<u8>,
+    permit: Option<OutboundDeliveryPermit>,
+}
+
+impl std::fmt::Debug for OutboundFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundFrame")
+            .field("bytes", &self.bytes.len())
+            .field("permit", &self.permit.is_some())
+            .finish()
+    }
+}
+
+impl OutboundFrame {
+    pub fn unaccounted(bytes: Vec<u8>) -> Self {
+        Self { bytes, permit: None }
+    }
+}
+
+/// Independent transport cancellation carrying the required close code/reason.
+#[derive(Debug, Clone)]
+pub struct ConnectionCancel {
+    pub code: u16,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -129,13 +232,15 @@ pub struct AuthenticatedConnection {
 
 #[derive(Debug)]
 pub enum RoomClientEvent {
-    Outbound(Vec<u8>),
+    Outbound(OutboundFrame),
     Close { code: u16, reason: String },
 }
 
 pub struct RoomJoin {
     pub conn: AuthenticatedConnection,
     pub events: mpsc::Sender<RoomClientEvent>,
+    /// Independent transport cancellation; not subject to the data queue.
+    pub cancel: Option<watch::Sender<Option<ConnectionCancel>>>,
 }
 
 enum RoomCommand {
@@ -195,11 +300,14 @@ struct ConnectionState {
     read_only: bool,
     routing_key: String,
     events: mpsc::Sender<RoomClientEvent>,
+    cancel: Option<watch::Sender<Option<ConnectionCancel>>>,
+    outbound_budget: Arc<ConnectionOutboundBudget>,
     conn_generation: u64,
     pending_bytes: usize,
     poisoned: bool,
     pending_persist: VecDeque<PersistBarrier>,
     in_flight: bool,
+    revoked: bool,
 }
 
 struct PersistBarrier {
@@ -221,6 +329,8 @@ struct RoomActor {
     fifo_seq: u64,
     /// Last compaction attempt failed; auto-compact backs off until a manual persist succeeds.
     compact_unhealthy: bool,
+    /// Tail row count when auto-compact last failed; retry after growth.
+    compact_retry_at_tail_len: Option<usize>,
     primary_loaded: bool,
     primary_dirty: bool,
     client_id_owner: HashMap<u32, (Uuid, Instant)>,
@@ -258,6 +368,7 @@ pub async fn spawn_room(
         awareness: AwarenessRegistry::new(),
         fifo_seq: 0,
         compact_unhealthy: false,
+        compact_retry_at_tail_len: None,
         primary_loaded: false,
         primary_dirty: false,
         client_id_owner: HashMap::new(),
@@ -273,34 +384,37 @@ pub async fn spawn_room(
 
 impl RoomActor {
     async fn run(mut self, mut rx: mpsc::Receiver<RoomCommand>) {
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                RoomCommand::Join(join, reply) => {
-                    let result = self.handle_join(join).await;
-                    let _ = reply.send(result);
+        let mut acl_tick = tokio::time::interval(Duration::from_millis(self.config.revoke_poll_ms));
+        acl_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                cmd = rx.recv() => {
+                    match cmd {
+                        Some(RoomCommand::Join(join, reply)) => {
+                            let result = self.handle_join(join).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(RoomCommand::Leave(conn_id)) => self.handle_leave(conn_id).await,
+                        Some(RoomCommand::Frame { conn_id, bytes }) => {
+                            self.handle_frame(conn_id, bytes).await;
+                        }
+                        Some(RoomCommand::Shutdown) => {
+                            self.shutting_down = true;
+                            break;
+                        }
+                        None => break,
+                    }
                 }
-                RoomCommand::Leave(conn_id) => self.handle_leave(conn_id),
-                RoomCommand::Frame { conn_id, bytes } => {
-                    self.handle_frame(conn_id, bytes).await;
-                }
-                RoomCommand::Shutdown => {
-                    self.shutting_down = true;
-                    break;
+                _ = acl_tick.tick() => {
+                    self.poll_acl().await;
                 }
             }
-            self.poll_acl().await;
             if self.connections.is_empty() && self.shutting_down {
                 break;
             }
         }
         for (_, conn) in self.connections.drain() {
-            let _ = conn
-                .events
-                .send(RoomClientEvent::Close {
-                    code: 1001,
-                    reason: "server shutdown".into(),
-                })
-                .await;
+            Self::enqueue_close(&conn.events, &conn.cancel, 1001, "server shutdown");
         }
         let engine = self.engine;
         let _ = engine.stop().await;
@@ -327,7 +441,8 @@ impl RoomActor {
             }
         }
         for conn_id in to_close {
-            self.close_connection(conn_id, 1008, "permission revoked");
+            self.close_connection(conn_id, 1008, "permission revoked")
+                .await;
         }
     }
 
@@ -352,19 +467,53 @@ impl RoomActor {
         }
     }
 
-    fn close_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
-        if let Some(conn) = self.connections.remove(&conn_id) {
-            let _ = conn.events.try_send(RoomClientEvent::Close {
+    fn signal_cancel(
+        cancel: &Option<watch::Sender<Option<ConnectionCancel>>>,
+        code: u16,
+        reason: &str,
+    ) {
+        if let Some(cancel) = cancel {
+            let _ = cancel.send_replace(Some(ConnectionCancel {
                 code,
                 reason: reason.into(),
-            });
-            if let Some(encoded) = self
-                .awareness
-                .remove_client(conn.client_id, conn.conn_generation)
-            {
-                self.broadcast_awareness(&encoded);
-            }
+            }));
+        }
+    }
+
+    fn enqueue_close(
+        events: &mpsc::Sender<RoomClientEvent>,
+        cancel: &Option<watch::Sender<Option<ConnectionCancel>>>,
+        code: u16,
+        reason: &str,
+    ) {
+        Self::signal_cancel(cancel, code, reason);
+        let close = RoomClientEvent::Close {
+            code,
+            reason: reason.into(),
+        };
+        let _ = events.try_send(close);
+    }
+
+    async fn evict_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
+        if let Some(conn) = self.connections.get_mut(&conn_id) {
+            conn.revoked = true;
+        }
+        if let Some(conn) = self.connections.remove(&conn_id) {
+            Self::enqueue_close(&conn.events, &conn.cancel, code, reason);
             self.client_id_owner.remove(&conn.client_id);
+        }
+    }
+
+    async fn close_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
+        let tombstone = if let Some(conn) = self.connections.get(&conn_id) {
+            self.awareness
+                .remove_client(conn.client_id, conn.conn_generation)
+        } else {
+            None
+        };
+        self.evict_connection(conn_id, code, reason).await;
+        if let Some(encoded) = tombstone {
+            self.broadcast_awareness(&encoded).await;
         }
     }
 
@@ -401,13 +550,11 @@ impl RoomActor {
                 _ => JoinError::AdmissionDenied,
             })?;
             self.set_committed_from_load(&claim.load);
-            if self.primary_loaded {
-                let _ = self.engine.recycle().await;
+            if let Err(err) = self.reload_primary_from_committed().await {
+                self.close_all_connections(1011, "engine reload failed").await;
+                return Err(err);
             }
-            self.load_engine_primary().await?;
             self.writer_generation = Some(claim.writer_generation);
-            self.primary_loaded = true;
-            self.primary_dirty = false;
         } else if self.writer_generation.is_none() && read_only {
             let load = load_collab_readonly(
                 &self.pool,
@@ -420,33 +567,57 @@ impl RoomActor {
             .map_err(|_| JoinError::DbError)?;
             let load = load.map_err(|_| JoinError::AdmissionDenied)?;
             self.set_committed_from_load(&load);
-            if self.primary_loaded {
-                let _ = self.engine.recycle().await;
+            if let Err(err) = self.reload_primary_from_committed().await {
+                self.close_all_connections(1011, "engine reload failed").await;
+                return Err(err);
             }
-            self.load_engine_primary().await?;
-            self.primary_loaded = true;
-            self.primary_dirty = false;
         }
         self.ensure_primary_capacity().await?;
         if !self.reserve_client_id(join.conn.client_id, join.conn.session.user_id) {
             return Err(JoinError::AdmissionDenied);
         }
         let conn_generation = self.awareness.connection_generation();
+        self.awareness
+            .claim_connection_client(join.conn.client_id, conn_generation);
+        let conn_id = join.conn.conn_id;
+        let routing_key = join.conn.routing_key.clone();
+        let session = join.conn.session.clone();
+        let outbound_budget = Arc::new(ConnectionOutboundBudget {
+            frame_sem: Arc::new(Semaphore::new(
+                self.config.max_outbound_frames_per_connection,
+            )),
+            queued_bytes: AtomicUsize::new(0),
+            max_bytes: self.config.max_outbound_bytes_per_connection,
+        });
         self.connections.insert(
-            join.conn.conn_id,
+            conn_id,
             ConnectionState {
                 session: join.conn.session,
                 client_id: join.conn.client_id,
                 read_only,
-                routing_key: join.conn.routing_key.clone(),
+                routing_key: routing_key.clone(),
                 events: join.events,
+                cancel: join.cancel,
+                outbound_budget,
                 conn_generation,
                 pending_bytes: 0,
                 poisoned: false,
                 pending_persist: VecDeque::new(),
                 in_flight: false,
+                revoked: false,
             },
         );
+        let encoded = self.awareness.encode_all();
+        if !encoded.is_empty() {
+            if let Ok(bytes) = encode(&WireFrame::Document {
+                routing_key: routing_key.clone(),
+                room: None,
+                message: DocumentMessage::Awareness(encoded),
+            }) {
+                self.deliver_outbound(conn_id, &session, read_only, bytes)
+                    .await;
+            }
+        }
         Ok(())
     }
 
@@ -455,6 +626,30 @@ impl RoomActor {
         self.committed.tail_payloads = load.tail.iter().map(|r| r.payload.clone()).collect();
         self.committed.tail_seq = load.tail_seq;
         self.committed.snapshot_cutoff_seq = load.snapshot_cutoff_seq;
+    }
+
+    async fn close_all_connections(&mut self, code: u16, reason: &str) {
+        for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
+            self.close_connection(conn_id, code, reason).await;
+        }
+    }
+
+    async fn recover_primary_after_engine_fault(&mut self) {
+        self.primary_loaded = false;
+        self.primary_dirty = true;
+        let _ = self.reload_primary_from_committed().await;
+    }
+
+    fn is_definite_append_rejection(err: &CollabDbError) -> bool {
+        matches!(
+            err,
+            CollabDbError::Forbidden
+                | CollabDbError::NotFound
+                | CollabDbError::OpIdConflict
+                | CollabDbError::PayloadTooLarge
+                | CollabDbError::StateBudgetExceeded
+                | CollabDbError::InvalidCutoff
+        )
     }
 
     fn reserve_client_id(&mut self, client_id: u32, user_id: Uuid) -> bool {
@@ -471,8 +666,8 @@ impl RoomActor {
         true
     }
 
-    fn handle_leave(&mut self, conn_id: Uuid) {
-        self.close_connection(conn_id, 1000, "client leave");
+    async fn handle_leave(&mut self, conn_id: Uuid) {
+        self.close_connection(conn_id, 1000, "client leave").await;
     }
 
     async fn handle_frame(&mut self, conn_id: Uuid, bytes: Vec<u8>) {
@@ -480,7 +675,8 @@ impl RoomActor {
             return;
         };
         if conn.pending_bytes + bytes.len() > self.config.max_pending_bytes_per_connection {
-            self.close_connection(conn_id, 1009, "pending bytes exceeded");
+            self.close_connection(conn_id, 1009, "pending bytes exceeded")
+                .await;
             return;
         }
         conn.pending_bytes += bytes.len();
@@ -488,20 +684,19 @@ impl RoomActor {
         let read_only = conn.read_only;
         let client_id = conn.client_id;
         let session = conn.session.clone();
-        let events = conn.events.clone();
         let conn_generation = conn.conn_generation;
 
         let frame = match crate::collab::wire::decode(&bytes) {
             Ok(frame) => frame,
             Err(_) => {
-                self.close_connection(conn_id, 1003, "invalid frame");
+                self.close_connection(conn_id, 1003, "invalid frame").await;
                 return;
             }
         };
 
         match frame {
             WireFrame::Connection(_) => {
-                self.handle_connection_ping(&events).await;
+                self.handle_connection_ping(conn_id).await;
             }
             WireFrame::Document {
                 routing_key: key,
@@ -509,19 +704,23 @@ impl RoomActor {
                 message,
             } => {
                 if key != routing_key {
+                    if let Some(conn) = self.connections.get_mut(&conn_id) {
+                        conn.pending_bytes = conn.pending_bytes.saturating_sub(bytes.len());
+                    }
                     return;
                 }
                 if room.is_none() {
-                    self.close_connection(conn_id, 1008, "invalid room");
+                    self.close_connection(conn_id, 1008, "invalid room")
+                        .await;
                     return;
                 }
                 if !self.session_authorized(&session, read_only).await {
-                    self.close_connection(conn_id, 1008, "permission revoked");
+                    self.close_connection(conn_id, 1008, "permission revoked")
+                        .await;
                     return;
                 }
                 self.handle_document_message(
                     conn_id,
-                    &events,
                     &routing_key,
                     read_only,
                     client_id,
@@ -537,19 +736,23 @@ impl RoomActor {
         }
     }
 
-    async fn handle_connection_ping(&self, events: &mpsc::Sender<RoomClientEvent>) {
+    async fn handle_connection_ping(&mut self, conn_id: Uuid) {
         let pong = encode(&WireFrame::Connection(
             crate::collab::wire::ConnectionMessage::Pong,
         ))
         .unwrap_or_default();
-        let _ = events.send(RoomClientEvent::Outbound(pong)).await;
+        if let Some(conn) = self.connections.get(&conn_id) {
+            let session = conn.session.clone();
+            let read_only = conn.read_only;
+            self.deliver_outbound(conn_id, &session, read_only, pong)
+                .await;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_document_message(
         &mut self,
         conn_id: Uuid,
-        events: &mpsc::Sender<RoomClientEvent>,
         routing_key: &str,
         read_only: bool,
         client_id: u32,
@@ -559,49 +762,60 @@ impl RoomActor {
     ) {
         match message {
             DocumentMessage::Auth(auth) => {
-                self.handle_auth(events, routing_key, auth).await;
+                self.handle_auth(conn_id, routing_key, read_only, auth).await;
             }
             DocumentMessage::Sync(sync) => {
-                self.handle_sync(conn_id, events, routing_key, read_only, sync)
+                self.handle_sync(conn_id, routing_key, read_only, sync)
                     .await;
             }
             DocumentMessage::Awareness(payload) => {
                 if !self.session_authorized(session, read_only).await {
-                    self.close_connection(conn_id, 1008, "permission revoked");
+                    self.close_connection(conn_id, 1008, "permission revoked")
+                        .await;
                     return;
                 }
-                self.handle_awareness(conn_id, client_id, session, conn_generation, payload);
+                self.handle_awareness(conn_id, client_id, session, conn_generation, payload)
+                    .await;
             }
             DocumentMessage::QueryAwareness => {
                 let encoded = self.awareness.encode_all();
                 if !encoded.is_empty() {
-                    self.send_document(events, routing_key, DocumentMessage::Awareness(encoded))
-                        .await;
+                    self.deliver_document_message(
+                        conn_id,
+                        routing_key,
+                        DocumentMessage::Awareness(encoded),
+                    )
+                    .await;
                 }
             }
             DocumentMessage::Stateless(payload) => {
-                self.handle_stateless(conn_id, events, routing_key, payload)
-                    .await;
+                self.handle_stateless(conn_id, payload).await;
             }
             DocumentMessage::Close { .. } => {
-                self.close_connection(conn_id, 1000, "client close");
+                self.close_connection(conn_id, 1000, "client close").await;
             }
             _ => {}
         }
     }
 
     async fn handle_auth(
-        &self,
-        events: &mpsc::Sender<RoomClientEvent>,
+        &mut self,
+        conn_id: Uuid,
         routing_key: &str,
+        read_only: bool,
         auth: AuthMessage,
     ) {
         if let AuthMessage::Token { .. } = auth {
-            self.send_document(
-                events,
+            let scope = if read_only {
+                "readonly"
+            } else {
+                "read-write"
+            };
+            self.deliver_document_message(
+                conn_id,
                 routing_key,
                 DocumentMessage::Auth(AuthMessage::Authenticated {
-                    scope: "read-write".into(),
+                    scope: scope.into(),
                 }),
             )
             .await;
@@ -611,7 +825,6 @@ impl RoomActor {
     async fn handle_sync(
         &mut self,
         conn_id: Uuid,
-        events: &mpsc::Sender<RoomClientEvent>,
         routing_key: &str,
         read_only: bool,
         sync: crate::collab::wire::SyncMessage,
@@ -624,6 +837,8 @@ impl RoomActor {
         match step {
             SyncStep::Step1 => {
                 if self.ensure_primary_capacity().await.is_err() {
+                    self.close_connection(conn_id, 1011, "engine unavailable")
+                        .await;
                     return;
                 }
                 let report = match self
@@ -635,8 +850,23 @@ impl RoomActor {
                     .await
                 {
                     Ok(report) => report,
-                    Err(BridgeError::Dead) => return,
+                    Err(BridgeError::Dead) => {
+                        self.recover_primary_after_engine_fault().await;
+                        self.close_connection(conn_id, 1011, "sync failed").await;
+                        return;
+                    }
                 };
+                if matches!(report.outcome, EngineStatus::Malformed { .. }) {
+                    self.recover_primary_after_engine_fault().await;
+                    self.close_connection(conn_id, 1008, "invalid state vector")
+                        .await;
+                    return;
+                }
+                if !matches!(report.outcome, EngineStatus::Ok { .. }) {
+                    self.recover_primary_after_engine_fault().await;
+                    self.close_connection(conn_id, 1011, "sync failed").await;
+                    return;
+                }
                 if let EngineStatus::Ok {
                     update_b64: Some(update),
                     ..
@@ -644,8 +874,8 @@ impl RoomActor {
                 {
                     let update = b64::decode(&update).unwrap_or_default();
                     let y_protocol = encode_sync_payload(SyncStep::Step2, &update);
-                    self.send_document(
-                        events,
+                    self.deliver_document_message(
+                        conn_id,
                         routing_key,
                         DocumentMessage::Sync(crate::collab::wire::SyncMessage {
                             step: SyncStep::Step2,
@@ -656,8 +886,17 @@ impl RoomActor {
                 }
                 let inspect = match self.engine.call(Request::Inspect).await {
                     Ok(report) => report,
-                    Err(BridgeError::Dead) => return,
+                    Err(BridgeError::Dead) => {
+                        self.recover_primary_after_engine_fault().await;
+                        self.close_connection(conn_id, 1011, "sync failed").await;
+                        return;
+                    }
                 };
+                if !matches!(inspect.outcome, EngineStatus::Ok { .. }) {
+                    self.recover_primary_after_engine_fault().await;
+                    self.close_connection(conn_id, 1011, "sync failed").await;
+                    return;
+                }
                 if let EngineStatus::Ok {
                     state_vector_b64: Some(sv_b64),
                     ..
@@ -665,8 +904,8 @@ impl RoomActor {
                 {
                     let sv = b64::decode(&sv_b64).unwrap_or_default();
                     let y_protocol = encode_sync_payload(SyncStep::Step1, &sv);
-                    self.send_document(
-                        events,
+                    self.deliver_document_message(
+                        conn_id,
                         routing_key,
                         DocumentMessage::Sync(crate::collab::wire::SyncMessage {
                             step: SyncStep::Step1,
@@ -678,20 +917,30 @@ impl RoomActor {
             }
             SyncStep::Step2 | SyncStep::Update => {
                 if payload.is_empty() {
-                    self.reject_candidate(conn_id, events, routing_key).await;
+                    if self.primary_dirty {
+                        let _ = self.reload_primary_from_committed().await;
+                    }
+                    if let Some(c) = self.connections.get_mut(&conn_id) {
+                        c.in_flight = false;
+                        c.poisoned = true;
+                    }
+                    self.send_sync_status(conn_id, routing_key, false).await;
                     return;
                 }
                 if read_only && !is_empty_update(&payload) {
-                    self.send_sync_status(events, routing_key, false).await;
+                    if let Some(c) = self.connections.get_mut(&conn_id) {
+                        c.poisoned = true;
+                    }
+                    self.send_sync_status(conn_id, routing_key, false).await;
                     return;
                 }
                 if is_empty_update(&payload) {
-                    self.send_sync_status(events, routing_key, true).await;
+                    self.send_sync_status(conn_id, routing_key, true).await;
                     return;
                 }
                 let conn = self.connections.get_mut(&conn_id);
                 if conn.map(|c| c.poisoned || c.in_flight).unwrap_or(true) {
-                    self.send_sync_status(events, routing_key, false).await;
+                    self.send_sync_status(conn_id, routing_key, false).await;
                     return;
                 }
                 if let Some(c) = self.connections.get_mut(&conn_id) {
@@ -699,7 +948,7 @@ impl RoomActor {
                 }
 
                 if self.ensure_primary_capacity().await.is_err() {
-                    self.reject_candidate(conn_id, events, routing_key).await;
+                    self.reject_candidate(conn_id, routing_key).await;
                     return;
                 }
 
@@ -712,13 +961,16 @@ impl RoomActor {
                 )
                 .await;
                 if validation != BundleValidation::Ok {
-                    self.reject_candidate(conn_id, events, routing_key).await;
+                    self.reject_candidate(conn_id, routing_key).await;
                     return;
                 }
 
+                #[cfg(feature = "db-tests")]
+                pause_for_append_revoke_barrier(self.document_id).await;
+
                 let writer_generation = self.writer_generation;
                 let Some(writer_generation) = writer_generation else {
-                    self.reject_candidate(conn_id, events, routing_key).await;
+                    self.reject_candidate(conn_id, routing_key).await;
                     return;
                 };
                 let (session_id, actor_user_id) = self
@@ -730,7 +982,7 @@ impl RoomActor {
                     .session_authorized_by_ids(actor_user_id, session_id, read_only)
                     .await
                 {
-                    self.reject_candidate(conn_id, events, routing_key).await;
+                    self.reject_candidate(conn_id, routing_key).await;
                     return;
                 }
 
@@ -756,11 +1008,15 @@ impl RoomActor {
                 let committed = match append {
                     Ok(Ok(result)) => result,
                     Ok(Err(CollabDbError::StaleWriter)) => {
-                        self.fatal_writer_stale();
-                        self.reject_candidate(conn_id, events, routing_key).await;
+                        self.fatal_writer_stale().await;
+                        self.reject_candidate(conn_id, routing_key).await;
                         return;
                     }
-                    Ok(Err(_)) | Err(_) => {
+                    Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
+                        self.reject_candidate(conn_id, routing_key).await;
+                        return;
+                    }
+                    Ok(Err(CollabDbError::StaleCutoff)) | Ok(Err(_)) | Err(_) => {
                         match self
                             .reconcile_ambiguous_append(
                                 actor_user_id,
@@ -774,7 +1030,7 @@ impl RoomActor {
                         {
                             Some(result) => result,
                             None => {
-                                self.reject_candidate(conn_id, events, routing_key).await;
+                                self.reject_candidate(conn_id, routing_key).await;
                                 return;
                             }
                         }
@@ -786,7 +1042,7 @@ impl RoomActor {
                     | AppendCollabResult::DuplicateAck { seq } => {
                         if seq != expected_tail + 1 {
                             self.fatal_room_divergence(actor_user_id, session_id).await;
-                            self.reject_candidate(conn_id, events, routing_key).await;
+                            self.reject_candidate(conn_id, routing_key).await;
                             return;
                         }
                         seq
@@ -800,9 +1056,9 @@ impl RoomActor {
                 self.fifo_seq += 1;
                 let op_prefix = self.fifo_seq;
 
-                self.broadcast_update(&sync.y_protocol);
+                self.broadcast_update(&sync.y_protocol).await;
                 let primary_ok = self.integrate_committed_update(&payload).await.is_ok();
-                self.send_sync_status(events, routing_key, true).await;
+                self.send_sync_status(conn_id, routing_key, true).await;
                 if let Some(c) = self.connections.get_mut(&conn_id) {
                     c.in_flight = false;
                 }
@@ -837,12 +1093,7 @@ impl RoomActor {
         }
     }
 
-    async fn reject_candidate(
-        &mut self,
-        conn_id: Uuid,
-        events: &mpsc::Sender<RoomClientEvent>,
-        routing_key: &str,
-    ) {
+    async fn reject_candidate(&mut self, conn_id: Uuid, routing_key: &str) {
         if self.primary_dirty {
             let _ = self.reload_primary_from_committed().await;
         }
@@ -850,8 +1101,8 @@ impl RoomActor {
             c.in_flight = false;
             c.poisoned = true;
         }
-        self.send_sync_status(events, routing_key, false).await;
-        self.close_connection(conn_id, 1008, "update rejected");
+        self.send_sync_status(conn_id, routing_key, false).await;
+        self.close_connection(conn_id, 1008, "update rejected").await;
     }
 
     async fn reconcile_ambiguous_append(
@@ -890,8 +1141,8 @@ impl RoomActor {
                 .await
                 {
                     Ok(Ok(load)) => {
-                        // Append and its immutable receipt commit atomically. A tail row
-                        // without that receipt is inconsistent, never proof of success.
+                        // Receipt lookup returned NotFound; compare durable tail to the
+                        // expected op_id before treating this as divergence.
                         if load.tail.iter().any(|r| r.op_id == op_id) {
                             self.fatal_room_divergence(actor_user_id, session_id).await;
                             return None;
@@ -919,9 +1170,9 @@ impl RoomActor {
         }
     }
 
-    fn fatal_writer_stale(&mut self) {
+    async fn fatal_writer_stale(&mut self) {
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.close_connection(conn_id, 1008, "writer stale");
+            self.close_connection(conn_id, 1008, "writer stale").await;
         }
         self.writer_generation = None;
     }
@@ -941,7 +1192,8 @@ impl RoomActor {
         }
         self.writer_generation = None;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.close_connection(conn_id, 1011, "room state diverged");
+            self.close_connection(conn_id, 1011, "room state diverged")
+                .await;
         }
     }
 
@@ -959,7 +1211,8 @@ impl RoomActor {
             let _ = self.reload_primary_from_committed().await;
         }
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.close_connection(conn_id, 1011, "primary engine unhealthy");
+            self.close_connection(conn_id, 1011, "primary engine unhealthy")
+                .await;
         }
     }
 
@@ -1043,7 +1296,7 @@ impl RoomActor {
         }
     }
 
-    fn handle_awareness(
+    async fn handle_awareness(
         &mut self,
         conn_id: Uuid,
         client_id: u32,
@@ -1055,6 +1308,7 @@ impl RoomActor {
         let display = crate::collab::awareness::display_name(
             &session.given_name,
             session.family_name.as_deref(),
+            &session.locale,
         );
         let color = crate::collab::awareness::user_color(&session.user_id);
         if let Some(encoded) = self.awareness.apply_connection_updates(
@@ -1065,18 +1319,12 @@ impl RoomActor {
             &color,
             conn_generation,
         ) {
-            self.broadcast_awareness(&encoded);
+            self.broadcast_awareness(&encoded).await;
         }
         let _ = conn_id;
     }
 
-    async fn handle_stateless(
-        &mut self,
-        conn_id: Uuid,
-        _events: &mpsc::Sender<RoomClientEvent>,
-        _routing_key: &str,
-        payload: String,
-    ) {
+    async fn handle_stateless(&mut self, conn_id: Uuid, payload: String) {
         if let Some(request_id) = payload.strip_prefix("persist:") {
             if let Ok(id) = Uuid::parse_str(request_id) {
                 let prefix = self.fifo_seq;
@@ -1092,24 +1340,22 @@ impl RoomActor {
     }
 
     async fn flush_connection_persist(&mut self, conn_id: Uuid, current_fifo: u64) {
-        let (routing_key, events, ready) = {
+        let ready = {
             let Some(conn) = self.connections.get_mut(&conn_id) else {
                 return;
             };
-            let ready = conn
-                .pending_persist
+            conn.pending_persist
                 .iter()
                 .filter(|b| b.prefix_fifo <= current_fifo)
                 .map(|b| b.request_id)
-                .collect::<Vec<_>>();
-            (conn.routing_key.clone(), conn.events.clone(), ready)
+                .collect::<Vec<_>>()
         };
         for request_id in ready {
             if let Some(conn) = self.connections.get_mut(&conn_id) {
                 conn.pending_persist.retain(|b| b.request_id != request_id);
             }
             let result = self.run_persist_for(conn_id, request_id).await;
-            self.send_stateless(&events, &routing_key, result).await;
+            self.send_stateless(conn_id, result).await;
         }
     }
 
@@ -1134,9 +1380,13 @@ impl RoomActor {
         {
             return format!("persist-failed:{request_id}");
         }
+        if conn.read_only {
+            return format!("persisted:{request_id}");
+        }
 
         if self.ensure_primary_capacity().await.is_err() || !self.primary_loaded {
             self.compact_unhealthy = true;
+            self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
             return format!("persist-failed:{request_id}");
         }
 
@@ -1144,6 +1394,7 @@ impl RoomActor {
             Ok(report) => report,
             Err(BridgeError::Dead) => {
                 self.compact_unhealthy = true;
+                self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
                 return format!("persist-failed:{request_id}");
             }
         };
@@ -1155,11 +1406,13 @@ impl RoomActor {
                 Ok(bytes) => bytes,
                 Err(_) => {
                     self.compact_unhealthy = true;
+                    self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
                     return format!("persist-failed:{request_id}");
                 }
             },
             _ => {
                 self.compact_unhealthy = true;
+                self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
                 return format!("persist-failed:{request_id}");
             }
         };
@@ -1171,6 +1424,7 @@ impl RoomActor {
         .await
         {
             self.compact_unhealthy = true;
+            self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
             return format!("persist-failed:{request_id}");
         }
         if let Some(writer_generation) = self.writer_generation {
@@ -1193,11 +1447,14 @@ impl RoomActor {
             match compact {
                 Ok(Ok(load)) => {
                     self.compact_unhealthy = false;
+                    self.compact_retry_at_tail_len = None;
                     self.set_committed_from_load(&load);
                     if self.engine.needs_recycle()
                         && self.reload_primary_from_committed().await.is_err()
                     {
                         self.compact_unhealthy = true;
+                        self.compact_retry_at_tail_len =
+                            Some(self.committed.tail_payloads.len());
                         return format!("persist-failed:{request_id}");
                     }
                     format!("persisted:{request_id}")
@@ -1208,6 +1465,7 @@ impl RoomActor {
                 }
                 _ => {
                     self.compact_unhealthy = true;
+                    self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
                     format!("persist-failed:{request_id}")
                 }
             }
@@ -1217,10 +1475,17 @@ impl RoomActor {
     }
 
     async fn maybe_compact(&mut self) {
-        if self.any_pending_persist() || self.compact_unhealthy {
+        if self.any_pending_persist() {
             return;
         }
-        if self.committed.tail_payloads.len() < 32 {
+        if self.compact_unhealthy {
+            let retry = self.compact_retry_at_tail_len.map_or(false, |at_fail| {
+                self.committed.tail_payloads.len() >= at_fail.saturating_add(8)
+            });
+            if !retry {
+                return;
+            }
+        } else if self.committed.tail_payloads.len() < 32 {
             return;
         }
         let conn_id = self
@@ -1240,10 +1505,15 @@ impl RoomActor {
         }
     }
 
-    fn broadcast_update(&self, y_protocol: &[u8]) {
-        for conn in self.connections.values() {
+    async fn broadcast_update(&mut self, y_protocol: &[u8]) {
+        let recipients = self
+            .connections
+            .iter()
+            .map(|(id, conn)| (*id, conn.routing_key.clone(), conn.session.clone(), conn.read_only))
+            .collect::<Vec<_>>();
+        for (conn_id, routing_key, session, read_only) in recipients {
             let frame = encode(&WireFrame::Document {
-                routing_key: conn.routing_key.clone(),
+                routing_key,
                 room: None,
                 message: DocumentMessage::Sync(crate::collab::wire::SyncMessage {
                     step: SyncStep::Update,
@@ -1251,25 +1521,100 @@ impl RoomActor {
                 }),
             })
             .unwrap_or_default();
-            let _ = conn.events.try_send(RoomClientEvent::Outbound(frame));
+            self.deliver_outbound(conn_id, &session, read_only, frame)
+                .await;
         }
     }
 
-    fn broadcast_awareness(&self, encoded: &[u8]) {
-        for conn in self.connections.values() {
+    async fn broadcast_awareness(&mut self, encoded: &[u8]) {
+        let recipients = self
+            .connections
+            .iter()
+            .map(|(id, conn)| (*id, conn.routing_key.clone(), conn.session.clone(), conn.read_only))
+            .collect::<Vec<_>>();
+        for (conn_id, routing_key, session, read_only) in recipients {
             let frame = encode(&WireFrame::Document {
-                routing_key: conn.routing_key.clone(),
+                routing_key,
                 room: None,
                 message: DocumentMessage::Awareness(encoded.to_vec()),
             })
             .unwrap_or_default();
-            let _ = conn.events.try_send(RoomClientEvent::Outbound(frame));
+            self.deliver_outbound(conn_id, &session, read_only, frame)
+                .await;
         }
     }
 
-    async fn send_document(
-        &self,
-        events: &mpsc::Sender<RoomClientEvent>,
+    async fn deliver_outbound(
+        &mut self,
+        conn_id: Uuid,
+        session: &CollabSession,
+        read_only: bool,
+        bytes: Vec<u8>,
+    ) {
+        if self
+            .connections
+            .get(&conn_id)
+            .is_none_or(|conn| conn.revoked)
+        {
+            return;
+        }
+        if !self.session_authorized(session, read_only).await {
+            self.evict_connection(conn_id, 1008, "permission revoked")
+                .await;
+            return;
+        }
+        let accounted_bytes = bytes.len().saturating_add(OUTBOUND_FRAME_OVERHEAD);
+        let budget = self
+            .connections
+            .get(&conn_id)
+            .map(|conn| conn.outbound_budget.clone());
+        let Some(budget) = budget else {
+            return;
+        };
+        if accounted_bytes > budget.max_bytes {
+            self.evict_connection(conn_id, 1009, "outbound queue full")
+                .await;
+            return;
+        }
+        let current = budget.queued_bytes.load(Ordering::Relaxed);
+        if current + accounted_bytes > budget.max_bytes {
+            self.evict_connection(conn_id, 1009, "outbound queue full")
+                .await;
+            return;
+        }
+        let frame_permit = match budget.frame_sem.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.evict_connection(conn_id, 1009, "outbound queue full")
+                    .await;
+                return;
+            }
+        };
+        budget
+            .queued_bytes
+            .fetch_add(accounted_bytes, Ordering::Relaxed);
+        let delivery_permit = OutboundDeliveryPermit {
+            frame_permit,
+            accounted_bytes,
+            budget,
+        };
+        let events = self.connections.get(&conn_id).map(|c| c.events.clone());
+        let Some(events) = events else {
+            return;
+        };
+        let frame = OutboundFrame {
+            bytes,
+            permit: Some(delivery_permit),
+        };
+        if events.try_send(RoomClientEvent::Outbound(frame)).is_err() {
+            self.evict_connection(conn_id, 1009, "outbound queue full")
+                .await;
+        }
+    }
+
+    async fn deliver_document_message(
+        &mut self,
+        conn_id: Uuid,
         routing_key: &str,
         message: DocumentMessage,
     ) {
@@ -1278,28 +1623,34 @@ impl RoomActor {
             room: None,
             message,
         }) {
-            let _ = events.send(RoomClientEvent::Outbound(bytes)).await;
+            if let Some(conn) = self.connections.get(&conn_id) {
+                let session = conn.session.clone();
+                let read_only = conn.read_only;
+                self.deliver_outbound(conn_id, &session, read_only, bytes)
+                    .await;
+            }
         }
     }
 
-    async fn send_sync_status(
-        &self,
-        events: &mpsc::Sender<RoomClientEvent>,
-        routing_key: &str,
-        applied: bool,
-    ) {
-        self.send_document(events, routing_key, DocumentMessage::SyncStatus { applied })
-            .await;
+    async fn send_sync_status(&mut self, conn_id: Uuid, routing_key: &str, applied: bool) {
+        self.deliver_document_message(
+            conn_id,
+            routing_key,
+            DocumentMessage::SyncStatus { applied },
+        )
+        .await;
     }
 
-    async fn send_stateless(
-        &self,
-        events: &mpsc::Sender<RoomClientEvent>,
-        routing_key: &str,
-        payload: String,
-    ) {
-        self.send_document(events, routing_key, DocumentMessage::Stateless(payload))
+    async fn send_stateless(&mut self, conn_id: Uuid, payload: String) {
+        if let Some(conn) = self.connections.get(&conn_id) {
+            let routing_key = conn.routing_key.clone();
+            self.deliver_document_message(
+                conn_id,
+                &routing_key,
+                DocumentMessage::Stateless(payload),
+            )
             .await;
+        }
     }
 }
 

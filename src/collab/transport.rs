@@ -1,21 +1,25 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::auth::token::hash_token;
 use crate::collab::hub::CollabHub;
 use crate::collab::origin::{validate_collab_origin, CollabOriginError};
+use crate::collab::config::CollabConfig;
 use crate::collab::room::{
-    parse_client_id, AuthenticatedConnection, CollabSession, JoinError, RoomClientEvent, RoomJoin,
+    parse_client_id, AuthenticatedConnection, CollabSession, ConnectionCancel, JoinError,
+    OutboundFrame, RoomClientEvent, RoomJoin,
 };
 use crate::collab::wire::{AuthMessage, CollabKind, CollabRoomName, DocumentMessage, WireFrame};
+use crate::db::collab::resolve_collab_admission;
 use crate::db::identity::find_live_session;
 use crate::error::SESSION_COOKIE;
 use crate::http::state::AppState;
@@ -111,7 +115,18 @@ async fn collab_upgrade(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let session = CollabSession::from(live.unwrap());
-    ws.on_upgrade(move |socket| handle_socket(socket, hub, session, peer))
+    let socket_permit = hub.try_acquire_socket();
+    if socket_permit.is_none() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let max_frame = hub.config().max_ws_frame_bytes;
+    let max_message = hub.config().max_ws_message_bytes;
+    ws.max_frame_size(max_frame)
+        .max_message_size(max_message)
+        .on_upgrade(move |socket| async move {
+            let _socket_permit = socket_permit;
+            handle_socket(socket, hub, session, peer).await;
+        })
 }
 
 pub async fn collab_get_without_upgrade() -> impl IntoResponse {
@@ -126,60 +141,217 @@ pub async fn collab_get_without_upgrade() -> impl IntoResponse {
     )
 }
 
+struct PreAuthOutboundAllowance {
+    remaining: u32,
+    max_bytes: usize,
+}
+
+impl PreAuthOutboundAllowance {
+    fn new(config: &CollabConfig) -> Self {
+        Self {
+            remaining: config.max_pre_auth_outbound_frames,
+            max_bytes: config.max_ws_message_bytes,
+        }
+    }
+
+    fn try_send(&mut self, events: &mpsc::Sender<RoomClientEvent>, bytes: Vec<u8>) -> bool {
+        if self.remaining == 0 || bytes.len() > self.max_bytes {
+            return false;
+        }
+        if events
+            .try_send(RoomClientEvent::Outbound(OutboundFrame::unaccounted(bytes)))
+            .is_ok()
+        {
+            self.remaining -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+async fn send_ws_message(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: Message,
+    send_deadline: Duration,
+    max_frame_bytes: usize,
+) -> bool {
+    let byte_len = match &message {
+        Message::Binary(bytes) => bytes.len(),
+        Message::Close(frame) => frame
+            .as_ref()
+            .map(|f| f.reason.len())
+            .unwrap_or(0),
+        Message::Ping(payload) | Message::Pong(payload) => payload.len(),
+        _ => 0,
+    };
+    if byte_len > max_frame_bytes {
+        return false;
+    }
+    match tokio::time::timeout(send_deadline, sender.send(message)).await {
+        Ok(Ok(())) => true,
+        _ => false,
+    }
+}
+
 async fn handle_socket(
     socket: WebSocket,
     hub: Arc<CollabHub>,
     live: CollabSession,
     _peer: SocketAddr,
 ) {
+    let config = hub.config();
     let (mut sender, mut receiver) = socket.split();
     let conn_id = Uuid::now_v7();
-    let (events_tx, mut events_rx) = mpsc::channel(64);
-    let mut joined_room: Option<(crate::collab::room::RoomKey, String, bool)> = None;
+    let (events_tx, mut events_rx) =
+        mpsc::channel(config.max_outbound_frames_per_connection.max(8));
+    let (cancel_tx, mut cancel_rx) = watch::channel(None::<ConnectionCancel>);
+    let mut joined_room: Option<(crate::collab::room::RoomKey, String, bool, bool)> = None;
+    let send_deadline = Duration::from_millis(config.outbound_send_deadline_ms);
+    let max_frame_bytes = config.max_ws_frame_bytes;
+    let auth_deadline =
+        Instant::now() + Duration::from_millis(config.auth_wait_ms);
+    let mut auth_wait = Box::pin(tokio::time::sleep_until(
+        tokio::time::Instant::from_std(auth_deadline),
+    ));
+    let mut collab_authenticated = false;
+    let mut pre_auth_outbound = PreAuthOutboundAllowance::new(config);
+    let mut inbound_window_start = Instant::now();
+    let mut inbound_window_count = 0u32;
 
     loop {
         tokio::select! {
-            outbound = events_rx.recv() => {
-                match outbound {
-                    Some(RoomClientEvent::Outbound(bytes)) => {
-                        if sender.send(Message::Binary(bytes.into())).await.is_err() {
+            _ = auth_wait.as_mut(), if !collab_authenticated => {
+                break;
+            }
+            room_event = events_rx.recv() => {
+                match room_event {
+                    Some(RoomClientEvent::Outbound(outbound)) => {
+                        if let Some((key, _, authenticated, read_only)) = &joined_room {
+                            if *authenticated
+                                && !hub
+                                    .session_still_authorized(key.0, key.1, &live, *read_only)
+                                    .await
+                            {
+                                break;
+                            }
+                        }
+                        if !send_ws_message(
+                            &mut sender,
+                            Message::Binary(outbound.bytes.into()),
+                            send_deadline,
+                            max_frame_bytes,
+                        )
+                        .await
+                        {
                             break;
                         }
                     }
                     Some(RoomClientEvent::Close { code, reason }) => {
-                        let _ = sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                            code,
-                            reason: reason.into(),
-                        }))).await;
+                        let _ = send_ws_message(
+                            &mut sender,
+                            Message::Close(Some(axum::extract::ws::CloseFrame {
+                                code,
+                                reason: reason.into(),
+                            })),
+                            send_deadline,
+                            max_frame_bytes,
+                        )
+                        .await;
                         break;
                     }
                     None => break,
                 }
             }
+            _ = cancel_rx.changed() => {
+                let cancel = {
+                    let guard = cancel_rx.borrow_and_update();
+                    guard.clone()
+                };
+                if let Some(cancel) = cancel {
+                    let _ = send_ws_message(
+                        &mut sender,
+                        Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: cancel.code,
+                            reason: cancel.reason.into(),
+                        })),
+                        send_deadline,
+                        max_frame_bytes,
+                    )
+                    .await;
+                    break;
+                }
+            }
             inbound = receiver.next() => {
                 match inbound {
                     Some(Ok(Message::Binary(bytes))) => {
-                        if let Some((key, routing_key, authenticated)) = &joined_room {
+                        if bytes.len() > config.max_ws_message_bytes {
+                            break;
+                        }
+                        let now = Instant::now();
+                        if now.duration_since(inbound_window_start)
+                            > Duration::from_millis(config.inbound_message_window_ms)
+                        {
+                            inbound_window_start = now;
+                            inbound_window_count = 0;
+                        }
+                        inbound_window_count += 1;
+                        if inbound_window_count > config.max_inbound_messages_per_window {
+                            break;
+                        }
+                        if let Some((key, routing_key, authenticated, _read_only)) = &joined_room {
                             if *authenticated {
                                 hub.send_frame(*key, conn_id, bytes.to_vec()).await;
                             } else {
-                                if try_authenticate(
+                                let (authenticated, joined_read_only) = try_authenticate(
                                     &hub,
                                     conn_id,
                                     &live,
                                     routing_key,
                                     &bytes,
                                     &events_tx,
-                                ).await {
-                                    joined_room = Some((*key, routing_key.clone(), true));
+                                    &cancel_tx,
+                                    &mut pre_auth_outbound,
+                                )
+                                .await;
+                                if authenticated {
+                                    joined_room =
+                                        Some((*key, routing_key.clone(), true, joined_read_only));
+                                    collab_authenticated = true;
                                 }
                             }
-                        } else if let Some((key, routing, auth_ok)) = first_room_from_frame(&bytes, &live, conn_id, &hub, &events_tx).await {
-                            joined_room = Some((key, routing, auth_ok));
+                        } else if let Some((key, routing, auth_ok, read_only)) =
+                            first_room_from_frame(
+                                &bytes,
+                                &live,
+                                conn_id,
+                                &hub,
+                                &events_tx,
+                                &cancel_tx,
+                                &mut pre_auth_outbound,
+                            )
+                            .await
+                        {
+                            joined_room = Some((key, routing, auth_ok, read_only));
+                            if auth_ok {
+                                collab_authenticated = true;
+                            }
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        let _ = sender.send(Message::Pong(payload)).await;
+                        if payload.len() > config.max_ws_frame_bytes {
+                            break;
+                        }
+                        if !send_ws_message(
+                            &mut sender,
+                            Message::Pong(payload),
+                            send_deadline,
+                            max_frame_bytes,
+                        )
+                        .await
+                        {
+                            break;
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
@@ -187,7 +359,7 @@ async fn handle_socket(
             }
         }
     }
-    if let Some((key, _, _)) = joined_room {
+    if let Some((key, _, _, _)) = joined_room {
         hub.leave_room(key, conn_id).await;
     }
 }
@@ -198,7 +370,9 @@ async fn first_room_from_frame(
     conn_id: Uuid,
     hub: &Arc<CollabHub>,
     events: &mpsc::Sender<RoomClientEvent>,
-) -> Option<(crate::collab::room::RoomKey, String, bool)> {
+    cancel: &watch::Sender<Option<ConnectionCancel>>,
+    pre_auth_outbound: &mut PreAuthOutboundAllowance,
+) -> Option<(crate::collab::room::RoomKey, String, bool, bool)> {
     let frame = crate::collab::wire::decode(bytes).ok()?;
     let WireFrame::Document {
         routing_key,
@@ -210,16 +384,26 @@ async fn first_room_from_frame(
     };
     let room_name = room?;
     if room_name.kind != CollabKind::Document {
-        send_auth_denied(events, &routing_key, "unsupported kind").await;
+        send_auth_denied(pre_auth_outbound, events, &routing_key, "unsupported kind");
         return None;
     }
     let key = (room_name.workspace_id, room_name.resource_id);
-    let auth_ok = if matches!(message, DocumentMessage::Auth(AuthMessage::Token { .. })) {
-        try_authenticate(hub, conn_id, live, &routing_key, bytes, events).await
+    let (auth_ok, read_only) = if matches!(message, DocumentMessage::Auth(AuthMessage::Token { .. })) {
+        try_authenticate(
+            hub,
+            conn_id,
+            live,
+            &routing_key,
+            bytes,
+            events,
+            cancel,
+            pre_auth_outbound,
+        )
+        .await
     } else {
-        false
+        (false, false)
     };
-    Some((key, routing_key, auth_ok))
+    Some((key, routing_key, auth_ok, read_only))
 }
 
 async fn try_authenticate(
@@ -229,63 +413,87 @@ async fn try_authenticate(
     routing_key: &str,
     bytes: &[u8],
     events: &mpsc::Sender<RoomClientEvent>,
-) -> bool {
+    cancel: &watch::Sender<Option<ConnectionCancel>>,
+    pre_auth_outbound: &mut PreAuthOutboundAllowance,
+) -> (bool, bool) {
     let frame = crate::collab::wire::decode(bytes).ok();
     let token = match frame {
         Some(WireFrame::Document {
             message: DocumentMessage::Auth(AuthMessage::Token { token, .. }),
             ..
         }) => token,
-        _ => return false,
+        _ => return (false, false),
     };
     let client_id = parse_client_id(&token);
     if client_id.is_none() {
-        send_auth_denied(events, routing_key, "unauthorized").await;
-        return false;
+        send_auth_denied(pre_auth_outbound, events, routing_key, "unauthorized");
+        return (false, false);
     }
     let room = CollabRoomName::parse(routing_key.split('\0').next().unwrap_or(routing_key));
     let room = match room {
         Some(r) if r.kind == CollabKind::Document => r,
         _ => {
-            send_auth_denied(events, routing_key, "not found").await;
-            return false;
+            send_auth_denied(pre_auth_outbound, events, routing_key, "not found");
+            return (false, false);
         }
     };
+    let admission = match resolve_collab_admission(
+        hub.pool(),
+        room.workspace_id,
+        live.user_id,
+        live.session_id,
+        room.resource_id,
+    )
+    .await
+    {
+        Ok(Ok(admission)) => admission,
+        _ => {
+            send_auth_denied(pre_auth_outbound, events, routing_key, "not found");
+            return (false, false);
+        }
+    };
+    let read_only = admission.read_only;
     let join = RoomJoin {
         conn: AuthenticatedConnection {
             conn_id,
-            session: live.clone(), // CollabSession is Clone
+            session: live.clone(),
             client_id: client_id.unwrap(),
-            read_only: false,
+            read_only,
             routing_key: routing_key.to_string(),
         },
         events: events.clone(),
+        cancel: Some(cancel.clone()),
     };
     match hub
         .join_room((room.workspace_id, room.resource_id), join)
         .await
     {
         Ok(()) => {
-            let scope = "read-write";
-            send_auth_ok(events, routing_key, scope).await;
-            true
+            let scope = if read_only { "readonly" } else { "read-write" };
+            send_auth_ok(pre_auth_outbound, events, routing_key, scope);
+            (true, read_only)
         }
         Err(JoinError::AdmissionDenied) => {
-            send_auth_denied(events, routing_key, "not found").await;
-            false
+            send_auth_denied(pre_auth_outbound, events, routing_key, "not found");
+            (false, false)
         }
         Err(JoinError::UnsupportedKind) => {
-            send_auth_denied(events, routing_key, "unsupported kind").await;
-            false
+            send_auth_denied(pre_auth_outbound, events, routing_key, "unsupported kind");
+            (false, false)
         }
         Err(_) => {
-            send_auth_denied(events, routing_key, "unauthorized").await;
-            false
+            send_auth_denied(pre_auth_outbound, events, routing_key, "unauthorized");
+            (false, false)
         }
     }
 }
 
-async fn send_auth_ok(events: &mpsc::Sender<RoomClientEvent>, routing_key: &str, scope: &str) {
+fn send_auth_ok(
+    pre_auth: &mut PreAuthOutboundAllowance,
+    events: &mpsc::Sender<RoomClientEvent>,
+    routing_key: &str,
+    scope: &str,
+) {
     let frame = crate::collab::wire::encode(&WireFrame::Document {
         routing_key: routing_key.to_string(),
         room: None,
@@ -294,10 +502,15 @@ async fn send_auth_ok(events: &mpsc::Sender<RoomClientEvent>, routing_key: &str,
         }),
     })
     .unwrap_or_default();
-    let _ = events.send(RoomClientEvent::Outbound(frame)).await;
+    let _ = pre_auth.try_send(events, frame);
 }
 
-async fn send_auth_denied(events: &mpsc::Sender<RoomClientEvent>, routing_key: &str, reason: &str) {
+fn send_auth_denied(
+    pre_auth: &mut PreAuthOutboundAllowance,
+    events: &mpsc::Sender<RoomClientEvent>,
+    routing_key: &str,
+    reason: &str,
+) {
     let frame = crate::collab::wire::encode(&WireFrame::Document {
         routing_key: routing_key.to_string(),
         room: None,
@@ -306,7 +519,7 @@ async fn send_auth_denied(events: &mpsc::Sender<RoomClientEvent>, routing_key: &
         }),
     })
     .unwrap_or_default();
-    let _ = events.send(RoomClientEvent::Outbound(frame)).await;
+    let _ = pre_auth.try_send(events, frame);
 }
 
 fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
