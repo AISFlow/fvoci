@@ -122,11 +122,28 @@ function sameIdentity(before: ProcMember | null, pid: number): boolean {
   return now != null && now.starttime === before.starttime;
 }
 
+/** Refuse a recycled process-group number unless a recorded member still owns it. */
+export function signalOwnedGroup(pgid: number, owners: readonly ProcMember[]): void {
+  const current = processGroupMembers(pgid);
+  if (current.length === 0) return;
+  if (!current.some((member) => owners.some((owner) =>
+    owner.pid === member.pid && owner.starttime === member.starttime && owner.pgrp === pgid,
+  ))) {
+    throw new Error(`cannot prove ownership of process group ${pgid}`);
+  }
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
 export class OwnedServer {
   child: ChildProcess | null = null;
   pgid: number | null = null;
   parentPid: number | null = null;
   parentIdentity: ProcMember | null = null;
+  private ownedMembers: ProcMember[] = [];
   baseUrl = "";
   bind = "";
   logs = "";
@@ -168,7 +185,7 @@ export class OwnedServer {
       throw new Error("cannot restart before the owned server has bound a port");
     }
     const bind = this.bind;
-    await this.killGroupObserved("SIGKILL");
+    await this.killGroupObserved();
     await this.spawnAt(bind, bind);
   }
 
@@ -177,7 +194,7 @@ export class OwnedServer {
   }
 
   /**
-   * SIGTERM the server PID only so Drop can flush and kill helpers.
+   * SIGTERM the server PID only so its async shutdown can flush and reap helpers.
    * Group SIGKILL is only if parent or helpers remain after the wait.
    */
   async shutdownGraceful(): Promise<void> {
@@ -185,15 +202,18 @@ export class OwnedServer {
     const pgid = this.pgid;
     const parentPid = this.parentPid;
     const identity = this.parentIdentity;
+    const owners = this.observeOwnedMembers();
     this.child = null;
     this.pgid = null;
     this.parentPid = null;
     this.parentIdentity = null;
     if (parentPid == null || pgid == null) return;
-    try {
-      process.kill(parentPid, "SIGTERM");
-    } catch {
-      /* already gone */
+    if (sameIdentity(identity, parentPid)) {
+      try {
+        process.kill(parentPid, "SIGTERM");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
     }
     if (child && child.exitCode == null && child.signalCode == null) {
       await Promise.race([once(child, "exit"), delay(5_000)]);
@@ -206,15 +226,7 @@ export class OwnedServer {
     }
     this.lastGracefulLeftovers = leftovers;
     if (leftovers.length > 0 || sameIdentity(identity, parentPid)) {
-      try {
-        process.kill(-pgid, "SIGKILL");
-      } catch {
-        try {
-          process.kill(parentPid, "SIGKILL");
-        } catch {
-          /* gone */
-        }
-      }
+      signalOwnedGroup(pgid, owners);
       await delay(200);
       leftovers = processGroupMembers(pgid);
       this.lastGracefulLeftovers = leftovers;
@@ -230,6 +242,14 @@ export class OwnedServer {
     if (this.logPath !== "") {
       writeFileSync(this.logPath, text, { flag: "a" });
     }
+  }
+
+  private observeOwnedMembers(): ProcMember[] {
+    if (this.parentPid != null && this.pgid != null &&
+      sameIdentity(this.parentIdentity, this.parentPid)) {
+      this.ownedMembers = processGroupMembers(this.pgid);
+    }
+    return this.ownedMembers;
   }
 
   private async spawnAt(bind: string, expectedBind?: string): Promise<void> {
@@ -275,6 +295,8 @@ export class OwnedServer {
     });
     await delay(20);
     this.parentIdentity = readProcMember(child.pid);
+    this.ownedMembers = [];
+    this.observeOwnedMembers();
 
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
@@ -284,7 +306,7 @@ export class OwnedServer {
         );
       }
       if (BIND_FAIL_RE.test(this.logs)) {
-        await this.killGroupObserved("SIGKILL");
+        await this.killGroupObserved();
         throw new Error(`fvoci-server failed to bind ${bind}: ${this.logs.slice(-2000)}`);
       }
       const match = LISTEN_RE.exec(this.logs);
@@ -292,10 +314,10 @@ export class OwnedServer {
         const url = match[1];
         const bound = url.replace("http://", "");
         if (expectedBind && bound !== expectedBind) {
-          await this.killGroupObserved("SIGKILL");
+          await this.killGroupObserved();
           throw new Error(`owned restart bound ${bound}, expected ${expectedBind}`);
         }
-        const ready = await fetch(`${url}/api/v1/setup`)
+        const ready = await fetch(`${url}/api/v1/setup`, { signal: AbortSignal.timeout(1_000) })
           .then((res) => res.status === 200 || res.status === 404)
           .catch(() => false);
         if (ready) {
@@ -306,31 +328,22 @@ export class OwnedServer {
       }
       await delay(100);
     }
-    await this.killGroupObserved("SIGKILL");
+    await this.killGroupObserved();
     throw new Error(`fvoci-server did not become ready on ${bind}: ${this.logs.slice(-2000)}`);
   }
 
-  private async killGroupObserved(signal: "SIGKILL"): Promise<void> {
+  private async killGroupObserved(): Promise<void> {
     const child = this.child;
     const pgid = this.pgid;
     const parentPid = this.parentPid;
     const identity = this.parentIdentity;
+    const owners = this.observeOwnedMembers();
     this.child = null;
     this.pgid = null;
     this.parentPid = null;
     this.parentIdentity = null;
     if (pgid == null) return;
-    try {
-      process.kill(-pgid, signal);
-    } catch {
-      if (parentPid != null) {
-        try {
-          process.kill(parentPid, signal);
-        } catch {
-          /* already gone */
-        }
-      }
-    }
+    signalOwnedGroup(pgid, owners);
     if (child && child.exitCode == null && child.signalCode == null) {
       await Promise.race([once(child, "exit"), delay(5_000)]);
     }
