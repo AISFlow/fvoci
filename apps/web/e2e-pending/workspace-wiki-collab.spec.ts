@@ -37,6 +37,8 @@ import {
   peer,
   persistBody,
   placeContentCaret,
+  installCaretProbe,
+  readCaretProbe,
   readEditorSelection,
   sentPersistRequests,
   sessionCookie,
@@ -308,13 +310,15 @@ test("delete-only save then structured marks, table, and IDs persist", async ({ 
   expect(secondId).not.toBe(firstId);
   await expectMatchingPersistAck(page, wire);
 
+  await installCaretProbe(page);
   await editor.click();
   await page.keyboard.type("굵은링크");
   await page.keyboard.press("Shift+Home");
   // Native keyboard selectionchange and ProseMirror selection update are
   // separate events. Assert both before exercising the selection toolbar;
   // a lost selection must fail here, not look like a missing format button.
-  await expect.poll(() => editor.evaluate((root) => {
+  try {
+    await expect.poll(() => editor.evaluate((root) => {
     const live = (root as HTMLElement & {
       editor?: {
         state: {
@@ -331,7 +335,11 @@ test("delete-only save then structured marks, table, and IDs persist", async ({ 
         : null,
     };
   }), { message: "native and editor selection must cover the intended marked text" })
-    .toEqual({ browser: "굵은링크", editor: "굵은링크" });
+      .toEqual({ browser: "굵은링크", editor: "굵은링크" });
+  } catch (error) {
+    console.info("caret probe on selection failure", await readCaretProbe(page));
+    throw error;
+  }
   await applyBoldToSelection(page);
   await applyLinkToSelection(page, "https://example.com");
   await persistBody(page);

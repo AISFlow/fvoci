@@ -423,6 +423,122 @@ export async function closeCollabContext(
   }
 }
 
+/** Diagnostic only: bounded in-page caret buffer, dumped on assertion failure. */
+export async function installCaretProbe(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const host = globalThis as unknown as {
+      __fvociCaretProbe?: Array<Record<string, unknown>>;
+      __fvociCaretProbeInstalled?: boolean;
+      __fvociCaretProbeEditor?: boolean;
+    };
+    if (host.__fvociCaretProbeInstalled) return;
+    host.__fvociCaretProbeInstalled = true;
+    const log: Array<Record<string, unknown>> = [];
+    host.__fvociCaretProbe = log;
+    const push = (event: Record<string, unknown>) => {
+      log.push(event);
+      if (log.length > 80) log.splice(0, log.length - 80);
+    };
+    const snap = (kind: string, extra: Record<string, unknown> = {}) => {
+      const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
+        editor?: {
+          view: { posAtDOM(node: Node, offset: number): number };
+          state: {
+            selection: { from: number; to: number; empty: boolean };
+            doc: { textContent: string };
+          };
+        };
+      } | null;
+      const live = root?.editor;
+      const native = window.getSelection();
+      const anchor = native?.anchorNode ?? null;
+      let nativePmPos: number | null = null;
+      try {
+        if (live && anchor) nativePmPos = live.view.posAtDOM(anchor, native?.anchorOffset ?? 0);
+      } catch {
+        nativePmPos = null;
+      }
+      return {
+        kind,
+        t: Date.now(),
+        focused: Boolean(root && document.activeElement === root),
+        browser: native?.toString() ?? "",
+        nativeCollapsed: native?.isCollapsed ?? null,
+        nativeOffset: native?.anchorOffset ?? null,
+        nativeFocusOffset: native?.focusOffset ?? null,
+        nativeText: anchor instanceof Text ? anchor.data : anchor ? anchor.nodeName : null,
+        nativeTextLen: anchor instanceof Text ? anchor.length : null,
+        nativePmPos,
+        from: live?.state.selection.from ?? null,
+        to: live?.state.selection.to ?? null,
+        empty: live?.state.selection.empty ?? null,
+        pmText: live?.state.doc.textContent ?? null,
+        ySync: false,
+        uniqueId: false,
+        ...extra,
+      };
+    };
+    document.addEventListener("input", () => {
+      push(snap("input"));
+      queueMicrotask(() => push(snap("input-microtask")));
+    }, true);
+    document.addEventListener("selectionchange", () => {
+      push(snap("selectionchange"));
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Home") return;
+      push(snap("home-keydown", {
+        shift: event.shiftKey,
+        prevented: event.defaultPrevented,
+      }));
+    }, true);
+    const attachEditor = () => {
+      const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
+        editor?: {
+          on(
+            event: "transaction",
+            cb: (props: {
+              transaction: { getMeta(key: string): unknown };
+              editor: {
+                state: {
+                  selection: { from: number; to: number; empty: boolean };
+                  doc: { textContent: string };
+                };
+              };
+            }) => void,
+          ): void;
+        };
+      } | null;
+      const live = root?.editor;
+      if (!live || host.__fvociCaretProbeEditor) return;
+      host.__fvociCaretProbeEditor = true;
+      live.on("transaction", ({ transaction, editor: current }) => {
+        push({
+          ...snap("transaction"),
+          ySync: Boolean(transaction.getMeta("y-sync$")),
+          uniqueId: Boolean(transaction.getMeta("__uniqueIDTransaction")),
+          from: current.state.selection.from,
+          to: current.state.selection.to,
+          empty: current.state.selection.empty,
+          pmText: current.state.doc.textContent,
+        });
+      });
+    };
+    attachEditor();
+    new MutationObserver(attachEditor).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  });
+}
+
+export async function readCaretProbe(page: Page): Promise<unknown[]> {
+  return page.evaluate(() => {
+    const host = globalThis as unknown as { __fvociCaretProbe?: unknown[] };
+    return host.__fvociCaretProbe ?? [];
+  });
+}
+
 export async function placeContentCaret(page: Page, where: "start" | "end"): Promise<void> {
   const locator = editorLocator(page);
   await locator.focus();
