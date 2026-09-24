@@ -4,8 +4,7 @@ import type { components, paths } from "@/generated/api";
 
 export const api = createClient<paths>({
   credentials: "include",
-  fetch: (input: Request) => globalThis.fetch(input),
-  ...(typeof window === "undefined" ? { baseUrl: "http://test.local" } : {}),
+  fetch: (input) => globalThis.fetch(input),
 });
 
 type ProblemBody = components["schemas"]["ProblemResponse"];

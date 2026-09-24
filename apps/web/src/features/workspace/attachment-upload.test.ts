@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { installNodeRelativeRequestShim } from "../../../test/node-api-fetch.ts";
+
+const restoreNodeRequest = installNodeRelativeRequestShim();
 
 const WS = "11111111-1111-7111-8111-111111111111";
 const DOC = "22222222-2222-7222-8222-222222222222";
@@ -91,6 +94,9 @@ async function loadBridge(
 }
 
 test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
+  t.after(() => {
+    restoreNodeRequest();
+  });
   t.afterEach(() => {
     globalThis.fetch = originalFetch;
   });
