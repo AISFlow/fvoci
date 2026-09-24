@@ -15,8 +15,23 @@ pub async fn set_tenant(
     Ok(())
 }
 
-pub async fn set_system(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+pub async fn set_system(tx: &mut Transaction<'_, Postgres>) -> Result<String, sqlx::Error> {
+    let previous: Option<String> =
+        sqlx::query_scalar("SELECT current_setting('app.system_ctx', true)")
+            .fetch_one(&mut **tx)
+            .await?;
     sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(previous.unwrap_or_default())
+}
+
+pub async fn restore_system(
+    tx: &mut Transaction<'_, Postgres>,
+    previous: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('app.system_ctx', $1, true)")
+        .bind(previous)
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -35,6 +50,26 @@ pub async fn set_self_user(
 
 pub async fn clear_self_user(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('app.self_user_id', '', true)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_invitation_token_hash(
+    tx: &mut Transaction<'_, Postgres>,
+    token_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('app.invitation_token_hash', $1, true)")
+        .bind(token_hash)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn clear_invitation_token_hash(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('app.invitation_token_hash', '', true)")
         .execute(&mut **tx)
         .await?;
     Ok(())

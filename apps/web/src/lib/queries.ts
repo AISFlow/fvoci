@@ -26,3 +26,29 @@ export function workspaceMetaQuery(workspaceId: string) {
       })),
   });
 }
+
+export function membersQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["workspaces", workspaceId, "members"],
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/members", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    retry: false,
+  });
+}
+
+export function invitationPublicQuery(token: string) {
+  return queryOptions({
+    queryKey: ["invitation", token],
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/invitations/{token}", {
+          params: { path: { token } },
+        }),
+      ),
+    retry: false,
+  });
+}

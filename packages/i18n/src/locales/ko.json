@@ -13,7 +13,7 @@
 	"form.invalid": "입력을 확인해 주세요.",
 	"common.cancel": "취소",
 	"auth.unsupported.notice": "매직 링크, 소셜 로그인, SSO, MFA, 동의 화면은 이 Rust 슬라이스에서 지원하지 않습니다.",
-	"workspace.settings.unsupported.notice": "멤버 목록, 초대, 가져오기, 보내기, 삭제는 이 Rust 슬라이스에서 지원하지 않습니다.",
+	"workspace.settings.unsupported.notice": "가져오기, 보내기, 삭제는 이 Rust 슬라이스에서 지원하지 않습니다.",
 	"workspace.counts.notice": "문서·태스크 수는 아직 계산되지 않으며 0으로 표시됩니다.",
 	"authentication required": "인증이 필요합니다",
 	"branding asset too large": "브랜딩 이미지가 너무 큽니다",

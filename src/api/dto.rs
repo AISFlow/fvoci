@@ -262,6 +262,71 @@ pub struct MemberRoleBody {
     pub role: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MembersResponse {
+    pub items: Vec<MemberResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationCreateBody {
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationCreateResponse {
+    pub accept_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationLegalDocument {
+    pub kind: String,
+    pub version: i32,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationPublicResponse {
+    pub workspace_name: String,
+    pub email_masked: String,
+    pub role: String,
+    pub required_legal: Vec<InvitationLegalDocument>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationConsentItem {
+    pub kind: String,
+    pub version: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InvitationAcceptBody {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    pub email: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    pub given_name: Option<String>,
+    #[serde(default)]
+    pub family_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub consents: Option<Vec<InvitationConsentItem>>,
+}
+
 /// Source `parentId` is `uuid.nullable()`: present and null is allowed, omitted is not.
 /// `#[serde(default)]` plus a third Missing variant is required; a wrapper around
 /// `Option` would treat omitted fields as null because serde's missing-field path

@@ -10,6 +10,7 @@ import { WikiPage } from "@/pages/WikiPage";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
 import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
+import { InvitePage } from "@/pages/InvitePage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -26,6 +27,14 @@ export function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/setup" element={<SetupPage />} />
+          <Route
+            path="/invite/:token"
+            element={
+              <SetupGuard>
+                <InvitePage />
+              </SetupGuard>
+            }
+          />
           <Route
             path="/login"
             element={

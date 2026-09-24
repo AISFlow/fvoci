@@ -30,3 +30,34 @@ export const workspaceCreateInput = z.object({
 export const workspaceNameInput = z.object({
   name: z.string().trim().min(1, "i18n:form.too_small"),
 });
+
+export const invitationCreateInput = z.object({
+  email: z.string().trim().email("i18n:form.email"),
+  role: z.enum(["owner", "admin", "member", "guest"]),
+});
+
+const optionalEmail = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().trim().email("i18n:form.email").optional(),
+);
+
+const optionalGivenName = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().trim().min(1, "i18n:form.too_small").optional(),
+);
+
+const optionalPassword = z.preprocess(
+  (value) => (typeof value === "string" && value === "" ? undefined : value),
+  z.string().min(10, "i18n:form.too_small").optional(),
+);
+
+export const invitationAcceptInput = z.object({
+  email: optionalEmail,
+  givenName: optionalGivenName,
+  familyName: z
+    .string()
+    .trim()
+    .transform((value) => (value === "" ? undefined : value))
+    .optional(),
+  password: optionalPassword,
+});

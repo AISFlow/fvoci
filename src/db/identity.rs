@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::auth::password::{hash_password, verify_password, Keyring};
 use crate::auth::session::{as_text_scale, as_week_starts_on, SessionUser};
 use crate::auth::token::{new_token, SESSION_TTL_SECS};
+use crate::db::quota::acquire_admission_lock;
 
 const SESSION_SLIDE_THRESHOLD_SECS: i64 = 15 * 24 * 60 * 60;
 
@@ -231,6 +232,7 @@ pub async fn setup_first_owner(
     input: SetupFirstOwnerInput,
 ) -> Result<SetupFirstOwnerResult, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    acquire_admission_lock(&mut tx).await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(INSTANCE_ADMIN_LOCK_KEY)
         .execute(&mut *tx)
