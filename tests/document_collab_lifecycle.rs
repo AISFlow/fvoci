@@ -92,22 +92,19 @@ async fn wait_for_trash_append_rejection(
                 }
             }
             msg = tokio::time::timeout(slice, peer.next()) => {
-                match msg {
-                    Ok(Some(Ok(Message::Binary(bytes)))) => {
-                        if matches!(
-                            fvoci_server::collab::wire::decode(&bytes),
-                            Ok(WireFrame::Document {
-                                message: DocumentMessage::Sync(SyncMessage {
-                                    step: SyncStep::Update,
-                                    ..
-                                }),
+                if let Ok(Some(Ok(Message::Binary(bytes)))) = msg {
+                    if matches!(
+                        fvoci_server::collab::wire::decode(&bytes),
+                        Ok(WireFrame::Document {
+                            message: DocumentMessage::Sync(SyncMessage {
+                                step: SyncStep::Update,
                                 ..
-                            })
-                        ) {
-                            panic!("trashed append rejection must not broadcast Sync Update");
-                        }
+                            }),
+                            ..
+                        })
+                    ) {
+                        panic!("trashed append rejection must not broadcast Sync Update");
                     }
-                    Ok(Some(Ok(_))) | Ok(None) | Ok(Some(Err(_))) | Err(_) => {}
                 }
             }
         }
