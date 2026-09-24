@@ -960,6 +960,15 @@ export interface operations {
                     "application/json": components["schemas"]["AttachmentOutput"];
                 };
             };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
             /** @description Not found or forbidden */
             404: {
                 headers: {
@@ -1007,6 +1016,15 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
             /** @description Uploader mismatch */
             403: {
                 headers: {
@@ -1018,6 +1036,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Upload is not in the required state */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1060,6 +1087,24 @@ export interface operations {
                 };
                 content: {
                     "application/octet-stream": unknown;
+                };
+            };
+            /** @description Invalid download variant */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
             /** @description Not found or forbidden */
@@ -1107,6 +1152,24 @@ export interface operations {
                     "application/json": components["schemas"]["PutAttachmentPartResponse"];
                 };
             };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
             /** @description Uploader mismatch */
             403: {
                 headers: {
@@ -1118,6 +1181,24 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Upload is not in the required state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Part too large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1150,6 +1231,15 @@ export interface operations {
                     "application/json": components["schemas"]["ResumeAttachmentUploadResponse"];
                 };
             };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
             /** @description Uploader mismatch */
             403: {
                 headers: {
@@ -1161,6 +1251,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Upload is not in the required state */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1391,6 +1490,24 @@ export interface operations {
                     "application/json": components["schemas"]["CreateAttachmentUploadResponse"];
                 };
             };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
             /** @description Not found or forbidden */
             404: {
                 headers: {
@@ -1402,6 +1519,15 @@ export interface operations {
             };
             /** @description File too large */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Create rate limited */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
