@@ -1,18 +1,19 @@
 use std::net::SocketAddr;
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateTaskBody, TaskChildOutput, TaskChildProgressOutput, TaskListResponse, TaskMetaOutput,
-    TaskOutput, TaskParentOutput,
+    CreateTaskBody, TaskChildOutput, TaskChildProgressOutput, TaskListItemOutput, TaskListResponse,
+    TaskMetaOutput, TaskOutput, TaskParentOutput, TaskStatusCountOutput,
 };
 use crate::auth::session::SessionUser;
 use crate::db::projects::ProjectDbError;
@@ -22,7 +23,18 @@ use crate::http::guard::{check_origin, reject_bearer};
 use crate::http::rate_limit::peer_ip;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
+use crate::tasks::list_query::{parse_task_list_query, TaskListQueryError};
 use crate::tasks::{priority_is_valid, task_type_is_valid, title_is_valid};
+
+#[derive(Debug, Deserialize)]
+pub struct TaskListQueryParams {
+    pub query: Option<String>,
+    pub archived: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i32>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -151,8 +163,19 @@ async fn list_tasks(
     headers: HeaderMap,
     jar: CookieJar,
     Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+    query: Result<Query<TaskListQueryParams>, QueryRejection>,
 ) -> Result<Json<TaskListResponse>, TaskApiError> {
     reject_bearer(&headers)?;
+    let Query(params) = query.map_err(AppError::from)?;
+    let parsed = parse_task_list_query(
+        params.query.as_deref(),
+        params.archived.as_deref(),
+        params.cursor.as_deref(),
+        params.limit,
+        params.from.as_deref(),
+        params.to.as_deref(),
+    )
+    .map_err(map_task_list_query_error)?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_project_tasks(
@@ -161,14 +184,46 @@ async fn list_tasks(
         project_id,
         actor_user_id,
         session_id,
+        &parsed,
     )
     .await
     .map_err(internal)?;
     match result {
-        Ok(tasks) => Ok(Json(TaskListResponse {
-            items: tasks.into_iter().map(task_meta_output).collect(),
+        Ok(page) => Ok(Json(TaskListResponse {
+            items: page
+                .items
+                .into_iter()
+                .map(|task| TaskListItemOutput {
+                    meta: task_meta_output(task),
+                    assignee_ids: Vec::new(),
+                    label_ids: Vec::new(),
+                })
+                .collect(),
+            next_cursor: page.next_cursor,
+            status_counts: page
+                .status_counts
+                .into_iter()
+                .map(|(status_id, count)| TaskStatusCountOutput {
+                    status_id: status_id.to_string(),
+                    count,
+                })
+                .collect(),
         })),
         Err(err) => Err(map_project_error(err).into()),
+    }
+}
+
+fn map_task_list_query_error(err: TaskListQueryError) -> TaskApiError {
+    match err {
+        TaskListQueryError::InvalidInput => AppError::from_code(ProblemCode::InvalidInput).into(),
+        TaskListQueryError::InvalidCursor => AppError {
+            status: StatusCode::BAD_REQUEST,
+            code: ProblemCode::InvalidInput,
+            source: None,
+            params: Some(json!({"code":"invalid_cursor"})),
+            retry_after: None,
+        }
+        .into(),
     }
 }
 
@@ -185,10 +240,13 @@ fn task_meta_output(task: crate::db::tasks::TaskMetaRow) -> TaskMetaOutput {
         start_date: task.start_date,
         due_date: task.due_date,
         due_at: task.due_at,
-        estimate: task.estimate,
+        estimate: task.estimate.map(|value| value.to_string()),
         parent_id: task.parent_id.map(|id| id.to_string()),
         milestone_id: task.milestone_id.map(|id| id.to_string()),
         recurrence: task.recurrence,
+        sort_key: task.sort_key,
+        schema_version: task.schema_version,
+        version: task.version,
         archived_at: task.archived_at,
         created_by: task.created_by.to_string(),
         created_at: task.created_at,

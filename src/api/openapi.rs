@@ -11,11 +11,11 @@ use crate::api::dto::{
     AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CompleteAttachmentUploadBody,
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateDocumentBody,
     CreateProjectBody, CreateTaskBody, CreateWorkspaceBody, DocumentMetaResponse, LoginBody,
-    LoginResponse, MemberResponse, MemberRoleBody, OkResponse, PatchDocumentBody, PatchMeBody,
-    PatchProjectBody, PatchWorkspaceBody, ProblemResponse, ProjectListResponse,
-    ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
-    ResumeAttachmentUploadResponse, SessionUserOutput, SetupBody, SetupResponse,
-    SetupStatusResponse, TaskChildOutput, TaskChildProgressOutput, TaskListResponse,
+    LoginResponse, LookupItemOutput, LookupListResponse, MemberResponse, MemberRoleBody,
+    OkResponse, PatchDocumentBody, PatchMeBody, PatchProjectBody, PatchWorkspaceBody,
+    ProblemResponse, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
+    PutAttachmentPartResponse, ResumeAttachmentUploadResponse, SessionUserOutput, SetupBody,
+    SetupResponse, SetupStatusResponse, TaskChildOutput, TaskChildProgressOutput, TaskListResponse,
     TaskMetaOutput, TaskOutput, TaskParentOutput, TreeResponse, WorkflowOutput,
     WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
 };
@@ -65,6 +65,7 @@ impl Modify for CookieSecurityAddon {
         patch_project_member,
         delete_project_member,
         get_project_workflow,
+        lookup_display_id,
         list_tasks,
         create_task,
         get_task,
@@ -113,6 +114,8 @@ impl Modify for CookieSecurityAddon {
             TaskChildOutput,
             TaskChildProgressOutput,
             TaskListResponse,
+            LookupItemOutput,
+            LookupListResponse,
             CreateDocumentBody,
             PatchDocumentBody,
             DocumentMetaResponse,
@@ -497,13 +500,39 @@ fn get_project_workflow() {}
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("project_id" = String, description = "Project id"),
+        ("query" = Option<String>, Query, description = "JSON-encoded view query"),
+        ("archived" = Option<String>, Query, description = "Filter archived tasks"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size"),
+        ("from" = Option<String>, Query, description = "Schedule range start (YYYY-MM-DD)"),
+        ("to" = Option<String>, Query, description = "Schedule range end (YYYY-MM-DD)"),
     ),
     responses(
         (status = 200, description = "Project tasks", body = TaskListResponse),
+        (status = 400, description = "Invalid query", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
     )
 )]
 fn list_tasks() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/lookup/{display_id}",
+    tag = "search",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("display_id" = String, description = "Display id such as LAB-1 or WIKI-2"),
+        ("projectId" = Option<String>, Query, description = "Optional project scope filter"),
+    ),
+    responses(
+        (status = 200, description = "Lookup matches", body = LookupListResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not a workspace member", body = ProblemResponse),
+    )
+)]
+fn lookup_display_id() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

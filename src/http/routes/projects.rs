@@ -371,9 +371,11 @@ async fn get_workflow(
                 .into_iter()
                 .map(|status| WorkflowStatusOutput {
                     id: status.id.to_string(),
+                    workflow_id: workflow.id.to_string(),
                     name: status.name,
                     category: status.category,
                     sort_key: status.sort_key,
+                    wip_limit: status.wip_limit,
                 })
                 .collect(),
         })),
@@ -425,6 +427,13 @@ pub fn map_project_error(err: ProjectDbError) -> AppError {
         }
         ProjectDbError::LeadNotMember => AppError::from_code(ProblemCode::Conflict),
         ProjectDbError::Archived => AppError::from_code(ProblemCode::ProjectArchived),
+        ProjectDbError::InvalidCursor => AppError {
+            status: StatusCode::BAD_REQUEST,
+            code: ProblemCode::InvalidInput,
+            source: None,
+            params: Some(json!({"code":"invalid_cursor"})),
+            retry_after: None,
+        },
     }
 }
 

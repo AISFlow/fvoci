@@ -4,6 +4,7 @@ pub mod auth;
 pub mod collab;
 pub mod config;
 pub mod db;
+pub mod display_id;
 pub mod error;
 pub mod http;
 pub mod projects;

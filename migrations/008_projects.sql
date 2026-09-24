@@ -97,6 +97,7 @@ CREATE TABLE fvoci.statuses (
     name text NOT NULL,
     category text NOT NULL,
     sort_key text NOT NULL,
+    wip_limit integer,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT statuses_workspace_id_id_unique UNIQUE (workspace_id, id),
@@ -140,6 +141,8 @@ CREATE TABLE fvoci.tasks (
     parent_id uuid,
     milestone_id uuid,
     recurrence jsonb,
+    sort_key text NOT NULL DEFAULT 'V',
+    schema_version integer NOT NULL DEFAULT 2,
     content_json jsonb NOT NULL,
     version integer NOT NULL DEFAULT 1,
     archived_at timestamptz,
@@ -152,7 +155,7 @@ CREATE TABLE fvoci.tasks (
     CONSTRAINT tasks_title_check CHECK (
         char_length(btrim(title)) >= 1 AND char_length(title) <= 500
     ),
-    CONSTRAINT tasks_type_check CHECK (type IN ('task', 'subtask', 'milestone')),
+    CONSTRAINT tasks_type_check CHECK (type IN ('task', 'bug', 'story', 'epic', 'subtask')),
     CONSTRAINT tasks_priority_check CHECK (
         priority IN ('none', 'low', 'medium', 'high', 'urgent')
     ),
