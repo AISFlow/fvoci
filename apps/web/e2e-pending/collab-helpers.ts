@@ -449,7 +449,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
           view: { posAtDOM(node: Node, offset: number): number };
           state: {
             selection: { from: number; to: number; empty: boolean };
-            doc: { textContent: string };
+            doc: { textContent: string; content: { size: number } };
           };
         };
       } | null;
@@ -482,6 +482,7 @@ export async function installCaretProbe(page: Page): Promise<void> {
         to: live?.state.selection.to ?? null,
         empty: live?.state.selection.empty ?? null,
         pmText: live?.state.doc.textContent ?? null,
+        pmContentSize: live?.state.doc.content.size ?? null,
         ySync: false,
         uniqueId: false,
         ...extra,
@@ -502,17 +503,21 @@ export async function installCaretProbe(page: Page): Promise<void> {
         prevented: event.defaultPrevented,
       }));
     }, true);
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Delete") return;
+      push(snap("delete-keydown-bubble", { prevented: event.defaultPrevented }));
+    });
     const attachEditor = () => {
       const root = document.querySelector(".fvoci-editor .ProseMirror") as HTMLElement & {
         editor?: {
           on(
             event: "transaction",
             cb: (props: {
-              transaction: { getMeta(key: string): unknown };
+              transaction: { getMeta(key: string): unknown; docChanged: boolean };
               editor: {
                 state: {
                   selection: { from: number; to: number; empty: boolean };
-                  doc: { textContent: string };
+                  doc: { textContent: string; content: { size: number } };
                 };
               };
             }) => void,
@@ -531,6 +536,8 @@ export async function installCaretProbe(page: Page): Promise<void> {
           to: current.state.selection.to,
           empty: current.state.selection.empty,
           pmText: current.state.doc.textContent,
+          pmContentSize: current.state.doc.content.size,
+          docChanged: transaction.docChanged,
         });
       });
     };

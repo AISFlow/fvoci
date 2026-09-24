@@ -181,7 +181,6 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
         await pageB.keyboard.press("ArrowLeft");
         await pageB.keyboard.press("ArrowLeft");
         await pageB.keyboard.press("ArrowLeft");
-        console.info("emoji before Delete", await readCaretProbe(pageB));
         await pageB.keyboard.press("Delete");
         console.info("emoji after Delete", await readCaretProbe(pageB));
       })(),
@@ -193,6 +192,12 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
     await expectConverged(pageA, pageB);
     expect(uniqueBlockIds(await editorShape(pageA))).toEqual(beforeIds);
     expect(uniqueBlockIds(await editorShape(pageB))).toEqual(beforeIds);
+  } catch (error) {
+    console.info("concurrent emoji Delete failure", {
+      a: await readCaretProbe(pageA).catch(() => null),
+      b: await readCaretProbe(pageB).catch(() => null),
+    });
+    throw error;
   } finally {
     await ctxA.close();
     await ctxB.close();
@@ -202,6 +207,8 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
 // Keep the insertion/deletion race above independent of caret association at the
 // same boundary. Separately exercise native Delete beside a remote caret, with
 // an otherwise identical control whose remote caret is at the document start.
+// These two cases observe settled selection; the unpaced race above does not.
+// Delete is a real key event; ProseMirror performs the emoji atom deletion.
 for (const remotePosition of ["adjacent", "start"] as const) {
   test(`native emoji Delete with remote caret ${remotePosition}`, async ({ browser, collabApp }) => {
     const ctxA = await newCollabContext(browser, collabApp.baseUrl);
