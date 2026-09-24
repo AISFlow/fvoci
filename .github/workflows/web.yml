@@ -131,6 +131,7 @@ jobs:
       - name: Check collaborative browser fixtures
         run: |
           node --experimental-strip-types --test apps/web/e2e-pending/collab-wire.test.ts apps/web/e2e-pending/collab-restart.test.ts
+          node --experimental-strip-types --test apps/web/e2e-pending/collab-helpers.test.ts
           apps/web/node_modules/.bin/tsc -p apps/web/e2e-pending/collab-tsconfig.json
       - name: Real React collaborative editing with PostgreSQL app role
         id: browser
