@@ -210,14 +210,21 @@ async fn parent_document_live(
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
-        "SELECT deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    let row: Option<(Option<DateTime<Utc>>, Option<Uuid>)> = sqlx::query_as(
+        r#"
+        SELECT deleted_at, project_id
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        FOR UPDATE
+        "#,
     )
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
+    Ok(row
+        .map(|(deleted, project_id)| deleted.is_none() && project_id.is_none())
+        .unwrap_or(false))
 }
 
 async fn require_upload_access(

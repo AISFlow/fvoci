@@ -7,6 +7,8 @@ pub mod documents;
 pub mod identity;
 pub mod migrate;
 pub mod pool;
+pub mod projects;
+pub mod tasks;
 pub mod workspace;
 
 use sqlx::PgPool;

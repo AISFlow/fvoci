@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -423,6 +423,216 @@ pub struct PutAttachmentPartResponse {
 pub struct AttachmentDownloadQuery {
     #[serde(default)]
     pub variant: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateProjectBody {
+    pub key: String,
+    pub name: String,
+    pub visibility: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub lead_user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchProjectBody {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub icon: Option<Option<String>>,
+    #[serde(default)]
+    pub lead_user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectOutput {
+    pub id: String,
+    pub workspace_id: String,
+    pub key: String,
+    pub name: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub description: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub icon: Option<String>,
+    pub visibility: String,
+    pub root_document_id: String,
+    pub status: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectListItemOutput {
+    pub id: String,
+    pub workspace_id: String,
+    pub key: String,
+    pub name: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub description: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub icon: Option<String>,
+    pub visibility: String,
+    pub root_document_id: String,
+    pub status: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub task_count: i64,
+    pub open_task_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectListResponse {
+    pub items: Vec<ProjectListItemOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectMembersResponse {
+    pub items: Vec<MemberResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AddProjectMemberBody {
+    pub user_id: Uuid,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkflowStatusOutput {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub sort_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkflowOutput {
+    pub id: String,
+    pub project_id: String,
+    pub statuses: Vec<WorkflowStatusOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateTaskBody {
+    pub title: String,
+    #[serde(default = "default_task_type", rename = "type")]
+    pub task_type: String,
+    #[serde(default = "default_task_priority")]
+    pub priority: String,
+    #[serde(default)]
+    pub status_id: Option<Uuid>,
+    #[serde(default)]
+    pub start_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub due_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub parent_id: Option<Uuid>,
+    #[serde(default)]
+    pub milestone_id: Option<Uuid>,
+    #[serde(default)]
+    pub recurrence: Option<serde_json::Value>,
+}
+
+fn default_task_type() -> String {
+    "task".to_string()
+}
+
+fn default_task_priority() -> String {
+    "none".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskMetaOutput {
+    pub id: String,
+    pub workspace_id: String,
+    pub project_id: String,
+    pub number: i32,
+    pub title: String,
+    #[serde(rename = "type")]
+    pub task_type: String,
+    pub priority: String,
+    pub status_id: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub start_date: Option<NaiveDate>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub due_date: Option<NaiveDate>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub due_at: Option<DateTime<Utc>>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub estimate: Option<f64>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub parent_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub milestone_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub recurrence: Option<serde_json::Value>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub archived_at: Option<DateTime<Utc>>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskListResponse {
+    pub items: Vec<TaskMetaOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskParentOutput {
+    pub id: String,
+    pub title: String,
+    pub number: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskOutput {
+    #[serde(flatten)]
+    pub meta: TaskMetaOutput,
+    pub content_json: serde_json::Value,
+    pub can_edit: bool,
+    pub assignee_ids: Vec<String>,
+    pub label_ids: Vec<String>,
+    pub children: Vec<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub parent: Option<TaskParentOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
