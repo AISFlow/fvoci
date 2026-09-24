@@ -2113,3 +2113,15 @@ Composer 보고서의 “accepted review cc48112” 표기는 잘못된 라벨�
   55개 실제 API 페이지네이션 E2E). 워커 E2E 6/6은 통합 SHA 수락이 아니다.
 - 워커 완료 전송 주의: bare `orca`는 빈 파일이라 worker_done이 조용히 유실됐다. 이후 명세에
   `/home/kinesis/.local/bin/orca-ide` 절대 경로를 명시한다.
+
+### 설치 산출물 (컨테이너) — 2026-09-25
+
+- Composer ctx_d6ac049d1a5d 4451237 + 코디네이터 보완: `infra/rust/Dockerfile`(digest 고정, 비root uid1000,
+  server/migrate/collab-engine/document-extract/정적 자산 포함), `compose.yml`(postgres → init: 앱 역할 생성·
+  migrate·`--grant-app-role` → server), `scripts/install-smoke.sh`, `install.yml`(x64/ARM64).
+- 코디네이터 보완: init SQL을 psql 변수+`format(%I,%L)`+`\gexec`로 바꿔 역할/비밀번호 SQL 주입 제거(따옴표·주입
+  문자열 실측), init root 실행 제거, 웹 단계는 CI drift 검사로 보장되는 커밋된 생성 API 사용(Rust 빌드 의존 제거).
+- 워커 로컬 smoke(x86_64): setup/login, 협업 저장, /collab 활성, HWPX 추출, sha256, uid·저장소 소유, SIGTERM exit0
+  재시작, 재조회 성공(237s). 코디네이터 보완 후 smoke는 원격 CI로 확인한다.
+- 남은 차이: 서버는 기동 시 migration을 실행하므로 소유자 `DATABASE_URL`을 런타임에도 받는다(기존 제품 계약).
+  백업·복구 절차 검증, 운영 TLS/secure cookie 구성 문서화는 최종 수락 전 항목이다.

@@ -10,8 +10,8 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Migration owner connection (superuser or schema owner). Used only by `fvoci-migrate` and startup migration — **never** for request handling. |
-| `DATABASE_APP_URL` | Application DML role (non-superuser, no `BYPASSRLS`). Required; must differ from `DATABASE_URL` in URL and role name. |
+| `DATABASE_URL` | Migration owner connection (superuser or schema owner). Used only by `fvoci-migrate` — **never** by `fvoci-server`. |
+| `DATABASE_APP_URL` | Application DML role (non-superuser, no `BYPASSRLS`). Required by the server; must use a dedicated app role, not the migration owner. |
 | `PASSWORD_PEPPER_KEYS` | JSON map of pepper key id → 64-char hex. |
 | `PASSWORD_PEPPER_ACTIVE_KEY_ID` | Active pepper id. |
 | `FVOCI_BIND` | Listen address (default `127.0.0.1:0`). |
@@ -27,7 +27,20 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 
 Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. The crate uses SQLx `runtime-tokio-rustls`.
 
-## Provision app role (after migrate)
+## Migrate and grant before server
+
+Run migrations and app-role grants **before** starting or upgrading `fvoci-server`. Stop old
+instances first: old binaries refuse a newer `fvoci.schema_migrations` version and cannot restart
+after migrate. Upgrade order is stop old → `fvoci-migrate` → `fvoci-migrate --grant-app-role` →
+start new; mixed-version rolling restart is not supported. The server connects only through
+`DATABASE_APP_URL`, requires the applied version to equal the compiled set, and exits nonzero
+with an operator message if the schema is missing, behind, newer than this binary, or unreadable.
+A newer database needs a matching or newer `fvoci-server`; do not run migrate from the old
+binary. The gate does not detect stale grants after a later migration; re-run `--grant-app-role`
+after every upgrade that applies new migrations. The server does not run migrations and ignores
+`DATABASE_URL` / `FVOCI_MIGRATION_URL` if set.
+
+## Create role, migrate, then grant
 
 Create the dedicated app LOGIN role first, then run migrations, then apply grants:
 
@@ -53,10 +66,15 @@ Never grant the app role before the role exists. Keep database credentials and p
 
 ## Start server
 
+After `fvoci-migrate` and `fvoci-migrate --grant-app-role` succeed:
+
 ```sh
+export DATABASE_APP_URL='postgres://fvoci_app_prod:***@host:5432/fvoci?sslmode=require'
 export FVOCI_STORAGE_DIR='/path/to/persistent/fvoci-storage'
 cargo run --bin fvoci-server
 ```
+
+The only database URL the server process requires is `DATABASE_APP_URL`.
 
 The current durability implementation requires the server account to read/search every ancestor of the storage directory up to `/`, as well as write within it, because those directory entries are synchronized. Validate permissions for the actual service account before deployment.
 
@@ -70,7 +88,7 @@ After applying migration 006 to an existing Rust slice database, re-run
 `fvoci-migrate --grant-app-role` for the same application role before serving requests.
 This does not provide an importer for the original TypeScript installation.
 
-Migrations run once at startup via the owner URL; the server connects only through `DATABASE_APP_URL`. The app pool is closed explicitly on shutdown and startup failures.
+The app pool is closed explicitly on shutdown and before exiting on startup gate failures.
 
 Rate limits use the direct socket peer. Forwarded headers are ignored; behind a reverse proxy, clients share the proxy's IP bucket. Trusted-proxy configuration and distributed limits are not implemented yet.
 
@@ -238,7 +256,66 @@ export FVOCI_EXTRACTOR_BIN="$PWD/crates/document-extract/target/debug/document-e
 Use the default helper build for deployment; `test-hang`, `extract-native-tests`
 and `extract-job-driver` are test-only. The helper must be installed alongside
 the server at the configured executable path. No Node or browser process is used
-for server-side extraction. Final deployment packaging is not yet provided.
+for server-side extraction.
+
+## Container install
+
+The install artifact is a multi-stage Docker image plus a small Compose stack under
+`infra/rust/`. It builds release `fvoci-server`, `fvoci-migrate`, the production
+`collab-engine` helper (`--features worker`), the production `document-extract`
+helper (same rhwp pin as `scripts/prepare-extract-helper.sh` / `rust.yml`, without
+`test-hang`), and the `apps/web` production bundle (same steps as
+`scripts/prepare-web-e2e.sh` + `npm run build`). Runtime images pin base digests,
+run as uid/gid `1000` (`fvoci`), and set:
+
+| Variable | Installed path / note |
+| --- | --- |
+| `FVOCI_STATIC_DIR` | `/opt/fvoci/static` |
+| `FVOCI_COLLAB_ENGINE` | `/opt/fvoci/bin/collab-engine` |
+| `FVOCI_EXTRACTOR_BIN` | `/opt/fvoci/bin/document-extract` |
+| `FVOCI_STORAGE_DIR` | `/data/storage` (Compose volume, owned by `fvoci`) |
+
+Unset any helper env to disable that feature (API-only). The published image ships
+all three helpers and enables them via the defaults above.
+
+### Bootstrap
+
+1. Copy `infra/rust/.env.example` to `infra/rust/.env` and replace placeholders.
+   Keep `POSTGRES_*` as the migration owner credentials. Create the dedicated app
+   role only through the init path below — never grant superuser or `BYPASSRLS` to
+   the app role.
+2. Build locally (no registry push required):
+
+```sh
+docker build -f infra/rust/Dockerfile -t fvoci-rust-install:local .
+```
+
+3. Start PostgreSQL, the one-shot init job, then the server:
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env up -d --wait server
+```
+
+The `init` service runs `fvoci-migrate`, creates the non-superuser
+`FVOCI_APP_ROLE` if missing, then `fvoci-migrate --grant-app-role <role>` with the
+owner `DATABASE_URL`. The stack fails if init exits nonzero; `server` starts only
+after init succeeds. The server receives only `DATABASE_APP_URL`; the owner URL is
+given to the one-shot init service alone. Preserve the `storage` and `pgdata` volumes across restarts.
+
+The server is published on `FVOCI_PUBLISH_ADDR:FVOCI_PUBLISH_PORT` (default
+`127.0.0.1`, loopback only). `FVOCI_PUBLIC_ORIGIN` must be the exact origin browsers
+use. Beyond local evaluation, terminate TLS in a reverse proxy, set
+`FVOCI_PUBLIC_ORIGIN=https://…` and `FVOCI_COOKIE_SECURE=true`.
+
+### Verification
+
+`scripts/install-smoke.sh` builds the image, starts an isolated Compose project
+(unique name, ephemeral published port, run-owned volumes), exercises setup/login,
+wiki collab body projection, HWPX upload + extraction, `/collab` availability,
+a graceful `docker compose stop server` (stopped container must report exit code 0),
+a recreated server container on the same volumes, and post-recreate reads.
+CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
+`.github/workflows/install.yml` (no secrets, no image publish).
 
 When `FVOCI_EXTRACTOR_BIN` is absent, extraction is explicitly disabled and stored
 HWP/HWPX attachments remain pending. An invalid configured path fails startup.

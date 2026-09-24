@@ -10,6 +10,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA fvoci TO :"app_role
 GRANT USAGE ON SEQUENCE fvoci.events_seq TO :"app_role";
 
 REVOKE ALL ON fvoci.schema_migrations FROM :"app_role";
+GRANT SELECT ON fvoci.schema_migrations TO :"app_role";
 
 REVOKE UPDATE, DELETE ON fvoci.events FROM :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.audit_log FROM :"app_role";

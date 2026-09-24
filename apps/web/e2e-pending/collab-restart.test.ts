@@ -48,10 +48,11 @@ test("cleanup refuses a stale group identity and reaps only its owned child", { 
   }
 });
 
-test("child env keeps app/migration URLs and strips fixture-only admin aliases", () => {
+test("child env keeps DATABASE_APP_URL and strips owner/admin URLs", () => {
   const env = ownedServerChildEnv("127.0.0.1:4321", {
     PATH: "/bin",
     DATABASE_URL: "postgres://owner/db",
+    FVOCI_MIGRATION_URL: "postgres://migrate/db",
     DATABASE_APP_URL: "postgres://app/db",
     FVOCI_E2E_ADMIN_DATABASE_URL: "postgres://admin-secret/db",
     TEST_DATABASE_URL: "postgres://test-secret/db",
@@ -63,7 +64,8 @@ test("child env keeps app/migration URLs and strips fixture-only admin aliases",
     FVOCI_E2E_SERVER_BIN: "/tmp/fvoci-server",
     PEPPER: "should-not-copy",
   });
-  assert.equal(env.DATABASE_URL, "postgres://owner/db");
+  assert.equal(env.DATABASE_URL, undefined);
+  assert.equal(env.FVOCI_MIGRATION_URL, undefined);
   assert.equal(env.DATABASE_APP_URL, "postgres://app/db");
   assert.equal(env.FVOCI_BIND, "127.0.0.1:4321");
   assert.equal(env.FVOCI_PUBLIC_ORIGIN, "http://127.0.0.1:4321");
@@ -85,6 +87,7 @@ test("owned server child env forwards an explicit storage directory", () => {
     FVOCI_COLLAB_ENGINE: "/tmp/collab-engine",
   });
   assert.equal(env.FVOCI_STORAGE_DIR, "/tmp/owned-storage");
+  assert.equal(env.DATABASE_URL, undefined);
 });
 
 test("process group observation reads this Node process without pid-file daemons", () => {

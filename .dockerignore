@@ -1,0 +1,17 @@
+.git
+.github
+target
+**/target
+apps/web/node_modules
+apps/web/dist
+packages/editor/node_modules
+packages/i18n/node_modules
+crates/document-extract/.vendor-src
+crates/collab-engine/target
+compat/target
+**/*.md
+!crates/document-extract/README.md
+!crates/collab-engine/README.md
+docs
+.agents
+compat/target

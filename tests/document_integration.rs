@@ -1610,11 +1610,28 @@ async fn app_role_rls_and_secret_grants_hold_for_new_tables() {
             .fetch_optional(&app_pool)
             .await;
     assert!(denied_token.is_err());
-    let denied_migrations =
+    let readable_version =
         sqlx::query_scalar::<_, i32>("SELECT version FROM fvoci.schema_migrations LIMIT 1")
-            .fetch_optional(&app_pool)
-            .await;
-    assert!(denied_migrations.is_err());
+            .fetch_one(&app_pool)
+            .await
+            .expect("app role may SELECT schema_migrations");
+    assert!(readable_version >= 1);
+    for sql in [
+        "INSERT INTO fvoci.schema_migrations (version) VALUES (999)",
+        "UPDATE fvoci.schema_migrations SET version = version",
+        "DELETE FROM fvoci.schema_migrations",
+    ] {
+        let error = sqlx::query(sql).execute(&app_pool).await.expect_err(sql);
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|db| db.code())
+                .map(|code| code.to_string())
+                .as_deref(),
+            Some("42501"),
+            "{sql}: {error}"
+        );
+    }
 
     let mut tx = app_pool.begin().await.unwrap();
     sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
