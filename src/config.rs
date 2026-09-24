@@ -4,7 +4,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use uuid::Uuid;
+
+use crate::attachments::UploadLimits;
 use crate::auth::password::Keyring;
+
+pub const DEFAULT_UPLOAD_PART_SIZE_BYTES: i64 = 32 * 1024 * 1024;
+pub const DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES: i64 = 5120_i64 * 1024 * 1024;
+pub const DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN: u32 = 120;
 
 pub struct Config {
     pub bind: SocketAddr,
@@ -15,6 +22,8 @@ pub struct Config {
     pub public_origin: String,
     pub cookie_secure: bool,
     pub static_dir: Option<PathBuf>,
+    pub storage_root: PathBuf,
+    pub upload: UploadLimits,
     /// Wall deadline covering HTTP drain, hub join, and pool close after the stop signal.
     pub shutdown_deadline: Duration,
 }
@@ -30,6 +39,8 @@ impl Clone for Config {
             public_origin: self.public_origin.clone(),
             cookie_secure: self.cookie_secure,
             static_dir: self.static_dir.clone(),
+            storage_root: self.storage_root.clone(),
+            upload: self.upload.clone(),
             shutdown_deadline: self.shutdown_deadline,
         }
     }
@@ -45,6 +56,8 @@ impl fmt::Debug for Config {
             .field("public_origin", &self.public_origin)
             .field("cookie_secure", &self.cookie_secure)
             .field("static_dir", &self.static_dir)
+            .field("storage_root", &self.storage_root)
+            .field("upload", &self.upload)
             .field("shutdown_deadline", &self.shutdown_deadline)
             .finish()
     }
@@ -104,6 +117,23 @@ impl Config {
             _ => None,
         };
 
+        let storage_root = match env::var("FVOCI_STORAGE_DIR") {
+            Ok(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
+            _ => std::env::temp_dir().join(format!("fvoci-storage-{}", Uuid::now_v7())),
+        };
+        std::fs::create_dir_all(&storage_root).map_err(|e| {
+            format!("failed to create storage root {}: {e}", storage_root.display())
+        })?;
+
+        let upload = UploadLimits {
+            part_size_bytes: env_parse_i64("FVOCI_UPLOAD_PART_SIZE_BYTES")
+                .unwrap_or(DEFAULT_UPLOAD_PART_SIZE_BYTES),
+            max_file_size_bytes: env_parse_i64("FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES")
+                .unwrap_or(DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES),
+            create_rate_per_5min: env_parse_u32("FVOCI_UPLOAD_CREATE_RATE_PER_5MIN")
+                .unwrap_or(DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN),
+        };
+
         let shutdown_deadline =
             parse_shutdown_deadline_ms(env::var("FVOCI_SHUTDOWN_DEADLINE_MS").ok().as_deref())?;
 
@@ -116,9 +146,25 @@ impl Config {
             public_origin,
             cookie_secure,
             static_dir,
+            storage_root,
+            upload,
             shutdown_deadline,
         })
     }
+}
+
+fn env_parse_i64(name: &str) -> Option<i64> {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+}
+
+fn env_parse_u32(name: &str) -> Option<u32> {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
 }
 
 /// Default 30s; values below 1ms are rejected so expiry cannot be confused with success.

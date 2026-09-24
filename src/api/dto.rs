@@ -312,6 +312,99 @@ pub struct BodyResponse {
     pub version: i32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateAttachmentUploadBody {
+    pub name: String,
+    pub size_bytes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_mime: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentPartUrlResponse {
+    pub part_number: i32,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateAttachmentUploadResponse {
+    pub attachment_id: String,
+    pub part_size_bytes: i64,
+    pub parts: Vec<AttachmentPartUrlResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentUploadedPartResponse {
+    pub part_number: i32,
+    pub etag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ResumeAttachmentUploadResponse {
+    pub attachment_id: String,
+    pub part_size_bytes: i64,
+    pub uploaded_parts: Vec<AttachmentUploadedPartResponse>,
+    pub parts: Vec<AttachmentPartUrlResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentCompletePartBody {
+    pub part_number: i32,
+    pub etag: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CompleteAttachmentUploadBody {
+    pub parts: Vec<AttachmentCompletePartBody>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentPreviewResponse {
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentOutput {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub size_bytes: Option<i64>,
+    pub image: bool,
+    pub scan_status: String,
+    pub created_at: DateTime<Utc>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub preview: Option<AttachmentPreviewResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PutAttachmentPartResponse {
+    pub etag: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct ProblemResponse {

@@ -24,6 +24,7 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::auth::router())
         .merge(routes::workspaces::router())
         .merge(routes::documents::router())
+        .merge(routes::attachments::router())
         .merge(collab)
         .with_state(state);
 

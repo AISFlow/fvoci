@@ -7,6 +7,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
     (include_str!("../../migrations/003_workspace.sql"), 3),
     (include_str!("../../migrations/004_documents.sql"), 4),
     (include_str!("../../migrations/005_collab_updates.sql"), 5),
+    (include_str!("../../migrations/006_attachments.sql"), 6),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -98,7 +99,7 @@ pub async fn assert_app_role(pool: &PgPool) -> Result<(), String> {
               AND c.relname IN (
                   'schema_migrations', 'users', 'workspaces', 'memberships',
                   'sessions', 'events', 'audit_log', 'documents', 'document_states',
-                  'document_collab_updates', 'document_collab_op_receipts'
+                  'document_collab_updates', 'document_collab_op_receipts', 'attachments'
               )
               AND pg_get_userbyid(c.relowner) = current_user
         )

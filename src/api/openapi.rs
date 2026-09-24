@@ -7,11 +7,14 @@ use utoipa::{Modify, OpenApi};
 
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
-    AncestorsResponse, BodyResponse, BrandingOutput, CreateDocumentBody, CreateWorkspaceBody,
-    DocumentMetaResponse, LoginBody, LoginResponse, MemberResponse, MemberRoleBody, OkResponse,
-    PatchDocumentBody, PatchMeBody, PatchWorkspaceBody, ProblemResponse, SessionUserOutput,
-    SetupBody, SetupResponse, SetupStatusResponse, TreeResponse, WorkspaceListItemResponse,
-    WorkspaceListResponse, WorkspaceMetaResponse,
+    AncestorsResponse, AttachmentOutput, AttachmentPartUrlResponse, AttachmentUploadedPartResponse,
+    BodyResponse, BrandingOutput, CompleteAttachmentUploadBody, CreateAttachmentUploadBody,
+    CreateAttachmentUploadResponse, CreateDocumentBody, CreateWorkspaceBody, DocumentMetaResponse,
+    LoginBody, LoginResponse, MemberResponse, MemberRoleBody, OkResponse, PatchDocumentBody,
+    PatchMeBody, PatchWorkspaceBody, ProblemResponse, PutAttachmentPartResponse,
+    ResumeAttachmentUploadResponse, SessionUserOutput, SetupBody, SetupResponse,
+    SetupStatusResponse, TreeResponse, WorkspaceListItemResponse, WorkspaceListResponse,
+    WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -34,7 +37,7 @@ impl Modify for CookieSecurityAddon {
     info(
         title = "FVOCI API",
         version = "0.1.0",
-        description = "Rust slice HTTP contract for authentication, workspace, and wiki document operations."
+        description = "Rust slice HTTP contract for authentication, workspace, wiki document, and attachment operations."
     ),
     paths(
         setup_status,
@@ -56,6 +59,12 @@ impl Modify for CookieSecurityAddon {
         patch_document,
         get_ancestors,
         get_body,
+        create_attachment_upload,
+        put_attachment_part,
+        resume_attachment_upload,
+        complete_attachment_upload,
+        get_attachment_meta,
+        download_attachment,
     ),
     components(
         schemas(
@@ -81,6 +90,14 @@ impl Modify for CookieSecurityAddon {
             TreeResponse,
             AncestorsResponse,
             BodyResponse,
+            CreateAttachmentUploadBody,
+            CreateAttachmentUploadResponse,
+            AttachmentPartUrlResponse,
+            ResumeAttachmentUploadResponse,
+            AttachmentUploadedPartResponse,
+            CompleteAttachmentUploadBody,
+            AttachmentOutput,
+            PutAttachmentPartResponse,
             ProblemResponse,
         )
     ),
@@ -90,6 +107,7 @@ impl Modify for CookieSecurityAddon {
         (name = "auth", description = "Authentication and profile"),
         (name = "workspaces", description = "Workspace membership and metadata"),
         (name = "documents", description = "Wiki documents"),
+        (name = "attachments", description = "Wiki document attachments"),
     )
 )]
 pub struct ApiDoc;
@@ -378,6 +396,118 @@ fn get_ancestors() {}
     )
 )]
 fn get_body() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = CreateAttachmentUploadBody,
+    responses(
+        (status = 201, description = "Upload session created", body = CreateAttachmentUploadResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 413, description = "File too large", body = ProblemResponse),
+    )
+)]
+fn create_attachment_upload() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    put,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/parts/{part_number}",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Attachment id"),
+        ("part_number" = i32, description = "Part number"),
+    ),
+    responses(
+        (status = 200, description = "Part stored", body = PutAttachmentPartResponse),
+        (status = 403, description = "Uploader mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn put_attachment_part() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Attachment id"),
+    ),
+    responses(
+        (status = 200, description = "Resume state", body = ResumeAttachmentUploadResponse),
+        (status = 403, description = "Uploader mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn resume_attachment_upload() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Attachment id"),
+    ),
+    request_body = CompleteAttachmentUploadBody,
+    responses(
+        (status = 200, description = "Stored attachment", body = AttachmentOutput),
+        (status = 400, description = "Invalid parts", body = ProblemResponse),
+        (status = 403, description = "Uploader mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn complete_attachment_upload() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Attachment id"),
+    ),
+    responses(
+        (status = 200, description = "Attachment metadata", body = AttachmentOutput),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_attachment_meta() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Attachment id"),
+    ),
+    responses(
+        (status = 200, description = "Original bytes", content_type = "application/octet-stream"),
+        (status = 206, description = "Partial content", content_type = "application/octet-stream"),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 416, description = "Range not satisfiable", body = ProblemResponse),
+    )
+)]
+fn download_attachment() {}
 
 #[cfg(feature = "api-schema")]
 pub fn spec_json() -> String {
