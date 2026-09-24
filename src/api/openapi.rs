@@ -14,15 +14,15 @@ use crate::api::dto::{
     ExpectedDatesBody, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
     InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LoginBody,
     LoginResponse, LookupItemOutput, LookupListResponse, MemberResponse, MemberRoleBody,
-    MembersResponse, MoveTaskBody, OkResponse, PatchDocumentBody, PatchMeBody, PatchProjectBody,
-    PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectListResponse,
+    MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse, PatchDocumentBody, PatchMeBody,
+    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectListResponse,
     ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
     ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
     RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
-    SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, TaskChildOutput,
-    TaskChildProgressOutput, TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput,
-    TreeResponse, WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse,
-    WorkspaceMetaResponse,
+    SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, SortDocumentBody,
+    TaskChildOutput, TaskChildProgressOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
+    TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse, WorkflowOutput,
+    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -88,10 +88,7 @@ impl Modify for CookieSecurityAddon {
         patch_document,
         get_ancestors,
         get_body,
-        create_revision,
-        list_revisions,
-        get_revision,
-        restore_revision,
+    create_revision, list_revisions, get_revision, restore_revision, move_document, sort_document, trash_document, restore_document, list_trash,
         create_attachment_upload,
         put_attachment_part,
         resume_attachment_upload,
@@ -149,12 +146,7 @@ impl Modify for CookieSecurityAddon {
             TreeResponse,
             AncestorsResponse,
             BodyResponse,
-            RevisionCreateResponse,
-            RevisionMetaResponse,
-            RevisionListResponse,
-            RevisionDetailResponse,
-            RevisionRestoreBody,
-            RevisionRestoreResponse,
+    RevisionCreateResponse, RevisionMetaResponse, RevisionListResponse, RevisionDetailResponse, RevisionRestoreBody, RevisionRestoreResponse, MoveDocumentBody, SortDocumentBody, TrashListResponse, TrashItemResponse,
             CreateAttachmentUploadBody,
             CreateAttachmentUploadResponse,
             AttachmentPartUrlResponse,
@@ -808,6 +800,93 @@ fn get_document() {}
     )
 )]
 fn patch_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/move",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = MoveDocumentBody,
+    responses(
+        (status = 200, description = "Moved document", body = DocumentMetaResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn move_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/sort",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = SortDocumentBody,
+    responses(
+        (status = 200, description = "Reordered document", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn sort_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/trash",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("children" = Option<String>, Query, description = "trash or reparent"),
+    ),
+    responses(
+        (status = 200, description = "Trashed", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn trash_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Restored", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Parent trashed", body = ProblemResponse),
+    )
+)]
+fn restore_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/trash",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Trashed documents", body = TrashListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_trash() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

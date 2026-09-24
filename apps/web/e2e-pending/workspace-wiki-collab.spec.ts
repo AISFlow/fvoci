@@ -120,6 +120,7 @@ test("insert and delete conflict keeps the insertion and applies the deletion", 
   const pageA = await ctxA.newPage();
   const pageB = await ctxB.newPage();
   try {
+    await ensureCollabFixture(pageA);
     await login(pageA, member.email, member.password);
     await login(pageB, member.email, member.password);
     const doc = await createWikiDoc(pageA, "삽입 삭제 충돌");
@@ -129,7 +130,19 @@ test("insert and delete conflict keeps the insertion and applies the deletion", 
     await expectTokens(pageA, ["한글본문"]);
     const editorB = await openEditor(pageB, doc.url);
     await expectTokens(pageB, ["한글본문"]);
-    await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
+    await Promise.all([installCaretProbe(pageA), installCaretProbe(pageB)]);
+    try {
+      await Promise.all([placeContentCaret(pageA, "start"), placeContentCaret(pageB, "end")]);
+    } catch (error) {
+      console.info(
+        "placeContentCaret failure",
+        JSON.stringify({
+          a: await readCaretProbe(pageA).catch(() => null),
+          b: await readCaretProbe(pageB).catch(() => null),
+        }),
+      );
+      throw error;
+    }
     await Promise.all([
       (async () => {
         await pageA.keyboard.type("앞쪽삽입");
@@ -217,6 +230,7 @@ for (const remotePosition of ["adjacent", "start"] as const) {
     const pageB = await ctxB.newPage();
     let failed = true;
     try {
+      await ensureCollabFixture(pageA);
       await login(pageA, member.email, member.password);
       await login(pageB, member.email, member.password);
       const doc = await createWikiDoc(pageA, `이모지 삭제 커서 ${remotePosition}`);
@@ -274,6 +288,103 @@ for (const remotePosition of ["adjacent", "start"] as const) {
     }
   });
 }
+
+async function blurEditorToTitle(page: import("@playwright/test").Page): Promise<void> {
+  await page.getByRole("textbox", { name: "문서 제목" }).click();
+  await expect.poll(() => page.evaluate(() => (
+    document.activeElement?.classList.contains("document-page__title") ?? false
+  ))).toBe(true);
+}
+
+test("host-padding focus(end) types at the document end", async ({ page }) => {
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "포커스 끝");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("first");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("second");
+  await expectTokens(page, ["first", "second"]);
+  await blurEditorToTitle(page);
+  await page.locator(".fvoci-editor").dispatchEvent("mousedown");
+  await expect.poll(() => editor.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: {
+        view: { hasFocus(): boolean };
+        state: { selection: { from: number; to: number }; doc: { content: { size: number } } };
+      };
+    }).editor;
+    if (!live) return null;
+    const end = live.state.doc.content.size - 1;
+    return [live.view.hasFocus(), live.state.selection.from, live.state.selection.to, end];
+  })).toEqual([true, 14, 14, 14]);
+  await page.keyboard.type("X");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Y");
+  const shape = await editorShape(page);
+  expect(shape.text).toBe("firstsecondXY");
+  expect(shape.blocks.map((block) => block.text)).toEqual(["first", "secondX", "Y"]);
+});
+
+test("blurred insertContent types at the intended position", async ({ page }) => {
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "블러 삽입");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("second");
+  await expectTokens(page, ["second"]);
+  await blurEditorToTitle(page);
+  await editor.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: {
+        chain(): { focus(): { insertContent(content: string): { run(): boolean } } };
+      };
+    }).editor;
+    if (!live) throw new Error("missing live editor");
+    live.chain().focus().insertContent("Z").run();
+  });
+  await expect.poll(async () => (await editorShape(page)).text).toBe("secondZ");
+  await expect.poll(() => editor.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: { view: { hasFocus(): boolean } };
+    }).editor;
+    return live?.view.hasFocus() ?? false;
+  })).toBe(true);
+  await page.keyboard.type("W");
+  expect((await editorShape(page)).text).toBe("secondZW");
+});
+
+test("focus(pos) types at the requested document position", async ({ page }) => {
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "포커스 위치");
+  const editor = await openEditor(page, doc.url);
+  await editor.click();
+  await page.keyboard.type("first");
+  await expectTokens(page, ["first"]);
+  await blurEditorToTitle(page);
+  await editor.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: { commands: { focus(pos: number): boolean } };
+    }).editor;
+    if (!live) throw new Error("missing live editor");
+    live.commands.focus(3);
+  });
+  await expect.poll(() => editor.evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: {
+        view: { hasFocus(): boolean };
+        state: { selection: { from: number; to: number } };
+      };
+    }).editor;
+    if (!live) return null;
+    return [live.view.hasFocus(), live.state.selection.from, live.state.selection.to];
+  })).toEqual([true, 3, 3]);
+  await page.keyboard.type("Q");
+  expect((await editorShape(page)).text).toBe("fiQrst");
+});
 
 test("offline typing reconnects with unsent text and without a persist ack", async ({
   page,

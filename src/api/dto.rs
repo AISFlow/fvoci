@@ -520,6 +520,39 @@ pub struct RevisionRestoreResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MoveDocumentBody {
+    pub new_parent_id: Uuid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SortDocumentBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub after_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TrashListResponse {
+    pub items: Vec<TrashItemResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TrashItemResponse {
+    pub id: String,
+    pub title: String,
+    pub deleted_at: DateTime<Utc>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct CreateAttachmentUploadBody {
     pub name: String,
     pub size_bytes: i64,

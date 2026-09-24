@@ -6,6 +6,7 @@ import {
 } from "@tiptap/core";
 import Collaboration, { isChangeOrigin } from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
+import { yCursorPluginKey } from "@tiptap/y-tiptap";
 import { FileHandler } from "@tiptap/extension-file-handler";
 import {
 	AllSelection,
@@ -13,6 +14,7 @@ import {
 	Plugin,
 	PluginKey,
 	TextSelection,
+	type Transaction,
 } from "@tiptap/pm/state";
 import { CellSelection } from "@tiptap/pm/tables";
 import type { EditorView } from "@tiptap/pm/view";
@@ -59,6 +61,7 @@ import {
 	MathNodeView,
 	MermaidNodeView,
 } from "./node-views.js";
+import { shouldAdoptNativeOnAwareness } from "./awareness-selection-guard.js";
 import { isNativeOwnedDeleteKey } from "./native-delete-owner.js";
 import { overlayOwner } from "./overlay-owner.js";
 import { parseWorkspaceUrl, resolvePastedEmbed } from "./paste-embed.js";
@@ -115,8 +118,8 @@ export function collabCaretRender(peer: {
  * caret the user sees. The native caret is mapped like PM's selectionFromDOM
  * (bias 1, TextSelection.between normalisation) and skipped inside
  * non-editable leaf DOM, where PM would pick a different position or a
- * NodeSelection. placeContentCaret's [1,1] case is a different writer and is not
- * handled here. */
+ * NodeSelection. Awareness decoration updates are a second writer; they go
+ * through createAwarenessSelectionGuardPlugin. */
 function handleNativeOwnedDeleteKeyDown(
 	view: EditorView,
 	event: KeyboardEvent,
@@ -134,31 +137,119 @@ function handleNativeOwnedDeleteKeyDown(
 	) {
 		return false;
 	}
+	const aligned = nativeTextSelectionFromDom(view, view.state.doc);
+	if (!aligned || aligned.eq(selection)) return false;
+	view.dispatch(view.state.tr.setSelection(aligned));
+	return false;
+}
+
+/* WHY: awareness-only yCursorPlugin transactions rebuild caret widgets. PM then
+ * calls selectionToDOM because inner decorations changed, even when
+ * state.selection did not. That can clobber a native caret PM has not read yet
+ * (Arrow keys, then a peer awareness message before selectionchange). Adopt
+ * native only when the live DOM selection differs from PM's last-synced
+ * currentSelection — native ahead, not a browser focus reset that left PM
+ * ahead. Do not wrap docView.setSelection or view.dispatch: those skips also
+ * drop PM's own focus writes (view.focus rAF, 20ms restore, flush doc-start
+ * kludge). Do not clear suppressingSelectionUpdates (desktop Chrome never
+ * sets it from selectionToDOM; clearing it would undo PM #820 on Android).
+ * Mapping matches handleNativeOwnedDeleteKeyDown. Do not patch y-tiptap.
+ * domObserver.currentSelection / domSelectionRange are not in
+ * prosemirror-view's .d.ts; this targets the pinned @tiptap/pm view
+ * (prosemirror-view 1.42.x). */
+const awarenessSelectionGuardKey = new PluginKey("fvociAwarenessSelectionGuard");
+
+type ProseMirrorDomSelectionRange = {
+	anchorNode: Node | null;
+	anchorOffset: number;
+	focusNode: Node | null;
+	focusOffset: number;
+};
+
+type ProseMirrorViewInternals = EditorView & {
+	domObserver?: {
+		currentSelection: { eq(other: ProseMirrorDomSelectionRange): boolean };
+	};
+	domSelectionRange(): ProseMirrorDomSelectionRange;
+};
+
+function nativeTextSelectionFromDom(
+	view: EditorView,
+	doc: EditorState["doc"],
+): TextSelection | null {
 	const domSel = view.dom.ownerDocument.defaultView?.getSelection();
 	const anchorNode = domSel?.anchorNode;
 	const focusNode = domSel?.focusNode;
-	if (!domSel || !anchorNode || !focusNode) return false;
+	if (!domSel || !anchorNode || !focusNode) return null;
 	if (!view.dom.contains(anchorNode) || !view.dom.contains(focusNode)) {
-		return false;
+		return null;
 	}
 	for (const node of [anchorNode, focusNode]) {
 		const element = node instanceof Element ? node : node.parentElement;
 		const leaf = element?.closest('[contenteditable="false"]');
-		if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return false;
+		if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return null;
 	}
-	let aligned: TextSelection;
 	try {
-		const doc = view.state.doc;
-		aligned = TextSelection.between(
+		return TextSelection.between(
 			doc.resolve(view.posAtDOM(anchorNode, domSel.anchorOffset, 1)),
 			doc.resolve(view.posAtDOM(focusNode, domSel.focusOffset, 1)),
 		) as TextSelection;
 	} catch {
-		return false;
+		return null;
 	}
-	if (aligned.eq(selection)) return false;
-	view.dispatch(view.state.tr.setSelection(aligned));
-	return false;
+}
+
+function observedDomSelectionMatchesNative(view: EditorView): boolean {
+	const current = view as ProseMirrorViewInternals;
+	const observer = current.domObserver;
+	if (!observer) return true;
+	return observer.currentSelection.eq(current.domSelectionRange());
+}
+
+function createAwarenessSelectionGuardPlugin(): Plugin {
+	let view: EditorView | null = null;
+	return new Plugin({
+		key: awarenessSelectionGuardKey,
+		view: (editorView) => {
+			view = editorView;
+			return {
+				destroy() {
+					view = null;
+				},
+			};
+		},
+		appendTransaction(
+			transactions: readonly Transaction[],
+			_old: EditorState,
+			state: EditorState,
+		) {
+			const current = view;
+			if (!current) return null;
+			const awarenessUpdated = transactions.some((tr) => {
+				const meta = tr.getMeta(yCursorPluginKey) as
+					| { awarenessUpdated?: boolean }
+					| undefined;
+				return Boolean(meta?.awarenessUpdated);
+			});
+			if (
+				!shouldAdoptNativeOnAwareness({
+					awarenessUpdated,
+					docChanged: transactions.some((tr) => tr.docChanged),
+					selectionSet: transactions.some((tr) => tr.selectionSet),
+					composing: current.composing,
+					editable: current.editable,
+					pmIsTextSelection: state.selection instanceof TextSelection,
+					observedDomSelectionMatchesNative:
+						observedDomSelectionMatchesNative(current),
+				})
+			) {
+				return null;
+			}
+			const aligned = nativeTextSelectionFromDom(current, state.doc);
+			if (!aligned || !aligned.empty || aligned.eq(state.selection)) return null;
+			return state.tr.setSelection(aligned);
+		},
+	});
 }
 
 export type MentionHit = {
@@ -510,7 +601,14 @@ export const FvociEditor = memo(function FvociEditor({
 			}),
 			...(provider && user
 				? [
-						CollaborationCaret.configure({
+						CollaborationCaret.extend({
+							addProseMirrorPlugins() {
+								return [
+									...(this.parent?.() ?? []),
+									createAwarenessSelectionGuardPlugin(),
+								];
+							},
+						}).configure({
 							provider,
 							user,
 							render: collabCaretRender,
