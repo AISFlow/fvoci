@@ -402,7 +402,12 @@ async fn fsync_dir(path: &Path) -> io::Result<()> {
 
 async fn durable_create_dir_all(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path).await?;
-    let mut cursor = path.to_path_buf();
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut cursor = fs::canonicalize(&abs).await.unwrap_or(abs);
     loop {
         if cursor.as_os_str().is_empty() {
             break;
@@ -521,9 +526,9 @@ mod delayed_create {
 
     impl DelayedCreateBarrier {
         pub async fn wait_entered(&mut self) {
-            if let Some(rx) = self.entered.take() {
-                let _ = rx.await;
-            }
+            let rx = self.entered.take().expect("entered receiver");
+            rx.await
+                .expect("create gate must signal entered; dropped sender is not success");
         }
 
         pub fn proceed(&mut self) {
@@ -533,9 +538,9 @@ mod delayed_create {
         }
 
         pub async fn wait_create_finished(&mut self) {
-            if let Some(rx) = self.created.take() {
-                let _ = rx.await;
-            }
+            let rx = self.created.take().expect("created receiver");
+            rx.await
+                .expect("create must complete after proceed; dropped sender is not success");
         }
     }
 
@@ -790,10 +795,12 @@ mod tests {
     #[tokio::test]
     async fn durable_create_dir_all_fsyncs_new_ancestors_including_root_entry() {
         let (storage, root) = temp_storage();
+        let capture = fs::canonicalize(&root).await.unwrap();
         let key = Uuid::now_v7().to_string();
-        delayed_create::capture_fsyncs(root.clone());
+        delayed_create::capture_fsyncs(capture.clone());
         storage.create_multipart(&key).await.unwrap();
-        let fsyncs = delayed_create::take_fsyncs(&root);
+        let fsyncs = delayed_create::take_fsyncs(&capture);
+        let root = fs::canonicalize(&root).await.unwrap();
         let tmp = root.join("tmp");
         let key_dir = tmp.join(&key);
         assert!(
@@ -809,10 +816,10 @@ mod tests {
             "storage root must be fsynced for the new tmp entry: {fsyncs:?}"
         );
 
-        delayed_create::capture_fsyncs(root.clone());
+        delayed_create::capture_fsyncs(capture.clone());
         let key2 = Uuid::now_v7().to_string();
         storage.create_multipart(&key2).await.unwrap();
-        let fsyncs = delayed_create::take_fsyncs(&root);
+        let fsyncs = delayed_create::take_fsyncs(&capture);
         let key2_dir = tmp.join(&key2);
         assert!(
             fsyncs.iter().any(|p| p == &key2_dir),
@@ -830,14 +837,18 @@ mod tests {
 
     #[tokio::test]
     async fn durable_create_dir_all_fsyncs_initially_missing_root_and_parent() {
-        let parent = std::env::temp_dir().join(format!("fvoci-att-missing-{}", Uuid::now_v7()));
+        let tmp_parent = std::env::temp_dir();
+        let capture = std::fs::canonicalize(&tmp_parent).unwrap();
+        let parent = tmp_parent.join(format!("fvoci-att-missing-{}", Uuid::now_v7()));
         let root = parent.join("storage");
         assert!(!root.exists());
         let storage = LocalStorage::new(root.clone());
         let key = Uuid::now_v7().to_string();
-        delayed_create::capture_fsyncs(parent.clone());
+        delayed_create::capture_fsyncs(capture.clone());
         storage.create_multipart(&key).await.unwrap();
-        let fsyncs = delayed_create::take_fsyncs(&parent);
+        let fsyncs = delayed_create::take_fsyncs(&capture);
+        let parent = fs::canonicalize(&parent).await.unwrap();
+        let root = fs::canonicalize(&root).await.unwrap();
         let tmp = root.join("tmp");
         let key_dir = tmp.join(&key);
         assert!(
@@ -857,5 +868,33 @@ mod tests {
             "parent of a newly created root must be fsynced: {fsyncs:?}"
         );
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[tokio::test]
+    async fn durable_create_dir_all_fsyncs_cwd_for_relative_nested_root() {
+        let rel_root = PathBuf::from(format!("fvoci-att-rel-{}", Uuid::now_v7()));
+        assert!(
+            !rel_root.is_absolute(),
+            "regression is a relative STORAGE path"
+        );
+        let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let storage = LocalStorage::new(rel_root.clone());
+        let key = Uuid::now_v7().to_string();
+        delayed_create::capture_fsyncs(cwd.clone());
+        let created = storage.create_multipart(&key).await;
+        let fsyncs = delayed_create::take_fsyncs(&cwd);
+        let abs_root = cwd.join(&rel_root);
+        let canonical_root = fs::canonicalize(&abs_root).await.ok();
+        let _ = std::fs::remove_dir_all(&rel_root);
+        created.unwrap();
+        let canonical_root = canonical_root.expect("relative root should exist after create");
+        assert!(
+            fsyncs.iter().any(|p| p == &canonical_root),
+            "relative storage root must be fsynced: {fsyncs:?}"
+        );
+        assert!(
+            fsyncs.iter().any(|p| p == &cwd),
+            "cwd must be fsynced so the relative root directory entry is durable: {fsyncs:?}"
+        );
     }
 }

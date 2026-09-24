@@ -534,6 +534,60 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
 
+    fn schema_is_nullable(schema: &Value) -> bool {
+        if schema["type"]
+            .as_array()
+            .is_some_and(|types| types.iter().any(|ty| ty == "null"))
+        {
+            return true;
+        }
+        for key in ["oneOf", "anyOf"] {
+            let Some(alts) = schema[key].as_array() else {
+                continue;
+            };
+            let has_null = alts
+                .iter()
+                .any(|alt| alt.get("type") == Some(&json!("null")));
+            let has_value = alts
+                .iter()
+                .any(|alt| alt.get("type") != Some(&json!("null")));
+            if has_null && has_value {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn assert_required_nullable(schemas: &Value, name: &str, field: &str) {
+        assert!(
+            schemas[name]["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} missing required"))
+                .contains(&json!(field)),
+            "{name}.{field} must be required"
+        );
+        assert!(
+            schema_is_nullable(&schemas[name]["properties"][field]),
+            "{name}.{field} must be nullable, got {}",
+            schemas[name]["properties"][field]
+        );
+    }
+
+    fn assert_required_non_nullable(schemas: &Value, name: &str, field: &str) {
+        assert!(
+            schemas[name]["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} missing required"))
+                .contains(&json!(field)),
+            "{name}.{field} must be required"
+        );
+        assert!(
+            !schema_is_nullable(&schemas[name]["properties"][field]),
+            "{name}.{field} must not be nullable, got {}",
+            schemas[name]["properties"][field]
+        );
+    }
+
     #[test]
     fn generated_nullability_matches_runtime_contract() {
         let spec: Value = serde_json::from_str(&spec_json()).unwrap();
@@ -543,14 +597,7 @@ mod tests {
             ("MemberResponse", &["familyName"][..]),
         ] {
             for field in fields {
-                assert!(schemas[name]["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(field)));
-                assert!(schemas[name]["properties"][field]["type"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("null")));
+                assert_required_nullable(schemas, name, field);
             }
         }
         for (name, fields) in [
@@ -566,15 +613,11 @@ mod tests {
             ),
         ] {
             for field in fields {
-                assert!(schemas[name]["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(field)));
-                assert!(schemas[name]["properties"][field]["type"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("null")));
+                assert_required_nullable(schemas, name, field);
             }
+        }
+        for field in ["id", "name", "mime", "scanStatus"] {
+            assert_required_non_nullable(schemas, "AttachmentOutput", field);
         }
         let create = &schemas["CreateDocumentBody"];
         assert!(create["required"]
