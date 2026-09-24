@@ -2799,14 +2799,12 @@ impl RoomActor {
     }
 
     async fn send_sync_status(&mut self, conn_id: Uuid, routing_key: &str, applied: bool) {
-        if let Ok(bytes) = encode(&WireFrame::Document {
-            routing_key: routing_key.to_string(),
-            room: None,
-            message: DocumentMessage::SyncStatus { applied },
-        }) {
-            self.deliver_outbound(conn_id, bytes, OutboundKind::Control)
-                .await;
-        }
+        self.deliver_document_message(
+            conn_id,
+            routing_key,
+            DocumentMessage::SyncStatus { applied },
+        )
+        .await;
     }
 
     async fn send_stateless(&mut self, conn_id: Uuid, payload: String) {
