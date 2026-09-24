@@ -1,12 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { SetupGuard } from "@/components/setup-guard";
-import { DocumentPage } from "@/pages/DocumentPage";
 import { HomePage } from "@/pages/HomePage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
+import { ProjectsPage } from "@/pages/ProjectsPage";
+import { ProjectTasksPage } from "@/pages/ProjectTasksPage";
 import { WikiPage } from "@/pages/WikiPage";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
+import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 
 const queryClient = new QueryClient({
@@ -48,9 +50,11 @@ export function App() {
               </SetupGuard>
             }
           >
+            <Route path="projects" element={<ProjectsPage />} />
             <Route path="wiki" element={<WikiPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
-            <Route path=":ref" element={<DocumentPage />} />
+            <Route path=":ref/tasks" element={<ProjectTasksPage />} />
+            <Route path=":ref" element={<WorkspaceRefPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

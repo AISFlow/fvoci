@@ -85,6 +85,16 @@ path = "tests/collab_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "project_integration"
+path = "tests/project_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "task_integration"
+path = "tests/task_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "attachment_integration"
 path = "tests/attachment_integration.rs"
 required-features = ["db-tests"]

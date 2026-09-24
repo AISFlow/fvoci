@@ -4177,6 +4177,20 @@ async fn collab_delivery_admission_parity_with_locking_join() {
     .await;
 
     let project_doc = Uuid::now_v7();
+    let project_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.projects (
+            id, workspace_id, key, name, visibility, status, next_number, created_by
+        ) VALUES ($1, $2, 'COL', 'Project collab lock', 'private', 'active', 1, $3)
+        "#,
+    )
+    .bind(project_id)
+    .bind(ws)
+    .bind(user)
+    .execute(&admin)
+    .await
+    .unwrap();
     sqlx::query(
         r#"
         INSERT INTO fvoci.documents (
@@ -4190,7 +4204,7 @@ async fn collab_delivery_admission_parity_with_locking_join() {
     .bind(project_doc)
     .bind(ws)
     .bind(project_doc.simple().to_string())
-    .bind(Uuid::now_v7())
+    .bind(project_id)
     .bind(empty_document_json())
     .bind(user)
     .execute(&admin)

@@ -582,7 +582,7 @@ async fn fresh_migration_005_adds_collab_tables_and_columns() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 7);
+    assert_eq!(versions.0, 8);
     let has_updates: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'document_collab_updates')",
     )
@@ -663,7 +663,7 @@ async fn migration_004_upgrades_to_005_collab() {
         .fetch_one(&migration_pool)
         .await
         .unwrap();
-    assert_eq!(versions.0, 7);
+    assert_eq!(versions.0, 8);
     let has_updates: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'document_collab_updates')",
     )

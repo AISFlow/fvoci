@@ -760,6 +760,20 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
     assert_eq!(body["code"], "not_found");
 
     let affiliated = Uuid::now_v7();
+    let affiliated_project = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.projects (
+            id, workspace_id, key, name, visibility, status, next_number, created_by
+        ) VALUES ($1, $2, 'PRJ', 'Projectish', 'private', 'active', 1, $3)
+        "#,
+    )
+    .bind(affiliated_project)
+    .bind(workspace_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .unwrap();
     sqlx::query(
         r#"
         INSERT INTO fvoci.documents (
@@ -773,7 +787,7 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
     .bind(affiliated)
     .bind(workspace_id)
     .bind(affiliated.simple().to_string())
-    .bind(Uuid::now_v7())
+    .bind(affiliated_project)
     .bind(owner_id)
     .execute(&admin)
     .await
@@ -1655,7 +1669,7 @@ async fn app_role_rls_and_secret_grants_hold_for_new_tables() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 7);
+    assert_eq!(versions.0, 8);
     app_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
@@ -1726,7 +1740,7 @@ async fn migration_001_003_upgrades_to_004_documents() {
         .fetch_one(&migration_pool)
         .await
         .unwrap();
-    assert_eq!(versions.0, 7);
+    assert_eq!(versions.0, 8);
     let has_documents: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'documents')",
     )

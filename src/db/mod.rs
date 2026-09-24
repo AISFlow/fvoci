@@ -5,8 +5,11 @@ pub mod collab_delivery;
 pub mod context;
 pub mod documents;
 pub mod identity;
+pub mod lookup;
 pub mod migrate;
 pub mod pool;
+pub mod projects;
+pub mod tasks;
 pub mod workspace;
 
 use sqlx::PgPool;

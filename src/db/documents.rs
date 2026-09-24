@@ -3,12 +3,11 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_key_from_uuid, set_tenant};
+use crate::db::context::{lock_tree, set_tenant};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::workspace::WorkspaceRole;
 
-pub(crate) const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
-const TREE_LOCK_NAMESPACE: i32 = 1_907_005;
+pub(crate) use crate::db::context::{lock_membership_users, recheck_session, session_is_live};
 pub const MAX_TREE_DEPTH: i32 = 20;
 pub const DOCUMENT_SCHEMA_VERSION: i32 = 2;
 const DOCUMENT_TITLE_MAX: usize = 300;
@@ -165,89 +164,6 @@ pub(crate) fn wiki_can_edit(role: Option<WorkspaceRole>) -> bool {
 
 fn wiki_can_view(role: Option<WorkspaceRole>) -> bool {
     wiki_can_edit(role)
-}
-
-pub(crate) async fn lock_membership_users(
-    tx: &mut Transaction<'_, Postgres>,
-    user_ids: &[Uuid],
-) -> Result<(), sqlx::Error> {
-    let mut keys = user_ids
-        .iter()
-        .map(|id| lock_key_from_uuid(*id))
-        .collect::<Vec<_>>();
-    keys.sort_unstable();
-    keys.dedup();
-    for key in keys {
-        sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
-            .bind(MEMBERSHIP_LOCK_NAMESPACE)
-            .bind(key)
-            .execute(&mut **tx)
-            .await?;
-    }
-    Ok(())
-}
-
-async fn lock_tree(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
-        .bind(TREE_LOCK_NAMESPACE)
-        .bind(lock_key_from_uuid(workspace_id))
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
-pub(crate) async fn recheck_session(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let live: Option<(bool,)> = sqlx::query_as(
-        r#"
-        SELECT (
-            s.revoked_at IS NULL
-            AND s.expires_at > clock_timestamp()
-            AND u.deleted_at IS NULL
-            AND u.suspended_at IS NULL
-        )
-        FROM fvoci.users u
-        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
-        WHERE u.id = $1
-        FOR UPDATE OF u, s
-        "#,
-    )
-    .bind(user_id)
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(live.map(|(v,)| v).unwrap_or(false))
-}
-
-pub(crate) async fn session_is_live(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let live: Option<(bool,)> = sqlx::query_as(
-        r#"
-        SELECT (
-            s.revoked_at IS NULL
-            AND s.expires_at > clock_timestamp()
-            AND u.deleted_at IS NULL
-            AND u.suspended_at IS NULL
-        )
-        FROM fvoci.users u
-        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
-        WHERE u.id = $1
-        "#,
-    )
-    .bind(user_id)
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(live.map(|(v,)| v).unwrap_or(false))
 }
 
 pub(crate) async fn membership_role(
@@ -607,7 +523,7 @@ pub async fn list_wiki_tree(
         r#"
         SELECT id, workspace_id, parent_id, project_id, title, icon, path, sort_key, number, status
         FROM fvoci.documents
-        WHERE workspace_id = $1 AND deleted_at IS NULL
+        WHERE workspace_id = $1 AND deleted_at IS NULL AND project_id IS NULL
         ORDER BY sort_key COLLATE "C"
         "#,
     )
