@@ -154,29 +154,6 @@ impl Drop for IdleEvictionHold {
 }
 
 #[cfg(feature = "db-tests")]
-static SHUTDOWN_DRAIN_WITNESS: std::sync::LazyLock<Mutex<Option<oneshot::Sender<()>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(None));
-
-#[cfg(feature = "db-tests")]
-pub async fn arm_shutdown_drain_witness() -> oneshot::Receiver<()> {
-    let (tx, rx) = oneshot::channel();
-    *SHUTDOWN_DRAIN_WITNESS.lock().await = Some(tx);
-    rx
-}
-
-#[cfg(feature = "db-tests")]
-pub async fn disarm_shutdown_drain_witness() {
-    SHUTDOWN_DRAIN_WITNESS.lock().await.take();
-}
-
-#[cfg(feature = "db-tests")]
-async fn signal_shutdown_drain_witness() {
-    if let Some(tx) = SHUTDOWN_DRAIN_WITNESS.lock().await.take() {
-        let _ = tx.send(());
-    }
-}
-
-#[cfg(feature = "db-tests")]
 static ROOM_START_COUNTS: std::sync::LazyLock<Mutex<HashMap<Uuid, usize>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -302,6 +279,8 @@ pub struct CollabHub {
     starts: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     shutdown_lock: Arc<Mutex<()>>,
     abnormal_actor_completions: Arc<AtomicUsize>,
+    #[cfg(feature = "db-tests")]
+    shutdown_drain_witness: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 impl CollabHub {
@@ -335,6 +314,27 @@ impl CollabHub {
             starts: Arc::new(std::sync::Mutex::new(Vec::new())),
             shutdown_lock: Arc::new(Mutex::new(())),
             abnormal_actor_completions,
+            #[cfg(feature = "db-tests")]
+            shutdown_drain_witness: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn arm_shutdown_drain_witness(&self) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        *self.shutdown_drain_witness.lock().await = Some(tx);
+        rx
+    }
+
+    #[cfg(feature = "db-tests")]
+    pub async fn disarm_shutdown_drain_witness(&self) {
+        self.shutdown_drain_witness.lock().await.take();
+    }
+
+    #[cfg(feature = "db-tests")]
+    async fn signal_shutdown_drain_witness(&self) {
+        if let Some(tx) = self.shutdown_drain_witness.lock().await.take() {
+            let _ = tx.send(());
         }
     }
 
@@ -771,6 +771,8 @@ impl CollabHub {
             }
         };
         let starts_join = async {
+            #[cfg(feature = "db-tests")]
+            self.signal_shutdown_drain_witness().await;
             let mut failures = 0usize;
             for result in join_all(starts).await {
                 if let Err(error) = result {
@@ -802,9 +804,6 @@ impl CollabHub {
         };
         let (idle_task_failed, mut start_task_failures, _) =
             tokio::join!(idle_join, starts_join, rooms_join);
-
-        #[cfg(feature = "db-tests")]
-        signal_shutdown_drain_witness().await;
 
         loop {
             let more = std::mem::take(&mut *self.starts.lock().expect("room start task list"));

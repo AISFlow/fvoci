@@ -10,8 +10,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use fvoci_server::collab::hub::{
-    arm_hub_join_barrier, arm_reclaim_barrier, arm_shutdown_drain_witness,
-    disarm_hub_join_barrier, disarm_reclaim_barrier, disarm_shutdown_drain_witness,
+    arm_hub_join_barrier, arm_reclaim_barrier, disarm_hub_join_barrier, disarm_reclaim_barrier,
     room_start_count, CollabHub, IdleEvictDecision, IdleEvictionHold, RoomLifecyclePhase,
     HUB_JOIN_BARRIER_AFTER_ACTOR_REPLY, HUB_JOIN_BARRIER_AFTER_SLOT_READY,
     HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN,
@@ -1071,6 +1070,7 @@ async fn collab_lifecycle_panic_rejoin_restores_committed_bytes_and_allows_edit(
                 )));
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let admin = admin_pool(&run.inner.harness.admin_url).await;
+                let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
                 let (conn_id, lease, mut events_rx) =
                     hub_join_with_events(&hub, &wiki, 1).await.expect("join");
@@ -1155,6 +1155,7 @@ async fn collab_lifecycle_old_guard_held_until_teardown_then_next_owner() {
                 )));
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let admin = admin_pool(&run.inner.harness.admin_url).await;
+                let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
                 let (conn_id, lease, mut events_rx) =
                     hub_join_with_events(&hub, &wiki, 1).await.expect("join");
@@ -1227,6 +1228,7 @@ async fn collab_lifecycle_concurrent_first_rejoin_starts_one_actor() {
                     wiki.session.pool.clone(),
                 )));
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
                 let (conn_id, lease, mut events_rx) =
                     hub_join_with_events(&hub, &wiki, 1).await.expect("join");
@@ -1508,6 +1510,7 @@ async fn collab_lifecycle_noreply_is_not_retried_for_same_conn() {
                     wiki.session.pool.clone(),
                 )));
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
                 let (_member, lease, mut events_rx) =
                     hub_join_with_events(&hub, &wiki, 1).await.expect("seed");
@@ -1606,7 +1609,7 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
                 .expect("reclaim signal");
             wait_for_phase(&hub, key, RoomLifecyclePhase::Closing).await;
 
-            let drain_witness = arm_shutdown_drain_witness().await;
+            let drain_witness = hub.arm_shutdown_drain_witness().await;
             let shutdown_task = tokio::spawn({
                 let hub = hub.clone();
                 async move { hub.shutdown().await }
@@ -1649,9 +1652,10 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
                 !status.is_clean(),
                 "panic reclaim during shutdown must report abnormal actor completion: {status:?}"
             );
-            assert!(
-                status.actor_failures >= 1,
-                "panic reclaim must be counted once: {status:?}"
+            assert_eq!(
+                status.actor_failures,
+                1,
+                "panic reclaim must be counted exactly once: {status:?}"
             );
             assert_eq!(
                 hub.available_room_slots(),
@@ -1667,7 +1671,7 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
             disarm_actor_panic_on_next_frame(wiki.document_id).await;
             disarm_teardown_barrier(wiki.document_id).await;
             disarm_reclaim_barrier(wiki.document_id).await;
-            disarm_shutdown_drain_witness().await;
+            hub.disarm_shutdown_drain_witness().await;
         })
     })
     .await;
