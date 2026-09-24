@@ -439,6 +439,7 @@ fn shutdown_deadline_error(
         "server shutdown deadline exceeded (rooms={rooms:?}, sockets_held={sockets_held}, deadline_ms={})",
         deadline.as_millis()
     );
+    let _ = std::io::stderr().flush();
     tracing::error!(
         ?rooms,
         sockets_held,
@@ -553,8 +554,9 @@ mod shutdown_outcome_tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn unix_stop_signals_install_without_waiting() {
+    #[tokio::test]
+    async fn unix_stop_signals_install_without_waiting() {
+        // Tokio unix signal registration requires a runtime; install must not wait for a signal.
         install_shutdown_signals().expect("SIGTERM and SIGINT must install before listen");
     }
 

@@ -3,7 +3,7 @@
 #[allow(dead_code)]
 mod support;
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::panic::{resume_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -88,6 +88,7 @@ impl ShutdownRun {
 struct OwnedChild {
     child: Option<Child>,
     helper_pids: Vec<u32>,
+    log_pumps: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl OwnedChild {
@@ -111,6 +112,12 @@ impl OwnedChild {
             .status();
     }
 
+    fn join_log_pumps(&mut self) {
+        for pump in self.log_pumps.drain(..) {
+            let _ = pump.join();
+        }
+    }
+
     fn kill_and_wait(&mut self) {
         if let Some(mut child) = self.child.take() {
             match child.try_wait() {
@@ -125,6 +132,7 @@ impl OwnedChild {
                 }
             }
         }
+        self.join_log_pumps();
         self.helper_pids
             .retain(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
         for helper in &self.helper_pids {
@@ -422,7 +430,7 @@ fn pump_lines<R: std::io::Read + Send + 'static>(
     stream: R,
     logs: Arc<Mutex<Vec<String>>>,
     tx: mpsc::Sender<String>,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let reader = BufReader::new(stream);
         for line in reader.lines().map_while(Result::ok) {
@@ -431,7 +439,97 @@ fn pump_lines<R: std::io::Read + Send + 'static>(
             }
             let _ = tx.send(line);
         }
-    });
+    })
+}
+
+fn headers_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|i| i + 4)
+}
+
+fn wait_for_http_100_continue(stream: &mut std::net::TcpStream, within: Duration) {
+    let deadline = Instant::now() + within;
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 512];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "did not receive HTTP 100 Continue within {within:?}; got {:?}",
+                String::from_utf8_lossy(&buf)
+            );
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .expect("100 Continue read timeout");
+        match stream.read(&mut tmp) {
+            Ok(0) => panic!(
+                "server closed before HTTP 100 Continue; got {:?}",
+                String::from_utf8_lossy(&buf)
+            ),
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(end) = headers_end(&buf) {
+                    let head = String::from_utf8_lossy(&buf[..end]);
+                    let status_line = head.lines().next().unwrap_or("");
+                    if status_line.starts_with("HTTP/1.1 100 ")
+                        || status_line.starts_with("HTTP/1.0 100 ")
+                    {
+                        return;
+                    }
+                    panic!(
+                        "expected HTTP 100 Continue proving body poll; server responded {status_line:?} headers={head:?}"
+                    );
+                }
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut
+                    || err.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                continue;
+            }
+            Err(err) => panic!(
+                "read HTTP 100 Continue: {err}; got {:?}",
+                String::from_utf8_lossy(&buf)
+            ),
+        }
+    }
+}
+
+fn collected_log_text(logs: &Arc<Mutex<Vec<String>>>) -> String {
+    logs.lock().expect("server logs").join("\n")
+}
+
+fn assert_nonzero_deadline_exit(
+    status: ExitStatus,
+    elapsed: Duration,
+    deadline_ms: u64,
+    log_text: &str,
+    label: &str,
+) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert!(
+            status.signal().is_none(),
+            "{label} must exit from the process, not a default signal kill ({status:?}); logs={log_text}"
+        );
+    }
+    assert!(
+        !status.success(),
+        "{label} must be nonzero, got {status}; logs={log_text}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(deadline_ms + 1_500),
+        "{label} must be bound by the deadline, elapsed={elapsed:?} deadline={deadline_ms}ms"
+    );
+    assert!(
+        log_text.contains("shutdown deadline exceeded")
+            || log_text.contains("server shutdown deadline exceeded"),
+        "{label} must report deadline failure, logs={log_text}"
+    );
 }
 
 fn spawn_server_process(
@@ -474,8 +572,10 @@ fn spawn_server_process_with_auth_wait(
     let stderr = child.stderr.take().expect("stderr");
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel::<String>();
-    pump_lines(stderr, logs.clone(), tx.clone());
-    pump_lines(stdout, logs.clone(), tx);
+    let log_pumps = vec![
+        pump_lines(stderr, logs.clone(), tx.clone()),
+        pump_lines(stdout, logs.clone(), tx),
+    ];
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut listen = None;
     while Instant::now() < deadline {
@@ -503,8 +603,12 @@ fn spawn_server_process_with_auth_wait(
             )
         }
         None => {
-            let _ = child.kill();
-            let _ = child.wait();
+            let mut failed = OwnedChild {
+                child: Some(child),
+                helper_pids: Vec::new(),
+                log_pumps,
+            };
+            failed.kill_and_wait();
             panic!(
                 "fvoci-server did not print listen address; logs={:?}",
                 logs.lock().unwrap()
@@ -515,6 +619,7 @@ fn spawn_server_process_with_auth_wait(
         OwnedChild {
             child: Some(child),
             helper_pids: Vec::new(),
+            log_pumps,
         },
         addr,
         logs,
@@ -527,6 +632,7 @@ fn wait_for_exit(child: &mut OwnedChild, within: Duration) -> ExitStatus {
         match child.try_wait() {
             Ok(Some(status)) => {
                 child.child = None;
+                child.join_log_pumps();
                 return status;
             }
             Ok(None) => {
@@ -771,20 +877,13 @@ async fn process_shutdown_deadline_exits_nonzero() {
                 Duration::from_millis(deadline_ms.saturating_mul(2) + 1_000),
             );
             let elapsed = signaled.elapsed();
-            assert!(
-                !status.success(),
-                "deadline expiry must be nonzero, got {status}; logs={:?}",
-                logs.lock().unwrap()
-            );
-            assert!(
-                elapsed < Duration::from_millis(deadline_ms + 1_500),
-                "deadline must bound exit, elapsed={elapsed:?} deadline={deadline_ms}ms"
-            );
-            let log_text = logs.lock().unwrap().join("\n");
-            assert!(
-                log_text.contains("shutdown deadline exceeded")
-                    || log_text.contains("server shutdown deadline exceeded"),
-                "expiry must report deadline failure, logs={log_text}"
+            let log_text = collected_log_text(&logs);
+            assert_nonzero_deadline_exit(
+                status,
+                elapsed,
+                deadline_ms,
+                &log_text,
+                "deadline expiry",
             );
             wait_pids_exit(&helpers, Duration::from_secs(1));
             barrier.rollback().await.ok();
@@ -832,10 +931,12 @@ async fn process_http_drain_deadline_exits_nonzero() {
             let mut held = std::net::TcpStream::connect(addr).expect("hold http connection");
             held.set_nodelay(true).ok();
             let request = format!(
-                "POST /api/v1/setup HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: 1048576\r\n\r\n",
+                "POST /api/v1/setup HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: 1048576\r\nExpect: 100-continue\r\n\r\n",
                 addr
             );
-            std::io::Write::write_all(&mut held, request.as_bytes()).expect("headers without body");
+            held.write_all(request.as_bytes())
+                .expect("headers without body");
+            wait_for_http_100_continue(&mut held, Duration::from_secs(5));
 
             let signaled = Instant::now();
             child.send_sigterm();
@@ -844,20 +945,13 @@ async fn process_http_drain_deadline_exits_nonzero() {
                 Duration::from_millis(deadline_ms.saturating_mul(2) + 1_000),
             );
             let elapsed = signaled.elapsed();
-            assert!(
-                !status.success(),
-                "HTTP drain deadline must be nonzero, got {status}; logs={:?}",
-                logs.lock().unwrap()
-            );
-            assert!(
-                elapsed < Duration::from_millis(deadline_ms + 1_500),
-                "HTTP drain must be bound by the same deadline, elapsed={elapsed:?} deadline={deadline_ms}ms"
-            );
-            let log_text = logs.lock().unwrap().join("\n");
-            assert!(
-                log_text.contains("shutdown deadline exceeded")
-                    || log_text.contains("server shutdown deadline exceeded"),
-                "HTTP drain expiry must report deadline, not clean success, logs={log_text}"
+            let log_text = collected_log_text(&logs);
+            assert_nonzero_deadline_exit(
+                status,
+                elapsed,
+                deadline_ms,
+                &log_text,
+                "HTTP drain expiry",
             );
             assert!(
                 !log_text.contains("collaboration task panicked"),
