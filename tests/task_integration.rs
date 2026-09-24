@@ -693,3 +693,202 @@ async fn task_create_audit_failure_rolls_back_all_state() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn suspended_user_task_create_denied_after_auth() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, body) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"After suspend"})),
+        Some(&cookie),
+    )
+    .await;
+    assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::NOT_FOUND);
+    let _ = body;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn contract_task_meta_fields_workflow_and_list_pagination() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+
+    let (status, workflow) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/workflow"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let status_row = &workflow["statuses"].as_array().unwrap()[0];
+    assert!(status_row.get("workflowId").is_some());
+    assert!(status_row["wipLimit"].is_null());
+
+    for title in ["One", "Two", "Three"] {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+            Some(json!({"title": title})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    let (status, page1) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={{\"sort\":[{{\"field\":\"number\",\"direction\":\"asc\"}}]}}"
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page1["items"].as_array().unwrap().len(), 2);
+    assert!(page1["nextCursor"].is_string());
+    assert!(!page1["statusCounts"].as_array().unwrap().is_empty());
+    let first = &page1["items"][0];
+    assert!(first.get("sortKey").is_some());
+    assert_eq!(first["schemaVersion"], 2);
+    assert_eq!(first["version"], 1);
+    assert!(first["assigneeIds"].as_array().unwrap().is_empty());
+    assert!(first["labelIds"].as_array().unwrap().is_empty());
+
+    let cursor = page1["nextCursor"].as_str().unwrap();
+    let (status, page2) = json_request(
+        app,
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?limit=2&query={{\"sort\":[{{\"field\":\"number\",\"direction\":\"asc\"}}]}}&cursor={cursor}"
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page2["items"].as_array().unwrap().len(), 1);
+    assert!(page2["nextCursor"].is_null());
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn contract_task_hierarchy_rejects_invalid_parents() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks");
+
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"title":"Parent task", "type":"task"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = task["id"].as_str().unwrap();
+
+    let (status, story) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"title":"Story", "type":"story"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let story_id = story["id"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"title":"Bad child", "type":"task", "parentId": task_id})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "task_hierarchy_violation");
+
+    let (status, subtask) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"title":"Sub", "type":"subtask", "parentId": story_id})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let subtask_id = subtask["id"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"title":"Nested sub", "type":"subtask", "parentId": subtask_id})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "task_hierarchy_violation");
+
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"title":"Epic child", "type":"epic", "parentId": story_id})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "task_hierarchy_violation");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn contract_task_create_includes_bug_type() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Bug", "type":"bug"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(task["type"], "bug");
+    admin.close().await;
+    harness.cleanup().await;
+}

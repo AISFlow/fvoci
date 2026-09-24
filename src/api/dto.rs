@@ -58,7 +58,13 @@ fn deserialize_optional_recurrence<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Value>, D::Error> {
     let value = Value::deserialize(deserializer)?;
-    let Some(kind) = value.get("kind").and_then(Value::as_str) else {
+    let Some(obj) = value.as_object() else {
+        return Err(serde::de::Error::custom("invalid recurrence preset"));
+    };
+    if obj.len() != 1 {
+        return Err(serde::de::Error::custom("invalid recurrence preset"));
+    }
+    let Some(kind) = obj.get("kind").and_then(Value::as_str) else {
         return Err(serde::de::Error::custom("invalid recurrence preset"));
     };
     if matches!(kind, "daily" | "weekly" | "monthly") {
@@ -563,9 +569,12 @@ pub struct AddProjectMemberBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct WorkflowStatusOutput {
     pub id: String,
+    pub workflow_id: String,
     pub name: String,
     pub category: String,
     pub sort_key: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub wip_limit: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -628,13 +637,16 @@ pub struct TaskMetaOutput {
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub due_at: Option<DateTime<Utc>>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
-    pub estimate: Option<f64>,
+    pub estimate: Option<String>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub parent_id: Option<String>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub milestone_id: Option<String>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub recurrence: Option<serde_json::Value>,
+    pub sort_key: String,
+    pub schema_version: i32,
+    pub version: i32,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub archived_at: Option<DateTime<Utc>>,
     pub created_by: String,
@@ -645,8 +657,29 @@ pub struct TaskMetaOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskStatusCountOutput {
+    pub status_id: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskListItemOutput {
+    #[serde(flatten)]
+    pub meta: TaskMetaOutput,
+    pub assignee_ids: Vec<String>,
+    pub label_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct TaskListResponse {
-    pub items: Vec<TaskMetaOutput>,
+    pub items: Vec<TaskListItemOutput>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub next_cursor: Option<String>,
+    pub status_counts: Vec<TaskStatusCountOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -696,6 +729,25 @@ pub struct TaskOutput {
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub parent: Option<TaskParentOutput>,
     pub children: Vec<TaskChildOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LookupItemOutput {
+    pub kind: String,
+    pub id: String,
+    pub display_id: String,
+    pub title: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LookupListResponse {
+    pub items: Vec<LookupItemOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

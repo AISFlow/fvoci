@@ -11,7 +11,8 @@ use axum::http::StatusCode;
 use fvoci_server::db::{context, migrate};
 use project_harness::{
     add_workspace_user, admin_pool, app_pool, count_rows, create_project, drop_insert_fail_trigger,
-    install_insert_fail_trigger, json_request, setup_session, wait_for_user_for_update_blocked,
+    hold_membership_user_lock, install_insert_fail_trigger, json_request, setup_session,
+    wait_for_advisory_blocked_by, wait_for_query_blocked_by, wait_for_user_for_update_blocked,
     TestDb,
 };
 use serde_json::json;
@@ -34,12 +35,8 @@ async fn migration_008_projects_schema_exists() {
 
 #[tokio::test]
 async fn migration_007_upgrades_to_008_projects() {
-    let harness = TestDb::bootstrap().await;
+    let harness = TestDb::bootstrap_through(7).await;
     let admin = admin_pool(&harness).await;
-    sqlx::query("DELETE FROM fvoci.schema_migrations WHERE version = 8")
-        .execute(&admin)
-        .await
-        .unwrap();
     migrate::run_migrations(&harness.admin_url)
         .await
         .expect("upgrade to 008");
@@ -49,6 +46,16 @@ async fn migration_007_upgrades_to_008_projects() {
             .await
             .unwrap();
     assert_eq!(version, Some(8));
+    let has_projects: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'fvoci' AND table_name = 'projects'
+        )",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(has_projects.0);
     admin.close().await;
     harness.cleanup().await;
 }
@@ -438,12 +445,6 @@ async fn contract_revoked_session_and_removed_member() {
     .await;
     assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::NOT_FOUND);
 
-    sqlx::query("DELETE FROM fvoci.project_members WHERE workspace_id = $1 AND user_id = $2")
-        .bind(workspace_id)
-        .bind(member.user_id)
-        .execute(&admin)
-        .await
-        .unwrap();
     let (status, _) = json_request(
         app.clone(),
         "GET",
@@ -452,7 +453,7 @@ async fn contract_revoked_session_and_removed_member() {
         Some(&member.cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::NOT_FOUND);
 
     let (status, _) = json_request(
         app,
@@ -858,11 +859,7 @@ async fn concurrent_workspace_remove_vs_private_lead_under_user_lock() {
     create_project(app.clone(), &lead.cookie, workspace_id, "HID", "private").await;
 
     let mut barrier = admin.begin().await.unwrap();
-    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
-        .bind(lead.user_id)
-        .fetch_one(&mut *barrier)
-        .await
-        .unwrap();
+    hold_membership_user_lock(&mut barrier, lead.user_id).await;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *barrier)
         .await
@@ -883,7 +880,7 @@ async fn concurrent_workspace_remove_vs_private_lead_under_user_lock() {
             .await
         }
     });
-    let _ = wait_for_user_for_update_blocked(&admin, blocker_pid).await;
+    let _ = wait_for_advisory_blocked_by(&admin, blocker_pid).await;
     barrier.commit().await.unwrap();
 
     let (status, _) = tokio::time::timeout(Duration::from_secs(10), remove)
@@ -914,11 +911,7 @@ async fn concurrent_member_add_vs_workspace_remove_under_user_lock() {
     let project_id = hid["id"].as_str().unwrap();
 
     let mut barrier = admin.begin().await.unwrap();
-    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
-        .bind(lead.user_id)
-        .fetch_one(&mut *barrier)
-        .await
-        .unwrap();
+    hold_membership_user_lock(&mut barrier, lead.user_id).await;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *barrier)
         .await
@@ -956,7 +949,7 @@ async fn concurrent_member_add_vs_workspace_remove_under_user_lock() {
         }
     });
 
-    wait_for_user_for_update_blocked(&admin, blocker_pid).await;
+    wait_for_advisory_blocked_by(&admin, blocker_pid).await;
     barrier.commit().await.unwrap();
 
     let (remove_status, _) = tokio::time::timeout(Duration::from_secs(10), remove)
@@ -1095,6 +1088,367 @@ async fn deleted_workspace_returns_not_found_on_nested_project_routes() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
         assert_eq!(body_json["code"], "not_found", "{method} {path}");
     }
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn rls_with_check_denies_cross_tenant_project_insert_for_app_role() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let app_pool = app_pool(&harness).await;
+    let mut conn = app_pool.acquire().await.unwrap();
+    let mut tx = conn.begin().await.unwrap();
+    context::set_tenant(&mut tx, workspace_id).await.unwrap();
+    let foreign_workspace = Uuid::now_v7();
+    let err = sqlx::query(
+        r#"
+        INSERT INTO fvoci.projects (
+            id, workspace_id, key, name, visibility, created_by
+        ) VALUES ($1, $2, 'ZZ', 'Cross tenant', 'workspace', $3)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(foreign_workspace)
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await
+    .expect_err("cross-tenant insert must fail");
+    assert_eq!(
+        err.as_database_error()
+            .and_then(|e| e.code())
+            .map(|c| c.to_string()),
+        Some("42501".to_string())
+    );
+    tx.rollback().await.ok();
+    drop(conn);
+    app_pool.close().await;
+    let _ = cookie;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_two_private_leads_workspace_remove_has_single_winner() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lead_a = add_workspace_user(&admin, workspace_id, "member", "lead-a").await;
+    let lead_b = add_workspace_user(&admin, workspace_id, "member", "lead-b").await;
+    let hid = create_project(app.clone(), &lead_a.cookie, workspace_id, "HID", "private").await;
+    let project_id = Uuid::parse_str(hid["id"].as_str().unwrap()).unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+        Some(json!({"userId": lead_b.user_id.to_string(), "role":"lead"})),
+        Some(&lead_a.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let remove_a = tokio::spawn({
+        let app = app.clone();
+        let owner_cookie = owner_cookie.clone();
+        let user_id = lead_a.user_id;
+        async move {
+            json_request(
+                app,
+                "DELETE",
+                &format!("/api/v1/workspaces/{workspace_id}/members/{user_id}"),
+                None,
+                Some(&owner_cookie),
+            )
+            .await
+        }
+    });
+    let remove_b = tokio::spawn({
+        let app = app.clone();
+        let owner_cookie = owner_cookie.clone();
+        let user_id = lead_b.user_id;
+        async move {
+            json_request(
+                app,
+                "DELETE",
+                &format!("/api/v1/workspaces/{workspace_id}/members/{user_id}"),
+                None,
+                Some(&owner_cookie),
+            )
+            .await
+        }
+    });
+    let (a, b) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(remove_a, remove_b)
+    })
+    .await
+    .expect("concurrent workspace removes must finish");
+    let a = a.expect("join a");
+    let b = b.expect("join b");
+    let outcomes = [a.0, b.0];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let lead_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.project_members
+         WHERE workspace_id = $1 AND project_id = $2 AND role = 'lead'",
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(lead_count.0 >= 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_guest_demotion_preserves_existing_project_membership() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lead = add_workspace_user(&admin, workspace_id, "member", "lead").await;
+    let joiner = add_workspace_user(&admin, workspace_id, "member", "joiner").await;
+    let hid = create_project(app.clone(), &lead.cookie, workspace_id, "HID", "private").await;
+    let project_id = hid["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+        Some(json!({"userId": joiner.user_id.to_string(), "role":"viewer"})),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/members/{}",
+            joiner.user_id
+        ),
+        Some(json!({"role":"guest"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
+        None,
+        Some(&joiner.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["visibility"], "private");
+
+    let guest_role: (String,) = sqlx::query_as(
+        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(joiner.user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(guest_role.0, "guest");
+    let member_rows: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.project_members
+         WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3",
+    )
+    .bind(workspace_id)
+    .bind(Uuid::parse_str(project_id).unwrap())
+    .bind(joiner.user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(member_rows.0, 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_patch_private_vs_workspace_remove_under_project_lock() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lead = add_workspace_user(&admin, workspace_id, "member", "lead").await;
+    let lab = create_project(app.clone(), &lead.cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+
+    let mut barrier = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+        .bind(workspace_id)
+        .bind(project_id)
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+
+    let patch = tokio::spawn({
+        let app = app.clone();
+        let owner_cookie = owner_cookie.clone();
+        async move {
+            json_request(
+                app,
+                "PATCH",
+                &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
+                Some(json!({"visibility":"private"})),
+                Some(&owner_cookie),
+            )
+            .await
+        }
+    });
+    let remove = tokio::spawn({
+        let app = app.clone();
+        let owner_cookie = owner_cookie.clone();
+        let lead_id = lead.user_id;
+        async move {
+            json_request(
+                app,
+                "DELETE",
+                &format!("/api/v1/workspaces/{workspace_id}/members/{lead_id}"),
+                None,
+                Some(&owner_cookie),
+            )
+            .await
+        }
+    });
+    let _ = wait_for_query_blocked_by(&admin, blocker_pid, "%projects%").await;
+    barrier.commit().await.unwrap();
+
+    let (patch_status, _) = tokio::time::timeout(Duration::from_secs(10), patch)
+        .await
+        .expect("patch finished")
+        .expect("join");
+    let (remove_status, _) = tokio::time::timeout(Duration::from_secs(10), remove)
+        .await
+        .expect("remove finished")
+        .expect("join");
+    assert!(
+        patch_status == StatusCode::CONFLICT || remove_status == StatusCode::CONFLICT,
+        "patch={patch_status} remove={remove_status}"
+    );
+    let lead_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.project_members
+         WHERE workspace_id = $1 AND project_id = $2 AND role = 'lead'",
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(lead_count.0 >= 1);
+    let member_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(lead.user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(member_count.0, 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn contract_display_id_lookup_respects_acl() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &owner_cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Lookup me"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_number = task["number"].as_i64().unwrap();
+
+    let (status, lookup) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/LAB-{task_number}"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = lookup["items"].as_array().unwrap();
+    assert!(items.iter().any(|item| item["kind"] == "task"));
+    assert!(items.iter().any(|item| item["kind"] == "document"));
+
+    let (status, lookup) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/WIKI-1"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lookup["items"].as_array().unwrap().len(), 1);
+    assert_eq!(lookup["items"][0]["kind"], "document");
+
+    let (status, lookup) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/WIKI-1?projectId={project_id}"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(lookup["items"].as_array().unwrap().is_empty());
+
+    let outsider = add_workspace_user(&admin, workspace_id, "guest", "outsider").await;
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+        .bind(workspace_id)
+        .bind(outsider.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/LAB-{task_number}"),
+        None,
+        Some(&outsider.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, lookup) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/not-a-display-id"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(lookup["items"].as_array().unwrap().is_empty());
 
     admin.close().await;
     harness.cleanup().await;

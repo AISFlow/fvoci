@@ -18,14 +18,21 @@ const MIGRATIONS: &[(&str, i32)] = &[
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
 
 pub async fn run_migrations(url: &str) -> Result<(), sqlx::Error> {
+    run_migrations_through(url, i32::MAX).await
+}
+
+pub async fn run_migrations_through(url: &str, max_version: i32) -> Result<(), sqlx::Error> {
     let pool = PgPoolOptions::new().max_connections(2).connect(url).await?;
-    let result = apply_migrations(&pool).await;
+    let result = apply_migrations(&pool, max_version).await;
     pool.close().await;
     result
 }
 
-async fn apply_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
+async fn apply_migrations(pool: &PgPool, max_version: i32) -> Result<(), sqlx::Error> {
     for (sql, version) in MIGRATIONS {
+        if *version > max_version {
+            continue;
+        }
         let mut tx = pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(MIGRATION_LOCK_KEY)

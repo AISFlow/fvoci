@@ -1343,6 +1343,80 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/lookup/{display_id}": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "operationId": "lookup_display_id",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "display_id",
+            "in": "path",
+            "description": "Display id such as LAB-1 or WIKI-2",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "projectId",
+            "in": "query",
+            "description": "Optional project scope filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lookup matches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LookupListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not a workspace member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/members/{user_id}": {
       "delete": {
         "tags": [
@@ -2027,6 +2101,61 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "description": "JSON-encoded view query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Filter archived tasks",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Schedule range start (YYYY-MM-DD)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Schedule range end (YYYY-MM-DD)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2036,6 +2165,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TaskListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
                 }
               }
             }
@@ -2816,6 +2955,50 @@
           }
         }
       },
+      "LookupItemOutput": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "displayId",
+          "title",
+          "projectId"
+        ],
+        "properties": {
+          "displayId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "LookupListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LookupItemOutput"
+            }
+          }
+        }
+      },
       "MemberResponse": {
         "type": "object",
         "required": [
@@ -3369,16 +3552,58 @@
           }
         }
       },
+      "TaskListItemOutput": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TaskMetaOutput"
+          },
+          {
+            "type": "object",
+            "required": [
+              "assigneeIds",
+              "labelIds"
+            ],
+            "properties": {
+              "assigneeIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "labelIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      },
       "TaskListResponse": {
         "type": "object",
         "required": [
-          "items"
+          "items",
+          "nextCursor",
+          "statusCounts"
         ],
         "properties": {
           "items": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/TaskMetaOutput"
+              "$ref": "#/components/schemas/TaskListItemOutput"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "statusCounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskStatusCountOutput"
             }
           }
         }
@@ -3401,6 +3626,9 @@
           "parentId",
           "milestoneId",
           "recurrence",
+          "sortKey",
+          "schemaVersion",
+          "version",
           "archivedAt",
           "createdBy",
           "createdAt",
@@ -3437,10 +3665,9 @@
           },
           "estimate": {
             "type": [
-              "number",
+              "string",
               "null"
-            ],
-            "format": "double"
+            ]
           },
           "id": {
             "type": "string"
@@ -3468,6 +3695,13 @@
             "type": "string"
           },
           "recurrence": {},
+          "schemaVersion": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "sortKey": {
+            "type": "string"
+          },
           "startDate": {
             "type": [
               "string",
@@ -3487,6 +3721,10 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
           },
           "workspaceId": {
             "type": "string"
@@ -3581,6 +3819,22 @@
             "type": "string"
           },
           "type": {
+            "type": "string"
+          }
+        }
+      },
+      "TaskStatusCountOutput": {
+        "type": "object",
+        "required": [
+          "statusId",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "statusId": {
             "type": "string"
           }
         }
@@ -3682,9 +3936,11 @@
         "type": "object",
         "required": [
           "id",
+          "workflowId",
           "name",
           "category",
-          "sortKey"
+          "sortKey",
+          "wipLimit"
         ],
         "properties": {
           "category": {
@@ -3697,6 +3953,16 @@
             "type": "string"
           },
           "sortKey": {
+            "type": "string"
+          },
+          "wipLimit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "workflowId": {
             "type": "string"
           }
         }

@@ -292,6 +292,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/lookup/{display_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["lookup_display_id"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/members/{user_id}": {
         parameters: {
             query?: never;
@@ -580,6 +596,16 @@ export interface components {
         LoginResponse: {
             userId: string;
         };
+        LookupItemOutput: {
+            displayId: string;
+            id: string;
+            kind: string;
+            projectId: string | null;
+            title: string;
+        };
+        LookupListResponse: {
+            items: components["schemas"]["LookupItemOutput"][];
+        };
         MemberResponse: {
             email: string;
             familyName: string | null;
@@ -729,8 +755,14 @@ export interface components {
             /** Format: int64 */
             total: number;
         };
+        TaskListItemOutput: components["schemas"]["TaskMetaOutput"] & {
+            assigneeIds: string[];
+            labelIds: string[];
+        };
         TaskListResponse: {
-            items: components["schemas"]["TaskMetaOutput"][];
+            items: components["schemas"]["TaskListItemOutput"][];
+            nextCursor: string | null;
+            statusCounts: components["schemas"]["TaskStatusCountOutput"][];
         };
         TaskMetaOutput: {
             /** Format: date-time */
@@ -742,8 +774,7 @@ export interface components {
             dueAt: string | null;
             /** Format: date */
             dueDate: string | null;
-            /** Format: double */
-            estimate: number | null;
+            estimate: string | null;
             id: string;
             milestoneId: string | null;
             /** Format: int32 */
@@ -752,6 +783,9 @@ export interface components {
             priority: string;
             projectId: string;
             recurrence: unknown;
+            /** Format: int32 */
+            schemaVersion: number;
+            sortKey: string;
             /** Format: date */
             startDate: string | null;
             statusId: string;
@@ -759,6 +793,8 @@ export interface components {
             type: string;
             /** Format: date-time */
             updatedAt: string;
+            /** Format: int32 */
+            version: number;
             workspaceId: string;
         };
         TaskOutput: components["schemas"]["TaskMetaOutput"] & {
@@ -777,6 +813,11 @@ export interface components {
             number: number;
             title: string;
             type: string;
+        };
+        TaskStatusCountOutput: {
+            /** Format: int64 */
+            count: number;
+            statusId: string;
         };
         TreeNodeResponse: {
             icon: string | null;
@@ -804,6 +845,9 @@ export interface components {
             id: string;
             name: string;
             sortKey: string;
+            /** Format: int32 */
+            wipLimit: number | null;
+            workflowId: string;
         };
         WorkspaceListItemResponse: {
             /** Format: int32 */
@@ -1803,6 +1847,52 @@ export interface operations {
             };
         };
     };
+    lookup_display_id: {
+        parameters: {
+            query?: {
+                /** @description Optional project scope filter */
+                projectId?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Display id such as LAB-1 or WIKI-2 */
+                display_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Lookup matches */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LookupListResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not a workspace member */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     remove_member: {
         parameters: {
             query?: never;
@@ -2228,7 +2318,20 @@ export interface operations {
     };
     list_tasks: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description JSON-encoded view query */
+                query?: string;
+                /** @description Filter archived tasks */
+                archived?: string;
+                /** @description Pagination cursor */
+                cursor?: string;
+                /** @description Page size */
+                limit?: number;
+                /** @description Schedule range start (YYYY-MM-DD) */
+                from?: string;
+                /** @description Schedule range end (YYYY-MM-DD) */
+                to?: string;
+            };
             header?: never;
             path: {
                 /** @description Workspace id */
@@ -2247,6 +2350,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskListResponse"];
+                };
+            };
+            /** @description Invalid query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
             /** @description Not found or forbidden */

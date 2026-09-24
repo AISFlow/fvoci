@@ -707,8 +707,13 @@ pub async fn remove_member(
         },
     )
     .await?;
-    tx.commit().await?;
-    Ok(Ok(()))
+    match tx.commit().await {
+        Ok(()) => Ok(Ok(())),
+        Err(err) if crate::db::projects::is_private_lead_violation(&err) => {
+            Ok(Err(WorkspaceDbError::LastProjectLead))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn count_owners(

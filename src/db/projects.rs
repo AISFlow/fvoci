@@ -26,6 +26,7 @@ pub enum ProjectDbError {
     GuestLead,
     LeadNotMember,
     Archived,
+    InvalidCursor,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,7 @@ pub struct WorkflowStatusRow {
     pub name: String,
     pub category: String,
     pub sort_key: String,
+    pub wip_limit: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -329,7 +331,7 @@ async fn record_project_event_and_audit(
     Ok(())
 }
 
-fn is_private_lead_violation(err: &sqlx::Error) -> bool {
+pub(crate) fn is_private_lead_violation(err: &sqlx::Error) -> bool {
     err.as_database_error()
         .and_then(|db| db.code())
         .is_some_and(|code| code.as_ref() == PRIVATE_LEAD_SQLSTATE)
@@ -386,16 +388,15 @@ pub(crate) async fn workspace_removal_blocked_by_private_leads(
     workspace_id: Uuid,
     target_user_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let project_ids = sqlx::query_as::<_, (Uuid,)>(
+    let projects = sqlx::query_as::<_, (Uuid, String)>(
         r#"
-        SELECT p.id
+        SELECT p.id, p.visibility
         FROM fvoci.projects p
         INNER JOIN fvoci.project_members pm
             ON pm.workspace_id = p.workspace_id AND pm.project_id = p.id
         WHERE p.workspace_id = $1
           AND pm.user_id = $2
           AND pm.role = 'lead'
-          AND p.visibility = 'private'
           AND p.deleted_at IS NULL
         ORDER BY p.id
         FOR NO KEY UPDATE OF p
@@ -405,8 +406,11 @@ pub(crate) async fn workspace_removal_blocked_by_private_leads(
     .bind(target_user_id)
     .fetch_all(&mut **tx)
     .await?;
-    for (project_id,) in project_ids {
-        if count_project_leads_excluding(tx, workspace_id, project_id, target_user_id).await? == 0 {
+    for (project_id, visibility) in projects {
+        if visibility == "private"
+            && count_project_leads_excluding(tx, workspace_id, project_id, target_user_id).await?
+                == 0
+        {
             return Ok(true);
         }
     }
@@ -734,8 +738,7 @@ pub async fn list_projects(
         .bind(workspace_id)
         .bind(project_id)
         .fetch_one(&mut *tx)
-        .await
-        .unwrap_or((0, 0));
+        .await?;
 
         items.push(ProjectListItem {
             project: ProjectRow {
@@ -969,21 +972,24 @@ pub async fn update_project(
     )
     .await?;
 
-    tx.commit().await?;
-    Ok(Ok(ProjectRow {
-        id: updated.0,
-        workspace_id,
-        key: updated.1,
-        name: updated.2,
-        description: updated.3,
-        icon: updated.4,
-        visibility: updated.5,
-        root_document_id: updated.6,
-        status: updated.7,
-        created_by: updated.8,
-        created_at: updated.9,
-        updated_at: updated.10,
-    }))
+    match tx.commit().await {
+        Ok(()) => Ok(Ok(ProjectRow {
+            id: updated.0,
+            workspace_id,
+            key: updated.1,
+            name: updated.2,
+            description: updated.3,
+            icon: updated.4,
+            visibility: updated.5,
+            root_document_id: updated.6,
+            status: updated.7,
+            created_by: updated.8,
+            created_at: updated.9,
+            updated_at: updated.10,
+        })),
+        Err(err) if is_private_lead_violation(&err) => Ok(Err(ProjectDbError::LastLead)),
+        Err(err) => Err(err),
+    }
 }
 
 pub async fn list_project_members(
@@ -1365,9 +1371,9 @@ pub async fn get_project_workflow(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    let statuses = sqlx::query_as::<_, (Uuid, String, String, String)>(
+    let statuses = sqlx::query_as::<_, (Uuid, String, String, String, Option<i32>)>(
         r#"
-        SELECT id, name, category, sort_key
+        SELECT id, name, category, sort_key, wip_limit
         FROM fvoci.statuses
         WHERE workspace_id = $1 AND project_id = $2
         ORDER BY sort_key COLLATE "C"
@@ -1383,12 +1389,15 @@ pub async fn get_project_workflow(
         project_id,
         statuses: statuses
             .into_iter()
-            .map(|(id, name, category, sort_key)| WorkflowStatusRow {
-                id,
-                name,
-                category,
-                sort_key,
-            })
+            .map(
+                |(id, name, category, sort_key, wip_limit)| WorkflowStatusRow {
+                    id,
+                    name,
+                    category,
+                    sort_key,
+                    wip_limit,
+                },
+            )
             .collect(),
     }))
 }

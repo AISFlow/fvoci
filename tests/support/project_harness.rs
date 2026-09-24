@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
-use fvoci_server::db::{migrate, pool, Db};
+use fvoci_server::db::{context, migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
 use rand::RngCore;
@@ -30,6 +30,10 @@ pub struct TestDb {
 
 impl TestDb {
     pub async fn bootstrap() -> Self {
+        Self::bootstrap_through(8).await
+    }
+
+    pub async fn bootstrap_through(max_migration_version: i32) -> Self {
         let admin_base = std::env::var("TEST_DATABASE_URL")
             .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
             .expect("TEST_DATABASE_URL missing");
@@ -50,7 +54,9 @@ impl TestDb {
             .expect("create database");
         admin_pool.close().await;
         let admin_url = join_db_url(&server_url, &db_name);
-        migrate::run_migrations(&admin_url).await.expect("migrate");
+        migrate::run_migrations_through(&admin_url, max_migration_version)
+            .await
+            .expect("migrate");
         let migration_pool = PgPoolOptions::new()
             .max_connections(2)
             .connect(&admin_url)
@@ -457,6 +463,18 @@ pub async fn wait_for_query_blocked_by(admin: &PgPool, blocker_pid: i32, query_l
 
 pub async fn wait_for_advisory_blocked_by(admin: &PgPool, blocker_pid: i32) -> i32 {
     wait_for_query_blocked_by(admin, blocker_pid, "%pg_advisory_xact_lock%").await
+}
+
+pub async fn hold_membership_user_lock(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(context::MEMBERSHIP_LOCK_NAMESPACE)
+        .bind(context::lock_key_from_uuid(user_id))
+        .execute(&mut **tx)
+        .await
+        .unwrap();
 }
 
 pub async fn create_project(

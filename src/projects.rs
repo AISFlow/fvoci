@@ -75,7 +75,7 @@ impl ProjectMemberRole {
 }
 
 pub fn normalize_project_key(key: &str) -> Result<String, ProjectKeyError> {
-    let canonical: String = key.nfkc().collect::<String>().to_uppercase();
+    let canonical: String = key.nfkc().collect();
     if !PROJECT_KEY_RE.is_match(&canonical) || PROJECT_KEY_TRAILING_NUM_RE.is_match(&canonical) {
         return Err(ProjectKeyError::InvalidPattern);
     }
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn project_key_nfkc_and_pattern() {
-        assert_eq!(normalize_project_key("lab").unwrap(), "LAB");
+        assert!(normalize_project_key("lab").is_err());
         assert_eq!(normalize_project_key("ＡＢ").unwrap(), "AB");
         assert!(normalize_project_key("OPS-5").is_err());
         assert!(normalize_project_key("WIKI").is_err());
