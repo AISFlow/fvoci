@@ -26,7 +26,7 @@ jobs:
       matrix:
         include:
           - flow: workspace-flow
-            specs: e2e/workspace-flow.spec.ts e2e/workspace-wiki-flow.spec.ts
+            specs: e2e/workspace-flow.spec.ts e2e/workspace-wiki-flow.spec.ts e2e/workspace-invite-flow.spec.ts
           - flow: project-task-flow
             specs: e2e/project-task-flow.spec.ts
     runs-on: ubuntu-24.04
