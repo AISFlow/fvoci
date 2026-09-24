@@ -115,6 +115,16 @@ export type EditorShape = {
   table: { id: string; rows: string[][] } | null;
 };
 
+export function attachmentNodeCount(shape: EditorShape): number {
+  let count = 0;
+  const visit = (node: EditorNode): void => {
+    if (node.type === "attachment") count += 1;
+    for (const child of node.content ?? []) visit(child);
+  };
+  visit(shape.document);
+  return count;
+}
+
 export async function ensureCollabFixture(page: Page): Promise<void> {
   const setupRes = await page.request.get("/api/v1/setup");
   expect(setupRes.ok(), `setup status failed: ${setupRes.status()}`).toBe(true);
@@ -144,6 +154,30 @@ export async function ensureInstanceSetup(page: Page): Promise<void> {
   await fillInstanceSetup(page);
 }
 
+function isDuplicateEmailFixtureError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const err = error as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
+  const text = [err.message, err.stderr?.toString(), err.stdout?.toString()].join("\n");
+  return text.includes("users_email_unique");
+}
+
+function createE2eUserIfAbsent(
+  email: string,
+  password: string,
+  givenName: string,
+  options?: {
+    familyName?: string;
+    workspaceSlug?: string;
+    membershipRole?: string;
+  },
+): void {
+  try {
+    createE2eUser(email, password, givenName, options);
+  } catch (error) {
+    if (!isDuplicateEmailFixtureError(error)) throw error;
+  }
+}
+
 export async function login(page: Page, email: string, password: string): Promise<void> {
   await page.context().clearCookies();
   await page.goto("/login");
@@ -155,7 +189,7 @@ export async function login(page: Page, email: string, password: string): Promis
 }
 
 export function installCollabMember(): void {
-  createE2eUser(member.email, member.password, member.givenName, {
+  createE2eUserIfAbsent(member.email, member.password, member.givenName, {
     familyName: member.familyName,
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "member",
@@ -163,7 +197,7 @@ export function installCollabMember(): void {
 }
 
 export function installCollabPeer(user = peer): void {
-  createE2eUser(user.email, user.password, user.givenName, {
+  createE2eUserIfAbsent(user.email, user.password, user.givenName, {
     familyName: user.familyName,
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "member",
