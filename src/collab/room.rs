@@ -8,6 +8,7 @@ use tokio::time::MissedTickBehavior;
 
 use collab_engine::b64;
 use collab_engine::outcome::EngineStatus;
+use collab_engine::outcome::LimitKind;
 use collab_engine::protocol::Request;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPool;
@@ -16,6 +17,7 @@ use uuid::Uuid;
 
 use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
+use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
 use crate::collab::validation::{
@@ -26,8 +28,9 @@ use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_pay
 use crate::db::collab::verify_collab_operation;
 use crate::db::collab::{
     append_collab_update, claim_writer_and_load, compact_collab_snapshot, load_collab_readonly,
-    resolve_collab_admission, AppendCollabInput, AppendCollabResult, CollabDbError,
-    CompactCollabInput, VerifyCollabInput,
+    project_derived_body, resolve_collab_admission, AppendCollabInput, AppendCollabResult,
+    CollabDbError, CompactCollabInput, ProjectDerivedBodyInput, ProjectDerivedBodyResult,
+    VerifyCollabInput,
 };
 use crate::db::collab_delivery::{check_delivery_admission, DeliveryAdmission};
 use crate::db::identity::LiveSession;
@@ -368,6 +371,27 @@ struct PersistBarrier {
     prefix_fifo: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectDerivedOutcome {
+    Projected,
+    Unchanged,
+    /// Empty Yjs seed at `tail_seq == 0`; true no-op for manual persist.
+    SkippedSeed,
+    /// Source-compatible deterministic content rejection (Malformed, body caps, prepare).
+    DeterministicSkip,
+    /// Primary not loaded or dirty; retry after reload, not a successful derive.
+    PrimaryNotReady,
+    /// `(writer_generation, tail_seq)` fence mismatch after commit.
+    StaleCutoff,
+    /// Archived/trashed/forbidden at derive time.
+    PermissionDenied,
+    StaleWriter,
+    /// Engine/helper operational failure; primary child was recycled when possible.
+    EngineFailed,
+    /// DB operational failure on derived write/event.
+    DbFailed,
+}
+
 struct RoomActor {
     workspace_id: Uuid,
     document_id: Uuid,
@@ -670,6 +694,15 @@ impl RoomActor {
             }
         }
         self.ensure_primary_capacity().await?;
+        if !read_only && self.writer_generation.is_some() && self.committed.tail_seq >= 1 {
+            let _ = self
+                .maybe_project_derived_body(
+                    self.committed.tail_seq,
+                    join.conn.session.user_id,
+                    join.conn.session.session_id,
+                )
+                .await;
+        }
         if !self.reserve_client_id(join.conn.client_id, join.conn.session.user_id) {
             return Err(JoinError::AdmissionDenied);
         }
@@ -1200,17 +1233,24 @@ impl RoomActor {
                 self.fifo_seq += 1;
                 let op_prefix = self.fifo_seq;
 
-                self.broadcast_update(&sync.y_protocol).await;
                 let primary_ok = self.integrate_committed_update(&payload).await.is_ok();
-                self.send_sync_status(conn_id, routing_key, true).await;
-                if let Some(c) = self.connections.get_mut(&conn_id) {
-                    c.in_flight = false;
-                }
                 if !primary_ok {
+                    self.send_sync_status(conn_id, routing_key, true).await;
+                    if let Some(c) = self.connections.get_mut(&conn_id) {
+                        c.in_flight = false;
+                    }
                     self.fatal_primary_unhealthy(actor_user_id, session_id)
                         .await;
                     return;
                 }
+                self.broadcast_update(&sync.y_protocol).await;
+                let _ = self
+                    .maybe_project_derived_body(seq, actor_user_id, session_id)
+                    .await;
+                if let Some(c) = self.connections.get_mut(&conn_id) {
+                    c.in_flight = false;
+                }
+                self.send_sync_status(conn_id, routing_key, true).await;
                 self.flush_connection_persist(conn_id, op_prefix).await;
                 self.maybe_compact().await;
             }
@@ -1359,6 +1399,259 @@ impl RoomActor {
             self.reload_primary_from_committed().await?;
         }
         Ok(())
+    }
+
+    async fn maybe_project_derived_body(
+        &mut self,
+        seq: i64,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> ProjectDerivedOutcome {
+        if seq < 1 {
+            return ProjectDerivedOutcome::SkippedSeed;
+        }
+        let Some(writer_generation) = self.writer_generation else {
+            tracing::warn!(
+                target: "collab.derive_failed",
+                document_id = %self.document_id,
+                seq,
+                reason = "no_writer",
+                "collab derived body skipped"
+            );
+            return ProjectDerivedOutcome::EngineFailed;
+        };
+        if !self.primary_loaded || self.primary_dirty {
+            tracing::warn!(
+                target: "collab.derive_failed",
+                document_id = %self.document_id,
+                writer_generation,
+                seq,
+                reason = "primary_not_ready",
+                "collab derived body skipped"
+            );
+            return ProjectDerivedOutcome::PrimaryNotReady;
+        }
+        if self.ensure_primary_capacity().await.is_err() {
+            tracing::error!(
+                target: "collab.derive_failed",
+                document_id = %self.document_id,
+                writer_generation,
+                seq,
+                reason = "primary_capacity",
+                "collab derived body operational failure"
+            );
+            return ProjectDerivedOutcome::EngineFailed;
+        }
+
+        let report = match self.engine.call(Request::Project { encoding: 1 }).await {
+            Ok(report) => report,
+            Err(BridgeError::Dead) => {
+                self.recover_primary_after_engine_fault().await;
+                tracing::error!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "engine_dead",
+                    "collab derived body operational failure"
+                );
+                return ProjectDerivedOutcome::EngineFailed;
+            }
+        };
+
+        let (content_json, pending) = match report.outcome {
+            EngineStatus::Ok {
+                content_json: Some(json),
+                pending,
+                ..
+            } => (json, pending),
+            EngineStatus::Ok {
+                content_json: None, ..
+            } => {
+                self.recover_primary_after_engine_fault().await;
+                tracing::error!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "missing_content_json",
+                    "collab derived body operational failure"
+                );
+                return ProjectDerivedOutcome::EngineFailed;
+            }
+            EngineStatus::Malformed { detail } => {
+                tracing::warn!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "malformed",
+                    detail = %detail,
+                    "collab derived body skipped"
+                );
+                return ProjectDerivedOutcome::DeterministicSkip;
+            }
+            EngineStatus::Unsupported { detail, .. } => {
+                self.recover_primary_after_engine_fault().await;
+                tracing::error!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "unsupported",
+                    detail = %detail,
+                    "collab derived body operational failure"
+                );
+                return ProjectDerivedOutcome::EngineFailed;
+            }
+            EngineStatus::ResourceLimit { kind, detail } => {
+                if Self::is_deterministic_project_limit(kind) {
+                    tracing::warn!(
+                        target: "collab.derive_failed",
+                        document_id = %self.document_id,
+                        writer_generation,
+                        seq,
+                        reason = "resource_limit",
+                        limit_kind = ?kind,
+                        detail = %detail,
+                        "collab derived body skipped"
+                    );
+                    return ProjectDerivedOutcome::DeterministicSkip;
+                }
+                self.recover_primary_after_engine_fault().await;
+                tracing::error!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "engine_operational",
+                    limit_kind = ?kind,
+                    detail = %detail,
+                    "collab derived body operational failure"
+                );
+                return ProjectDerivedOutcome::EngineFailed;
+            }
+            EngineStatus::WorkerFailure { detail, .. } => {
+                self.recover_primary_after_engine_fault().await;
+                tracing::error!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "engine_operational",
+                    detail = %detail,
+                    "collab derived body operational failure"
+                );
+                return ProjectDerivedOutcome::EngineFailed;
+            }
+        };
+
+        let prepared = match prepare_derived_body(content_json) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                tracing::warn!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "prepare_failed",
+                    error = ?err,
+                    "collab derived body skipped"
+                );
+                return ProjectDerivedOutcome::DeterministicSkip;
+            }
+        };
+
+        match project_derived_body(
+            &self.pool,
+            ProjectDerivedBodyInput::new(
+                self.workspace_id,
+                actor_user_id,
+                session_id,
+                self.document_id,
+                writer_generation,
+                seq,
+                prepared,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(ProjectDerivedBodyResult::Updated)) => {
+                tracing::info!(
+                    target: "collab.derive",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    pending,
+                    result = "updated",
+                    "collab derived body projected"
+                );
+                ProjectDerivedOutcome::Projected
+            }
+            Ok(Ok(ProjectDerivedBodyResult::Unchanged)) => {
+                tracing::info!(
+                    target: "collab.derive",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    pending,
+                    result = "unchanged",
+                    "collab derived body unchanged"
+                );
+                ProjectDerivedOutcome::Unchanged
+            }
+            Ok(Ok(ProjectDerivedBodyResult::SkippedSeed)) => ProjectDerivedOutcome::SkippedSeed,
+            Ok(Err(CollabDbError::StaleWriter)) => {
+                self.fatal_writer_stale().await;
+                ProjectDerivedOutcome::StaleWriter
+            }
+            Ok(Err(CollabDbError::StaleCutoff)) => ProjectDerivedOutcome::StaleCutoff,
+            Ok(Err(CollabDbError::Forbidden | CollabDbError::NotFound)) => {
+                ProjectDerivedOutcome::PermissionDenied
+            }
+            Ok(Err(err)) => {
+                tracing::error!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "db_rejected",
+                    error = ?err,
+                    "collab derived body db failure"
+                );
+                ProjectDerivedOutcome::DbFailed
+            }
+            Err(err) => {
+                tracing::error!(
+                    target: "collab.derive_failed",
+                    document_id = %self.document_id,
+                    writer_generation,
+                    seq,
+                    reason = "db_operational",
+                    error = %err,
+                    "collab derived body db failure"
+                );
+                ProjectDerivedOutcome::DbFailed
+            }
+        }
+    }
+
+    fn is_deterministic_project_limit(kind: LimitKind) -> bool {
+        matches!(kind, LimitKind::Output | LimitKind::Stack)
+    }
+
+    fn manual_persist_derived_ok(outcome: ProjectDerivedOutcome) -> bool {
+        matches!(
+            outcome,
+            ProjectDerivedOutcome::Projected
+                | ProjectDerivedOutcome::Unchanged
+                | ProjectDerivedOutcome::SkippedSeed
+                | ProjectDerivedOutcome::DeterministicSkip
+        )
+    }
+
+    fn manual_persist_projection_failed(outcome: ProjectDerivedOutcome) -> bool {
+        !Self::manual_persist_derived_ok(outcome)
     }
 
     async fn integrate_committed_update(&mut self, payload: &[u8]) -> Result<(), JoinError> {
@@ -1590,6 +1883,14 @@ impl RoomActor {
                     if self.engine.needs_recycle()
                         && self.reload_primary_from_committed().await.is_err()
                     {
+                        self.compact_unhealthy = true;
+                        self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
+                        return format!("persist-failed:{request_id}");
+                    }
+                    if Self::manual_persist_projection_failed(
+                        self.maybe_project_derived_body(load.tail_seq, actor_user_id, session_id)
+                            .await,
+                    ) {
                         self.compact_unhealthy = true;
                         self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
                         return format!("persist-failed:{request_id}");
