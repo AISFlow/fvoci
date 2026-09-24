@@ -9,6 +9,7 @@ import {
   applyBoldToSelection,
   applyLinkToSelection,
   attachCollabWire,
+  closeCollabContext,
   createE2eUser,
   createWikiDoc,
   editorLocator,
@@ -33,6 +34,7 @@ import {
   peer,
   persistBody,
   placeContentCaret,
+  readEditorSelection,
   sentPersistRequests,
   sessionCookie,
   test,
@@ -379,6 +381,18 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   const phase = (name: string) => console.info("crash recovery phase", {
     name, elapsedMs: Date.now() - started,
   });
+  const logSelection = async (page: import("@playwright/test").Page, label: string) => {
+    console.info("crash recovery selection", {
+      label,
+      ...(await readEditorSelection(page)),
+    });
+  };
+  const logEditorText = async (page: import("@playwright/test").Page, label: string) => {
+    console.info("crash recovery editor text", {
+      label,
+      text: (await editorShape(page)).text,
+    });
+  };
   const seedA = await newCollabContext(browser, collabApp.baseUrl);
   const seedB = await newCollabContext(browser, collabApp.baseUrl);
   const pageA = await seedA.newPage();
@@ -386,6 +400,7 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   const wire = attachCollabWire(pageA);
   let url = "";
   let seeded: Awaited<ReturnType<typeof editorShape>> | undefined;
+  let seedBodyFailed = false;
   try {
     await test.step("authenticate independent seed clients", () => Promise.all([
       login(pageA, member.email, member.password),
@@ -430,9 +445,14 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     expect(seeded.text).toContain("살아남을한글");
     expect(seeded.text).not.toContain("지울토큰XYZ");
     await expectConverged(pageA, pageB);
+  } catch (error) {
+    seedBodyFailed = true;
+    throw error;
   } finally {
-    await seedA.close();
-    await seedB.close();
+    await Promise.all([
+      closeCollabContext(seedA, seedBodyFailed),
+      closeCollabContext(seedB, seedBodyFailed),
+    ]);
   }
   phase("persist acknowledged and old clients closed");
   await test.step("kill owned process tree and restart from DB", () => collabApp.crashAndRestart());
@@ -442,6 +462,8 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   const freshB = await newCollabContext(browser, collabApp.baseUrl);
   const restoredA = await freshA.newPage();
   const restoredB = await freshB.newPage();
+  const restoredWires = [attachCollabWire(restoredA), attachCollabWire(restoredB)];
+  let restoreBodyFailed = false;
   try {
     await test.step("authenticate independent fresh clients", () => Promise.all([
       login(restoredA, member.email, member.password),
@@ -459,27 +481,69 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     expect(restored).toEqual(seeded);
     phase("fresh client recovered exact structure from DB");
 
-    await openEditor(restoredB, url);
-    await expectTokens(restoredB, ["살아남을한글"]);
-    await expectTokensAbsent(restoredB, ["지울토큰XYZ"]);
-    await expect(await editorShape(restoredB)).toEqual(seeded);
-    await editorLocator(restoredA).click();
-    await placeContentCaret(restoredA, "end");
-    await restoredA.keyboard.type("후속A");
-    await editorLocator(restoredB).focus();
-    await restoredB.keyboard.press("Control+Home");
-    await restoredB.keyboard.press("Enter");
-    await restoredB.keyboard.type("후속B");
-    await expectTokens(restoredB, ["후속B"]);
-    await expectTokens(restoredA, ["살아남을한글", "후속A", "후속B"]);
-    await expectTokens(restoredB, ["살아남을한글", "후속A", "후속B"]);
-    await expectConverged(restoredA, restoredB);
-    await expectTokensAbsent(restoredA, ["지울토큰XYZ"]);
-    expect((await editorShape(restoredA)).table?.id).toBe(seeded?.table?.id);
+    await test.step("open second fresh client on recovered document", async () => {
+      await openEditor(restoredB, url);
+      await expectTokens(restoredB, ["살아남을한글"]);
+      await expectTokensAbsent(restoredB, ["지울토큰XYZ"]);
+      await expect(await editorShape(restoredB)).toEqual(seeded);
+    });
+    phase("second fresh client verified against DB structure");
+
+    await test.step("subsequent A edit at document end", async () => {
+      await editorLocator(restoredA).click();
+      await logSelection(restoredA, "restoredA before placeContentCaret end");
+      await placeContentCaret(restoredA, "end");
+      await logSelection(restoredA, "restoredA after placeContentCaret end");
+      await restoredA.keyboard.type("후속A");
+      await logSelection(restoredA, "restoredA after type 후속A");
+      await logEditorText(restoredA, "restoredA after type 후속A");
+      await logEditorText(restoredB, "restoredB after A type 후속A");
+    });
+    phase("client A typed subsequent edit");
+
+    await test.step("subsequent B edit at document start", async () => {
+      await editorLocator(restoredB).focus();
+      await logSelection(restoredB, "restoredB after focus before Control+Home");
+      await restoredB.keyboard.press("Control+Home");
+      await logSelection(restoredB, "restoredB after Control+Home");
+      await restoredB.keyboard.press("Enter");
+      await logSelection(restoredB, "restoredB after Enter");
+      await restoredB.keyboard.type("후속B");
+      await logSelection(restoredB, "restoredB after type 후속B");
+      await logEditorText(restoredB, "restoredB after type 후속B");
+      await logEditorText(restoredA, "restoredA after B type 후속B");
+    });
+    phase("client B typed subsequent edit");
+
+    await test.step("subsequent edits converged across fresh clients", async () => {
+      await expectTokens(restoredB, ["후속B"]);
+      await expectTokens(restoredA, ["살아남을한글", "후속A", "후속B"]);
+      await expectTokens(restoredB, ["살아남을한글", "후속A", "후속B"]);
+      await expectConverged(restoredA, restoredB);
+      await expectTokensAbsent(restoredA, ["지울토큰XYZ"]);
+      expect((await editorShape(restoredA)).table?.id).toBe(seeded?.table?.id);
+    });
     phase("subsequent edits converged");
+  } catch (error) {
+    restoreBodyFailed = true;
+    // Only frame categories: never print cookies, auth tokens or document data.
+    for (const [client, wire] of restoredWires.entries()) {
+      const category = (frame: (typeof wire.sent)[number]) =>
+        frame.kind === "other" ? `document-type-${frame.type}` : frame.kind;
+      console.info("crash recovery fresh wire", {
+        client,
+        sentCount: wire.sent.length,
+        receivedCount: wire.received.length,
+        sentTail: wire.sent.slice(-32).map(category),
+        receivedTail: wire.received.slice(-32).map(category),
+      });
+    }
+    throw error;
   } finally {
-    await freshA.close();
-    await freshB.close();
+    await Promise.all([
+      closeCollabContext(freshA, restoreBodyFailed),
+      closeCollabContext(freshB, restoreBodyFailed),
+    ]);
   }
 });
 

@@ -327,6 +327,47 @@ export async function editorShape(page: Page): Promise<EditorShape> {
   });
 }
 
+export type EditorSelectionSnapshot = {
+  browser: string;
+  editor: string | null;
+  from: number | null;
+  to: number | null;
+};
+
+export async function readEditorSelection(page: Page): Promise<EditorSelectionSnapshot> {
+  return editorLocator(page).evaluate((root) => {
+    const live = (root as HTMLElement & {
+      editor?: {
+        state: {
+          selection: { from: number; to: number };
+          doc: { textBetween(from: number, to: number): string };
+        };
+      };
+    }).editor;
+    const selection = live?.state.selection;
+    return {
+      browser: window.getSelection()?.toString() ?? "",
+      editor: live && selection
+        ? live.state.doc.textBetween(selection.from, selection.to)
+        : null,
+      from: selection?.from ?? null,
+      to: selection?.to ?? null,
+    };
+  });
+}
+
+export async function closeCollabContext(
+  context: BrowserContext,
+  bodyFailed: boolean,
+): Promise<void> {
+  try {
+    await context.close();
+  } catch (error) {
+    if (bodyFailed) return;
+    throw error;
+  }
+}
+
 export async function placeContentCaret(page: Page, where: "start" | "end"): Promise<void> {
   const locator = editorLocator(page);
   await locator.focus();

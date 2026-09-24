@@ -1470,3 +1470,22 @@ barrier를 outbound 경로에 한정하고, sweep을 먼저 실행한 뒤 송신
 표시하지 않는다. 새 diff all-target/db-tests clippy 성공3.41s; 첫 check의 helper
 rename import 누락을 수정했다. DB 실행은 새 원격 SHA에서 확인할 예정이며,
 기존 32-thread 로컬 실패 전체의 원인을 해결했다는 주장은 하지 않는다.
+
+cae2602 원격 Rust35970615824/Web35970615846/Documents35970615789/
+Engine35970615782는 모두 성공했다. 송신 barrier 분리와1011 기대값 수정 이후
+실제 각 job의 세부 실행 수를 재확인 중이다. 이전 실패를 취소/재실행으로
+지우지 않았다. F7 Grok 제출 f38a935를7af79af에 통합: dead Live slot의
+정리를 hub 소유 task로 넘기며, 아직 enqueue하지 않은 Closed/Closing만
+제한적으로 재시도한다. NoReply와QueueFull은 재시도하지 않는다. 워커 실제
+격리PG lifecycle19/19(body14.80s, suite37.69s,4threads), 정적 검사 통과.
+Opus ctx23d7b64eb998는 고정f38a935 및cae2602 delta 검토 중이다.
+
+Composer88b1c46의 cross-client 동기화 대기 추가는 원래 동시 후속 편집을
+직렬화하므로 거부했다. ffb1a67의 순수 진단 개선만 반영하고 코디네이터가
+finally 이전 실제catch 상태로 원래 오류 보존을 보강했다. 두 context 모두
+정리하며 성공 본문의 정리 실패는 계속 실패한다. 새fresh socket 진단은
+frame 종류/개수만 남긴다. 로컬trace x3OdEO는 freshA 연결15초 실패이며,
+CI1684412의 복원 이후30초timeout과 같은 결함이라고 단정하지 않는다.
+덮어쓴 혼합log와 rg -q 반복의 성공은 수락 증거에서 제외한다. 브라우저
+근본 원인은 아직 미확정, 진단 추가를 제품 수정 완료로 표시하지 않는다.
+두 쓰기 워커는 release, 커밋/worktree 보존, 소유PG 정리 보고 확인.
