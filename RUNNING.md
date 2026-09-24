@@ -238,7 +238,60 @@ export FVOCI_EXTRACTOR_BIN="$PWD/crates/document-extract/target/debug/document-e
 Use the default helper build for deployment; `test-hang`, `extract-native-tests`
 and `extract-job-driver` are test-only. The helper must be installed alongside
 the server at the configured executable path. No Node or browser process is used
-for server-side extraction. Final deployment packaging is not yet provided.
+for server-side extraction.
+
+## Container install
+
+The install artifact is a multi-stage Docker image plus a small Compose stack under
+`infra/rust/`. It builds release `fvoci-server`, `fvoci-migrate`, the production
+`collab-engine` helper (`--features worker`), the production `document-extract`
+helper (same rhwp pin as `scripts/prepare-extract-helper.sh` / `rust.yml`, without
+`test-hang`), and the `apps/web` production bundle (same steps as
+`scripts/prepare-web-e2e.sh` + `npm run build`). Runtime images pin base digests,
+run as uid/gid `1000` (`fvoci`), and set:
+
+| Variable | Installed path / note |
+| --- | --- |
+| `FVOCI_STATIC_DIR` | `/opt/fvoci/static` |
+| `FVOCI_COLLAB_ENGINE` | `/opt/fvoci/bin/collab-engine` |
+| `FVOCI_EXTRACTOR_BIN` | `/opt/fvoci/bin/document-extract` |
+| `FVOCI_STORAGE_DIR` | `/data/storage` (Compose volume, owned by `fvoci`) |
+
+Unset any helper env to disable that feature (API-only). The published image ships
+all three helpers and enables them via the defaults above.
+
+### Bootstrap
+
+1. Copy `infra/rust/.env.example` to `infra/rust/.env` and replace placeholders.
+   Keep `POSTGRES_*` as the migration owner credentials. Create the dedicated app
+   role only through the init path below — never grant superuser or `BYPASSRLS` to
+   the app role.
+2. Build locally (no registry push required):
+
+```sh
+docker build -f infra/rust/Dockerfile -t fvoci-rust-install:local .
+```
+
+3. Start PostgreSQL, the one-shot init job, then the server:
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env up -d --wait server
+```
+
+The `init` service runs `fvoci-migrate`, creates the non-superuser
+`FVOCI_APP_ROLE` if missing, then `fvoci-migrate --grant-app-role <role>` with the
+owner `DATABASE_URL`. The stack fails if init exits nonzero; `server` starts only
+after init succeeds. Request handling uses `DATABASE_APP_URL` only (owner URL is for
+migrations/grants). Preserve the `storage` and `pgdata` volumes across restarts.
+
+### Verification
+
+`scripts/install-smoke.sh` builds the image, starts an isolated Compose project
+(unique name, ephemeral published port, run-owned volumes), exercises setup/login,
+wiki collab body projection, HWPX upload + extraction, `/collab` availability,
+graceful `docker compose restart server` (exit code 0), and post-restart reads.
+CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
+`.github/workflows/install.yml` (no secrets, no image publish).
 
 When `FVOCI_EXTRACTOR_BIN` is absent, extraction is explicitly disabled and stored
 HWP/HWPX attachments remain pending. An invalid configured path fails startup.

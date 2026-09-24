@@ -1,0 +1,69 @@
+# FVOCI Rust slice install stack: PostgreSQL, one-shot init, and server.
+# Secrets belong in .env (see .env.example); never commit real credentials.
+name: fvoci-rust-install
+
+services:
+  postgres:
+    image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fvoci}
+      POSTGRES_USER: ${POSTGRES_USER:-fvoci_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fvoci_owner} -d ${POSTGRES_DB:-fvoci}"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  init:
+    image: ${FVOCI_IMAGE:?FVOCI_IMAGE is required}
+    user: "0:0"
+    entrypoint: ["/opt/fvoci/sbin/init-db.sh"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-fvoci_owner}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fvoci}
+      FVOCI_APP_ROLE: ${FVOCI_APP_ROLE:-fvoci_app}
+      FVOCI_APP_PASSWORD: ${FVOCI_APP_PASSWORD:?FVOCI_APP_PASSWORD is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  server:
+    image: ${FVOCI_IMAGE:?FVOCI_IMAGE is required}
+    ports:
+      - "${FVOCI_PUBLISH_PORT:-0}:8080"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-fvoci_owner}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fvoci}
+      DATABASE_APP_URL: postgres://${FVOCI_APP_ROLE:-fvoci_app}:${FVOCI_APP_PASSWORD}@postgres:5432/${POSTGRES_DB:-fvoci}
+      PASSWORD_PEPPER_KEYS: ${PASSWORD_PEPPER_KEYS:?PASSWORD_PEPPER_KEYS is required}
+      PASSWORD_PEPPER_ACTIVE_KEY_ID: ${PASSWORD_PEPPER_ACTIVE_KEY_ID:?PASSWORD_PEPPER_ACTIVE_KEY_ID is required}
+      FVOCI_PUBLIC_ORIGIN: ${FVOCI_PUBLIC_ORIGIN:-http://127.0.0.1:8080}
+      FVOCI_COOKIE_SECURE: ${FVOCI_COOKIE_SECURE:-false}
+      FVOCI_BIND: 0.0.0.0:8080
+      FVOCI_STORAGE_DIR: /data/storage
+      FVOCI_STATIC_DIR: /opt/fvoci/static
+      FVOCI_COLLAB_ENGINE: /opt/fvoci/bin/collab-engine
+      FVOCI_EXTRACTOR_BIN: /opt/fvoci/bin/document-extract
+      FVOCI_EXTRACT_POLL_SECS: ${FVOCI_EXTRACT_POLL_SECS:-2}
+      FVOCI_SHUTDOWN_DEADLINE_MS: ${FVOCI_SHUTDOWN_DEADLINE_MS:-30000}
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/setup >/dev/null || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  pgdata:
+  storage:

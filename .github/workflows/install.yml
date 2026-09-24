@@ -1,0 +1,67 @@
+name: Container install
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/install.yml
+      - infra/rust/**
+      - scripts/install-smoke.sh
+      - scripts/install-smoke-collab.mjs
+      - Dockerfile
+      - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - migrations/**
+      - src/**
+      - crates/**
+      - apps/web/**
+      - packages/**
+      - scripts/generate-api.sh
+      - scripts/grant-app-role.sql
+      - compat/fixtures/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/install.yml
+      - infra/rust/**
+      - scripts/install-smoke.sh
+      - scripts/install-smoke-collab.mjs
+      - Dockerfile
+      - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - migrations/**
+      - src/**
+      - crates/**
+      - apps/web/**
+      - packages/**
+      - scripts/generate-api.sh
+      - scripts/grant-app-role.sql
+      - compat/fixtures/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  install-smoke:
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            check: install-smoke
+          - runner: ubuntu-24.04-arm
+            check: install-smoke-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run container install smoke
+        run: bash scripts/install-smoke.sh
