@@ -1045,3 +1045,70 @@ non-XML child 잘림은 Malformed로 구분하며 binary 불변 검사를 추가
 기존 parent EngineSession은 non-Ok 응답을 받은 helper를 회수하는 정책을 유지한다.
 helper가 Malformed 프레임을 반환한 것과 parent가 process를 재사용한 것은 다르다.
 검사에서 전자를 확인했으며 후자 성공을 주장하지 않는다.
+
+Fable task9e1ca50c24dd/ctx6448929fbdab의974fe7d 검토는 차단2건:
+송신마다 actor+transport 중복 row-locking ACL tx, evict 시 awareness tombstone 누락.
+CI 성공은 이 검토를 대체하지 않는다. 같은 실제 Fable terminal을 짧은 설계 자문
+ taskacadb7df6df4/ctxa69eb0f2889c에 재사용 후 완료·release했다.
+초기 outbound ACL cache 제안은 사용자 계약과 맞지 않아 철회했다. 최종 경계:
+primary DB의 단일 joined SELECT/READ COMMITTED snapshot을 실제 송신 인가점으로
+삼고 transport dequeue에서 확인한다. 읽기는 행/advisory 잠금 없이 수행하되
+쓰기 append의 기존 lock/transaction 재검사는 유지한다. 이미 인가·전송 중인
+frame까지 소급 회수한다고 하지 않으며 DB 오류는 fail-closed1011로 구분한다.
+
+Grok taskc6eb00281ed9/ctx61d9504aaccf, Orca child rust-collab-delivery-fix,
+기준6ee6b64, 실제 cursor-grok-4.6-high에 해당 수정과 presence/clientID/auth-limit
+회귀를 배정했다. 소유: collab room/hub/transport/config/awareness, collab_product,
+새 db/collab_delivery.rs와 db/mod.rs 한 선언. Composer의 db/collab.rs와 겹치지 않는다.
+local heavy DB slot은 Grok 소유. 검토 report의 실제 barrier/권한 검사도 수락 조건이다.
+
+Composer task9a2149a2b80c/ctx29f180d3e224 제출3301fd8은 아직 미통합.
+관련 순수7/7·실제 앱 역할 derived_body DB6/6(~10s) 보고. 같은 실제 Composer
+terminal을 후속 taskbd712aa4ee1e/ctxe8b2738d8d0f에 재사용: source doc.content
+형식 검증과 알려진 emoji shortcode 변환을 보완하고, derived fence 조회에서
+필요 없는 최대8MiB binary snapshot 복사를 제거한다. 소유 범위에 최소 emoji
+lookup data/개발용 생성기만 추가 위임했다. root manifest/lock/CI 변경 없음.
+참조 테이블·room projection hook 연결은 미완료이며 전체 본문 동등성 수락 전이다.
+
+Native Project 경계: Fable taskc13802a01000/ctx3a1bdf0ba4bf 고정ea7a6c2 재검토
+차단0. 별도 프로세스 반복projection60×4, JS raw oracle·PM rank, fixture27개
+byte-identical 재생성과 관련6개 검사 통과. strict parent non-Ok 회수 정책 유지가
+안전함을 확인했다. 같은 terminal은 DB 기반3301fd8 읽기 전용 검토
+ task3a41681c91a0/ctx1fc7cc9b6013에 재사용했다(실제 Fable5.1 medium).
+6ee6b64824ae6b2f248b44c03f3b793adc9ce8f9 원격4workflow 모두 성공:
+Rust35944988980/Web35944988899/Documents35944988919/Engine35944989043.
+합성 checkout0e3e473=PR6ee6b64+mainba19932. x64/ARM native lib17,
+Yjs26(near_max_load 포함/filtered0), process test-hang17/production14 통과.
+React13/13(1.2분), 협업14/14(1.8분). 이 범위의 native Project 검증 완료이며
+현재 송신 보강과 DB/REST 제품 연결 차단은 별도 유지한다. PR7 Draft/미병합.
+
+DB3301fd8 독립 검토(task3a41681c91a0/ctx1fc7cc9b6013)는 차단0이며 완료·release.
+검사는 직접 실행하지 않은 코드 검토다. N1 타 tenant ID 위조, N2 두 연결의 실제
+stale projection 경합, N3 body/time 불변 및 event 실패 후 retry를 추가 수락 조건으로
+반영했다. Composer a62e7c7은 root.content 검증·emoji native lookup 보완 제출,
+순수11/11 보고(미통합). 같은 terminal의 후속 taskc29963bbfc5d/ctx9eaa40cd2c90가
+위 회귀와 PreparedDerivedBody 입력 경계, 2-column fence 조회·상수 정본, 실제
+고정 emoji package 버전/고지·결정적 생성 확인을 담당한다. Grok 송신 수정은
+계속 ctx61d9504aaccf이며 두 쓰기 소유권은 겹치지 않는다. Fable quota/Opus 없음.
+기존 lifecycle d5aec64 검토의 F4–F7은 최신 송신 diff 승인으로 자동 해소하지 않는다.
+
+본문 DB 보강3301fd8/a62e7c7/a04358c를44b75a4/7e95ee3/b38ec82로 순서대로 통합했다.
+Composer taskb5c6517105b9/ctx87d2ad6b5971은 고정a04358c에서
+`CARGO_BUILD_JOBS=2 scripts/start-test-postgres.sh cargo test --locked --offline --features db-tests --test collab_integration derived_body -- --test-threads=2`
+실제 앱 역할8/8 성공(22filtered, compile9.5s/body14s/wall약27s), 임시 DB 정리.
+이전9개 추정은 실행 결과가 아니며 실제 실행 수는8이다. 생성기2850항목 재생성도
+동일 결과이며 worker tree clean, 유효 완료 후 release했다.
+통합b38ec82에서 `cargo fmt --check`,
+`cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings`,
+`cargo test --locked --offline --lib` 성공: clippy5.07s, lib43/43(skip0,
+compile6.19s/body5.53s). 이 통합의 원격 CI는 다음 push에서 확인한다.
+Fable taskca8422ad74b3/ctx4b89108172bb 고정a04358c delta 검토 차단0, 완료·release.
+실제 claude-fable-5-1 medium; 주간 한도 오류/Opus 전환 없음. 독립 JS oracle
+2850 shortcode/6fixture와 비교해 불일치0. Fable은 cargo/DB를 실행하지 않았다.
+경합 테스트는 같은 actor advisory lock 순서로 stale cutoff를 검증하며, 두 번째
+wait가 append 자체에도 만족하므로 projection의 documents-row wait 증거로는
+사용하지 않는다. 다른 actor의 row-lock 경합 추가는 비차단 보강으로 남긴다.
+room의 native Project 호출→DB 파생 본문 저장 연결과 내부 참조 저장은 미완료다.
+송신 보강은 Grok ctx61d9504aaccf에서 계속하며 해당 파일 소유권을 유지한다.
+PR7 Draft/미병합, 전체 협업 수락·auto-merge 미설정. 다음 작업은 송신 제출 SHA
+검토·통합 후 room projection hook 연결이며 lifecycle F4–F7도 별도 해소한다.
