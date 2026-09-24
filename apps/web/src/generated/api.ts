@@ -497,6 +497,54 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
+        patch: operations["patch_task"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["move_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["restore_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["trash_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
         patch?: never;
         trace?: never;
     };
@@ -653,6 +701,14 @@ export interface components {
             version: number;
             workspaceId: string;
         };
+        ExpectedDatesBody: {
+            /** Format: date-time */
+            dueAt: string | null;
+            /** Format: date */
+            dueDate: string | null;
+            /** Format: date */
+            startDate: string | null;
+        };
         InvitationAcceptBody: {
             consents?: components["schemas"]["InvitationConsentItem"][] | null;
             email?: string | null;
@@ -714,6 +770,16 @@ export interface components {
         MembersResponse: {
             items: components["schemas"]["MemberResponse"][];
         };
+        MoveTaskBody: {
+            /** Format: uuid */
+            afterId?: string | null;
+            /** Format: uuid */
+            beforeId?: string | null;
+            /** Format: uuid */
+            expectedStatusId?: string | null;
+            /** Format: uuid */
+            statusId: string;
+        };
         OkResponse: {
             ok: boolean;
         };
@@ -744,6 +810,29 @@ export interface components {
             leadUserId?: string | null;
             name?: string;
             visibility?: string;
+        };
+        PatchTaskBody: {
+            archived?: boolean | null;
+            assigneeIds?: string[] | null;
+            /** Format: date-time */
+            dueAt?: string | null;
+            /** Format: date */
+            dueDate?: string | null;
+            estimate?: string | null;
+            expectedDates?: components["schemas"]["ExpectedDatesBody"] | null;
+            labelIds?: string[] | null;
+            /** Format: uuid */
+            milestoneId?: string | null;
+            /** Format: uuid */
+            parentId?: string | null;
+            priority?: string | null;
+            recurrence?: unknown;
+            /** Format: date */
+            startDate?: string | null;
+            /** Format: uuid */
+            statusId?: string | null;
+            title?: string | null;
+            type?: string | null;
         };
         PatchWorkspaceBody: {
             name: string;
@@ -2789,6 +2878,186 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskOutput"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    patch_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchTaskBody"];
+            };
+        };
+        responses: {
+            /** @description Updated task */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskMetaOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    move_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveTaskBody"];
+            };
+        };
+        responses: {
+            /** @description Moved task */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskMetaOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    restore_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task restored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    trash_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task trashed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
                 };
             };
             /** @description Not found or forbidden */

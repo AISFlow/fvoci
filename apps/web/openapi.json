@@ -2662,6 +2662,284 @@
             "fvoci_session": []
           }
         ]
+      },
+      "patch": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "patch_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskMetaOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "move_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Moved task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskMetaOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/restore": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "restore_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "trash_task",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task trashed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
       }
     },
     "/api/v1/workspaces/{workspace_id}/tree": {
@@ -3212,6 +3490,38 @@
           }
         }
       },
+      "ExpectedDatesBody": {
+        "type": "object",
+        "required": [
+          "startDate",
+          "dueDate",
+          "dueAt"
+        ],
+        "properties": {
+          "dueAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "startDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          }
+        },
+        "additionalProperties": false
+      },
       "InvitationAcceptBody": {
         "type": "object",
         "properties": {
@@ -3468,6 +3778,40 @@
           }
         }
       },
+      "MoveTaskBody": {
+        "type": "object",
+        "required": [
+          "statusId"
+        ],
+        "properties": {
+          "afterId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "beforeId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "expectedStatusId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "statusId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
       "OkResponse": {
         "type": "object",
         "required": [
@@ -3557,6 +3901,115 @@
           },
           "visibility": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PatchTaskBody": {
+        "type": "object",
+        "properties": {
+          "archived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "assigneeIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "dueAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "estimate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedDates": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpectedDatesBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "labelIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "milestoneId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "parentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recurrence": {},
+          "startDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "statusId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
