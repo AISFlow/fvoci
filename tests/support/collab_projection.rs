@@ -212,6 +212,12 @@ pub async fn setup_owner_session(harness: &TestDb) -> SessionFixture {
     }
 }
 
+pub fn tiny_output_project_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig {
+    let mut cfg = test_collab_config(max_rooms, idle_evict_ms);
+    cfg.limits.max_project_json_bytes = 8;
+    cfg
+}
+
 pub fn test_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig {
     CollabConfig {
         engine_bin: fvoci_server::collab::config::require_collab_engine_for_tests(),
@@ -260,37 +266,111 @@ pub async fn setup_wiki_doc(harness: &TestDb) -> WikiDocFixture {
     }
 }
 
-pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> AppState {
+pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> (AppState, Arc<CollabHub>) {
     let pool = pool::connect_app(app_url).await.expect("app pool");
-    AppState {
+    let hub = Arc::new(CollabHub::new(cfg, pool));
+    let state = AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool.clone()),
+            db: Db::new(hub.pool().clone()),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
         }),
         branding_name: "FVOCI".to_string(),
         public_origin: PUBLIC_ORIGIN.to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
-        collab: Some(Arc::new(CollabHub::new(cfg, pool))),
+        collab: Some(hub.clone()),
+    };
+    (state, hub)
+}
+
+pub struct TestServer {
+    pub addr: SocketAddr,
+    hub: Arc<CollabHub>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    join: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            join.abort();
+        }
     }
 }
 
-pub async fn spawn_server(app: Router) -> SocketAddr {
+impl TestServer {
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            if let Err(error) = join.await {
+                if !error.is_cancelled() {
+                    panic!("test server task failed: {error}");
+                }
+            }
+        }
+        self.hub.shutdown().await;
+    }
+}
+
+pub struct TestRun {
+    pub harness: TestDb,
+    servers: Vec<TestServer>,
+}
+
+impl TestRun {
+    pub fn new(harness: TestDb) -> Self {
+        Self {
+            harness,
+            servers: Vec::new(),
+        }
+    }
+
+    pub async fn spawn_router(&mut self, app_url: &str, cfg: CollabConfig) -> SocketAddr {
+        let (state, hub) = collab_app_state(app_url, cfg).await;
+        self.spawn_router_state(state, hub).await
+    }
+
+    pub async fn spawn_router_state(&mut self, state: AppState, hub: Arc<CollabHub>) -> SocketAddr {
+        let server = spawn_server(fvoci_server::http::router(state, None), hub).await;
+        let addr = server.addr;
+        self.servers.push(server);
+        addr
+    }
+
+    pub async fn finish(mut self) {
+        while let Some(server) = self.servers.pop() {
+            server.shutdown().await;
+        }
+        self.harness.cleanup().await;
+    }
+}
+
+pub async fn spawn_server(app: Router, hub: Arc<CollabHub>) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let join = tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(async {
+            shutdown_rx.await.ok();
+        })
         .await
-        .unwrap();
+        .expect("serve test collab server");
     });
-    addr
-}
-
-pub fn sample_hi_update() -> Vec<u8> {
-    hex::decode("0101e8eda5a2070004010b70726f73656d6972726f7202686900").expect("fixture")
+    TestServer {
+        addr,
+        hub,
+        shutdown: Some(shutdown_tx),
+        join: Some(join),
+    }
 }
 
 pub fn delete_only_base_update() -> Vec<u8> {
@@ -389,6 +469,54 @@ pub async fn auth_and_join(
     ));
 }
 
+pub fn sync_step1_frame(routing_key: &str, state_vector: &[u8]) -> Vec<u8> {
+    encode(&WireFrame::Document {
+        routing_key: routing_key.to_string(),
+        room: CollabRoomName::parse(routing_key),
+        message: DocumentMessage::Sync(SyncMessage {
+            step: SyncStep::Step1,
+            y_protocol: encode_sync_payload(SyncStep::Step1, state_vector),
+        }),
+    })
+    .expect("encode step1")
+}
+
+pub async fn complete_sync_handshake(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    routing_key: &str,
+) {
+    ws.send(Message::Binary(
+        sync_step1_frame(routing_key, &[0, 0]).into(),
+    ))
+    .await
+    .unwrap();
+    let mut saw_step2 = false;
+    let mut saw_server_step1 = false;
+    for _ in 0..16 {
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::Sync(SyncMessage { step, .. }),
+            ..
+        }) = recv_document_frame(ws, 1).await
+        {
+            match step {
+                SyncStep::Step2 if !saw_step2 => saw_step2 = true,
+                SyncStep::Step1 if saw_step2 => {
+                    saw_server_step1 = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_step2, "client must receive Step2");
+    assert!(
+        saw_server_step1,
+        "client must receive server Step1 after Step2"
+    );
+}
+
 pub fn sync_update_frame(routing_key: &str, update: &[u8]) -> Vec<u8> {
     encode(&WireFrame::Document {
         routing_key: routing_key.to_string(),
@@ -426,6 +554,56 @@ pub async fn recv_document_frame(
         }
     }
     None
+}
+
+pub async fn wait_for_stateless_exact(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    expected: &str,
+    within: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Some(WireFrame::Document {
+            message: DocumentMessage::Stateless(body),
+            ..
+        }) = recv_document_frame(ws, 1).await
+        {
+            if body == expected {
+                return true;
+            }
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(20))).await;
+    }
+    false
+}
+
+pub async fn persist_barrier(
+    addr: SocketAddr,
+    session_token: &str,
+    routing_key: &str,
+    client_id: u32,
+    request_id: Uuid,
+) {
+    let mut writer = connect_member(addr, session_token).await;
+    auth_and_join(&mut writer, routing_key, client_id).await;
+    writer
+        .send(Message::Binary(
+            stateless_frame(routing_key, &format!("persist:{request_id}")).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_stateless_exact(
+            &mut writer,
+            &format!("persisted:{request_id}"),
+            Duration::from_secs(5),
+        )
+        .await,
+        "persist must acknowledge with persisted:{request_id}"
+    );
 }
 
 pub async fn wait_for_sync_applied(

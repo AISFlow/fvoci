@@ -694,14 +694,20 @@ impl RoomActor {
             }
         }
         self.ensure_primary_capacity().await?;
-        if !read_only && self.writer_generation.is_some() && self.committed.tail_seq >= 1 {
-            let _ = self
-                .maybe_project_derived_body(
+        if !read_only
+            && self.writer_generation.is_some()
+            && self.committed.tail_seq >= 1
+            && matches!(
+                self.maybe_project_derived_body(
                     self.committed.tail_seq,
                     join.conn.session.user_id,
                     join.conn.session.session_id,
                 )
-                .await;
+                .await,
+                ProjectDerivedOutcome::StaleWriter
+            )
+        {
+            return Err(JoinError::WriterStale);
         }
         if !self.reserve_client_id(join.conn.client_id, join.conn.session.user_id) {
             return Err(JoinError::AdmissionDenied);
@@ -1480,16 +1486,17 @@ impl RoomActor {
                 return ProjectDerivedOutcome::EngineFailed;
             }
             EngineStatus::Malformed { detail } => {
-                tracing::warn!(
+                self.recover_primary_after_engine_fault().await;
+                tracing::error!(
                     target: "collab.derive_failed",
                     document_id = %self.document_id,
                     writer_generation,
                     seq,
                     reason = "malformed",
                     detail = %detail,
-                    "collab derived body skipped"
+                    "collab derived body operational failure"
                 );
-                return ProjectDerivedOutcome::DeterministicSkip;
+                return ProjectDerivedOutcome::EngineFailed;
             }
             EngineStatus::Unsupported { detail, .. } => {
                 self.recover_primary_after_engine_fault().await;
@@ -1505,7 +1512,8 @@ impl RoomActor {
                 return ProjectDerivedOutcome::EngineFailed;
             }
             EngineStatus::ResourceLimit { kind, detail } => {
-                if Self::is_deterministic_project_limit(kind) {
+                if Self::is_deterministic_project_limit(kind, &detail) {
+                    self.recover_primary_after_engine_fault().await;
                     tracing::warn!(
                         target: "collab.derive_failed",
                         document_id = %self.document_id,
@@ -1636,8 +1644,13 @@ impl RoomActor {
         }
     }
 
-    fn is_deterministic_project_limit(kind: LimitKind) -> bool {
-        matches!(kind, LimitKind::Output | LimitKind::Stack)
+    fn is_deterministic_project_limit(kind: LimitKind, detail: &str) -> bool {
+        match kind {
+            LimitKind::Output | LimitKind::Stack => true,
+            // Project node budget only; engine/process Memory stays operational.
+            LimitKind::Memory => detail.starts_with("project node count"),
+            _ => false,
+        }
     }
 
     fn manual_persist_derived_ok(outcome: ProjectDerivedOutcome) -> bool {
@@ -2123,4 +2136,40 @@ pub fn parse_client_id(token: &str) -> Option<u32> {
         return None;
     }
     Some(value as u32)
+}
+
+#[cfg(test)]
+mod project_limit_tests {
+    use collab_engine::outcome::LimitKind;
+
+    use super::RoomActor;
+
+    #[test]
+    fn deterministic_project_limit_classifier() {
+        for kind in [LimitKind::Output, LimitKind::Stack] {
+            assert!(
+                RoomActor::is_deterministic_project_limit(kind, ""),
+                "{kind:?} must be deterministic"
+            );
+        }
+        assert!(
+            RoomActor::is_deterministic_project_limit(
+                LimitKind::Memory,
+                "project node count 100000 reached max 100000",
+            ),
+            "project node budget must be deterministic"
+        );
+        for (kind, detail) in [
+            (LimitKind::Ops, ""),
+            (LimitKind::Input, ""),
+            (LimitKind::Frame, ""),
+            (LimitKind::Time, ""),
+            (LimitKind::Memory, "child rss exceeded"),
+        ] {
+            assert!(
+                !RoomActor::is_deterministic_project_limit(kind, detail),
+                "{kind:?} ({detail}) must stay operational"
+            );
+        }
+    }
 }
