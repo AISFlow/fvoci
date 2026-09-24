@@ -23,6 +23,11 @@ svg2pdf_note = "Upstream Cargo.lock pins this commit on branch determinism-0.13.
 name = "document-extract"
 path = "src/bin/document-extract.rs"
 
+[[bin]]
+name = "extract-parent-death-driver"
+path = "src/bin/extract-parent-death-driver.rs"
+required-features = ["test-hang"]
+
 [features]
 default = []
 # Compiles `--test-hang-ms` into the helper binary. Production builds omit it.
