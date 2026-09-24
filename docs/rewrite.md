@@ -10,7 +10,9 @@
 ## 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
-최신 main `125ef2568d17fba961e569a9d4c0bc007860a643`는 PR1–8의 수락 결과다.
+최신 main `59b6ecd90e5ff42da576c6d0d5336fb78c2c8859`는 PR1–9의 수락 결과다.
+PR9 native 취소/부모 종료 경계도 Opus 검토와 원격11job 및 post-merge11job을
+통과했다. 현재 wiki 첨부 backend/React 통합은 아직 미수락이다.
 PR7 https://github.com/AISFlow/fvoci/pull/7 은 검토 HEAD04f67ae,
 CI 합성merge5a8d0aa(baseba19932)에서11job 성공 후 squash merge했다.
 PR7의 실제 merged/main 반영과 post-merge11job 성공을 확인했다.
@@ -23,9 +25,10 @@ PR8 native client 분리도 merged이며 해당 post-merge11job 성공을 확인
 | --- | --- | --- | --- | --- | --- |
 | 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 첫 slice 수락, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | PAT/OIDC/MFA·계정 생명주기·확장 정책 |
 | 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락, PR4 merged | 실제 앱 역할DB66·양 아키텍처·React·CI·독립 검토 | counts·quota·groups·members-list 등 |
-| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component PR2 + 얇은 client PR8 수락 | native49+49/client6+6 양 아키텍처·CI·독립 검토 | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
+| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component PR2 + 얇은 client PR8/취소 PR9 수락 | native default51/test-hang54·client8×2 양 아키텍처·CI·독립 검토 | 첨부 추출 job/검색/썸네일 미연결 |
 | 기본 위키 문서 | domains/documents | 생성·조회·metadata·현재 문서 권한 | 첫 backend/React 수락, PR5 merged | 실제 앱 역할DB13·UI·CI·독립 검토 | 댓글·공유·리비전·확장 문서 기능 |
 | 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 opt-in 수락 | x64/ARM64 lifecycle20/product56/projection19/shutdown7·React14·Opus 검토 | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계 추가 검증, 과거 단발 timeout 원인 미확정. 명시적 opt-in이며 전체 협업 수락 아님 |
+| 위키 첨부 local | domains/attachments, packages/storage | 현재 부모 권한·원본 bytes·원자 완료·취소 | backend791199d/React6c54d8e 통합, 미수락 | 앱 역할DB20·React 첨부5/전체18 성공; Opus 후속 수정 중 | HTTP416·저장/취소 보강 및 최종 CI/검토, 추출 job/S3/썸네일 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
@@ -49,9 +52,9 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 인증 확장·PAT·OIDC·MFA·사용자 생명주기 | packages/contracts/src/routes.ts auth/me/admin, core/auth.ts | 세션 폐기, 범위, 마지막 관리자, 탈퇴/복구 | 재작성 미착수 | 미실행 | 첫 로그인 외 전체 |
 | 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend/React 수락5d8cac8, PR4 merged | 실제 앱 역할DB66 양 아키텍처/React6/CI/Fable | groups/확장 정책 등 미구현 |
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
-| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata PR5 수락; 본문 협업 PR7 진행 | PR5 실제DB/UI/CI; PR7 검증은 최신 기록 | 댓글·공유·리비전, 협업 최종 수락 미완료 |
-| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine PR6 수락; 실제 제품/2UI PR7 진행 | provider/native/DB/2UI 회귀 실행, 최신 수정 재검증 중 | 종료·재접속·파생 본문 실패 경계 차단 해소 및 전체 수락 필요 |
-| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | rhwp native 본문 추출 PR2 수락; 첨부 제품 미연결 | native52+52·CI·독립 검토 | 부모 권한·업로드·저장·다운로드·썸네일 |
+| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata PR5 수락; 본문 협업 PR7 opt-in 수락 | PR5/7 실제DB/UI/CI·독립 검토 | 댓글·공유·리비전, 협업 최종 수락 미완료 |
+| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine PR6 수락; 실제 제품/2UI PR7 opt-in 수락 | provider/native/DB/2UI 회귀·CI·Opus | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계, 과거 단발 timeout 원인 미확정 |
+| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | rhwp native/얇은 client PR2/8/9 수락; wiki local 첨부 통합 미수락 | native CI·독립 검토; 첨부DB20/React18 component 성공 | 첨부 최종 CI/검토, 추출 job·S3·다른 부모·썸네일 |
 | 검색·색인·AI | server domains/search, packages/search, routes.ts ai | 검색에서도 인가·철회·색인 복구 | 재작성 미착수 | 미실행 | 전체 |
 | 알림·메일·webhook·연동 | server domains/notifications, packages/jobs, routes.ts github/webhooks | outbox·커밋 후 전달·중복/재시도 | 재작성 미착수 | 미실행 | 전체 |
 | 동의·감사·사용권 | routes.ts legal/auth.consents/admin.audit, packages/ee | 동의 gate·증거·서명·권한 | 재작성 미착수 | 미실행 | 프로필 감사 강화 외 전체 |
@@ -1672,3 +1675,15 @@ term_7fa6590d-5c4a-4db2-92af-6d1b1e1616b5 --json. 활성 worker를 중복 배정
 /tmp/fvoci-attachment-extraction-next-task.txt(미dispatch)에 있다. 기존 source/storage
 인가가 수락된 뒤 연결한다. 종료한 옛 dispatch4개는 실제 exited+release 지시에
 따라 release했으며 user_takeover/불명 컨테이너·프로세스는 건드리지 않았다.
+
+2026-09-24 09:29 UTC checkpoint: backend791199d + React9bf450d/6c54d8e를 정상 통합했다.
+backend lib59/실제 앱 역할 attachment DB20, React unit67와 좁은 E2E5/전체18이
+성공했다. c40305a의 Opus5.5 medium 검토는 실행 확인됐고 실제 테스트를 실행한
+검토는 아니다. 416 Content-Range 손실(B1)을 차단으로 반환했고, 기존 payload
+etag 확인·취소 중 create·storage root fsync를 함께 보강한다. Grok task8f8e752be9a2/
+ctxe8025b41879f가 backend와 위임된 OpenAPI 오류등록만 소유하며 heavy slot을
+인계받았다. Composer taskc88f02eb2dde/ctx61ad2de4abd8는 product test-only URL
+제거와 attachment 구조 보존 oracle 보강만 소유한다. 이전 브라우저 성공을
+아직 없는 후속 diff/원격 CI의 성공으로 사용하지 않는다. 세션 lock 취소 누출을
+막는 close_on_drop-before-acquire 순서는 유지하며, pool churn 개선은 안전을
+약화하지 않는 후속 설계가 필요하다. 추출 job은 미구현/미dispatch, 열린 PR 없음.
