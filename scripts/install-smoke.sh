@@ -218,6 +218,11 @@ if [[ "$RUNNING_UID" != "1000" || "$SERVER_PID1_UID" != "1000" ]]; then
   exit 1
 fi
 log_assert "server runs as non-root uid 1000: ok"
+if docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SERVER_CID" | grep -Eq '^(DATABASE_URL|FVOCI_MIGRATION_URL)='; then
+  echo "server container must not receive the migration owner URL" >&2
+  exit 1
+fi
+log_assert "server holds only the app database URL: ok"
 
 STORAGE_SAMPLE="$(docker exec "$SERVER_CID" sh -c 'find /data/storage -type f | head -1')"
 if [[ -z "$STORAGE_SAMPLE" ]]; then

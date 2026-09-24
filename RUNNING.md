@@ -299,8 +299,8 @@ docker compose -f infra/rust/compose.yml --env-file infra/rust/.env up -d --wait
 The `init` service runs `fvoci-migrate`, creates the non-superuser
 `FVOCI_APP_ROLE` if missing, then `fvoci-migrate --grant-app-role <role>` with the
 owner `DATABASE_URL`. The stack fails if init exits nonzero; `server` starts only
-after init succeeds. Request handling uses `DATABASE_APP_URL` only (owner URL is for
-migrations/grants). Preserve the `storage` and `pgdata` volumes across restarts.
+after init succeeds. The server receives only `DATABASE_APP_URL`; the owner URL is
+given to the one-shot init service alone. Preserve the `storage` and `pgdata` volumes across restarts.
 
 The server is published on `FVOCI_PUBLISH_ADDR:FVOCI_PUBLISH_PORT` (default
 `127.0.0.1`, loopback only). `FVOCI_PUBLIC_ORIGIN` must be the exact origin browsers
