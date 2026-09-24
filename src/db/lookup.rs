@@ -98,7 +98,7 @@ pub async fn lookup_display_id(
     };
     if !acl.project_ids.contains(&project_id) {
         tx.rollback().await?;
-        return Ok(Err(LookupDbError::NotFound));
+        return Ok(Ok(Vec::new()));
     }
     let member_role: Option<(String,)> = sqlx::query_as(
         r#"
@@ -115,7 +115,7 @@ pub async fn lookup_display_id(
     let permission = effective_permission(role, &visibility, member_role);
     if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
-        return Ok(Err(LookupDbError::NotFound));
+        return Ok(Ok(Vec::new()));
     }
 
     let label = format_display_id(&project_key, number);

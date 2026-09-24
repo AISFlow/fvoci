@@ -8,14 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use fvoci_server::db::collab::{resolve_collab_admission, CollabDbError};
 use fvoci_server::db::{context, migrate};
 use project_harness::{
     add_workspace_user, admin_pool, app_pool, count_rows, create_project, drop_insert_fail_trigger,
-    hold_membership_user_lock, install_insert_fail_trigger, json_request,
-    json_request_with_headers, setup_session, wait_for_advisory_blocked_by,
-    wait_for_blocked_query_count, wait_for_user_for_update_blocked, TestDb,
+    hold_membership_user_lock, http_request, insert_stored_attachment, install_insert_fail_trigger,
+    json_request, json_request_with_headers, session_id_for_user, setup_session,
+    wait_for_advisory_blocked_by, wait_for_blocked_query_count, wait_for_user_for_update_blocked,
+    TestDb,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::Acquire;
 use uuid::Uuid;
 
@@ -1751,7 +1753,7 @@ async fn lookup_deactivated_user_returns_authentication_required() {
 }
 
 #[tokio::test]
-async fn lookup_removed_member_and_private_project_share_not_found_body() {
+async fn lookup_removed_member_and_private_project_share_empty_items() {
     let harness = TestDb::bootstrap().await;
     let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
@@ -1770,7 +1772,9 @@ async fn lookup_removed_member_and_private_project_share_not_found_body() {
     let task_number = task["number"].as_i64().unwrap();
     let root_number = 1i64;
 
-    let (status, removed_body) = json_request(
+    let empty_items = json!({"items": []});
+
+    let (status, invisible_task_body) = json_request(
         app.clone(),
         "GET",
         &format!("/api/v1/workspaces/{workspace_id}/lookup/HID-{task_number}"),
@@ -1778,8 +1782,19 @@ async fn lookup_removed_member_and_private_project_share_not_found_body() {
         Some(&owner_cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(removed_body["code"], "not_found");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(invisible_task_body, empty_items);
+
+    let (status, nonexistent_body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/HID-99999"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(nonexistent_body, invisible_task_body);
 
     let outsider = add_workspace_user(&admin, workspace_id, "guest", "outsider").await;
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
@@ -1798,7 +1813,6 @@ async fn lookup_removed_member_and_private_project_share_not_found_body() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(member_body["code"], "not_found");
-    assert_eq!(member_body, removed_body);
 
     let (status, root_body) = json_request(
         app.clone(),
@@ -1808,9 +1822,8 @@ async fn lookup_removed_member_and_private_project_share_not_found_body() {
         Some(&owner_cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(root_body["code"], "not_found");
-    assert_eq!(root_body, removed_body);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(root_body, invisible_task_body);
 
     admin.close().await;
     harness.cleanup().await;
@@ -1848,6 +1861,414 @@ async fn lookup_rate_limit_returns_retry_after() {
         body["params"]["retryAfter"].as_u64().unwrap().to_string(),
         retry_after
     );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn private_project_cross_path_authorization_links() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+
+    let lead = add_workspace_user(&admin, workspace_id, "member", "lead").await;
+    let hid = create_project(app.clone(), &lead.cookie, workspace_id, "HID", "private").await;
+    let project_id = hid["id"].as_str().unwrap();
+    let root_id = hid["rootDocumentId"].as_str().unwrap();
+    let root_uuid = Uuid::parse_str(root_id).unwrap();
+
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Private task"})),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = task["id"].as_str().unwrap();
+    let task_number = task["number"].as_i64().unwrap();
+
+    let lab_member = add_workspace_user(&admin, workspace_id, "member", "labonly").await;
+    create_project(
+        app.clone(),
+        &lab_member.cookie,
+        workspace_id,
+        "LAB",
+        "workspace",
+    )
+    .await;
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "guest").await;
+
+    let other_workspace = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, 'other', 'Other')")
+        .bind(other_workspace)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let other_ws_user = add_workspace_user(&admin, other_workspace, "member", "foreign").await;
+
+    let attachment_id =
+        insert_stored_attachment(&admin, workspace_id, root_uuid, lead.user_id).await;
+    let lead_session = session_id_for_user(&admin, lead.user_id).await;
+    let empty_lookup = json!({"items": []});
+
+    struct PrivateProjectFixture<'a> {
+        workspace_id: Uuid,
+        project_id: &'a str,
+        root_id: &'a str,
+        task_id: &'a str,
+        task_number: i64,
+        attachment_id: Uuid,
+        empty_lookup: &'a Value,
+    }
+
+    let fixture = PrivateProjectFixture {
+        workspace_id,
+        project_id,
+        root_id,
+        task_id,
+        task_number,
+        attachment_id,
+        empty_lookup: &empty_lookup,
+    };
+
+    async fn assert_member_denied(
+        app: &axum::Router,
+        cookie: &str,
+        fx: &PrivateProjectFixture<'_>,
+    ) {
+        let doc_base = format!(
+            "/api/v1/workspaces/{}/documents/{}",
+            fx.workspace_id, fx.root_id
+        );
+        for path in [
+            doc_base.clone(),
+            format!("{doc_base}/ancestors"),
+            format!("{doc_base}/body"),
+        ] {
+            let (status, _) = json_request(app.clone(), "GET", &path, None, Some(cookie)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "GET {path}");
+        }
+
+        let (status, tree) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/workspaces/{}/tree", fx.workspace_id),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!tree["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"].as_str() == Some(fx.root_id)));
+
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{doc_base}/uploads"),
+            Some(json!({"name":"x.bin","sizeBytes":1})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let att_base = format!(
+            "/api/v1/workspaces/{}/attachments/{}",
+            fx.workspace_id, fx.attachment_id
+        );
+        let fake_attachment = Uuid::now_v7();
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/workspaces/{}/attachments/{}/complete",
+                fx.workspace_id, fake_attachment
+            ),
+            Some(json!({"parts": [{"partNumber": 1, "etag": "x"}]})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = json_request(app.clone(), "GET", &att_base, None, Some(cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let download = format!("{att_base}/download");
+        let (status, _, _) = http_request(
+            app.clone(),
+            "HEAD",
+            &download,
+            None,
+            None,
+            Some(cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _, _) = http_request(
+            app.clone(),
+            "GET",
+            &download,
+            None,
+            None,
+            Some(cookie),
+            &[("range", "bytes=0-0")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{}/tasks/{}",
+                fx.workspace_id, fx.task_id
+            ),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{}/projects/{}/tasks",
+                fx.workspace_id, fx.project_id
+            ),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, projects) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/workspaces/{}/projects", fx.workspace_id),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!projects["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"].as_str() == Some(fx.project_id)));
+
+        let (status, lookup) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{}/lookup/HID-{}",
+                fx.workspace_id, fx.task_number
+            ),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(lookup, *fx.empty_lookup);
+    }
+
+    async fn assert_non_member_denied(
+        app: &axum::Router,
+        cookie: &str,
+        fx: &PrivateProjectFixture<'_>,
+    ) {
+        let get_paths = [
+            format!("/api/v1/workspaces/{}/tree", fx.workspace_id),
+            format!(
+                "/api/v1/workspaces/{}/documents/{}",
+                fx.workspace_id, fx.root_id
+            ),
+            format!(
+                "/api/v1/workspaces/{}/documents/{}/ancestors",
+                fx.workspace_id, fx.root_id
+            ),
+            format!(
+                "/api/v1/workspaces/{}/documents/{}/body",
+                fx.workspace_id, fx.root_id
+            ),
+            format!(
+                "/api/v1/workspaces/{}/attachments/{}",
+                fx.workspace_id, fx.attachment_id
+            ),
+            format!(
+                "/api/v1/workspaces/{}/attachments/{}/download",
+                fx.workspace_id, fx.attachment_id
+            ),
+            format!(
+                "/api/v1/workspaces/{}/tasks/{}",
+                fx.workspace_id, fx.task_id
+            ),
+            format!("/api/v1/workspaces/{}/projects", fx.workspace_id),
+            format!(
+                "/api/v1/workspaces/{}/lookup/HID-{}",
+                fx.workspace_id, fx.task_number
+            ),
+        ];
+        for path in get_paths {
+            let (status, body) = json_request(app.clone(), "GET", &path, None, Some(cookie)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "GET {path}: {body:?}");
+        }
+
+        let doc_uploads = format!(
+            "/api/v1/workspaces/{}/documents/{}/uploads",
+            fx.workspace_id, fx.root_id
+        );
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &doc_uploads,
+            Some(json!({"name":"x.bin","sizeBytes":1})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "POST {doc_uploads}: {body:?}"
+        );
+
+        let fake_attachment = Uuid::now_v7();
+        let complete = format!(
+            "/api/v1/workspaces/{}/attachments/{}/complete",
+            fx.workspace_id, fake_attachment
+        );
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &complete,
+            Some(json!({"parts": [{"partNumber": 1, "etag": "x"}]})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "POST {complete}: {body:?}");
+    }
+
+    async fn assert_unauthenticated(app: &axum::Router, cookie: &str, workspace_id: Uuid) {
+        let (status, body) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/workspaces/{workspace_id}/projects"),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "authentication_required");
+    }
+
+    for cookie in [&owner_cookie, &lab_member.cookie, &guest.cookie] {
+        assert_member_denied(&app, cookie, &fixture).await;
+    }
+
+    assert_non_member_denied(&app, &other_ws_user.cookie, &fixture).await;
+
+    let outsider = add_workspace_user(&admin, workspace_id, "guest", "outsider").await;
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+        .bind(workspace_id)
+        .bind(outsider.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_non_member_denied(&app, &outsider.cookie, &fixture).await;
+
+    for user_id in [lead.user_id, owner_id] {
+        let session_id = if user_id == lead.user_id {
+            lead_session
+        } else {
+            session_id_for_user(&admin, user_id).await
+        };
+        let admission =
+            resolve_collab_admission(&pool, workspace_id, user_id, session_id, root_uuid).await;
+        assert!(
+            matches!(admission, Ok(Err(CollabDbError::NotFound))),
+            "collab admission for {user_id}: {admission:?}"
+        );
+    }
+
+    let (status, detail) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}"),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["id"], task_id);
+
+    let (status, list) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["items"].as_array().unwrap().len(), 1);
+
+    let (status, projects) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects"),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(projects["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"].as_str() == Some(project_id)));
+
+    let (status, lookup) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/HID-{task_number}"),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lookup["items"].as_array().unwrap().len(), 1);
+
+    let doc_base = format!("/api/v1/workspaces/{workspace_id}/documents/{root_id}");
+    for path in [
+        doc_base.clone(),
+        format!("{doc_base}/ancestors"),
+        format!("{doc_base}/body"),
+    ] {
+        let (status, _) = json_request(app.clone(), "GET", &path, None, Some(&lead.cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "lead GET {path}");
+    }
+
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(lead.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_unauthenticated(&app, &lead.cookie, workspace_id).await;
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/HID-{task_number}"),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "authentication_required");
+
+    pool.close().await;
     admin.close().await;
     harness.cleanup().await;
 }

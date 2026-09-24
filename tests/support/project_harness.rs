@@ -169,6 +169,52 @@ fn app_router(state: AppState) -> axum::Router {
     fvoci_server::http::router(state, None)
 }
 
+pub async fn http_request(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    content_type: Option<&str>,
+    cookie: Option<&str>,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, Value, axum::http::HeaderMap) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("origin", "http://localhost");
+    if let Some(cookie) = cookie {
+        builder = builder.header("cookie", format!("fvoci_session={}", cookie));
+    }
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = if let Some(body) = body {
+        let mut builder = builder;
+        if let Some(content_type) = content_type {
+            builder = builder.header("content-type", content_type);
+        }
+        builder.body(Body::from(body)).unwrap()
+    } else {
+        builder.body(Body::empty()).unwrap()
+    };
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default();
+    let json = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(json!({}))
+    };
+    (status, json, headers)
+}
+
 pub async fn json_request(
     app: axum::Router,
     method: &str,
@@ -622,4 +668,40 @@ pub async fn create_project(
 
 pub async fn app_pool(harness: &TestDb) -> PgPool {
     pool::connect_app(&harness.app_url).await.expect("app pool")
+}
+
+pub async fn session_id_for_user(admin: &PgPool, user_id: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "SELECT id FROM fvoci.sessions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_one(admin)
+    .await
+    .expect("session id")
+}
+
+pub async fn insert_stored_attachment(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    uploader_id: Uuid,
+) -> Uuid {
+    let attachment_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.attachments (
+            id, workspace_id, document_id, uploader_id, status, name, reserved_size_bytes,
+            size_bytes, storage_key, completed_at
+        ) VALUES ($1, $2, $3, $4, 'stored', 'probe.bin', 4, 4, $5, now())
+        "#,
+    )
+    .bind(attachment_id)
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(uploader_id)
+    .bind(Uuid::now_v7().to_string())
+    .execute(admin)
+    .await
+    .expect("insert attachment");
+    attachment_id
 }
