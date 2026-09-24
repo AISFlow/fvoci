@@ -21,7 +21,8 @@ async fn app_state() -> AppState {
         .max_connections(1)
         .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/none")
         .expect("lazy pool");
-    let storage_root = std::env::temp_dir().join(format!("fvoci-static-test-{}", uuid::Uuid::now_v7()));
+    let storage_root =
+        std::env::temp_dir().join(format!("fvoci-static-test-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
         auth: Arc::new(AuthService {
