@@ -63,7 +63,7 @@ export FVOCI_E2E_RESULT_DIR="$RUN_DIR"
 if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]]; then
   cd "$ROOT/apps/web"
   "$ROOT/apps/web/node_modules/.bin/playwright" test \
-    --config=e2e-pending/collab-playwright.config.ts
+    --config=e2e-pending/collab-playwright.config.ts "$@"
   exit 0
 fi
 
@@ -91,4 +91,4 @@ fi
 
 cd "$ROOT/apps/web"
 export PLAYWRIGHT_BASE_URL="$BASE_URL"
-"$ROOT/apps/web/node_modules/.bin/playwright" test
+"$ROOT/apps/web/node_modules/.bin/playwright" test "$@"
