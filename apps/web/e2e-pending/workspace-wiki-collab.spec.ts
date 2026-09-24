@@ -1,7 +1,7 @@
 /**
  * Product /collab acceptance for two real FvociEditor clients.
- * Not registered in apps/web/e2e (CI web.yml). Not accepted until the
- * coordinator grants the heavy browser/DB slot. Pending invocation:
+ * Registered separately in the collaboration-flow CI job. Full product
+ * acceptance still requires the recorded security/review gates. Invocation:
  * FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh
  */
 import {
@@ -42,7 +42,8 @@ import {
   workspaceId,
 } from "./collab-helpers";
 
-test.describe.configure({ mode: "serial" });
+// One worker preserves setup order. Scenarios own separate documents/users;
+// a failed scenario must not skip the remaining independent acceptance cases.
 
 test("instance setup then member fixture", async ({ page }) => {
   await ensureInstanceSetup(page);
@@ -196,19 +197,36 @@ test("Korean plus emoji middle insert and delete converge without dropping IDs",
 test("offline typing reconnects with unsent text and without a persist ack", async ({
   page,
   context,
+  collabApp,
 }) => {
+  const wire = attachCollabWire(page);
   await login(page, member.email, member.password);
   const doc = await createWikiDoc(page, "재접속");
   const editor = await openEditor(page, doc.url);
-  await context.setOffline(true);
-  await editor.click();
-  await page.keyboard.type("오프라인에서 쓴 줄");
-  await expect(page.getByText("연결됨 · 저장 대기")).toBeVisible();
-  await expectNotDurablySaved(page);
-  await context.setOffline(false);
+  await collabApp.shutdownGraceful();
+  try {
+    await expect(page.locator('[data-collab-status="connected"]')).toHaveCount(0);
+    await expect(editor).toBeVisible();
+    await editor.focus();
+    await page.keyboard.type("오프라인에서 쓴 줄");
+    await expect(editor).toContainText("오프라인에서 쓴 줄");
+    await expectNotDurablySaved(page);
+    expect(sentPersistRequests(wire)).toEqual([]);
+  } finally {
+    await collabApp.recycle();
+  }
   await waitConnected(page);
   await expect(editor).toContainText("오프라인에서 쓴 줄");
   await expectNotDurablySaved(page);
+  expect(sentPersistRequests(wire)).toEqual([]);
+  const observer = await context.newPage();
+  try {
+    await openEditor(observer, doc.url);
+    await expectTokens(observer, ["오프라인에서 쓴 줄"]);
+    await expectConverged(page, observer);
+  } finally {
+    await observer.close();
+  }
 });
 
 test("archived document stays connected and read-only", async ({ page }) => {
@@ -421,9 +439,11 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     await editorLocator(restoredA).click();
     await placeContentCaret(restoredA, "end");
     await restoredA.keyboard.type("후속A");
-    await editorLocator(restoredB).click();
+    await editorLocator(restoredB).focus();
+    await restoredB.keyboard.press("Control+Home");
     await restoredB.keyboard.press("Enter");
     await restoredB.keyboard.type("후속B");
+    await expectTokens(restoredB, ["후속B"]);
     await expectTokens(restoredA, ["살아남을한글", "후속A", "후속B"]);
     await expectTokens(restoredB, ["살아남을한글", "후속A", "후속B"]);
     await expectConverged(restoredA, restoredB);
@@ -472,7 +492,8 @@ test("two users show presence and drop it when the peer closes", async ({
   browser,
   collabApp,
 }, testInfo) => {
-  installCollabPeer();
+  const presencePeer = { ...peer, email: "collab-presence@example.com" };
+  installCollabPeer(presencePeer);
   const ctxA = await newCollabContext(browser, collabApp.baseUrl);
   const ctxB = await newCollabContext(browser, collabApp.baseUrl);
   const pageA = await ctxA.newPage();
@@ -483,7 +504,7 @@ test("two users show presence and drop it when the peer closes", async ({
     await login(pageA, member.email, member.password);
     const doc = await createWikiDoc(pageA, "프레즌스");
     await openEditor(pageA, doc.url);
-    await login(pageB, peer.email, peer.password);
+    await login(pageB, presencePeer.email, presencePeer.password);
     await openEditor(pageB, doc.url);
     await expect(pageA.getByLabel(/동시 접속 1명/)).toBeVisible({ timeout: 15_000 });
     await expect(pageB.getByLabel(/동시 접속 1명/)).toBeVisible();

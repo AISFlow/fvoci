@@ -185,6 +185,10 @@ export class OwnedServer {
       throw new Error("cannot restart before the owned server has bound a port");
     }
     const bind = this.bind;
+    const members = this.observeOwnedMembers();
+    if (!members.some((member) => member.comm === "collab-engine")) {
+      throw new Error("process-tree crash requires an observed live collaboration helper");
+    }
     await this.killGroupObserved();
     await this.spawnAt(bind, bind);
   }

@@ -146,9 +146,9 @@ export function installCollabMember(): void {
   });
 }
 
-export function installCollabPeer(): void {
-  createE2eUser(peer.email, peer.password, peer.givenName, {
-    familyName: peer.familyName,
+export function installCollabPeer(user = peer): void {
+  createE2eUser(user.email, user.password, user.givenName, {
+    familyName: user.familyName,
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "member",
   });
