@@ -183,3 +183,10 @@ scripts/run-web-e2e.sh
 The UI reuses source auth/workspace/settings styling for setup, login, workspace
 list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,
 import/export, and deletion surfaces are shown as unavailable rather than faked.
+
+
+문서 추출 클라이언트는 `crates/document-extract-client`에서 parser 의존성 없이
+빌드·검사한다 (`cargo test --locked --offline --all-targets`). 실제 추출 실행은
+별도 `document-extract` native helper가 필요하며 클라이언트만으로 지원 완료가 아니다.
+협업 Live actor의 비정상 완료를 복구했더라도 해당 hub의 수명 동안 실패 기록이
+유지되어 이후 정상 종료 요청의 프로세스 exit가 non-zero가 될 수 있다.

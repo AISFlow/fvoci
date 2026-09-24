@@ -1,0 +1,26 @@
+[package]
+name = "document-extract-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Killable native extract process client and canonical outcome/limits/revision types"
+
+# Revision constants in src/lib.rs are authoritative for ExtractReport.
+# Parser-side fetch-rhwp.sh still verifies origin/HEAD/clean from
+# crates/document-extract Cargo.toml metadata; keep these values identical.
+[package.metadata.document-extract]
+rhwp_repo = "https://github.com/edwardkim/rhwp"
+rhwp_rev = "e8800c8def63449808a4092798442652ed460552"
+rhwp_license = "MIT"
+
+[features]
+default = []
+# Compiles spawn tracing used by the parent helper's `--test-hang-ms` tests.
+# Production builds omit it; this crate never compiles hang flags into a helper.
+test-hang = []
+
+[dependencies]
+libc = { version = "=0.2.189", default-features = false }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"

@@ -10,12 +10,13 @@
 ## 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
-최신 main `ba19932b03a98a69b24479e33ade68946b5bbd47`은 PR1–6의 수락 결과다.
-PR7은 Draft/미병합이며 협업 제품 경로의 결함 보강·독립 검토 중이다.
-최신 원격 검사 HEAD는 `e232b876cb7cac82f382a40496fa99fa58ab4d9c`:
-4 workflow 성공, 양 아키텍처 협업50+파생본문14·DB/native·실제React13/협업14 실행.
-접속 취소/종료 수명주기 수정은 별도worktree에서 미수락이다. 활성 작업과
-검토 잔여사항은 문서 끝의 최신 기록을 따른다. 전체 협업은 아직 수락되지 않았다.
+최신 main `9c39532a0c3be57b60b93bade633219b5991d2c4`는 PR1–7의 수락 결과다.
+PR7 https://github.com/AISFlow/fvoci/pull/7 은 검토 HEAD04f67ae,
+CI 합성merge5a8d0aa(baseba19932)에서11job 성공 후 squash merge했다.
+실제 merged/main 반영을 확인했으며 post-merge CI는 진행 중이다.
+협업은 검증된 opt-in 범위만 수락했다. 실제 OS IME, 과거 단발 브라우저 timeout의
+원인 및 전체 제품 동등성은 미완료다. 다음은 기존 wiki의 인가된 첨부 흐름이다.
+
 
 | 기능 | 원본 근거 | 보존할 외부 동작·불변식 | 새 구현 | 검증 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
@@ -23,7 +24,7 @@ PR7은 Draft/미병합이며 협업 제품 경로의 결함 보강·독립 검�
 | 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락, PR4 merged | 실제 앱 역할DB66·양 아키텍처·React·CI·독립 검토 | counts·quota·groups·members-list 등 |
 | HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component 수락, PR2 merged | 실제 문서/native52+52·CI·독립 검토 | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
 | 기본 위키 문서 | domains/documents | 생성·조회·metadata·현재 문서 권한 | 첫 backend/React 수락, PR5 merged | 실제 앱 역할DB13·UI·CI·독립 검토 | 댓글·공유·리비전·확장 문서 기능 |
-| 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 부분 구현 | 실제2UI14개 회귀·새 프로세스 복원 등 실행; 최신 수정은 재검증 중 | 종료/재접속 수명주기·파생 본문 실패 경계 차단 지적 해결 전. 명시적 opt-in이며 전체 협업 수락 아님 |
+| 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 opt-in 수락 | x64/ARM64 lifecycle20/product56/projection19/shutdown7·React14·Opus 검토 | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계 추가 검증, 과거 단발 timeout 원인 미확정. 명시적 opt-in이며 전체 협업 수락 아님 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
@@ -1532,3 +1533,27 @@ Grok task35941578aad5/ctxde9b76aa5f60은 main ba19932의 별도
 rust-attachment-native-client에서 얇은 추출 process client를 구현 중이다.
 단독 소유는 crates/document-extract-client 및 필요한 기존 native crate 경계이며,
 root manifest/CI/서버/프론트는 제외한다. 첨부 제품 연결 완료가 아니다.
+
+
+PR7 수락: Opus task3efe827d22ae/ctx5b2f005f63d0의04f67ae delta 검토 차단0,
+reviewer는 테스트를 실행하지 않았다. Rust35972961448/Web35972961453/
+Documents35972961442/Engine35972961480 총11job 성공을 직접 확인했다.
+x64/ARM64 PG30/66/13, lifecycle20/product56/projection19/shutdown7 및 native
+admission1, fast50/bin5/wire11, React13/14 실제 실행. native admission log의
+중복 grep 출력은 두 번 실행한 증거가 아니다. merger9c39532, auto-merge 사용 안 함.
+비차단 권고: Live로 공개된 actor의 과거 복구된 panic도 hub 수명 counter에 남아
+나중 종료를 non-zero로 만든다. publish 전 startup 종료는 이 집계 밖이다.
+shutdown witness는 해당 hub drain 진입·회수 완료 전 반환 금지의 증거이며 특정
+await만의 차단 증거가 아니다. static snapshot의 build→copy 구간까지 격리되지는
+않으므로 같은 worktree의 무거운 검증은 하나로 유지한다.
+
+다음 native client 경계: Grok70de2d3 제출을 main9c39532와 통합했다.
+crates/document-extract-client는 canonical limits/outcome 및 killable process
+호출만 포함하며 rhwp/CFB/ZIP graph가 없다. worker client6개 및 production49/
+test-hang49 실제 성공. 이전 native52개 중 child-IO3개는 client로 이동했고 신규
+client3개를 더했다. 기존 native parser/revision·fixture·보안 경계는 변경하지 않았다.
+CI에 client 정적/실행/graph 검사와 해당 source를 포함한 캐시 키를 추가한다.
+독립 검토/원격 수락 전이며 첨부 HTTP 연결 완료가 아니다.
+Composer task3a54b691e844/ctx1ebeaac1d3ac는 rust-wiki-attachments의 backend,
+migration006/공통 연결 파일을 단독 소유한다. native/client와 frontend/CI는 제외.
+Grok은 release, target/vendor는 보존. Composer가 로컬 heavy slot을 이어받았다.
