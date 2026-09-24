@@ -11,9 +11,9 @@ use axum::http::StatusCode;
 use fvoci_server::db::{context, migrate};
 use project_harness::{
     add_workspace_user, admin_pool, app_pool, count_rows, create_project, drop_insert_fail_trigger,
-    hold_membership_user_lock, install_insert_fail_trigger, json_request, setup_session,
-    wait_for_advisory_blocked_by, wait_for_blocked_query_count, wait_for_project_lock_waiters,
-    wait_for_user_for_update_blocked, TestDb,
+    hold_membership_user_lock, install_insert_fail_trigger, json_request,
+    json_request_with_headers, setup_session, wait_for_advisory_blocked_by,
+    wait_for_blocked_query_count, wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
 use sqlx::Acquire;
@@ -1368,18 +1368,6 @@ async fn run_patch_private_vs_workspace_remove_project_lock_race(
     let project_path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}");
     let remove_path = format!("/api/v1/workspaces/{workspace_id}/members/{}", lead.user_id);
 
-    let mut barrier = admin.begin().await.unwrap();
-    sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
-        .bind(workspace_id)
-        .bind(project_id)
-        .fetch_one(&mut *barrier)
-        .await
-        .unwrap();
-    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *barrier)
-        .await
-        .unwrap();
-
     let patch_app = app.clone();
     let patch_cookie = ws_admin.cookie.clone();
     let patch_path = project_path.clone();
@@ -1387,7 +1375,19 @@ async fn run_patch_private_vs_workspace_remove_project_lock_race(
     let remove_cookie = owner_cookie.clone();
     let remove_member_path = remove_path.clone();
 
-    let (patch, remove) = if patch_first {
+    let (patch, remove, barrier) = if patch_first {
+        let mut barrier = admin.begin().await.unwrap();
+        hold_membership_user_lock(&mut barrier, lead.user_id).await;
+        sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+            .bind(workspace_id)
+            .bind(project_id)
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
         let patch = tokio::spawn(async move {
             json_request(
                 patch_app,
@@ -1409,8 +1409,8 @@ async fn run_patch_private_vs_workspace_remove_project_lock_race(
             )
             .await
         });
-        wait_for_project_lock_waiters(&admin, 2).await;
-        (patch, remove)
+        wait_for_advisory_blocked_by(&admin, blocker_pid).await;
+        (patch, remove, barrier)
     } else {
         let remove = tokio::spawn(async move {
             json_request(
@@ -1422,7 +1422,32 @@ async fn run_patch_private_vs_workspace_remove_project_lock_race(
             )
             .await
         });
-        wait_for_blocked_query_count(&admin, blocker_pid, "%fvoci.projects%", 1).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let remaining: (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
+            )
+            .bind(workspace_id)
+            .bind(lead.user_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+            if remaining.0 == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let mut barrier = admin.begin().await.unwrap();
+        sqlx::query("SELECT id FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+            .bind(workspace_id)
+            .bind(project_id)
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
         let patch = tokio::spawn(async move {
             json_request(
                 patch_app,
@@ -1433,8 +1458,8 @@ async fn run_patch_private_vs_workspace_remove_project_lock_race(
             )
             .await
         });
-        wait_for_project_lock_waiters(&admin, 2).await;
-        (patch, remove)
+        wait_for_blocked_query_count(&admin, blocker_pid, "%fvoci.projects%", 1).await;
+        (patch, remove, barrier)
     };
 
     barrier.commit().await.unwrap();
@@ -1609,6 +1634,220 @@ async fn contract_display_id_lookup_respects_acl() {
     assert_eq!(status, StatusCode::OK);
     assert!(lookup["items"].as_array().unwrap().is_empty());
 
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn lookup_revoked_session_returns_authentication_required() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &owner_cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Lookup target"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_number = task["number"].as_i64().unwrap();
+    let owner_id: (Uuid,) = sqlx::query_as("SELECT id FROM fvoci.users LIMIT 1")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(owner_id.0)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, body) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/LAB-{task_number}"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "authentication_required");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn lookup_suspended_user_returns_authentication_required() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Suspended lookup"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_number = task["number"].as_i64().unwrap();
+    sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, body) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/LAB-{task_number}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "authentication_required");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn lookup_deactivated_user_returns_authentication_required() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Deactivated lookup"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_number = task["number"].as_i64().unwrap();
+    sqlx::query("UPDATE fvoci.users SET deleted_at = now() WHERE id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, body) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/LAB-{task_number}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "authentication_required");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn lookup_removed_member_and_private_project_share_not_found_body() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
+    let hid = create_project(app.clone(), &member.cookie, workspace_id, "HID", "private").await;
+    let project_id = hid["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Hidden task"})),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_number = task["number"].as_i64().unwrap();
+    let root_number = 1i64;
+
+    let (status, removed_body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/HID-{task_number}"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(removed_body["code"], "not_found");
+
+    let outsider = add_workspace_user(&admin, workspace_id, "guest", "outsider").await;
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+        .bind(workspace_id)
+        .bind(outsider.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, member_body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/HID-{task_number}"),
+        None,
+        Some(&outsider.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(member_body["code"], "not_found");
+    assert_eq!(member_body, removed_body);
+
+    let (status, root_body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/lookup/HID-{root_number}"),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(root_body["code"], "not_found");
+    assert_eq!(root_body, removed_body);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn lookup_rate_limit_returns_retry_after() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title":"Rate limit probe"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_number = task["number"].as_i64().unwrap();
+    let path = format!("/api/v1/workspaces/{workspace_id}/lookup/LAB-{task_number}");
+    for _ in 0..60 {
+        let (status, _) = json_request(app.clone(), "GET", &path, None, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, body, headers) =
+        json_request_with_headers(app, "GET", &path, None, Some(&cookie)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["code"], "rate_limit_exceeded");
+    assert!(body["params"]["retryAfter"].is_number());
+    let retry_after = headers.get("retry-after").unwrap().to_str().unwrap();
+    assert_eq!(
+        body["params"]["retryAfter"].as_u64().unwrap().to_string(),
+        retry_after
+    );
     admin.close().await;
     harness.cleanup().await;
 }

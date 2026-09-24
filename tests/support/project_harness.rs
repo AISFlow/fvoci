@@ -176,6 +176,17 @@ pub async fn json_request(
     body: Option<Value>,
     cookie: Option<&str>,
 ) -> (StatusCode, Value) {
+    let (status, json, _) = json_request_with_headers(app, method, path, body, cookie).await;
+    (status, json)
+}
+
+pub async fn json_request_with_headers(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    cookie: Option<&str>,
+) -> (StatusCode, Value, axum::http::HeaderMap) {
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
@@ -197,6 +208,7 @@ pub async fn json_request(
         .insert(axum::extract::ConnectInfo(test_peer()));
     let response = app.oneshot(request).await.expect("response");
     let status = response.status();
+    let headers = response.headers().clone();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap_or_default();
@@ -205,7 +217,7 @@ pub async fn json_request(
     } else {
         serde_json::from_slice(&bytes).unwrap_or(json!({}))
     };
-    (status, json)
+    (status, json, headers)
 }
 
 fn extract_session_cookie(set_cookie: &str) -> String {
@@ -427,7 +439,8 @@ pub async fn wait_for_user_for_update_blocked(admin: &PgPool, blocker_pid: i32) 
             r#"
             SELECT activity.pid
             FROM pg_stat_activity AS activity
-            WHERE activity.wait_event_type = 'Lock'
+            WHERE activity.datname = current_database()
+              AND activity.wait_event_type = 'Lock'
               AND activity.state = 'active'
               AND activity.query ILIKE '%fvoci.users%'
               AND activity.query ILIKE '%FOR UPDATE%'
@@ -477,7 +490,8 @@ pub async fn wait_for_blocked_by_holder(
                 r#"
                 SELECT activity.pid
                 FROM pg_stat_activity AS activity
-                WHERE activity.wait_event_type = 'Lock'
+                WHERE activity.datname = current_database()
+                  AND activity.wait_event_type = 'Lock'
                   AND activity.state = 'active'
                   AND activity.query ILIKE $2
                   AND $1 = ANY(pg_blocking_pids(activity.pid))
@@ -494,7 +508,8 @@ pub async fn wait_for_blocked_by_holder(
                 r#"
                 SELECT activity.pid
                 FROM pg_stat_activity AS activity
-                WHERE activity.wait_event_type = 'Lock'
+                WHERE activity.datname = current_database()
+                  AND activity.wait_event_type = 'Lock'
                   AND activity.state = 'active'
                   AND $1 = ANY(pg_blocking_pids(activity.pid))
                 ORDER BY activity.pid
@@ -514,18 +529,51 @@ pub async fn wait_for_blocked_by_holder(
     panic!("expected at least {expected} blocked queries matching {detail}");
 }
 
-pub async fn wait_for_project_lock_waiters(admin: &PgPool, expected: usize) {
+pub async fn wait_for_active_query_count(admin: &PgPool, query_like: &str, expected: usize) {
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(admin)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let active: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM pg_stat_activity AS activity
+            WHERE activity.datname = current_database()
+              AND activity.pid <> $1
+              AND activity.state = 'active'
+              AND activity.query ILIKE $2
+            "#,
+        )
+        .bind(blocker_pid)
+        .bind(query_like)
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        if active >= expected as i64 {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("expected at least {expected} active queries matching {query_like}");
+}
+
+pub async fn wait_for_project_lock_waiters(admin: &PgPool, blocker_pid: i32, expected: usize) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         let waiting: i64 = sqlx::query_scalar(
             r#"
             SELECT count(*)
             FROM pg_stat_activity AS activity
-            WHERE activity.wait_event_type = 'Lock'
+            WHERE activity.datname = current_database()
+              AND activity.wait_event_type = 'Lock'
               AND activity.state = 'active'
               AND activity.query ILIKE '%fvoci.projects%'
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
             "#,
         )
+        .bind(blocker_pid)
         .fetch_one(admin)
         .await
         .unwrap();
@@ -534,7 +582,7 @@ pub async fn wait_for_project_lock_waiters(admin: &PgPool, expected: usize) {
         }
         tokio::task::yield_now().await;
     }
-    panic!("expected at least {expected} active project-lock waiters");
+    panic!("expected at least {expected} active project-lock waiters blocked by pid {blocker_pid}");
 }
 
 pub async fn wait_for_advisory_blocked_by(admin: &PgPool, blocker_pid: i32) -> i32 {

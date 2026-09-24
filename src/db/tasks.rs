@@ -671,7 +671,9 @@ pub async fn list_project_tasks(
         return Ok(Err(ProjectDbError::NotFound));
     }
 
-    let (mut conditions, mut binds) = task_list_filter_conditions(query);
+    let (base_conditions, base_binds) = task_list_filter_conditions(query);
+    let mut conditions = base_conditions.clone();
+    let mut binds = base_binds.clone();
     let sort = effective_sort(&query.view.sort);
     if let Some(cursor) = &query.cursor {
         let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(
@@ -727,7 +729,8 @@ pub async fn list_project_tasks(
         binds.push(id.to_string());
     }
 
-    let where_sql = conditions.join(" AND ");
+    let list_where_sql = conditions.join(" AND ");
+    let count_where_sql = base_conditions.join(" AND ");
     let order_sql = order_clause(&sort);
     let limit = query.limit + 1;
     let list_sql = format!(
@@ -737,7 +740,7 @@ pub async fn list_project_tasks(
                t.sort_key, t.schema_version, t.version, t.archived_at, t.created_by, t.created_at,
                t.updated_at, t.recurrence
         FROM fvoci.tasks t
-        WHERE {where_sql}
+        WHERE {list_where_sql}
         ORDER BY {order_sql}
         LIMIT {limit}
         "#
@@ -752,14 +755,14 @@ pub async fn list_project_tasks(
         r#"
         SELECT t.status_id, count(*)
         FROM fvoci.tasks t
-        WHERE {where_sql}
+        WHERE {count_where_sql}
         GROUP BY t.status_id
         "#
     );
     let mut count_query = sqlx::query_as::<_, (Uuid, i64)>(&count_sql)
         .bind(workspace_id)
         .bind(project_id);
-    for value in &binds {
+    for value in &base_binds {
         count_query = count_query.bind(value);
     }
     let status_counts = count_query.fetch_all(&mut *tx).await?;

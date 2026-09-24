@@ -87,7 +87,10 @@ async fn lookup_display_id_route(
                 })
                 .collect(),
         })),
-        Err(LookupDbError::NotFound) | Err(LookupDbError::Forbidden) => Err(map_project_error(
+        Err(LookupDbError::Forbidden) => {
+            Err(AppError::from_code(ProblemCode::AuthenticationRequired))
+        }
+        Err(LookupDbError::NotFound) => Err(map_project_error(
             crate::db::projects::ProjectDbError::NotFound,
         )),
     }
