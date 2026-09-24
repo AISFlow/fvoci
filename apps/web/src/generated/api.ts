@@ -308,6 +308,118 @@ export interface paths {
         patch: operations["patch_member"];
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_projects"];
+        put?: never;
+        post: operations["create_project"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_project"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["patch_project"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_project_members"];
+        put?: never;
+        post: operations["add_project_member"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/members/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_project_member"];
+        options?: never;
+        head?: never;
+        patch: operations["patch_project_member"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_tasks"];
+        put?: never;
+        post: operations["create_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/workflow": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_project_workflow"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_task"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tree": {
         parameters: {
             query?: never;
@@ -328,6 +440,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AddProjectMemberBody: {
+            role: string;
+            /** Format: uuid */
+            userId: string;
+        };
         AncestorResponse: {
             icon: string | null;
             id: string;
@@ -404,6 +521,31 @@ export interface components {
             parentId: string | null;
             title: string;
         };
+        CreateProjectBody: {
+            description?: string | null;
+            icon?: string | null;
+            key: string;
+            /** Format: uuid */
+            leadUserId?: string | null;
+            name: string;
+            visibility: string;
+        };
+        CreateTaskBody: {
+            /** Format: date */
+            dueDate?: string | null;
+            /** Format: uuid */
+            milestoneId?: string | null;
+            /** Format: uuid */
+            parentId?: string | null;
+            priority?: string;
+            recurrence?: unknown;
+            /** Format: date */
+            startDate?: string | null;
+            /** Format: uuid */
+            statusId?: string | null;
+            title: string;
+            type?: string;
+        };
         CreateWorkspaceBody: {
             name: string;
             slug: string;
@@ -471,6 +613,14 @@ export interface components {
             /** Format: int32 */
             weekStartsOn?: number;
         };
+        PatchProjectBody: {
+            description?: string | null;
+            icon?: string | null;
+            /** Format: uuid */
+            leadUserId?: string | null;
+            name?: string | null;
+            visibility?: string | null;
+        };
         PatchWorkspaceBody: {
             name: string;
         };
@@ -479,6 +629,48 @@ export interface components {
             params?: unknown;
             source?: string | null;
             title: string;
+        };
+        ProjectListItemOutput: {
+            /** Format: date-time */
+            createdAt: string;
+            createdBy: string;
+            description: string | null;
+            icon: string | null;
+            id: string;
+            key: string;
+            name: string;
+            /** Format: int64 */
+            openTaskCount: number;
+            rootDocumentId: string;
+            status: string;
+            /** Format: int64 */
+            taskCount: number;
+            /** Format: date-time */
+            updatedAt: string;
+            visibility: string;
+            workspaceId: string;
+        };
+        ProjectListResponse: {
+            items: components["schemas"]["ProjectListItemOutput"][];
+        };
+        ProjectMembersResponse: {
+            items: components["schemas"]["MemberResponse"][];
+        };
+        ProjectOutput: {
+            /** Format: date-time */
+            createdAt: string;
+            createdBy: string;
+            description: string | null;
+            icon: string | null;
+            id: string;
+            key: string;
+            name: string;
+            rootDocumentId: string;
+            status: string;
+            /** Format: date-time */
+            updatedAt: string;
+            visibility: string;
+            workspaceId: string;
         };
         PutAttachmentPartResponse: {
             etag: string;
@@ -523,6 +715,69 @@ export interface components {
             branding: components["schemas"]["BrandingOutput"];
             needed: boolean;
         };
+        TaskChildOutput: {
+            id: string;
+            /** Format: int32 */
+            number: number;
+            statusId: string;
+            title: string;
+            type: string;
+        };
+        TaskChildProgressOutput: {
+            /** Format: int64 */
+            done: number;
+            /** Format: int64 */
+            total: number;
+        };
+        TaskListResponse: {
+            items: components["schemas"]["TaskMetaOutput"][];
+        };
+        TaskMetaOutput: {
+            /** Format: date-time */
+            archivedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            createdBy: string;
+            /** Format: date-time */
+            dueAt: string | null;
+            /** Format: date */
+            dueDate: string | null;
+            /** Format: double */
+            estimate: number | null;
+            id: string;
+            milestoneId: string | null;
+            /** Format: int32 */
+            number: number;
+            parentId: string | null;
+            priority: string;
+            projectId: string;
+            recurrence: unknown;
+            /** Format: date */
+            startDate: string | null;
+            statusId: string;
+            title: string;
+            type: string;
+            /** Format: date-time */
+            updatedAt: string;
+            workspaceId: string;
+        };
+        TaskOutput: components["schemas"]["TaskMetaOutput"] & {
+            assigneeIds: string[];
+            canEdit: boolean;
+            childProgress: components["schemas"]["TaskChildProgressOutput"] | null;
+            children: components["schemas"]["TaskChildOutput"][];
+            contentJson: unknown;
+            dependencies: unknown[];
+            labelIds: string[];
+            parent: components["schemas"]["TaskParentOutput"] | null;
+        };
+        TaskParentOutput: {
+            id: string;
+            /** Format: int32 */
+            number: number;
+            title: string;
+            type: string;
+        };
         TreeNodeResponse: {
             icon: string | null;
             id: string;
@@ -538,6 +793,17 @@ export interface components {
         };
         TreeResponse: {
             items: components["schemas"]["TreeNodeResponse"][];
+        };
+        WorkflowOutput: {
+            id: string;
+            projectId: string;
+            statuses: components["schemas"]["WorkflowStatusOutput"][];
+        };
+        WorkflowStatusOutput: {
+            category: string;
+            id: string;
+            name: string;
+            sortKey: string;
         };
         WorkspaceListItemResponse: {
             /** Format: int32 */
@@ -1596,6 +1862,506 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MemberResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_projects: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Projects visible to caller */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectListResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    create_project: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProjectBody"];
+            };
+        };
+        responses: {
+            /** @description Created project */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Key taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    get_project: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectOutput"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    patch_project: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchProjectBody"];
+            };
+        };
+        responses: {
+            /** @description Updated project */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectOutput"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Lead invariant violated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_project_members: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project members */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectMembersResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    add_project_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddProjectMemberBody"];
+            };
+        };
+        responses: {
+            /** @description Added member */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemberResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Lead invariant violated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    delete_project_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+                /** @description Member user id */
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed member */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Lead invariant violated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    patch_project_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+                /** @description Member user id */
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemberRoleBody"];
+            };
+        };
+        responses: {
+            /** @description Updated member */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemberResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Lead invariant violated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_tasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project tasks */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskListResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    create_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTaskBody"];
+            };
+        };
+        responses: {
+            /** @description Created task */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskMetaOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    get_project_workflow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project workflow */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowOutput"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    get_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskOutput"];
                 };
             };
             /** @description Not found or forbidden */

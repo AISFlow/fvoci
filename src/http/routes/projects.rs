@@ -4,10 +4,10 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use serde_json::{json, Value};
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::api::dto::{
@@ -25,9 +25,7 @@ use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::guard::{check_origin, reject_bearer};
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
-use crate::projects::{
-    name_is_valid, normalize_project_key, ProjectKeyError, ProjectMemberRole,
-};
+use crate::projects::{name_is_valid, normalize_project_key, ProjectKeyError, ProjectMemberRole};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -92,11 +90,9 @@ async fn create_project_route(
     .await
     .map_err(internal)?;
     match result {
-        Ok(project) => Ok((
-            StatusCode::CREATED,
-            Json(project_output(project, false)),
-        )
-            .into_response()),
+        Ok(project) => {
+            Ok((StatusCode::CREATED, Json(project_output(project, false))).into_response())
+        }
         Err(err) => Err(map_project_error(err)),
     }
 }
@@ -110,14 +106,9 @@ async fn list_projects_route(
     reject_bearer(&headers)?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
-    let result = list_projects(
-        &state.auth.db.pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-    )
-    .await
-    .map_err(internal)?;
+    let result = list_projects(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
+        .await
+        .map_err(internal)?;
     match result {
         Ok(items) => Ok(Json(ProjectListResponse {
             items: items
@@ -196,10 +187,7 @@ async fn patch_project_route(
     let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
-    let description = body
-        .description
-        .as_ref()
-        .map(|value| value.as_deref());
+    let description = body.description.as_ref().map(|value| value.as_deref());
     let icon = body.icon.as_ref().map(|value| value.as_deref());
     let result = update_project(
         &state.auth.db.pool,
@@ -393,10 +381,7 @@ async fn get_workflow(
     }
 }
 
-fn project_output(
-    project: crate::db::projects::ProjectRow,
-    include_counts: bool,
-) -> ProjectOutput {
+fn project_output(project: crate::db::projects::ProjectRow, include_counts: bool) -> ProjectOutput {
     let _ = include_counts;
     ProjectOutput {
         id: project.id.to_string(),

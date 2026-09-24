@@ -249,3 +249,235 @@ pub async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid, Uui
     admin.close().await;
     (app, cookie, user_id.0, workspace_id.0)
 }
+
+pub async fn admin_pool(harness: &TestDb) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin pool")
+}
+
+pub struct TestUser {
+    pub user_id: Uuid,
+    pub cookie: String,
+}
+
+pub async fn add_workspace_user(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    role: &str,
+    label: &str,
+) -> TestUser {
+    let user_id = Uuid::now_v7();
+    let email = format!("{label}-{user_id}@example.com");
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(&email)
+        .bind(label)
+        .execute(admin)
+        .await
+        .expect("insert user");
+    sqlx::query("INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, $3)")
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(role)
+        .execute(admin)
+        .await
+        .expect("insert membership");
+    let token = fvoci_server::auth::token::new_token();
+    sqlx::query(
+        "INSERT INTO fvoci.sessions (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, now() + interval '1 hour')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(user_id)
+    .bind(&token.hash)
+    .execute(admin)
+    .await
+    .expect("insert session");
+    TestUser {
+        user_id,
+        cookie: token.token,
+    }
+}
+
+pub async fn insert_minimal_project(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    key: &str,
+    created_by: Uuid,
+    visibility: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.projects (
+            id, workspace_id, key, name, visibility, status, next_number, created_by
+        ) VALUES ($1, $2, $3, $4, $5, 'active', 1, $6)
+        "#,
+    )
+    .bind(project_id)
+    .bind(workspace_id)
+    .bind(key)
+    .bind(key)
+    .bind(visibility)
+    .bind(created_by)
+    .execute(admin)
+    .await
+    .expect("insert project");
+}
+
+pub async fn insert_project_document(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    document_id: Uuid,
+    created_by: Uuid,
+    number: i32,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, project_id, number, status,
+            schema_version, content_json, created_by
+        ) VALUES (
+            $1, $2, 'Project doc', $3, NULL, 'V', $4, $5, 'published', 2, '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, $6
+        )
+        "#,
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(document_id.simple().to_string())
+    .bind(project_id)
+    .bind(number)
+    .bind(created_by)
+    .execute(admin)
+    .await
+    .expect("insert project document");
+}
+
+pub async fn count_rows(admin: &PgPool, table: &str) -> i64 {
+    let sql = format!("SELECT count(*) FROM fvoci.{table}");
+    sqlx::query_scalar::<_, i64>(&sql)
+        .fetch_one(admin)
+        .await
+        .unwrap_or(0)
+}
+
+pub async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
+    sqlx::query(&format!(
+        r#"
+        CREATE OR REPLACE FUNCTION fvoci.{fn_name}()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'insert blocked on {target}';
+        END;
+        $$;
+        "#
+    ))
+    .execute(admin)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        r#"
+        CREATE TRIGGER fvoci_{fn_name}
+        BEFORE INSERT ON fvoci.{target}
+        FOR EACH ROW EXECUTE FUNCTION fvoci.{fn_name}()
+        "#
+    ))
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+pub async fn drop_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
+    let _ = sqlx::query(&format!(
+        "DROP TRIGGER IF EXISTS fvoci_{fn_name} ON fvoci.{target}"
+    ))
+    .execute(admin)
+    .await;
+    let _ = sqlx::query(&format!("DROP FUNCTION IF EXISTS fvoci.{fn_name}()"))
+        .execute(admin)
+        .await;
+}
+
+pub async fn wait_for_user_for_update_blocked(admin: &PgPool, blocker_pid: i32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let blocked: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT activity.pid
+            FROM pg_stat_activity AS activity
+            WHERE activity.wait_event_type = 'Lock'
+              AND activity.state = 'active'
+              AND activity.query ILIKE '%fvoci.users%'
+              AND activity.query ILIKE '%FOR UPDATE%'
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
+            LIMIT 1
+            "#,
+        )
+        .bind(blocker_pid)
+        .fetch_optional(admin)
+        .await
+        .unwrap();
+        if blocked.is_some() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("expected FOR UPDATE block on users row");
+}
+
+pub async fn wait_for_query_blocked_by(admin: &PgPool, blocker_pid: i32, query_like: &str) -> i32 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let blocked: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT activity.pid
+            FROM pg_stat_activity AS activity
+            WHERE activity.wait_event_type = 'Lock'
+              AND activity.state = 'active'
+              AND activity.query ILIKE $2
+              AND $1 = ANY(pg_blocking_pids(activity.pid))
+            LIMIT 1
+            "#,
+        )
+        .bind(blocker_pid)
+        .bind(query_like)
+        .fetch_optional(admin)
+        .await
+        .unwrap();
+        if let Some(pid) = blocked {
+            return pid;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("expected blocked query matching {query_like}");
+}
+
+pub async fn wait_for_advisory_blocked_by(admin: &PgPool, blocker_pid: i32) -> i32 {
+    wait_for_query_blocked_by(admin, blocker_pid, "%pg_advisory_xact_lock%").await
+}
+
+pub async fn create_project(
+    app: axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    key: &str,
+    visibility: &str,
+) -> Value {
+    let (status, body) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects"),
+        Some(json!({"key": key, "name": key, "visibility": visibility})),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    body
+}
+
+pub async fn app_pool(harness: &TestDb) -> PgPool {
+    pool::connect_app(&harness.app_url).await.expect("app pool")
+}

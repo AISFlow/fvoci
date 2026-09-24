@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -219,19 +221,22 @@ pub(crate) async fn lock_project(
     workspace_id: Uuid,
     project_id: Uuid,
 ) -> Result<Option<LockedProject>, sqlx::Error> {
-    let row = sqlx::query_as::<_, (
-        Uuid,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<Uuid>,
-        String,
-        Uuid,
-        DateTime<Utc>,
-        DateTime<Utc>,
-    )>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<Uuid>,
+            String,
+            Uuid,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ),
+    >(
         r#"
         SELECT id, key, name, description, icon, visibility, root_document_id, status,
                created_by, created_at, updated_at
@@ -282,8 +287,7 @@ pub(crate) async fn project_permission(
     let workspace_role = membership_role(tx, workspace_id, actor_user_id)
         .await?
         .unwrap_or(WorkspaceRole::Guest);
-    let member_role =
-        project_member_role(tx, workspace_id, project.id, actor_user_id).await?;
+    let member_role = project_member_role(tx, workspace_id, project.id, actor_user_id).await?;
     Ok(effective_permission(
         workspace_role,
         &project.visibility,
@@ -402,8 +406,7 @@ pub(crate) async fn workspace_removal_blocked_by_private_leads(
     .fetch_all(&mut **tx)
     .await?;
     for (project_id,) in project_ids {
-        if count_project_leads_excluding(tx, workspace_id, project_id, target_user_id).await? == 0
-        {
+        if count_project_leads_excluding(tx, workspace_id, project_id, target_user_id).await? == 0 {
             return Ok(true);
         }
     }
@@ -597,19 +600,22 @@ pub async fn create_project(
     )
     .await?;
 
-    let row = sqlx::query_as::<_, (
-        Uuid,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<Uuid>,
-        String,
-        Uuid,
-        DateTime<Utc>,
-        DateTime<Utc>,
-    )>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<Uuid>,
+            String,
+            Uuid,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ),
+    >(
         r#"
         SELECT id, key, name, description, icon, visibility, root_document_id, status,
                created_by, created_at, updated_at
@@ -665,19 +671,22 @@ pub async fn list_projects(
     };
 
     let guest = workspace_role == WorkspaceRole::Guest;
-    let rows = sqlx::query_as::<_, (
-        Uuid,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<Uuid>,
-        String,
-        Uuid,
-        DateTime<Utc>,
-        DateTime<Utc>,
-    )>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<Uuid>,
+            String,
+            Uuid,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ),
+    >(
         r#"
         SELECT p.id, p.key, p.name, p.description, p.icon, p.visibility, p.root_document_id,
                p.status, p.created_by, p.created_at, p.updated_at
@@ -831,8 +840,7 @@ pub async fn update_project(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::Archived));
     }
-    let pre_permission =
-        project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+    let pre_permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
     if !pre_permission.at_least(ProjectPermission::Manage) {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -856,14 +864,23 @@ pub async fn update_project(
         icon = optional_text_to_db(next_icon);
     }
 
-    if visibility == "private" && locked.visibility == "workspace" {
-        if count_project_leads(&mut tx, workspace_id, project_id).await? == 0 {
-            tx.rollback().await?;
-            return Ok(Err(ProjectDbError::LastLead));
-        }
+    if visibility == "private"
+        && locked.visibility == "workspace"
+        && count_project_leads(&mut tx, workspace_id, project_id).await? == 0
+    {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::LastLead));
     }
 
     if let Some(lead_user_id) = input.lead_user_id {
+        let lead_ws_role = membership_role(&mut tx, workspace_id, lead_user_id).await?;
+        if !lead_ws_role
+            .map(|r| r.at_least(WorkspaceRole::Member))
+            .unwrap_or(false)
+        {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::GuestLead));
+        }
         let member = project_member_role(&mut tx, workspace_id, project_id, lead_user_id).await?;
         if member.is_none() {
             tx.rollback().await?;
@@ -895,19 +912,22 @@ pub async fn update_project(
         .await?;
     }
 
-    let updated = sqlx::query_as::<_, (
-        Uuid,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<Uuid>,
-        String,
-        Uuid,
-        DateTime<Utc>,
-        DateTime<Utc>,
-    )>(
+    let updated = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<Uuid>,
+            String,
+            Uuid,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ),
+    >(
         r#"
         UPDATE fvoci.projects
         SET name = $3, visibility = $4, description = $5, icon = $6, updated_at = now()
@@ -1009,19 +1029,18 @@ pub async fn list_project_members(
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Ok(
-        rows.into_iter()
-            .filter_map(|(user_id, email, given_name, family_name, role)| {
-                ProjectMemberRole::parse(&role).map(|role| ProjectMemberRow {
-                    user_id,
-                    email,
-                    given_name,
-                    family_name,
-                    role,
-                })
+    Ok(Ok(rows
+        .into_iter()
+        .filter_map(|(user_id, email, given_name, family_name, role)| {
+            ProjectMemberRole::parse(&role).map(|role| ProjectMemberRow {
+                user_id,
+                email,
+                given_name,
+                family_name,
+                role,
             })
-            .collect(),
-    ))
+        })
+        .collect()))
 }
 
 pub async fn add_project_member(
@@ -1130,6 +1149,10 @@ pub async fn update_project_member_role(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::Forbidden));
     }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
     let locked = lock_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         tx.rollback().await?;
@@ -1160,8 +1183,7 @@ pub async fn update_project_member_role(
     if current == ProjectMemberRole::Lead
         && role != ProjectMemberRole::Lead
         && locked.visibility == "private"
-        && count_project_leads_excluding(&mut tx, workspace_id, project_id, target_user_id)
-            .await?
+        && count_project_leads_excluding(&mut tx, workspace_id, project_id, target_user_id).await?
             == 0
     {
         tx.rollback().await?;
@@ -1230,6 +1252,10 @@ pub async fn remove_project_member(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::Forbidden));
     }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
     let locked = lock_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         tx.rollback().await?;
@@ -1249,8 +1275,7 @@ pub async fn remove_project_member(
     };
     if current == ProjectMemberRole::Lead
         && locked.visibility == "private"
-        && count_project_leads_excluding(&mut tx, workspace_id, project_id, target_user_id)
-            .await?
+        && count_project_leads_excluding(&mut tx, workspace_id, project_id, target_user_id).await?
             == 0
     {
         tx.rollback().await?;
@@ -1308,6 +1333,10 @@ pub async fn get_project_workflow(
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
     }
     let locked = lock_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {

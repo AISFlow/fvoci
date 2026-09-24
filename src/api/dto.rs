@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 fn deserialize_present_string<'de, D: Deserializer<'de>>(
@@ -27,6 +27,44 @@ fn deserialize_optional_non_null_string<'de, D: Deserializer<'de>>(
             serde::de::Unexpected::Unit,
             &"string",
         )),
+    }
+}
+
+fn deserialize_optional_non_null_uuid<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Uuid>, D::Error> {
+    match Option::<Uuid>::deserialize(deserializer)? {
+        Some(value) => Ok(Some(value)),
+        None => Err(serde::de::Error::invalid_type(
+            serde::de::Unexpected::Unit,
+            &"uuid",
+        )),
+    }
+}
+
+fn deserialize_optional_non_null_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NaiveDate>, D::Error> {
+    match Option::<NaiveDate>::deserialize(deserializer)? {
+        Some(value) => Ok(Some(value)),
+        None => Err(serde::de::Error::invalid_type(
+            serde::de::Unexpected::Unit,
+            &"date",
+        )),
+    }
+}
+
+fn deserialize_optional_recurrence<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let Some(kind) = value.get("kind").and_then(Value::as_str) else {
+        return Err(serde::de::Error::custom("invalid recurrence preset"));
+    };
+    if matches!(kind, "daily" | "weekly" | "monthly") {
+        Ok(Some(json!({ "kind": kind })))
+    } else {
+        Err(serde::de::Error::custom("invalid recurrence preset"))
     }
 }
 
@@ -548,17 +586,17 @@ pub struct CreateTaskBody {
     pub task_type: String,
     #[serde(default = "default_task_priority")]
     pub priority: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
     pub status_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_date")]
     pub start_date: Option<NaiveDate>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_date")]
     pub due_date: Option<NaiveDate>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
     pub parent_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
     pub milestone_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_recurrence")]
     pub recurrence: Option<serde_json::Value>,
 }
 
@@ -617,7 +655,29 @@ pub struct TaskListResponse {
 pub struct TaskParentOutput {
     pub id: String,
     pub title: String,
+    #[serde(rename = "type")]
+    pub task_type: String,
     pub number: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskChildOutput {
+    pub id: String,
+    pub number: i32,
+    pub title: String,
+    #[serde(rename = "type")]
+    pub task_type: String,
+    pub status_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskChildProgressOutput {
+    pub done: i64,
+    pub total: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -630,9 +690,12 @@ pub struct TaskOutput {
     pub can_edit: bool,
     pub assignee_ids: Vec<String>,
     pub label_ids: Vec<String>,
-    pub children: Vec<String>,
+    pub dependencies: Vec<serde_json::Value>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub child_progress: Option<TaskChildProgressOutput>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub parent: Option<TaskParentOutput>,
+    pub children: Vec<TaskChildOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

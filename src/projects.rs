@@ -4,9 +4,10 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::db::workspace::WorkspaceRole;
 
-static PROJECT_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?!.*-\d+$)[A-Z][A-Z0-9-]{1,31}$").expect("project key regex")
-});
+static PROJECT_KEY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Z][A-Z0-9-]{1,31}$").expect("project key regex"));
+static PROJECT_KEY_TRAILING_NUM_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-\d+$").expect("project key trailing num regex"));
 
 const RESERVED_KEYS: &[&str] = &[
     "WIKI",
@@ -75,7 +76,7 @@ impl ProjectMemberRole {
 
 pub fn normalize_project_key(key: &str) -> Result<String, ProjectKeyError> {
     let canonical: String = key.nfkc().collect::<String>().to_uppercase();
-    if !PROJECT_KEY_RE.is_match(&canonical) {
+    if !PROJECT_KEY_RE.is_match(&canonical) || PROJECT_KEY_TRAILING_NUM_RE.is_match(&canonical) {
         return Err(ProjectKeyError::InvalidPattern);
     }
     if RESERVED_KEYS.contains(&canonical.as_str()) {

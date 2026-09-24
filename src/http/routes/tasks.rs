@@ -4,13 +4,16 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::api::dto::{CreateTaskBody, TaskListResponse, TaskMetaOutput, TaskOutput};
+use crate::api::dto::{
+    CreateTaskBody, TaskChildOutput, TaskChildProgressOutput, TaskListResponse, TaskMetaOutput,
+    TaskOutput, TaskParentOutput,
+};
 use crate::auth::session::SessionUser;
 use crate::db::projects::ProjectDbError;
 use crate::db::tasks::{create_task, get_task, list_project_tasks, CreateTaskInput};
@@ -53,6 +56,9 @@ async fn create_task_route(
     if !priority_is_valid(&body.priority) {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
+    if body.milestone_id.is_some() {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
     let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
@@ -70,7 +76,7 @@ async fn create_task_route(
             start_date: body.start_date,
             due_date: body.due_date,
             parent_id: body.parent_id,
-            milestone_id: body.milestone_id,
+            milestone_id: None,
             recurrence: body.recurrence,
         },
         Some(&ip),
@@ -78,11 +84,7 @@ async fn create_task_route(
     .await
     .map_err(internal)?;
     match result {
-        Ok(task) => Ok((
-            StatusCode::CREATED,
-            Json(task_meta_output(task)),
-        )
-            .into_response()),
+        Ok(task) => Ok((StatusCode::CREATED, Json(task_meta_output(task))).into_response()),
         Err(ProjectDbError::Conflict) => Err(TaskApiError::Coded {
             status: StatusCode::CONFLICT,
             code: "task_hierarchy_violation",
@@ -117,8 +119,28 @@ async fn get_task_route(
             can_edit: task.can_edit,
             assignee_ids: Vec::new(),
             label_ids: Vec::new(),
-            children: Vec::new(),
-            parent: None,
+            dependencies: Vec::new(),
+            child_progress: task.child_progress.map(|progress| TaskChildProgressOutput {
+                done: progress.done,
+                total: progress.total,
+            }),
+            parent: task.parent.map(|parent| TaskParentOutput {
+                id: parent.id.to_string(),
+                title: parent.title,
+                task_type: parent.task_type,
+                number: parent.number,
+            }),
+            children: task
+                .children
+                .into_iter()
+                .map(|child| TaskChildOutput {
+                    id: child.id.to_string(),
+                    number: child.number,
+                    title: child.title,
+                    task_type: child.task_type,
+                    status_id: child.status_id.to_string(),
+                })
+                .collect(),
         })),
         Err(err) => Err(map_project_error(err).into()),
     }
