@@ -331,12 +331,14 @@ mod tests {
         assert_eq!(outcome, BundleValidation::Rejected);
     }
 
+    // Native admission is also exercised by collab_projection in the DB gate.
+    // Keep this out of the dependency-free gate instead of silently succeeding
+    // when the helper has not been built.
+    #[cfg(feature = "db-tests")]
     #[test]
     fn validate_recovery_bundle_huge_varint_memory_is_rejected() {
-        let engine_bin = match crate::collab::config::collab_engine_path_for_tests() {
-            Some(path) => path,
-            None => return,
-        };
+        let engine_bin = crate::collab::config::collab_engine_path_for_tests()
+            .expect("native admission test requires FVOCI_COLLAB_ENGINE or a built local helper");
         let snapshot = std::fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("crates/collab-engine/fixtures/delete_only_base.v1"),

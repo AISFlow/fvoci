@@ -375,6 +375,10 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   browser,
   collabApp,
 }) => {
+  const started = Date.now();
+  const phase = (name: string) => console.info("crash recovery phase", {
+    name, elapsedMs: Date.now() - started,
+  });
   const seedA = await newCollabContext(browser, collabApp.baseUrl);
   const seedB = await newCollabContext(browser, collabApp.baseUrl);
   const pageA = await seedA.newPage();
@@ -383,8 +387,11 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   let url = "";
   let seeded: Awaited<ReturnType<typeof editorShape>> | undefined;
   try {
-    await login(pageA, member.email, member.password);
-    await login(pageB, member.email, member.password);
+    await test.step("authenticate independent seed clients", () => Promise.all([
+      login(pageA, member.email, member.password),
+      login(pageB, member.email, member.password),
+    ]));
+    phase("seed clients authenticated");
     const doc = await createWikiDoc(pageA, "크래시 복원");
     url = doc.url;
     const editorA = await openEditor(pageA, doc.url);
@@ -427,16 +434,20 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     await seedA.close();
     await seedB.close();
   }
-
-  await collabApp.crashAndRestart();
+  phase("persist acknowledged and old clients closed");
+  await test.step("kill owned process tree and restart from DB", () => collabApp.crashAndRestart());
+  phase("server restarted");
 
   const freshA = await newCollabContext(browser, collabApp.baseUrl);
   const freshB = await newCollabContext(browser, collabApp.baseUrl);
   const restoredA = await freshA.newPage();
   const restoredB = await freshB.newPage();
   try {
-    await login(restoredA, member.email, member.password);
-    await login(restoredB, member.email, member.password);
+    await test.step("authenticate independent fresh clients", () => Promise.all([
+      login(restoredA, member.email, member.password),
+      login(restoredB, member.email, member.password),
+    ]));
+    phase("fresh clients authenticated");
     expect(await indexedDbNames(restoredA)).toEqual([]);
     expect(await indexedDbNames(restoredB)).toEqual([]);
     expect(
@@ -446,6 +457,7 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     expect(seeded).toBeTruthy();
     const restored = await editorShape(restoredA);
     expect(restored).toEqual(seeded);
+    phase("fresh client recovered exact structure from DB");
 
     await openEditor(restoredB, url);
     await expectTokens(restoredB, ["살아남을한글"]);
@@ -464,6 +476,7 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     await expectConverged(restoredA, restoredB);
     await expectTokensAbsent(restoredA, ["지울토큰XYZ"]);
     expect((await editorShape(restoredA)).table?.id).toBe(seeded?.table?.id);
+    phase("subsequent edits converged");
   } finally {
     await freshA.close();
     await freshB.close();

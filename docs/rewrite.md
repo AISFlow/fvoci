@@ -1397,3 +1397,23 @@ Opus task39a1256fcffa/ctxeda690cc4e0e의 고정a52cf71 F6/F7 자문 보고서는
 완료 전송되지 않았다. 최종 turn 종료를 확인하고 해당 dispatch만 worker-stop했다.
 검토 내용은 자문으로 사용하되 Orca 성공 settlement나 제품 수락으로 기록하지 않는다.
 다음 구현은 F5 검토 후 actor 자원 정리·동일 슬롯 재접속·일시 장애1011 구분이다.
+
+64bff49 원격 수락 검사: Rust35966676886/Web35966676883/Documents35966676867/
+Engine35966676848 총11 jobs 성공. 합성merge f35a6bf=64bff49+mainba19932.
+fast lib51/bin5/wire11, 양 아키텍처 DB30/66/13 및 협업7/50/19/6 실행.
+React workspace13/13(1.2m), collaboration14/14(2.2m). Opus 고정delta
+a52cf71..64bff49(taskb1c2e27e0b53/ctx848cbe6b5c9f)는 Memory/Stack B1 해결을
+확인했으나 인증 전 socket이 auth_wait까지 종료를 지연시키는 F5-B1을 발견했다.
+리뷰 완료/release와 제품 수락을 구분한다. PR7 Draft/미병합/auto-merge 없음.
+
+현재 Composer task52e2fc904322/ctx9d7d2ce390f2: rust-collab-actor-exit의
+room/engine_bridge/lifecycle만 소유. 초안7fda5dc 보존, 전역 스레드 수 비교를
+개별 bridge 증거로, yield_now 큐 추정을 명시적 barrier로 수정하며 stop 오류를
+성공으로 삼키지 않게 보강 중. 로컬 무거운 검증 슬롯은 Composer. Grok
+taskdf206cb232ea/ctxf3bd4b856d79: transport/product 검사와 좁은 hub 종료
+notification/slot 제거, shutdown 검사 소유; F5-B1을 기존 F7에 추가 배정했다.
+코디네이터 미수락: RUNNING 종료 설명, crash 브라우저 독립 로그인 병렬화·단계
+계측, native varint의 실제 Memory 분류 단위 검사와 helper 부재 silent pass 제거.
+로컬 crash 좁은2개 검사는 기존29.7s→24.5s(동일scope 단일warm관찰), 실제
+CI 속도 개선으로 아직 주장하지 않는다. 다음 명령은 기존 Run inbox 확인 후
+두 제출SHA delta 통합·관련 검사·Opus 추가 검토다.

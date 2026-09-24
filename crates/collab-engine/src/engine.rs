@@ -424,6 +424,26 @@ mod classify_tests {
     }
 
     #[test]
+    fn huge_varint_load_tail_is_memory_limit() {
+        let mut engine = super::CollabEngine::new(crate::limits::Limits::for_tests());
+        let status = engine.handle(&crate::protocol::Request::Load {
+            encoding: 1,
+            snapshot_b64: None,
+            tail_b64: vec![vec![0xff, 0xff, 0xff, 0xff, 0x0f]],
+        });
+        assert!(
+            matches!(
+                status,
+                EngineStatus::ResourceLimit {
+                    kind: crate::outcome::LimitKind::Memory,
+                    ..
+                }
+            ),
+            "crafted update must exercise Memory, not merely any rejection: {status:?}"
+        );
+    }
+
+    #[test]
     fn load_tail_wraps_malformed() {
         let out = super::load_tail_error(
             1,

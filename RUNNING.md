@@ -128,6 +128,15 @@ export FVOCI_COLLAB_ENGINE="$PWD/target/debug/collab-engine"
 Optional tuning: `FVOCI_COLLAB_MAX_ROOMS` (default 4), `FVOCI_COLLAB_MAX_CONNECTIONS`,
 `FVOCI_COLLAB_IDLE_MS`, `FVOCI_COLLAB_REVOKE_POLL_MS`.
 
+`FVOCI_SHUTDOWN_DEADLINE_MS` sets the whole server shutdown deadline (default
+30000, positive milliseconds). SIGTERM/Ctrl+C stops collaboration admission
+before HTTP draining; independent rooms drain concurrently. Normal shutdown
+joins room helpers and releases their database guards before closing the pool.
+An observed shutdown failure or deadline expiry exits nonzero. Expiry is not a
+successful flush or proof that an in-flight transaction rolled back; recovery
+uses the durable CRDT state and operation receipts. Actor panic/rejoin handling
+is still under acceptance review, so collaboration remains opt-in.
+
 Product tests require `TEST_DATABASE_URL`, the helper path above, and run as:
 
 ```sh
