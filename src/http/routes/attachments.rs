@@ -514,12 +514,19 @@ async fn serve_download(
 
     match parsed {
         ParsedRange::Invalid => {
-            response_headers.insert(
+            let mut resp = AppError::from_code(ProblemCode::RangeNotSatisfiable).into_response();
+            let headers = resp.headers_mut();
+            headers.insert(
                 CONTENT_RANGE,
                 HeaderValue::from_str(&format!("bytes */{}", size))
                     .map_err(|_| AppError::internal())?,
             );
-            Err(AppError::from_code(ProblemCode::RangeNotSatisfiable))
+            for (name, value) in response_headers.iter() {
+                if name != CONTENT_TYPE {
+                    headers.insert(name, value.clone());
+                }
+            }
+            Ok(resp)
         }
         ParsedRange::Full => {
             response_headers.insert(

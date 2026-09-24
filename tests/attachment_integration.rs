@@ -681,7 +681,7 @@ async fn download_range_206_and_invalid_416() {
         "bytes 2-5/10"
     );
 
-    let (status, _, _) = request(
+    let (status, body, headers) = request(
         app.clone(),
         "GET",
         &format!(
@@ -695,6 +695,62 @@ async fn download_range_206_and_invalid_416() {
     )
     .await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        headers.get("content-range").unwrap().to_str().unwrap(),
+        "bytes */10"
+    );
+    assert_eq!(
+        headers.get("content-type").unwrap().to_str().unwrap(),
+        "application/problem+json"
+    );
+    let problem: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem["code"], "range_not_satisfiable");
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "nosniff"
+    );
+
+    let (status, _, headers) = request(
+        app.clone(),
+        "HEAD",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{}/download",
+            uploaded.attachment_id
+        ),
+        None,
+        None,
+        Some(&cookie),
+        &[("range", "bytes=20-")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        headers.get("content-range").unwrap().to_str().unwrap(),
+        "bytes */10"
+    );
+
+    let (status, _, headers) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{}/download",
+            uploaded.attachment_id
+        ),
+        None,
+        None,
+        Some(&cookie),
+        &[("range", "bytes=0-1,5-9")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        headers.get("content-range").unwrap().to_str().unwrap(),
+        "bytes */10"
+    );
     harness.cleanup().await;
 }
 
@@ -1223,6 +1279,17 @@ async fn attachment_event_and_audit_failures_roll_back_and_retry() {
         .await
         .unwrap();
 
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": "not-the-etag" }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "wrong etag: {:?}", body);
+    assert_eq!(body["code"], "submitted_parts_do_not_match_uploaded_parts");
+
     install_insert_fail_trigger(&admin, "audit_log", "test_att_audit_fail").await;
     let (status, _, _) = json_request(
         app.clone(),
@@ -1400,6 +1467,16 @@ async fn aborted_complete_releases_lock_for_retry_on_same_pool() {
     aborted.abort();
     let _ = aborted.await;
     test_barrier::disarm_pre_mark_stored(attachment_uuid);
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": "wrong-etag" }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "wrong etag: {:?}", body);
+    assert_eq!(body["code"], "submitted_parts_do_not_match_uploaded_parts");
     let (status, completed, _) = json_request(
         app.clone(),
         "POST",
