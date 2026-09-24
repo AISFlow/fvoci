@@ -18,7 +18,13 @@ echo "==> DB policy tests"
 cargo test --locked --features db-tests --test attachment_extract_integration --target-dir "$TARGET" -- --nocapture
 
 echo "==> build native helper"
-cargo build -p document-extract --target-dir "$TARGET" --locked
+(
+  cd "$ROOT/crates/document-extract"
+  if [[ ! -d .vendor-src/rhwp ]]; then
+    bash fetch-rhwp.sh
+  fi
+  cargo build --locked --bin document-extract --target-dir "$TARGET"
+)
 export FVOCI_EXTRACTOR_BIN="$TARGET/debug/document-extract"
 if [[ ! -x "$FVOCI_EXTRACTOR_BIN" ]]; then
   echo "missing helper binary at $FVOCI_EXTRACTOR_BIN" >&2

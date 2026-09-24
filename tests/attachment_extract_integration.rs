@@ -137,18 +137,13 @@ async fn seed_workspace(admin: &PgPool) -> (Uuid, Uuid, Uuid) {
     .execute(admin)
     .await
     .expect("insert user");
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.workspaces (id, slug, name, owner_id)
-        VALUES ($1, $2, 'Workspace', $3)
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(format!("ws-{}", workspace_id.simple()))
-    .bind(user_id)
-    .execute(admin)
-    .await
-    .expect("insert workspace");
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id)
+        .bind(workspace_id.simple().to_string().to_lowercase())
+        .bind("Workspace")
+        .execute(admin)
+        .await
+        .expect("insert workspace");
     sqlx::query(
         r#"
         INSERT INTO fvoci.memberships (workspace_id, user_id, role)
@@ -162,12 +157,17 @@ async fn seed_workspace(admin: &PgPool) -> (Uuid, Uuid, Uuid) {
     .expect("insert membership");
     sqlx::query(
         r#"
-        INSERT INTO fvoci.documents (workspace_id, id, title, created_by)
-        VALUES ($1, $2, 'Doc', $3)
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, sort_key, number, status, schema_version,
+            content_json, created_by
+        ) VALUES (
+            $1, $2, 'Doc', $3, 'V', 1, 'draft', 2, '{"type":"doc"}'::jsonb, $4
+        )
         "#,
     )
-    .bind(workspace_id)
     .bind(document_id)
+    .bind(workspace_id)
+    .bind(document_id.simple().to_string())
     .bind(user_id)
     .execute(admin)
     .await

@@ -5,9 +5,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
-use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::auth::password::Keyring;
-use fvoci_server::auth::token::hash_token;
 use fvoci_server::auth::AuthService;
 use fvoci_server::attachments::{spawn_extract_job, ExtractJobSettings, LocalStorage, UploadLimits};
 use fvoci_server::db::attachment_extract::fetch_extract_state;
@@ -422,7 +420,6 @@ pub async fn download_original(
 pub async fn spawn_extract_for_storage(
     harness: &TestDb,
     storage_root: &PathBuf,
-    extractor_bin: PathBuf,
     settings: ExtractJobSettings,
 ) -> fvoci_server::attachments::ExtractJobHandle {
     let pool = app_pool(&harness.app_url).await;

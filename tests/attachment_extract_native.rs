@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn startup_rejects_missing_extractor_bin_env() {
-    let err = fvoci_server::attachments::validate_extractor_bin(PathBuf::from("/no/such/document-extract"))
+    let err = fvoci_server::attachments::validate_extractor_bin(
+        std::path::Path::new("/no/such/document-extract"),
+    )
         .expect_err("missing path must fail");
     assert!(err.contains("existing file") || err.contains("not found"));
 }
@@ -29,7 +31,6 @@ async fn authenticated_hwp_upload_extracts_안녕_and_download_matches() {
     let job = spawn_extract_for_storage(
         &harness,
         &storage_root,
-        extractor.clone(),
         extract_job_settings(extractor.clone()),
     )
     .await;
@@ -69,7 +70,6 @@ async fn authenticated_hwpx_upload_extracts_안녕_and_download_matches() {
     let job = spawn_extract_for_storage(
         &harness,
         &storage_root,
-        extractor.clone(),
         extract_job_settings(extractor.clone()),
     )
     .await;
@@ -120,8 +120,7 @@ async fn graceful_shutdown_while_pending_does_not_burn_attempt() {
     let job = spawn_extract_for_storage(
         &harness,
         &storage_root,
-        extractor,
-        idle_extract_job_settings(extractor.clone()),
+        idle_extract_job_settings(extractor),
     )
     .await;
     job.request_shutdown();
@@ -162,7 +161,6 @@ async fn restart_job_resumes_durable_pending_without_memory() {
     let first = spawn_extract_for_storage(
         &harness,
         &storage_root,
-        extractor.clone(),
         idle_extract_job_settings(extractor.clone()),
     )
     .await;
@@ -171,8 +169,7 @@ async fn restart_job_resumes_durable_pending_without_memory() {
     let second = spawn_extract_for_storage(
         &harness,
         &storage_root,
-        extractor,
-        extract_job_settings(require_extractor_bin()),
+        extract_job_settings(extractor),
     )
     .await;
     let pool = app_pool(&harness.app_url).await;
