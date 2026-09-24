@@ -55,6 +55,25 @@ impl Drop for WritingGuard {
     }
 }
 
+/// Create the temp file on the blocking pool while that same closure owns the
+/// unlink guard. If the JoinHandle is dropped, the still-running closure keeps
+/// the guard until IO finishes and dropping the output unlinks the path.
+async fn create_writing_file(path: PathBuf) -> io::Result<(fs::File, WritingGuard)> {
+    let join = tokio::task::spawn_blocking(move || -> io::Result<(std::fs::File, WritingGuard)> {
+        let guard = WritingGuard::new(path.clone());
+        #[cfg(test)]
+        let created_tx = delayed_create::wait_before_create(&path);
+        let file = std::fs::File::create(&path)?;
+        #[cfg(test)]
+        if let Some(tx) = created_tx {
+            let _ = tx.send(());
+        }
+        Ok((file, guard))
+    });
+    let (std_file, guard) = join.await.map_err(io::Error::other)??;
+    Ok((fs::File::from_std(std_file), guard))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("storage key rejected")]
@@ -155,8 +174,7 @@ impl LocalStorage {
             "{part_number}.{writing}.writing",
             writing = Uuid::now_v7()
         ));
-        let mut guard = WritingGuard::new(writing_path.clone());
-        let mut file = fs::File::create(&writing_path).await?;
+        let (mut file, mut guard) = create_writing_file(writing_path.clone()).await?;
         let mut hasher = Sha256::new();
         let mut size_bytes = 0u64;
         while let Some(chunk) = stream.next().await {
@@ -257,15 +275,25 @@ impl LocalStorage {
         }
     }
 
+    pub async fn discard_uncommitted_payload(&self, key: &str) -> Result<(), StorageError> {
+        Self::assert_key(key)?;
+        let dir = self.objects_dir(key);
+        match fs::metadata(&dir).await {
+            Ok(_) => {
+                fs::remove_dir_all(&dir).await?;
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(StorageError::Io(err)),
+        }
+    }
+
     pub async fn assemble_multipart(
         &self,
         key: &str,
         submitted: &[(i32, String)],
     ) -> Result<u64, StorageError> {
         Self::assert_key(key)?;
-        if self.payload_exists(key).await? {
-            return self.head(key).await?.ok_or(StorageError::UploadGone);
-        }
         let actual = self.list_parts(key).await?;
         let mut submitted = submitted.to_vec();
         submitted.sort_by_key(|(n, _)| *n);
@@ -277,10 +305,12 @@ impl LocalStorage {
         if !matches {
             return Err(StorageError::EtagMismatch);
         }
+        if self.payload_exists(key).await? {
+            return self.head(key).await?.ok_or(StorageError::UploadGone);
+        }
         durable_create_dir_all(&self.objects_dir(key)).await?;
         let assembly_path = self.object_path(key).with_extension("assembly");
-        let mut assembly_guard = WritingGuard::new(assembly_path.clone());
-        let mut out = fs::File::create(&assembly_path).await?;
+        let (mut out, mut assembly_guard) = create_writing_file(assembly_path.clone()).await?;
         let mut size_bytes = 0u64;
         for part in &actual {
             let path = self.parts_dir(key).join(part.part_number.to_string());
@@ -364,15 +394,26 @@ impl LocalStorage {
 }
 
 async fn fsync_dir(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    delayed_create::record_fsync(path);
     let dir = fs::File::open(path).await?;
     dir.sync_all().await
 }
 
 async fn durable_create_dir_all(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path).await?;
-    fsync_dir(path).await?;
-    if let Some(parent) = path.parent() {
-        fsync_dir(parent).await?;
+    let mut cursor = path.to_path_buf();
+    loop {
+        if cursor.as_os_str().is_empty() {
+            break;
+        }
+        fsync_dir(&cursor).await?;
+        match cursor.parent() {
+            Some(parent) if parent != cursor.as_path() && !parent.as_os_str().is_empty() => {
+                cursor = parent.to_path_buf();
+            }
+            _ => break,
+        }
     }
     Ok(())
 }
@@ -423,6 +464,108 @@ impl Drop for StagedPart {
         if !self.keep {
             let _ = std::fs::remove_file(&self.writing_path);
         }
+    }
+}
+
+#[cfg(test)]
+mod delayed_create {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    struct CreateGate {
+        entered_tx: tokio::sync::oneshot::Sender<()>,
+        proceed_rx: mpsc::Receiver<()>,
+        created_tx: tokio::sync::oneshot::Sender<()>,
+    }
+
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, CreateGate>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static FSYNCS: LazyLock<Mutex<HashMap<PathBuf, Vec<PathBuf>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub struct DelayedCreateBarrier {
+        entered: Option<tokio::sync::oneshot::Receiver<()>>,
+        proceed: Option<mpsc::SyncSender<()>>,
+        created: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    pub fn arm_for_dir(dir: PathBuf) -> DelayedCreateBarrier {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (proceed_tx, proceed_rx) = mpsc::sync_channel(1);
+        let (created_tx, created_rx) = tokio::sync::oneshot::channel();
+        GATES.lock().expect("create gate").insert(
+            dir,
+            CreateGate {
+                entered_tx,
+                proceed_rx,
+                created_tx,
+            },
+        );
+        DelayedCreateBarrier {
+            entered: Some(entered_rx),
+            proceed: Some(proceed_tx),
+            created: Some(created_rx),
+        }
+    }
+
+    pub fn wait_before_create(path: &Path) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let parent = path.parent()?.to_path_buf();
+        let gate = GATES.lock().ok()?.remove(&parent)?;
+        let _ = gate.entered_tx.send(());
+        let _ = gate.proceed_rx.recv_timeout(Duration::from_secs(30));
+        Some(gate.created_tx)
+    }
+
+    impl DelayedCreateBarrier {
+        pub async fn wait_entered(&mut self) {
+            if let Some(rx) = self.entered.take() {
+                let _ = rx.await;
+            }
+        }
+
+        pub fn proceed(&mut self) {
+            if let Some(tx) = self.proceed.take() {
+                let _ = tx.send(());
+            }
+        }
+
+        pub async fn wait_create_finished(&mut self) {
+            if let Some(rx) = self.created.take() {
+                let _ = rx.await;
+            }
+        }
+    }
+
+    impl Drop for DelayedCreateBarrier {
+        fn drop(&mut self) {
+            self.proceed();
+        }
+    }
+
+    pub fn capture_fsyncs(root: PathBuf) {
+        FSYNCS.lock().expect("fsync log").insert(root, Vec::new());
+    }
+
+    pub fn record_fsync(path: &Path) {
+        let Ok(mut map) = FSYNCS.lock() else {
+            return;
+        };
+        for (root, paths) in map.iter_mut() {
+            if path.starts_with(root) || root.starts_with(path) {
+                paths.push(path.to_path_buf());
+            }
+        }
+    }
+
+    pub fn take_fsyncs(root: &Path) -> Vec<PathBuf> {
+        FSYNCS
+            .lock()
+            .expect("fsync log")
+            .remove(root)
+            .unwrap_or_default()
     }
 }
 
@@ -524,5 +667,195 @@ mod tests {
         assert!(matches!(err, StorageError::Io(_)));
         assert!(writing_names(&storage.parts_dir(&key)).await.is_empty());
         assert!(storage.list_parts(&key).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delayed_create_cancellation_unlinks_after_pending_create() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let dir = storage.parts_dir(&key);
+        let mut barrier = delayed_create::arm_for_dir(dir.clone());
+        let hanging = stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
+            bytes::Bytes::from_static(b"xx"),
+        )])
+        .chain(futures_util::stream::pending());
+        let staged = tokio::spawn({
+            let storage = storage.clone();
+            let key = key.clone();
+            async move { storage.stage_part_stream(&key, 1, hanging, 32).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), barrier.wait_entered())
+            .await
+            .expect("create should reach delayed gate");
+        assert!(
+            writing_names(&dir).await.is_empty(),
+            "file must not exist while create is gated"
+        );
+        staged.abort();
+        let _ = staged.await;
+        barrier.proceed();
+        tokio::time::timeout(Duration::from_secs(5), barrier.wait_create_finished())
+            .await
+            .expect("blocked create should complete after the barrier is released");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if writing_names(&dir).await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("spawn_blocking output drop must unlink after create finishes");
+        assert!(storage.list_parts(&key).await.unwrap().is_empty());
+    }
+
+    async fn publish_one(storage: &LocalStorage, key: &str, body: &'static [u8]) -> PartInfo {
+        let mut staged = storage
+            .stage_part_stream(
+                key,
+                1,
+                stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
+                    bytes::Bytes::from_static(body),
+                )]),
+                body.len() as u64,
+            )
+            .await
+            .unwrap();
+        storage
+            .publish_staged_part(key, 1, &mut staged)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn assemble_shortcut_rejects_wrong_etags_when_payload_exists() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let part = publish_one(&storage, &key, b"payload-a").await;
+        let assembled = storage
+            .assemble_multipart(&key, &[(part.part_number, part.etag.clone())])
+            .await
+            .unwrap();
+        assert_eq!(assembled, 9);
+        let err = storage
+            .assemble_multipart(&key, &[(1, "deadbeef".into())])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::EtagMismatch));
+        assert_eq!(storage.head(&key).await.unwrap(), Some(9));
+    }
+
+    #[tokio::test]
+    async fn assemble_shortcut_reuses_payload_only_after_etag_match() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let part = publish_one(&storage, &key, b"payload-b").await;
+        storage
+            .assemble_multipart(&key, &[(part.part_number, part.etag.clone())])
+            .await
+            .unwrap();
+        let reused = storage
+            .assemble_multipart(&key, &[(part.part_number, part.etag.clone())])
+            .await
+            .unwrap();
+        assert_eq!(reused, 9);
+        assert_eq!(storage.read_range(&key, 0, 8).await.unwrap(), b"payload-b");
+    }
+
+    #[tokio::test]
+    async fn discard_uncommitted_payload_prevents_stale_object_substitution() {
+        let (storage, _root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        storage.create_multipart(&key).await.unwrap();
+        let part = publish_one(&storage, &key, b"current").await;
+        durable_create_dir_all(&storage.objects_dir(&key))
+            .await
+            .unwrap();
+        fs::write(storage.object_path(&key), b"STALEOBJ")
+            .await
+            .unwrap();
+        storage.discard_uncommitted_payload(&key).await.unwrap();
+        let size = storage
+            .assemble_multipart(&key, &[(part.part_number, part.etag.clone())])
+            .await
+            .unwrap();
+        assert_eq!(size, 7);
+        assert_eq!(storage.read_range(&key, 0, 6).await.unwrap(), b"current");
+    }
+
+    #[tokio::test]
+    async fn durable_create_dir_all_fsyncs_new_ancestors_including_root_entry() {
+        let (storage, root) = temp_storage();
+        let key = Uuid::now_v7().to_string();
+        delayed_create::capture_fsyncs(root.clone());
+        storage.create_multipart(&key).await.unwrap();
+        let fsyncs = delayed_create::take_fsyncs(&root);
+        let tmp = root.join("tmp");
+        let key_dir = tmp.join(&key);
+        assert!(
+            fsyncs.iter().any(|p| p == &key_dir),
+            "new tmp/key dir must be fsynced: {fsyncs:?}"
+        );
+        assert!(
+            fsyncs.iter().any(|p| p == &tmp),
+            "new tmp dir must be fsynced: {fsyncs:?}"
+        );
+        assert!(
+            fsyncs.iter().any(|p| p == &root),
+            "storage root must be fsynced for the new tmp entry: {fsyncs:?}"
+        );
+
+        delayed_create::capture_fsyncs(root.clone());
+        let key2 = Uuid::now_v7().to_string();
+        storage.create_multipart(&key2).await.unwrap();
+        let fsyncs = delayed_create::take_fsyncs(&root);
+        let key2_dir = tmp.join(&key2);
+        assert!(
+            fsyncs.iter().any(|p| p == &key2_dir),
+            "existing-tree leaf must still be fsynced: {fsyncs:?}"
+        );
+        assert!(
+            fsyncs.iter().any(|p| p == &tmp),
+            "already-existing tmp ancestor must still be fsynced: {fsyncs:?}"
+        );
+        assert!(
+            fsyncs.iter().any(|p| p == &root),
+            "already-existing storage root must still be fsynced: {fsyncs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_create_dir_all_fsyncs_initially_missing_root_and_parent() {
+        let parent = std::env::temp_dir().join(format!("fvoci-att-missing-{}", Uuid::now_v7()));
+        let root = parent.join("storage");
+        assert!(!root.exists());
+        let storage = LocalStorage::new(root.clone());
+        let key = Uuid::now_v7().to_string();
+        delayed_create::capture_fsyncs(parent.clone());
+        storage.create_multipart(&key).await.unwrap();
+        let fsyncs = delayed_create::take_fsyncs(&parent);
+        let tmp = root.join("tmp");
+        let key_dir = tmp.join(&key);
+        assert!(
+            fsyncs.iter().any(|p| p == &key_dir),
+            "leaf must be fsynced: {fsyncs:?}"
+        );
+        assert!(
+            fsyncs.iter().any(|p| p == &tmp),
+            "tmp must be fsynced: {fsyncs:?}"
+        );
+        assert!(
+            fsyncs.iter().any(|p| p == &root),
+            "created storage root must be fsynced: {fsyncs:?}"
+        );
+        assert!(
+            fsyncs.iter().any(|p| p == &parent),
+            "parent of a newly created root must be fsynced: {fsyncs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
