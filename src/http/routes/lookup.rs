@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::get;
@@ -17,9 +18,12 @@ use crate::http::rate_limit::peer_ip;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
 
+const LOOKUP_IP_LIMIT: u32 = 120;
+const LOOKUP_USER_LIMIT: u32 = 60;
+
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LookupQuery {
-    #[serde(rename = "projectId")]
     pub project_id: Option<Uuid>,
 }
 
@@ -36,19 +40,38 @@ async fn lookup_display_id_route(
     headers: HeaderMap,
     jar: CookieJar,
     Path((workspace_id, display_id)): Path<(Uuid, String)>,
-    Query(query): Query<LookupQuery>,
+    query: Result<Query<LookupQuery>, QueryRejection>,
 ) -> Result<Json<LookupListResponse>, AppError> {
-    let _ = peer_ip(peer.ip());
     reject_bearer(&headers)?;
     if display_id.trim().is_empty() || display_id.chars().count() > 64 {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
-    let (user, _) = require_session(&state, &jar).await?;
+    let Query(query) = query.map_err(AppError::from)?;
+    let ip = peer_ip(peer.ip());
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(&format!("lookup:ip:{ip}"), LOOKUP_IP_LIMIT)
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
+    let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(
+            &format!("lookup:user:{actor_user_id}"),
+            LOOKUP_USER_LIMIT,
+        )
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
     let result = lookup_display_id(
         &state.auth.db.pool,
         workspace_id,
         actor_user_id,
+        session_id,
         &display_id,
         query.project_id,
     )
@@ -67,9 +90,11 @@ async fn lookup_display_id_route(
                 })
                 .collect(),
         })),
-        Err(LookupDbError::NotFound) => Err(map_project_error(
-            crate::db::projects::ProjectDbError::NotFound,
-        )),
+        Err(LookupDbError::NotFound) | Err(LookupDbError::Forbidden) => {
+            Err(map_project_error(
+                crate::db::projects::ProjectDbError::NotFound,
+            ))
+        }
     }
 }
 

@@ -37,6 +37,54 @@ async fn migration_008_projects_schema_exists() {
 async fn migration_007_upgrades_to_008_projects() {
     let harness = TestDb::bootstrap_through(7).await;
     let admin = admin_pool(&harness).await;
+    let workspace_id = Uuid::now_v7();
+    let user_id = Uuid::now_v7();
+    let doc_id = Uuid::now_v7();
+    let path = doc_id.simple().to_string();
+    sqlx::query(
+        "INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'Owner')",
+    )
+    .bind(user_id)
+    .bind(format!("owner-{user_id}@example.com"))
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.workspaces (id, slug, name, next_document_number, created_by)
+         VALUES ($1, 'acme', 'Acme', 1, $2)",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, icon, path, parent_id, sort_key, project_id, number,
+            status, schema_version, text, chosung, version, created_by, content_json, kind
+        ) VALUES (
+            $1, $2, 'Pre-upgrade doc', NULL, $3, NULL, 'V', NULL, 1,
+            'draft', 2, '', '', 1, $4, '{}'::jsonb, 'wiki'
+        )
+        "#,
+    )
+    .bind(doc_id)
+    .bind(workspace_id)
+    .bind(path)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+
     migrate::run_migrations(&harness.admin_url)
         .await
         .expect("upgrade to 008");
@@ -56,6 +104,14 @@ async fn migration_007_upgrades_to_008_projects() {
     .await
     .unwrap();
     assert!(has_projects.0);
+    let preserved: (String,) =
+        sqlx::query_as("SELECT title FROM fvoci.documents WHERE id = $1 AND workspace_id = $2")
+            .bind(doc_id)
+            .bind(workspace_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(preserved.0, "Pre-upgrade doc");
     admin.close().await;
     harness.cleanup().await;
 }

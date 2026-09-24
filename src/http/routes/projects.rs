@@ -25,7 +25,10 @@ use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::guard::{check_origin, reject_bearer};
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
-use crate::projects::{name_is_valid, normalize_project_key, ProjectKeyError, ProjectMemberRole};
+use crate::projects::{
+    description_is_valid, icon_is_valid, name_is_valid, normalize_project_key, ProjectKeyError,
+    ProjectMemberRole,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -67,6 +70,11 @@ async fn create_project_route(
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     if body.visibility != "private" && body.visibility != "workspace" {
+        return Err(AppError::from_code(ProblemCode::InvalidInput));
+    }
+    if !description_is_valid(body.description.as_deref())
+        || !icon_is_valid(body.icon.as_deref())
+    {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     let (user, session_id) = require_session(&state, &jar).await?;
@@ -124,8 +132,7 @@ async fn list_projects_route(
                     root_document_id: item
                         .project
                         .root_document_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_default(),
+                        .map(|id| id.to_string()),
                     status: item.project.status,
                     created_by: item.project.created_by.to_string(),
                     created_at: item.project.created_at,
@@ -181,6 +188,16 @@ async fn patch_project_route(
     }
     if let Some(visibility) = body.visibility.as_deref() {
         if visibility != "private" && visibility != "workspace" {
+            return Err(AppError::from_code(ProblemCode::InvalidInput));
+        }
+    }
+    if let Some(description) = body.description.as_ref().and_then(|value| value.as_deref()) {
+        if !description_is_valid(Some(description)) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput));
+        }
+    }
+    if let Some(icon) = body.icon.as_ref().and_then(|value| value.as_deref()) {
+        if !icon_is_valid(Some(icon)) {
             return Err(AppError::from_code(ProblemCode::InvalidInput));
         }
     }
@@ -395,8 +412,7 @@ fn project_output(project: crate::db::projects::ProjectRow, include_counts: bool
         visibility: project.visibility,
         root_document_id: project
             .root_document_id
-            .map(|id| id.to_string())
-            .unwrap_or_default(),
+            .map(|id| id.to_string()),
         status: project.status,
         created_by: project.created_by.to_string(),
         created_at: project.created_at,

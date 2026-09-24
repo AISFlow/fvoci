@@ -64,6 +64,11 @@ fn deserialize_optional_recurrence<'de, D: Deserializer<'de>>(
     if obj.len() != 1 {
         return Err(serde::de::Error::custom("invalid recurrence preset"));
     }
+    for key in obj.keys() {
+        if key != "kind" {
+            return Err(serde::de::Error::custom("invalid recurrence preset"));
+        }
+    }
     let Some(kind) = obj.get("kind").and_then(Value::as_str) else {
         return Err(serde::de::Error::custom("invalid recurrence preset"));
     };
@@ -480,7 +485,7 @@ pub struct CreateProjectBody {
     pub description: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
     pub lead_user_id: Option<Uuid>,
 }
 
@@ -488,15 +493,17 @@ pub struct CreateProjectBody {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct PatchProjectBody {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub visibility: Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub description: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub icon: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
     pub lead_user_id: Option<Uuid>,
 }
 
@@ -513,7 +520,8 @@ pub struct ProjectOutput {
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub icon: Option<String>,
     pub visibility: String,
-    pub root_document_id: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub root_document_id: Option<String>,
     pub status: String,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
@@ -533,7 +541,8 @@ pub struct ProjectListItemOutput {
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub icon: Option<String>,
     pub visibility: String,
-    pub root_document_id: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub root_document_id: Option<String>,
     pub status: String,
     pub created_by: String,
     pub created_at: DateTime<Utc>,

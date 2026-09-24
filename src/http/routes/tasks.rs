@@ -27,6 +27,7 @@ use crate::tasks::list_query::{parse_task_list_query, TaskListQueryError};
 use crate::tasks::{priority_is_valid, task_type_is_valid, title_is_valid};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskListQueryParams {
     pub query: Option<String>,
     pub archived: Option<String>,
