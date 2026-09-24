@@ -32,6 +32,16 @@ jobs:
             check: native-extraction-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+        env:
+          POSTGRES_PASSWORD: ci-ephemeral-only
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 2s --health-retries 30
     defaults:
       run:
         working-directory: crates/document-extract
@@ -42,7 +52,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/registry
-          key: v2-cargo-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
+          key: v3-cargo-documents-${{ runner.os }}-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
       - name: Restore document build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -83,3 +93,33 @@ jobs:
         run: cargo test --locked --offline --all-targets --features test-hang
       - name: Production helper rejects test controls
         run: cargo test --locked --offline --all-targets
+      - name: Build production and test-only native helpers separately
+        run: |
+          cargo build --locked --offline --bin document-extract
+          cp target/debug/document-extract "$RUNNER_TEMP/document-extract-production"
+          cargo build --locked --offline --bin document-extract --features test-hang
+          cp target/debug/document-extract "$RUNNER_TEMP/document-extract-test-hang"
+      - name: Restore attachment product build outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target
+          key: v1-extract-product-${{ runner.os }}-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}
+          restore-keys: v1-extract-product-${{ runner.os }}-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
+      - name: Prepare locked server dependencies
+        working-directory: .
+        run: cargo fetch --locked
+      - name: Check native product test feature
+        working-directory: .
+        run: cargo clippy --locked --offline --all-targets --features extract-native-tests -- -D warnings
+      - name: Authenticated HWP and HWPX through the production helper
+        working-directory: .
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+          FVOCI_EXTRACTOR_BIN: ${{ runner.temp }}/document-extract-production
+        run: cargo test --locked --offline --features extract-native-tests --test attachment_extract_native authenticated_
+      - name: Native attachment cancellation and process recovery
+        working-directory: .
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+          FVOCI_EXTRACTOR_BIN: ${{ runner.temp }}/document-extract-test-hang
+        run: cargo test --locked --offline --features extract-native-tests --test attachment_extract_native
