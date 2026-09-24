@@ -10,7 +10,7 @@
 ## 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
-최신 수락 main `006943bc22328ce05c8516d0192a3741f8a1531e`는 PR1–11의 결과다.
+최신 수락 main `3fa41bc97fad21cb7f5abf0b6be1bf6f0ca88557`는 PR1–12의 결과다.
 PR10의 인가된 위키 첨부와 PR11의 rhwp 네이티브 추출 제품 연결을 수락했다.
 PR11 검토 HEAD180f597과 원격 합성merge01e780bd의 11개 job이 모두 통과했고,
 실제 squash merge006943bc의 제품 tree가 검토 HEAD와 같음을 확인했다.
@@ -19,7 +19,8 @@ PR11 검토 HEAD180f597과 원격 합성merge01e780bd의 11개 job이 모두 통
 Grok task8eab69af119e/ctx8edfffe068e9가 실제 PATCH 저장과 검사 순서를 조사·수정 중이다.
 PR12의 선택영역 진단 HEAD5f3710c는 실제11개 job 및 workspace13/협업18 검사를 통과했다.
 과거 선택영역 실패의 원인은 여전히 미확정이며 진단 보강을 원인 수정으로 표시하지 않는다.
-PR12는 새 metadata 실패의 분류와 수정 검증을 확인하기 전 Draft로 유지한다.
+PR12는 metadata 검사 순서를 수정하고 최신 HEAD의11개 CI 및 Opus delta검토 후 머지했다.
+main3fa41bc의 post-merge 검사는 현재 진행 중이다.
 Composer taske52f987188e4/ctxfe53e7184240의 프로젝트·태스크 기능은 미수락이며,
 실제 경합 검사·계약 보강 중이다. React 프로젝트·태스크 연결도 아직 미완료다.
 협업은 검증된 opt-in 범위만 수락했다. 실제 OS IME, 기존 데이터 전체 호환,
@@ -1906,3 +1907,46 @@ Grok dispatch release, 자원 없음. Composer project/task checkpointbc8a0ad는
 고정bc8a0ad 실제 diff를 검토하고, Composer는 남은 경합검사를 계속한다. 프로젝트테스트
 자체가 연결을 보유한 채 pool.close를 기다리던 문제는 drop(conn)으로수정했다.
 기존 collab_product의4pass/52fail은 helper환경미설정 실패이며 성공증거로사용하지않는다.
+
+2026-09-24 11:28 UTC 현재 재개점:
+- PR12 https://github.com/AISFlow/fvoci/pull/12 실제merged11:27:28Z, 수락HEAD
+  e462ef6bef0d77b740d7a0d92b56bdf8a8d57aac, 검사mergecd21363fc21d3ab344e6f83257f6be3d6fa659eb,
+  actualmain3fa41bc97fad21cb7f5abf0b6be1bf6f0ca88557. 11실제job성공
+  (Rust35992318236/Web35992318213/Documents35992318214/Engine35992318227),
+  workspace13pass58.1s/협업18pass2.9m. Opus taska031857424fb/ctx93723f468fa0
+  e462delta 차단없음. 메타데이터 저장 중 hard navigation의 제품guard는 원본처럼없고,
+  완료한 PATCH유실을 재현·수정했다고 표시하지 않는다. 선택영역 원인도미확정이다.
+  post-merge35993127819/35993127793/35993127792/35993127736 진행중.
+- PR13 https://github.com/AISFlow/fvoci/pull/13 Draft, remotea1f930a,
+  local통합9a85bc8961154d6168971d4183fb89273dd56f91(main3fa 정상merge, 아직push전).
+  원격PG x64/ARM에서project19pass/4fail, 뒤task검사는미실행. x64기존추출12/첨부20/협업30/
+  인증workspace66/문서13성공, native/helper/browser회귀성공. 실패근거
+  /tmp/fvoci-pr13-a1f-pg.log. lowercasekey400계약, 실제007->008fixture,
+  마지막lead fixture, 잘못된barrier관측을수정중이며 기대값완화로통과시키지않는다.
+- Opus 고정bc8a0ad review /tmp/fvoci-project-task-opus-bc8-review.md:
+  visibility전환과workspace제거의프로젝트잠금누락(B1), 태스크enum(B2),
+  계층규칙(B3), 필수응답/스키마필드(B4) 차단. count오류를0으로숨기는N1도
+  코디네이터차단으로승격했다. Composer taske52f987188e4/ctxfe53e7184240가
+  Rust/008/DTO/생성계약/DB검사를소유하고수정중. 기존workspace demotion의명시적
+  project권한보존은원본대로유지하며guest신규lead지정금지와구분한다.
+- Grok taskfaf4b32150c8/ctxf58abad014f3, rust-project-task-react, basee39bacd:
+  React프로젝트·태스크화면/라우트/i18n/관련E2E소유, 생성API읽기전용.
+  현재heavy local은Composer만소유. 읽기전용Opus와위키Grokdispatch는release완료.
+  다음: Composer수정delta고정→통합/생성계약Grok전달→원격관련gate와Opusdelta검토,
+  React실제flow수락후PR13머지. `orca-ide orchestration check`로기존Run이어받는다.
+
+### 2026-09-24 11:40Z 재개: main3fa 협업 회귀 및 PR13 계약 보완
+
+- main `3fa41bc97fad21cb7f5abf0b6be1bf6f0ca88557`: Rust35993127736, native-documents35993127819, native-engine35993127792 성공. Web35993127793 workspace 성공, collaboration107611687084 **16/18, 2실패**. 이전 PR 성공으로 post-merge 실패를 대체하지 않는다.
+- 실패 로그 `/tmp/fvoci-main3fa-collab-failure.log`: fresh client DB 구조 복원은 통과했으나 후속 본문 substring에 awareness 이름이 끼어 검사 실패. 별도 이모지 Delete 미반영 원인은 미확정. timeout/retry/선택 자동 복구 없이 조사한다.
+- 수정 PR[14](https://github.com/AISFlow/fvoci/pull/14), `rust-collab-presence-regression`, coordinator task_b72f67410a48, HEAD `abea392`: 기존 구조 oracle의 decoration 제외 본문을 token 검사에도 사용하고 native Delete 전후 읽기 전용 진단 추가. 로컬 앱/협업 TS, helper1, discovery18 성공(브라우저 실행 아님); 원격·Opus task492921f07a01/ctx_ad0764f20bf5 대기. 최초 잘못된 config 경로 discovery는 실패 후 실제 config로 교정했다.
+- PR13 미수락: Composer task_e52f987188e4/ctx_fe53e7184240가 B1–B4/N1 및 실제 lookup API, 원본 flat list item·pagination 계약 수정 중. 현재 backend 기준 bc8a0ad + 미커밋 변경 보존. list의 무조건 null cursor나 query 무시는 수락하지 않는다.
+- React 첫 제출 `8783817f864beaf24d629ffcbf467dc5d4d53b69`(basee39bacd): TS/순수70 성공, 실제E2E 미실행. lookup 미연결 상태는 수락 아님. 같은 Grok terminal에서 후속 task_a6e39d4da2c9/ctx_9d279276ae60로 생성 계약/lookup/상세/페이지네이션 연결 계속. 원래 ctx_f58abad014f3 완료·재사용 처리.
+- 다음: PR14 실제 CI/진단 및 Opus 확인; Composer 새 계약 SHA를 Grok에 전달 후 PR13 순차 통합·관련 실제 PG/React 원격 검사. 로컬 무거운 slot은 Composer 단독, 다른 소유 불명 프로세스/PG를 정리하지 않았다.
+
+### 2026-09-24 11:59Z 통합 상태
+
+- PR14 merged: 검토·원격11job 성공 HEAD `8173b71377ed933f8b631f7447ab2b5180cb735d`, merge/main `b5ab024e85aa3532538e15f828aa6f4fc87b5118`. 기대HEAD로 squash했고 REST merged/main을 확인했다. Web35995698669 실제 협업20/20(2.3분), workspace 성공; Rust35995698631/NativeDocuments35995698806/NativeEngine35995698705 성공. Opus 최종 delta task_efd15b3bd807/ctx_7c234820cc1a 보고 `/tmp/fvoci-presence-opus-8173-review.md`; 검토자가 실행한 테스트는 없다. 과거 빠른 Delete 무반응 원인은 미확정이며 이번 run에서는 재현되지 않았다. post-merge CI는 아직 확인 전.
+- PR13 통합: React8783817→e6a184d, backend cc48112→f47f3b4, React9f8c92e→b510caf. 모두 미수락. 마지막 backend project DB26성공/2실패(`/tmp/fvoci-project-task-fix.log`), task suite 미실행. Composer ctx_fe53e7184240가 실제 서로 다른 actor의 visibility/제거 경합, lookupfixture와 복합cursor/filtercounts 수정 중.
+- Grok task_91abad5687f6의 첫 재배정 ctx_ab89f32b2537은 기존 turn 실행 중 readiness timeout. 기존 작업을 보존·안전한 경계에서 멈춘 뒤 같은 terminal/model에서 ctx_12714a31991e로 재시도 ready 확인. React worktree는 cc48112를 dd399c0로 가져왔으며 이제 실제 generated lookup/list 연결 중. 임시 타입 감지/가짜404/성공 경로는 최종 수락에서 제외한다.
+- Web CI는 기존 workspace-flow 이름을 유지하는 matrix에 project-task-flow를 추가했다. 각 job은 독립 DB로 명시한 spec만 실행하며 기존 첫 설치 검사를 약화하지 않는다. actionlint 성공, 아직 이 matrix의 원격 실행은 미실행.
