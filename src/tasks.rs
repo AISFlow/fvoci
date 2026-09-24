@@ -16,6 +16,10 @@ pub fn parse_iso_date(value: &str) -> Option<chrono::NaiveDate> {
     if !shape_ok {
         return None;
     }
+    // Year 0000 matches the regex shape but PostgreSQL has no year zero.
+    if &value[..4] == "0000" {
+        return None;
+    }
     chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
 }
 

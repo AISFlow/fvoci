@@ -235,15 +235,17 @@ fn shift_recurrence_date_monthly(date: NaiveDate) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(overflow_year, overflow_month, date.day() - days_in_target)
 }
 
-/// Input dates are limited to four-digit years (`tasks::parse_iso_date`), so a
-/// shift cannot leave chrono's range; it is still checked instead of panicking.
+/// Returns None when the shifted date leaves the four-digit-year range the API
+/// accepts (the source fails the request in that case too).
 fn shift_recurrence_date(date: NaiveDate, kind: &str) -> Option<NaiveDate> {
-    match kind {
+    use chrono::Datelike;
+    let shifted = match kind {
         "daily" => date.checked_add_signed(chrono::Duration::days(1)),
         "weekly" => date.checked_add_signed(chrono::Duration::days(7)),
         "monthly" => shift_recurrence_date_monthly(date),
         _ => Some(date),
-    }
+    }?;
+    (shifted.year() <= 9999).then_some(shifted)
 }
 
 fn parse_recurrence_kind(value: &Value) -> Option<&str> {
@@ -1454,16 +1456,10 @@ async fn spawn_recurring_next_task(
         None => Ok(None),
         Some(date) => shift_recurrence_date(date, recurrence_kind)
             .map(Some)
-            .ok_or(ProjectDbError::Conflict),
+            .ok_or_else(|| sqlx::Error::Protocol("recurrence date out of range".into())),
     };
-    let next_start = match shift(task.record.start_date) {
-        Ok(date) => date,
-        Err(err) => return Ok(Err(err)),
-    };
-    let next_due = match shift(task.record.due_date) {
-        Ok(date) => date,
-        Err(err) => return Ok(Err(err)),
-    };
+    let next_start = shift(task.record.start_date)?;
+    let next_due = shift(task.record.due_date)?;
     let recurrence = json!({ "kind": recurrence_kind });
     sqlx::query(
         r#"
