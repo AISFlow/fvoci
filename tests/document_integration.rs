@@ -763,6 +763,20 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
     assert_eq!(body["code"], "not_found");
 
     let affiliated = Uuid::now_v7();
+    let affiliated_project = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.projects (
+            id, workspace_id, key, name, visibility, status, next_number, created_by
+        ) VALUES ($1, $2, 'PRJ', 'Projectish', 'private', 'active', 1, $3)
+        "#,
+    )
+    .bind(affiliated_project)
+    .bind(workspace_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .unwrap();
     sqlx::query(
         r#"
         INSERT INTO fvoci.documents (
@@ -776,7 +790,7 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
     .bind(affiliated)
     .bind(workspace_id)
     .bind(affiliated.simple().to_string())
-    .bind(Uuid::now_v7())
+    .bind(affiliated_project)
     .bind(owner_id)
     .execute(&admin)
     .await

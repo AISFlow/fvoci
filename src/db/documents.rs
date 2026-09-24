@@ -3,13 +3,11 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{lock_key_from_uuid, lock_tree, set_tenant};
+use crate::db::context::{lock_tree, set_tenant};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::workspace::WorkspaceRole;
 
-pub(crate) use crate::db::context::{
-    lock_membership_users, recheck_session, session_is_live, MEMBERSHIP_LOCK_NAMESPACE,
-};
+pub(crate) use crate::db::context::{lock_membership_users, recheck_session, session_is_live};
 pub const MAX_TREE_DEPTH: i32 = 20;
 pub const DOCUMENT_SCHEMA_VERSION: i32 = 2;
 const DOCUMENT_TITLE_MAX: usize = 300;

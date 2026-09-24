@@ -8,7 +8,6 @@ use crate::db::documents::empty_document_json;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission, ProjectDbError};
 use crate::projects::ProjectPermission;
-use crate::db::workspace::WorkspaceRole;
 
 #[derive(Debug, Clone)]
 pub struct TaskMetaRow {
@@ -34,10 +33,36 @@ pub struct TaskMetaRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct TaskParentRow {
+    pub id: Uuid,
+    pub title: String,
+    pub task_type: String,
+    pub number: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskChildRow {
+    pub id: Uuid,
+    pub number: i32,
+    pub title: String,
+    pub task_type: String,
+    pub status_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TaskChildProgress {
+    pub done: i64,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct TaskDetailRow {
     pub meta: TaskMetaRow,
     pub content_json: Value,
     pub can_edit: bool,
+    pub parent: Option<TaskParentRow>,
+    pub children: Vec<TaskChildRow>,
+    pub child_progress: Option<TaskChildProgress>,
 }
 
 pub struct CreateTaskInput<'a> {
@@ -60,21 +85,6 @@ struct TaskChangeRecord<'a> {
     target_id: Uuid,
     payload: Value,
     client_ip: Option<&'a str>,
-}
-
-async fn membership_role(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> Result<Option<WorkspaceRole>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
 }
 
 async fn workspace_is_live(
@@ -158,50 +168,6 @@ async fn default_backlog_status(
     Ok(fallback.map(|(id,)| id))
 }
 
-fn row_to_meta(
-    workspace_id: Uuid,
-    row: (
-        Uuid,
-        Uuid,
-        i32,
-        String,
-        String,
-        String,
-        Uuid,
-        Option<NaiveDate>,
-        Option<NaiveDate>,
-        Option<DateTime<Utc>>,
-        Option<Uuid>,
-        Option<Uuid>,
-        Option<DateTime<Utc>>,
-        Uuid,
-        DateTime<Utc>,
-        DateTime<Utc>,
-    ),
-) -> TaskMetaRow {
-    TaskMetaRow {
-        id: row.0,
-        workspace_id,
-        project_id: row.1,
-        number: row.2,
-        title: row.3,
-        task_type: row.4,
-        priority: row.5,
-        status_id: row.6,
-        start_date: row.7,
-        due_date: row.8,
-        due_at: row.9,
-        estimate: None,
-        parent_id: row.10,
-        milestone_id: row.11,
-        recurrence: None,
-        archived_at: row.12,
-        created_by: row.13,
-        created_at: row.14,
-        updated_at: row.15,
-    }
-}
-
 type TaskRowTuple = (
     Uuid,
     Uuid,
@@ -220,6 +186,126 @@ type TaskRowTuple = (
     DateTime<Utc>,
     DateTime<Utc>,
 );
+
+fn row_to_meta(workspace_id: Uuid, row: TaskRowTuple, recurrence: Option<Value>) -> TaskMetaRow {
+    TaskMetaRow {
+        id: row.0,
+        workspace_id,
+        project_id: row.1,
+        number: row.2,
+        title: row.3,
+        task_type: row.4,
+        priority: row.5,
+        status_id: row.6,
+        start_date: row.7,
+        due_date: row.8,
+        due_at: row.9,
+        estimate: None,
+        parent_id: row.10,
+        milestone_id: row.11,
+        recurrence,
+        archived_at: row.12,
+        created_by: row.13,
+        created_at: row.14,
+        updated_at: row.15,
+    }
+}
+
+async fn load_task_recurrence(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar("SELECT recurrence FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id)
+        .bind(task_id)
+        .fetch_one(&mut **tx)
+        .await
+}
+
+async fn load_task_parent(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    parent_id: Uuid,
+) -> Result<Option<TaskParentRow>, sqlx::Error> {
+    let row: Option<(Uuid, String, String, i32)> = sqlx::query_as(
+        r#"
+        SELECT id, title, type, number
+        FROM fvoci.tasks
+        WHERE workspace_id = $1 AND id = $2 AND project_id = $3 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(parent_id)
+    .bind(project_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(id, title, task_type, number)| TaskParentRow {
+        id,
+        title,
+        task_type,
+        number,
+    }))
+}
+
+async fn load_task_children(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    parent_id: Uuid,
+) -> Result<Vec<TaskChildRow>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (Uuid, i32, String, String, Uuid)>(
+        r#"
+        SELECT id, number, title, type, status_id
+        FROM fvoci.tasks
+        WHERE workspace_id = $1 AND parent_id = $2
+          AND deleted_at IS NULL AND archived_at IS NULL
+        ORDER BY created_at DESC, id DESC
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(parent_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, number, title, task_type, status_id)| TaskChildRow {
+            id,
+            number,
+            title,
+            task_type,
+            status_id,
+        })
+        .collect())
+}
+
+async fn load_task_child_progress(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    parent_id: Uuid,
+) -> Result<TaskChildProgress, sqlx::Error> {
+    let row: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            count(*) FILTER (WHERE s.category = 'done')::bigint,
+            count(*)::bigint
+        FROM fvoci.tasks t
+        INNER JOIN fvoci.statuses s
+          ON s.workspace_id = t.workspace_id AND s.id = t.status_id
+        WHERE t.workspace_id = $1 AND t.parent_id = $2
+          AND t.deleted_at IS NULL AND t.archived_at IS NULL
+          AND s.category <> 'canceled'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(parent_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(TaskChildProgress {
+        done: row.0,
+        total: row.1,
+    })
+}
 
 pub async fn create_task(
     pool: &PgPool,
@@ -348,7 +434,7 @@ pub async fn create_task(
     .bind(input.due_date)
     .bind(input.parent_id)
     .bind(input.milestone_id)
-    .bind(input.recurrence)
+    .bind(input.recurrence.clone())
     .bind(empty_document_json())
     .bind(actor_user_id)
     .fetch_one(&mut *tx)
@@ -373,7 +459,7 @@ pub async fn create_task(
     .await?;
 
     tx.commit().await?;
-    Ok(Ok(row_to_meta(workspace_id, row)))
+    Ok(Ok(row_to_meta(workspace_id, row, input.recurrence.clone())))
 }
 
 pub async fn get_task(
@@ -389,6 +475,10 @@ pub async fn get_task(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::Forbidden));
     }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
     let row = sqlx::query_as::<_, TaskRowTuple>(
         r#"
         SELECT t.id, t.project_id, t.number, t.title, t.type AS task_type, t.priority, t.status_id,
@@ -402,7 +492,7 @@ pub async fn get_task(
     .bind(task_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(tuple) = row else {
+    let Some(task_row) = row else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
@@ -413,7 +503,7 @@ pub async fn get_task(
     .bind(task_id)
     .fetch_one(&mut *tx)
     .await?;
-    let project_id = tuple.1;
+    let project_id = task_row.1;
     let locked = lock_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
         tx.rollback().await?;
@@ -424,11 +514,32 @@ pub async fn get_task(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
+
+    let meta = row_to_meta(
+        workspace_id,
+        task_row,
+        load_task_recurrence(&mut tx, workspace_id, task_id).await?,
+    );
+    let parent = if let Some(parent_id) = meta.parent_id {
+        load_task_parent(&mut tx, workspace_id, project_id, parent_id).await?
+    } else {
+        None
+    };
+    let children = load_task_children(&mut tx, workspace_id, task_id).await?;
+    let child_progress = if meta.task_type == "subtask" {
+        None
+    } else {
+        Some(load_task_child_progress(&mut tx, workspace_id, task_id).await?)
+    };
+
     tx.commit().await?;
     Ok(Ok(TaskDetailRow {
-        meta: row_to_meta(workspace_id, tuple),
+        meta,
         content_json,
         can_edit: permission.at_least(ProjectPermission::Edit),
+        parent,
+        children,
+        child_progress,
     }))
 }
 
@@ -444,6 +555,10 @@ pub async fn list_project_tasks(
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
     }
     let locked = lock_project(&mut tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
@@ -471,10 +586,12 @@ pub async fn list_project_tasks(
     .bind(project_id)
     .fetch_all(&mut *tx)
     .await?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let task_id = row.0;
+        let recurrence = load_task_recurrence(&mut tx, workspace_id, task_id).await?;
+        items.push(row_to_meta(workspace_id, row, recurrence));
+    }
     tx.commit().await?;
-    Ok(Ok(
-        rows.into_iter()
-            .map(|row| row_to_meta(workspace_id, row))
-            .collect(),
-    ))
+    Ok(Ok(items))
 }
