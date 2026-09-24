@@ -1914,3 +1914,16 @@ main3fa의 Web35993127793에서 workspace는 성공, 협업은16/18(본문 토�
 Opus는 동일 경계의 삽입 도착 순서와 Yjs 상대 위치 assoc=-1 때문에 기존 이모지 검사 기대값 자체도 순서 의존적임을 지적했다. 후속 diff는 삽입 위치를 분리하고, 원격 caret가 이모지 바로 앞에 있는 경우/문서 시작에 있는 대조군을 독립적으로 검사한다. 실제 native 화살표/Delete는 유지하며, DOM/PM 선택 일치는 읽기 전용으로 관찰하고 synthetic 편집/선택 복구를 하지 않는다. 정확한 구조·고유 ID·이모지 삭제 검사, retry0, 기존 timeout을 유지한다. 새 diff는 별도 원격·Opus 검토 전 미수락이다. 로그 `/tmp/fvoci-main3fa-collab-failure.log`, `/tmp/fvoci-pr14-abea-collab.log`, 검토 `/tmp/fvoci-presence-opus-abea-review.md`.
 
 PR14 a813b55의 11개 원격 job 및 협업20/20은 성공했고 Opus delta 검토도 비차단이었다. 다만 emoji는 leaf atom이라 실제 키 이벤트를 ProseMirror가 처리하며, 당시 정지한 선택에서만 삭제를 검증했다. 이전 빠른 키 입력에서 PM 선택이 늦게 반영되어 Delete가 무시됐다는 가설은 미확정이다. 이를 숨기지 않도록 후속 diff는 동시 편집 검사에서 Delete 직전 CDP 조회를 제거하고, keydown capture/bubble의 선택·prevented와 atom을 포함한 content.size/docChanged를 읽기 전용으로 기록한다. 실패 시 늦은 y-sync까지 마지막 probe를 남긴다. 선택을 복구하거나 timeout/retry를 늘리지 않는다. a813의 성공은 이 후속 diff의 검증을 대신하지 않는다.
+
+
+### 설치 산출물 (컨테이너) — 2026-09-25
+
+- Composer ctx_d6ac049d1a5d 4451237 + 코디네이터 보완: `infra/rust/Dockerfile`(digest 고정, 비root uid1000,
+  server/migrate/collab-engine/document-extract/정적 자산 포함), `compose.yml`(postgres → init: 앱 역할 생성·
+  migrate·`--grant-app-role` → server), `scripts/install-smoke.sh`, `install.yml`(x64/ARM64).
+- 코디네이터 보완: init SQL을 psql 변수+`format(%I,%L)`+`\gexec`로 바꿔 역할/비밀번호 SQL 주입 제거(따옴표·주입
+  문자열 실측), init root 실행 제거, 웹 단계는 CI drift 검사로 보장되는 커밋된 생성 API 사용(Rust 빌드 의존 제거).
+- 워커 로컬 smoke(x86_64): setup/login, 협업 저장, /collab 활성, HWPX 추출, sha256, uid·저장소 소유, SIGTERM exit0
+  재시작, 재조회 성공(237s). 코디네이터 보완 후 smoke는 원격 CI로 확인한다.
+- 남은 차이: 서버는 기동 시 migration을 실행하므로 소유자 `DATABASE_URL`을 런타임에도 받는다(기존 제품 계약).
+  백업·복구 절차 검증, 운영 TLS/secure cookie 구성 문서화는 최종 수락 전 항목이다.

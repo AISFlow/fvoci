@@ -19,7 +19,7 @@ RUN cargo fetch --locked \
 
 FROM rust-deps AS rust-build
 ENV CARGO_TARGET_DIR=/src/target
-RUN cargo build --locked --release --bin fvoci-server --bin fvoci-migrate --bin fvoci-export-openapi --features api-schema \
+RUN cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
  && cargo build --locked --release --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine \
  && cargo build --locked --release --manifest-path crates/document-extract/Cargo.toml --bin document-extract
 
@@ -33,13 +33,11 @@ COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
 WORKDIR /src/apps/web
 RUN npm ci --install-links --no-audit --no-fund \
  && npm ci --prefix ../../packages/editor --ignore-scripts --no-audit --no-fund
+# The committed openapi.json / generated api.ts are kept in sync with the Rust
+# DTOs by the Web workflow's generate-api drift check, so this stage does not
+# depend on the Rust build.
 COPY apps/web ./
-WORKDIR /src
-COPY --from=rust-build /src/target/release/fvoci-export-openapi /tmp/fvoci-export-openapi
-RUN mkdir -p apps/web/src/generated \
- && /tmp/fvoci-export-openapi >apps/web/openapi.json \
- && apps/web/node_modules/.bin/openapi-typescript apps/web/openapi.json -o apps/web/src/generated/api.ts \
- && cd apps/web && npm run build
+RUN npm run build
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 RUN apt-get update \

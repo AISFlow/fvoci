@@ -20,7 +20,6 @@ services:
 
   init:
     image: ${FVOCI_IMAGE:?FVOCI_IMAGE is required}
-    user: "0:0"
     entrypoint: ["/opt/fvoci/sbin/init-db.sh"]
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-fvoci_owner}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fvoci}
