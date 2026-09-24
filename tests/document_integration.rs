@@ -1669,7 +1669,10 @@ async fn app_role_rls_and_secret_grants_hold_for_new_tables() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 8);
+    assert_eq!(
+        versions.0,
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
+    );
     app_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
@@ -1740,7 +1743,10 @@ async fn migration_001_003_upgrades_to_004_documents() {
         .fetch_one(&migration_pool)
         .await
         .unwrap();
-    assert_eq!(versions.0, 8);
+    assert_eq!(
+        versions.0,
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
+    );
     let has_documents: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'documents')",
     )

@@ -1499,7 +1499,10 @@ async fn fresh_migration_006_adds_attachments_table() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 8);
+    assert_eq!(
+        versions.0,
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
+    );
     let has_attachments: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'attachments')",
     )
@@ -1567,7 +1570,10 @@ async fn migration_005_upgrades_to_006_attachments() {
         .fetch_one(&migration_pool)
         .await
         .unwrap();
-    assert_eq!(versions.0, 8);
+    assert_eq!(
+        versions.0,
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
+    );
     let has_attachments: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'attachments')",
     )
