@@ -4,7 +4,7 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
@@ -12,18 +12,25 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateTaskBody, TaskChildOutput, TaskChildProgressOutput, TaskListItemOutput, TaskListResponse,
-    TaskMetaOutput, TaskOutput, TaskParentOutput, TaskStatusCountOutput,
+    CreateTaskBody, MoveTaskBody, OkResponse, PatchTaskBody, TaskChildOutput,
+    TaskChildProgressOutput, TaskListItemOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
+    TaskParentOutput, TaskStatusCountOutput,
 };
 use crate::auth::session::SessionUser;
 use crate::db::projects::ProjectDbError;
-use crate::db::tasks::{create_task, get_task, list_project_tasks, CreateTaskInput};
+use crate::db::tasks::{
+    create_task, get_task, list_project_tasks, move_task, patch_task_meta, restore_task,
+    trash_task, CreateTaskInput,
+};
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::guard::{check_origin, reject_bearer};
 use crate::http::rate_limit::peer_ip;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
 use crate::tasks::list_query::{parse_task_list_query, TaskListQueryError};
+use crate::tasks::patch::{
+    estimate_is_valid, ExpectedDatesInput, FieldUpdate, MoveTaskInput, PatchTaskMetaInput,
+};
 use crate::tasks::{priority_is_valid, task_type_is_valid, title_is_valid};
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +52,19 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}",
-            get(get_task_route),
+            get(get_task_route).patch(patch_task_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move",
+            post(move_task_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash",
+            post(trash_task_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/restore",
+            post(restore_task_route),
         )
 }
 
@@ -155,7 +174,225 @@ async fn get_task_route(
                 })
                 .collect(),
         })),
-        Err(err) => Err(map_project_error(err).into()),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn patch_task_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<PatchTaskBody>, JsonRejection>,
+) -> Result<Json<TaskMetaOutput>, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    if body.assignee_ids.is_some() || body.label_ids.is_some() || body.milestone_id.is_some() {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    let input = parse_patch_body(&body)?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = patch_task_meta(
+        &state.auth.db.pool,
+        workspace_id,
+        task_id,
+        actor_user_id,
+        session_id,
+        input,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(task) => Ok(Json(task_meta_output(task))),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn move_task_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<MoveTaskBody>, JsonRejection>,
+) -> Result<Json<TaskMetaOutput>, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    if body.before_id.is_some() && body.after_id.is_some() {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = move_task(
+        &state.auth.db.pool,
+        workspace_id,
+        task_id,
+        actor_user_id,
+        session_id,
+        MoveTaskInput {
+            status_id: body.status_id,
+            expected_status_id: body.expected_status_id,
+            before_id: body.before_id,
+            after_id: body.after_id,
+        },
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(task) => Ok(Json(task_meta_output(task))),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn trash_task_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = trash_task(
+        &state.auth.db.pool,
+        workspace_id,
+        task_id,
+        actor_user_id,
+        session_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn restore_task_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = restore_task(
+        &state.auth.db.pool,
+        workspace_id,
+        task_id,
+        actor_user_id,
+        session_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiError> {
+    if body.expected_dates.is_none()
+        && body.task_type.is_none()
+        && body.title.is_none()
+        && body.priority.is_none()
+        && body.status_id.is_none()
+        && body.start_date.is_none()
+        && body.due_date.is_none()
+        && body.due_at.is_none()
+        && body.estimate.is_none()
+        && body.parent_id.is_none()
+        && body.recurrence.is_none()
+        && body.archived.is_none()
+    {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    if let Some(title) = &body.title {
+        if !title_is_valid(title) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+    }
+    if let Some(task_type) = &body.task_type {
+        if !task_type_is_valid(task_type) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+    }
+    if let Some(priority) = &body.priority {
+        if !priority_is_valid(priority) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+    }
+    if let Some(Some(estimate)) = &body.estimate {
+        if !estimate_is_valid(estimate) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+    }
+    Ok(PatchTaskMetaInput {
+        expected_dates: body
+            .expected_dates
+            .as_ref()
+            .map(|dates| ExpectedDatesInput {
+                start_date: dates.start_date,
+                due_date: dates.due_date,
+                due_at: dates.due_at,
+            }),
+        task_type: body.task_type.clone(),
+        title: body.title.clone(),
+        priority: body.priority.clone(),
+        status_id: body.status_id,
+        start_date: FieldUpdate::from_optional(body.start_date),
+        due_date: FieldUpdate::from_optional(body.due_date),
+        due_at: FieldUpdate::from_optional(body.due_at),
+        estimate: match &body.estimate {
+            None => FieldUpdate::Unchanged,
+            Some(None) => FieldUpdate::Clear,
+            Some(Some(value)) => FieldUpdate::Set(value.clone()),
+        },
+        parent_id: FieldUpdate::from_optional(body.parent_id),
+        recurrence: match &body.recurrence {
+            None => FieldUpdate::Unchanged,
+            Some(None) => FieldUpdate::Clear,
+            Some(Some(value)) => FieldUpdate::Set(value.clone()),
+        },
+        archived: body.archived,
+    })
+}
+
+fn map_task_db_error(err: ProjectDbError) -> TaskApiError {
+    match err {
+        ProjectDbError::Conflict => TaskApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "task_hierarchy_violation",
+            title: "task hierarchy violation".to_string(),
+        },
+        ProjectDbError::TaskArchived => TaskApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "task_archived",
+            title: "task archived".to_string(),
+        },
+        ProjectDbError::InvalidAnchor => TaskApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "anchor_not_in_target_list",
+            title: "anchor not in target list".to_string(),
+        },
+        other => map_project_error(other).into(),
     }
 }
 
@@ -210,7 +447,7 @@ async fn list_tasks(
                 })
                 .collect(),
         })),
-        Err(err) => Err(map_project_error(err).into()),
+        Err(err) => Err(map_task_db_error(err)),
     }
 }
 

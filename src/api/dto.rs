@@ -626,6 +626,64 @@ fn default_task_priority() -> String {
     "none".to_string()
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ExpectedDatesBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub start_date: Option<NaiveDate>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub due_date: Option<NaiveDate>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub due_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchTaskBody {
+    pub expected_dates: Option<ExpectedDatesBody>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    #[serde(rename = "type")]
+    pub task_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    pub title: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    pub priority: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub status_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub start_date: Option<Option<NaiveDate>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub due_date: Option<Option<NaiveDate>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub due_at: Option<Option<DateTime<Utc>>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub estimate: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub parent_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub milestone_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub recurrence: Option<Option<Value>>,
+    pub archived: Option<bool>,
+    pub assignee_ids: Option<Vec<Uuid>>,
+    pub label_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MoveTaskBody {
+    pub status_id: Uuid,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub expected_status_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub before_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub after_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]

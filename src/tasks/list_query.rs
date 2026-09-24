@@ -412,6 +412,7 @@ pub fn cursor_key_for_row(
     priority: &str,
     status_sort_key: &str,
     due_date: Option<NaiveDate>,
+    due_at: Option<DateTime<Utc>>,
 ) -> String {
     let sort = effective_sort_entries(sort);
     let mut parts = Vec::with_capacity(sort.len() + 1);
@@ -429,6 +430,7 @@ pub fn cursor_key_for_row(
                 priority,
                 status_sort_key,
                 due_date,
+                due_at,
             )
         ));
     }
@@ -436,19 +438,30 @@ pub fn cursor_key_for_row(
     sha256_hex(parts.join("\0"))
 }
 
-fn effective_sort_entries(sort: &[ViewSort]) -> Vec<ViewSort> {
+pub fn default_task_sort() -> Vec<ViewSort> {
+    vec![ViewSort {
+        field: SortField::Rank,
+        direction: SortDirection::Asc,
+    }]
+}
+
+pub fn effective_sort_entries(sort: &[ViewSort]) -> Vec<ViewSort> {
     if sort.is_empty() {
-        vec![ViewSort {
-            field: SortField::Created,
-            direction: SortDirection::Desc,
-        }]
+        default_task_sort()
     } else {
         sort.to_vec()
     }
 }
 
+pub fn effective_due_date(
+    due_date: Option<NaiveDate>,
+    due_at: Option<DateTime<Utc>>,
+) -> Option<NaiveDate> {
+    due_date.or_else(|| due_at.map(|value| value.date_naive()))
+}
+
 #[allow(clippy::too_many_arguments)]
-fn sort_value_token(
+pub fn sort_value_token(
     field: SortField,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -458,6 +471,7 @@ fn sort_value_token(
     priority: &str,
     status_sort_key: &str,
     due_date: Option<NaiveDate>,
+    due_at: Option<DateTime<Utc>>,
 ) -> String {
     match field {
         SortField::Created => created_at.to_rfc3339(),
@@ -467,13 +481,13 @@ fn sort_value_token(
         SortField::Rank => sort_key.to_string(),
         SortField::Priority => priority_rank(priority).to_string(),
         SortField::Status => status_sort_key.to_string(),
-        SortField::Due => due_date
+        SortField::Due => effective_due_date(due_date, due_at)
             .map(|date| date.to_string())
             .unwrap_or_else(|| "null".to_string()),
     }
 }
 
-fn priority_rank(priority: &str) -> i32 {
+pub fn priority_rank(priority: &str) -> i32 {
     match priority {
         "none" => 0,
         "low" => 1,

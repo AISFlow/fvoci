@@ -1,4 +1,5 @@
 pub mod list_query;
+pub mod patch;
 
 pub fn title_is_valid(title: &str) -> bool {
     let trimmed = title.trim();

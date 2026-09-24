@@ -436,6 +436,10 @@ pub fn map_project_error(err: ProjectDbError) -> AppError {
         }
         ProjectDbError::LeadNotMember => AppError::from_code(ProblemCode::Conflict),
         ProjectDbError::Archived => AppError::from_code(ProblemCode::ProjectArchived),
+        ProjectDbError::VersionConflict => AppError::from_code(ProblemCode::Conflict),
+        ProjectDbError::TaskArchived | ProjectDbError::InvalidAnchor => {
+            AppError::from_code(ProblemCode::Conflict)
+        }
         ProjectDbError::InvalidCursor => AppError {
             status: StatusCode::BAD_REQUEST,
             code: ProblemCode::InvalidInput,
