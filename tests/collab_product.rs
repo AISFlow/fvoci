@@ -4235,7 +4235,7 @@ async fn collab_authenticated_peer_fanout_records_observed_delivery() {
     // Writer echo is also Data (broadcast_update to every connection). No-cache
     // therefore has at least one delivery read per reader plus the writer.
     assert!(
-        observed_reads >= PEER_COUNT + 1,
+        observed_reads > PEER_COUNT,
         "current ACL/no-cache must run a delivery read per peer plus writer echo, got {observed_reads}"
     );
 
