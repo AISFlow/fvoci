@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -14,26 +15,52 @@ fn slots() -> &'static Mutex<usize> {
     CHILD_SLOTS.get_or_init(|| Mutex::new(0))
 }
 
+/// Client-only outcome: extraction stopped before a canonical child report.
+/// This is not an [`ExtractStatus`] wire variant and must never be reported as
+/// a successful empty extract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cancelled {
+    /// Set when a helper was spawned and then killed because of cancel.
+    pub child_pid: Option<u32>,
+}
+
+enum SlotWait {
+    Ready(SlotGuard),
+    Cancelled,
+    Failed(ExtractReport),
+}
+
 struct SlotGuard;
 
 impl SlotGuard {
-    fn acquire(deadline: Instant) -> Result<Self, ExtractReport> {
+    fn acquire(deadline: Instant, cancel: &AtomicBool) -> SlotWait {
         loop {
+            if cancelled(cancel) {
+                return SlotWait::Cancelled;
+            }
             {
-                let mut used = slots().lock().map_err(|_| {
-                    worker_fail(WorkerFailureReason::SlotPoison, "child slot mutex poisoned")
-                })?;
+                let mut used = match slots().lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        return SlotWait::Failed(worker_fail(
+                            WorkerFailureReason::SlotPoison,
+                            "child slot mutex poisoned",
+                        ));
+                    }
+                };
                 if *used < MAX_CHILD_CONCURRENCY {
                     *used += 1;
-                    return Ok(Self);
+                    return SlotWait::Ready(Self);
                 }
             }
             if Instant::now() >= deadline {
-                return Err(ExtractReport::new(ExtractStatus::ResourceLimit {
+                return SlotWait::Failed(ExtractReport::new(ExtractStatus::ResourceLimit {
                     kind: LimitKind::Time,
                     detail: "timed out waiting for extract child slot".to_string(),
                 }));
             }
+            #[cfg(feature = "test-hang")]
+            let _waiting = SlotWaitWitness::enter(cancel);
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -68,13 +95,67 @@ pub struct SpawnTrace {
 static LAST_SPAWN: OnceLock<Mutex<Option<SpawnTrace>>> = OnceLock::new();
 
 #[cfg(feature = "test-hang")]
+static SLOT_WAIT_KEYS: OnceLock<Mutex<std::collections::HashSet<usize>>> = OnceLock::new();
+
+#[cfg(feature = "test-hang")]
 fn last_spawn_lock() -> &'static Mutex<Option<SpawnTrace>> {
     LAST_SPAWN.get_or_init(|| Mutex::new(None))
 }
 
 #[cfg(feature = "test-hang")]
+fn slot_wait_keys() -> &'static Mutex<std::collections::HashSet<usize>> {
+    SLOT_WAIT_KEYS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(feature = "test-hang")]
+fn cancel_key(cancel: &AtomicBool) -> usize {
+    cancel as *const AtomicBool as usize
+}
+
+#[cfg(feature = "test-hang")]
+struct SlotWaitWitness {
+    key: usize,
+}
+
+#[cfg(feature = "test-hang")]
+impl SlotWaitWitness {
+    fn enter(cancel: &AtomicBool) -> Self {
+        let key = cancel_key(cancel);
+        if let Ok(mut keys) = slot_wait_keys().lock() {
+            keys.insert(key);
+        }
+        Self { key }
+    }
+}
+
+#[cfg(feature = "test-hang")]
+impl Drop for SlotWaitWitness {
+    fn drop(&mut self) {
+        if let Ok(mut keys) = slot_wait_keys().lock() {
+            keys.remove(&self.key);
+        }
+    }
+}
+
+#[cfg(feature = "test-hang")]
 pub fn take_last_spawn() -> Option<SpawnTrace> {
     last_spawn_lock().lock().ok().and_then(|mut g| g.take())
+}
+
+#[cfg(feature = "test-hang")]
+pub fn peek_last_spawn() -> Option<SpawnTrace> {
+    last_spawn_lock().lock().ok().and_then(|g| *g)
+}
+
+/// True only while `cancel` is the flag of a request currently sleeping in
+/// slot wait. A different request's waiter cannot satisfy this check.
+#[cfg(feature = "test-hang")]
+pub fn is_slot_waiter(cancel: &AtomicBool) -> bool {
+    let key = cancel_key(cancel);
+    slot_wait_keys()
+        .lock()
+        .map(|keys| keys.contains(&key))
+        .unwrap_or(false)
 }
 
 #[cfg(feature = "test-hang")]
@@ -96,41 +177,81 @@ fn record_helpers_joined(n: u8) {
     }
 }
 
+fn cancelled(flag: &AtomicBool) -> bool {
+    flag.load(Ordering::Acquire)
+}
+
 /// Run extraction in a killable child. This call is **synchronous**: the
 /// deadline is `limits.timeout_ms` from admission. There is no external
-/// cancel token. Dropping a `JoinHandle` that wraps this function does **not**
-/// terminate the child; only the watchdog kill+reap path does.
+/// cancel token; use [`extract_killable_with_cancel`] for an `AtomicBool`.
+/// Dropping a `JoinHandle` that wraps this function does **not** terminate
+/// the child; only the watchdog kill+reap path or parent-death SIGKILL does.
 pub fn extract_killable(req: ExtractRequest) -> ExtractReport {
+    match extract_killable_with_cancel(req, &AtomicBool::new(false)) {
+        Ok(report) => report,
+        Err(Cancelled { child_pid }) => {
+            let mut report = worker_fail(
+                WorkerFailureReason::Wait,
+                format!("cancel flag was unset (child_pid={child_pid:?})"),
+            );
+            if let Some(pid) = child_pid {
+                report = report.with_child_pid(pid);
+            }
+            report
+        }
+    }
+}
+
+/// Same process boundary as [`extract_killable`], plus a client-owned cancel
+/// flag. The flag is an `AtomicBool` observed at slot admission, spawn, and
+/// the existing `try_wait` poll; dropping a future or `JoinHandle` is not
+/// cancellation. Canonical child `ExtractStatus` / `WorkerFailureReason`
+/// enums are unchanged.
+pub fn extract_killable_with_cancel(
+    req: ExtractRequest,
+    cancel: &AtomicBool,
+) -> Result<ExtractReport, Cancelled> {
+    if cancelled(cancel) {
+        return Err(Cancelled { child_pid: None });
+    }
     if let Err(detail) = req.limits.validate() {
-        return worker_fail(WorkerFailureReason::InvalidLimits, detail);
+        return Ok(worker_fail(WorkerFailureReason::InvalidLimits, detail));
     }
     if req.bytes.len() as u64 > req.limits.max_input_bytes {
-        return ExtractReport::new(ExtractStatus::ResourceLimit {
+        return Ok(ExtractReport::new(ExtractStatus::ResourceLimit {
             kind: LimitKind::Input,
             detail: format!(
                 "input {} bytes exceeds {}-byte limit",
                 req.bytes.len(),
                 req.limits.max_input_bytes
             ),
-        });
+        }));
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        return worker_fail(
+        let _ = cancel;
+        return Ok(worker_fail(
             WorkerFailureReason::UnsupportedPlatform,
             "extract_killable requires Linux rlimits; refuse closed on this OS",
-        );
+        ));
     }
 
     #[cfg(target_os = "linux")]
     {
+        if cancelled(cancel) {
+            return Err(Cancelled { child_pid: None });
+        }
         let deadline = Instant::now() + Duration::from_millis(req.limits.timeout_ms);
-        let _slot = match SlotGuard::acquire(deadline) {
-            Ok(slot) => slot,
-            Err(report) => return report,
+        let _slot = match SlotGuard::acquire(deadline, cancel) {
+            SlotWait::Ready(slot) => slot,
+            SlotWait::Cancelled => return Err(Cancelled { child_pid: None }),
+            SlotWait::Failed(report) => return Ok(report),
         };
-        spawn_child(req, deadline)
+        if cancelled(cancel) {
+            return Err(Cancelled { child_pid: None });
+        }
+        spawn_child(req, deadline, cancel)
     }
 }
 
@@ -141,15 +262,22 @@ fn worker_fail(reason: WorkerFailureReason, detail: impl Into<String>) -> Extrac
     })
 }
 
-fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
+fn spawn_child(
+    req: ExtractRequest,
+    deadline: Instant,
+    cancel: &AtomicBool,
+) -> Result<ExtractReport, Cancelled> {
+    if cancelled(cancel) {
+        return Err(Cancelled { child_pid: None });
+    }
     if req.extractor_bin.as_os_str().is_empty() || !req.extractor_bin.is_file() {
-        return worker_fail(
+        return Ok(worker_fail(
             WorkerFailureReason::MissingExecutable,
             format!(
                 "extractor binary path required and must exist: {:?}",
                 req.extractor_bin
             ),
-        );
+        ));
     }
 
     let mut cmd = Command::new(&req.extractor_bin);
@@ -173,7 +301,7 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
         .env_remove("DOCUMENT_EXTRACT_TEST_HANG_MS");
 
     if let Err(err) = apply_pre_exec_rlimits(&mut cmd, &req.limits) {
-        return worker_fail(WorkerFailureReason::LimitApply, err);
+        return Ok(worker_fail(WorkerFailureReason::LimitApply, err));
     }
 
     #[cfg(feature = "test-hang")]
@@ -183,13 +311,17 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
     #[cfg(not(feature = "test-hang"))]
     let _ = req.test_hang_ms;
 
+    if cancelled(cancel) {
+        return Err(Cancelled { child_pid: None });
+    }
+
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(err) => {
-            return worker_fail(
+            return Ok(worker_fail(
                 WorkerFailureReason::Spawn,
                 format!("failed to spawn {:?}: {err}", req.extractor_bin),
-            );
+            ));
         }
     };
 
@@ -212,6 +344,7 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
 
     let mut limit = None;
     let mut wait_status = None;
+    let mut cancel_pid = None;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -219,6 +352,11 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
                 break;
             }
             Ok(None) => {
+                if cancelled(cancel) {
+                    kill_and_reap(&mut child);
+                    cancel_pid = Some(pid);
+                    break;
+                }
                 if Instant::now() >= deadline {
                     limit = Some(LimitKind::Time);
                     kill_and_reap(&mut child);
@@ -240,8 +378,10 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
                 join_any(stderr_join);
                 #[cfg(feature = "test-hang")]
                 record_helpers_joined(3);
-                return worker_fail(WorkerFailureReason::Wait, format!("wait failed: {err}"))
-                    .with_child_pid(pid);
+                return Ok(
+                    worker_fail(WorkerFailureReason::Wait, format!("wait failed: {err}"))
+                        .with_child_pid(pid),
+                );
             }
         }
     }
@@ -252,12 +392,19 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
     #[cfg(feature = "test-hang")]
     record_helpers_joined(3);
 
+    if let Some(pid) = cancel_pid {
+        let _ = (stdout_bytes, stderr_bytes);
+        return Err(Cancelled {
+            child_pid: Some(pid),
+        });
+    }
+
     if let Some(kind) = limit {
-        return ExtractReport::new(ExtractStatus::ResourceLimit {
+        return Ok(ExtractReport::new(ExtractStatus::ResourceLimit {
             kind,
             detail: format!("child pid {pid} exceeded {kind:?}; killed and reaped"),
         })
-        .with_child_pid(pid);
+        .with_child_pid(pid));
     }
 
     let status = match wait_status {
@@ -265,13 +412,20 @@ fn spawn_child(req: ExtractRequest, deadline: Instant) -> ExtractReport {
         None => match child.wait() {
             Ok(status) => status,
             Err(err) => {
-                return worker_fail(WorkerFailureReason::Wait, format!("reap failed: {err}"))
-                    .with_child_pid(pid);
+                return Ok(
+                    worker_fail(WorkerFailureReason::Wait, format!("reap failed: {err}"))
+                        .with_child_pid(pid),
+                );
             }
         },
     };
 
-    report_from_child_io(status, pid, stdout_bytes, stderr_bytes)
+    Ok(report_from_child_io(
+        status,
+        pid,
+        stdout_bytes,
+        stderr_bytes,
+    ))
 }
 
 /// Classify child pipes and status. Stdout overflow is checked before crash
@@ -417,8 +571,12 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         use std::os::unix::process::CommandExt;
         let as_bytes = limits.max_child_rss_bytes;
         let cpu_secs = (limits.timeout_ms / 1000).max(1);
+        let expected_ppid = std::process::id() as libc::pid_t;
         unsafe {
-            cmd.pre_exec(move || apply_rlimits_now(as_bytes, cpu_secs));
+            cmd.pre_exec(move || {
+                apply_rlimits_now(as_bytes, cpu_secs)?;
+                apply_parent_death_signal(expected_ppid)
+            });
         }
         Ok(())
     }
@@ -427,6 +585,37 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         let _ = (cmd, limits);
         Err("rlimit pre_exec is Linux-only".into())
     }
+}
+
+/// `PR_SET_PDEATHSIG` from `linux/prctl.h`. libc 0.2.189 exports this constant
+/// and `prctl` only on L4Re/Android, not gnu Linux.
+#[cfg(target_os = "linux")]
+const PR_SET_PDEATHSIG: libc::c_int = 1;
+
+/// Ask the kernel to SIGKILL this child if the expected parent dies, including
+/// the fork-to-prctl race where the parent is already gone.
+#[cfg(target_os = "linux")]
+fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> {
+    // SAFETY: `pre_exec` runs between fork and exec. Only async-signal-safe
+    // libc is used: `syscall`, `getppid`, `raise`, `_exit`.
+    unsafe {
+        let rc = libc::syscall(
+            libc::SYS_prctl,
+            PR_SET_PDEATHSIG as libc::c_long,
+            libc::SIGKILL as libc::c_long,
+            0,
+            0,
+            0,
+        );
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::getppid() != expected_ppid {
+            let _ = libc::raise(libc::SIGKILL);
+            libc::_exit(127);
+        }
+    }
+    Ok(())
 }
 
 /// Apply OS ceilings in the current process. Used from `pre_exec` and the child
@@ -457,6 +646,46 @@ pub fn apply_rlimits_now(as_bytes: u64, cpu_secs: u64) -> std::io::Result<()> {
             std::io::ErrorKind::Unsupported,
             "setrlimit is Linux-only",
         ))
+    }
+}
+
+/// Feature-gated parent-death fixture. Spawns a hanging helper through the
+/// production `pre_exec` path, writes the helper pid, then parks until SIGKILL.
+/// Production builds omit this (required-features / `test-hang` only).
+#[cfg(feature = "test-hang")]
+pub fn run_parent_death_driver(extractor: PathBuf, pid_file: PathBuf) -> ! {
+    let mut limits = Limits::for_tests();
+    limits.timeout_ms = crate::limits::DEFAULT_TIMEOUT_MS;
+    let req = ExtractRequest {
+        bytes: Vec::new(),
+        name: "hang.hwp".into(),
+        limits,
+        extractor_bin: extractor,
+        test_hang_ms: Some(crate::limits::DEFAULT_TIMEOUT_MS),
+    };
+    let cancel = AtomicBool::new(false);
+    thread::spawn(move || {
+        let _ = extract_killable_with_cancel(req, &cancel);
+    });
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(trace) = peek_last_spawn() {
+            if let Some(parent) = pid_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::write(&pid_file, trace.pid.to_string()).is_err() {
+                std::process::exit(2);
+            }
+            break;
+        }
+        if Instant::now() >= deadline {
+            eprintln!("parent-death driver: helper did not spawn");
+            std::process::exit(2);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    loop {
+        thread::park();
     }
 }
 
