@@ -18,6 +18,18 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_optional_non_null_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    match Option::<String>::deserialize(deserializer)? {
+        Some(value) => Ok(Some(value)),
+        None => Err(serde::de::Error::invalid_type(
+            serde::de::Unexpected::Unit,
+            &"string",
+        )),
+    }
+}
+
 #[cfg(feature = "api-schema")]
 use utoipa::ToSchema;
 
@@ -312,6 +324,107 @@ pub struct BodyResponse {
     pub version: i32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateAttachmentUploadBody {
+    pub name: String,
+    pub size_bytes: i64,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    pub declared_mime: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentPartUrlResponse {
+    pub part_number: i32,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateAttachmentUploadResponse {
+    pub attachment_id: String,
+    pub part_size_bytes: i64,
+    pub parts: Vec<AttachmentPartUrlResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentUploadedPartResponse {
+    pub part_number: i32,
+    pub etag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ResumeAttachmentUploadResponse {
+    pub attachment_id: String,
+    pub part_size_bytes: i64,
+    pub uploaded_parts: Vec<AttachmentUploadedPartResponse>,
+    pub parts: Vec<AttachmentPartUrlResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentCompletePartBody {
+    pub part_number: i32,
+    pub etag: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CompleteAttachmentUploadBody {
+    pub parts: Vec<AttachmentCompletePartBody>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentPreviewResponse {
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentOutput {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub size_bytes: Option<i64>,
+    pub image: bool,
+    pub scan_status: String,
+    pub created_at: DateTime<Utc>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub preview: Option<AttachmentPreviewResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PutAttachmentPartResponse {
+    pub etag: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentDownloadQuery {
+    #[serde(default)]
+    pub variant: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct ProblemResponse {
@@ -369,5 +482,62 @@ mod tests {
             "familyName must be present"
         );
         assert!(object["familyName"].is_null(), "familyName must be null");
+    }
+
+    #[test]
+    fn create_attachment_upload_rejects_unknown_fields_and_null_mime() {
+        let omitted: CreateAttachmentUploadBody =
+            serde_json::from_str(r#"{"name":"a.bin","sizeBytes":1}"#).unwrap();
+        assert!(omitted.declared_mime.is_none());
+        let with_mime: CreateAttachmentUploadBody =
+            serde_json::from_str(r#"{"name":"a.bin","sizeBytes":1,"declaredMime":"text/plain"}"#)
+                .unwrap();
+        assert_eq!(with_mime.declared_mime.as_deref(), Some("text/plain"));
+        assert!(serde_json::from_str::<CreateAttachmentUploadBody>(
+            r#"{"name":"a.bin","sizeBytes":1,"declaredMime":null}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<CreateAttachmentUploadBody>(
+            r#"{"name":"a.bin","sizeBytes":1,"extra":true}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn complete_attachment_upload_rejects_unknown_fields() {
+        let ok: CompleteAttachmentUploadBody =
+            serde_json::from_str(r#"{"parts":[{"partNumber":1,"etag":"abc"}]}"#).unwrap();
+        assert_eq!(ok.parts.len(), 1);
+        assert!(serde_json::from_str::<CompleteAttachmentUploadBody>(
+            r#"{"parts":[{"partNumber":1,"etag":"abc"}],"extra":1}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<CompleteAttachmentUploadBody>(
+            r#"{"parts":[{"partNumber":1,"etag":"abc","extra":true}]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn attachment_output_keeps_null_size_completed_and_preview() {
+        let output = AttachmentOutput {
+            id: "att-1".into(),
+            name: "파일.png".into(),
+            mime: "application/octet-stream".into(),
+            size_bytes: None,
+            image: false,
+            scan_status: "skipped".into(),
+            created_at: DateTime::parse_from_rfc3339("2026-09-24T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            completed_at: None,
+            preview: None,
+        };
+        let body = serde_json::to_value(output).expect("serialize attachment");
+        assert!(body["sizeBytes"].is_null());
+        assert!(body["completedAt"].is_null());
+        assert!(body["preview"].is_null());
+        assert_eq!(body["name"], "파일.png");
+        assert!(body["createdAt"].as_str().unwrap().contains("2026-09-24"));
     }
 }

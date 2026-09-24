@@ -7,6 +7,10 @@ import {
   type Page,
 } from "@playwright/test";
 import { createE2eUser } from "../e2e/helpers";
+import {
+  attachmentNodesFromDocument,
+  type AttachmentNodeShape,
+} from "./collab-attachment-oracle";
 import { startOwnedServer, type OwnedServer } from "./collab-restart";
 import {
   COLLAB_PERSIST_DONE,
@@ -115,9 +119,29 @@ export type EditorShape = {
   table: { id: string; rows: string[][] } | null;
 };
 
-export async function ensureInstanceSetup(page: Page): Promise<void> {
-  await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+export type { AttachmentNodeShape };
+
+export function attachmentNodes(shape: EditorShape): AttachmentNodeShape[] {
+  return attachmentNodesFromDocument(shape.document);
+}
+
+export function attachmentNodeCount(shape: EditorShape): number {
+  return attachmentNodes(shape).length;
+}
+
+export async function ensureCollabFixture(page: Page): Promise<void> {
+  const setupRes = await page.request.get("/api/v1/setup");
+  expect(setupRes.ok(), `setup status failed: ${setupRes.status()}`).toBe(true);
+  const setup = (await setupRes.json()) as { needed: boolean };
+  if (setup.needed) {
+    await page.goto("/setup");
+    await expect(page).toHaveURL(/\/setup$/);
+    await fillInstanceSetup(page);
+  }
+  installCollabMember();
+}
+
+async function fillInstanceSetup(page: Page): Promise<void> {
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
   await page.getByLabel("이메일").fill(admin.email);
@@ -126,6 +150,36 @@ export async function ensureInstanceSetup(page: Page): Promise<void> {
   await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
+}
+
+export async function ensureInstanceSetup(page: Page): Promise<void> {
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await fillInstanceSetup(page);
+}
+
+function isDuplicateEmailFixtureError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const err = error as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
+  const text = [err.message, err.stderr?.toString(), err.stdout?.toString()].join("\n");
+  return text.includes("users_email_unique");
+}
+
+function createE2eUserIfAbsent(
+  email: string,
+  password: string,
+  givenName: string,
+  options?: {
+    familyName?: string;
+    workspaceSlug?: string;
+    membershipRole?: string;
+  },
+): void {
+  try {
+    createE2eUser(email, password, givenName, options);
+  } catch (error) {
+    if (!isDuplicateEmailFixtureError(error)) throw error;
+  }
 }
 
 export async function login(page: Page, email: string, password: string): Promise<void> {
@@ -139,7 +193,7 @@ export async function login(page: Page, email: string, password: string): Promis
 }
 
 export function installCollabMember(): void {
-  createE2eUser(member.email, member.password, member.givenName, {
+  createE2eUserIfAbsent(member.email, member.password, member.givenName, {
     familyName: member.familyName,
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "member",
@@ -147,7 +201,7 @@ export function installCollabMember(): void {
 }
 
 export function installCollabPeer(user = peer): void {
-  createE2eUser(user.email, user.password, user.givenName, {
+  createE2eUserIfAbsent(user.email, user.password, user.givenName, {
     familyName: user.familyName,
     workspaceSlug: admin.workspaceSlug,
     membershipRole: "member",
@@ -546,6 +600,65 @@ export async function indexedDbNames(page: Page): Promise<string[]> {
     const dbs = await indexedDB.databases();
     return dbs.map((db) => db.name ?? "");
   });
+}
+
+export type SlashAttachmentFixture =
+  | string
+  | { name: string; buffer: Buffer; mimeType?: string };
+
+async function focusEditorForSlash(page: Page): Promise<void> {
+  const editor = editorLocator(page);
+  await editor.focus();
+  await editor.evaluate((root) => {
+    const live = (
+      root as HTMLElement & {
+        editor?: {
+          chain(): {
+            focus(): { setTextSelection(pos: number): { run(): boolean } };
+          };
+          state: { doc: { content: { size: number } } };
+        };
+      }
+    ).editor;
+    if (!live) throw new Error("editor instance missing on ProseMirror root");
+    const size = live.state.doc.content.size;
+    const pos = size > 0 ? Math.min(1, size) : 0;
+    live.chain().focus().setTextSelection(pos).run();
+  });
+}
+
+export async function insertSlashAttachment(
+  page: Page,
+  file: SlashAttachmentFixture,
+): Promise<void> {
+  await focusEditorForSlash(page);
+  await page.keyboard.type("/첨부");
+  await expect(page.locator(".fvoci-suggestion")).toBeVisible();
+  await page.keyboard.press("Enter");
+  const [fileChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.getByRole("button", { name: "파일 선택" }).click(),
+  ]);
+  if (typeof file === "string") {
+    await fileChooser.setFiles(file);
+  } else {
+    await fileChooser.setFiles({
+      name: file.name,
+      mimeType: file.mimeType ?? "application/octet-stream",
+      buffer: file.buffer,
+    });
+  }
+  await expect(page.locator('.afn-attachment[data-state="stored"]')).toBeVisible({
+    timeout: 30_000,
+  });
+}
+
+export async function storedAttachmentDownloadBytes(page: Page): Promise<Buffer> {
+  const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
+  expect(href).toBeTruthy();
+  const response = await page.request.get(href!);
+  expect(response.ok()).toBe(true);
+  return response.body();
 }
 
 export { UUID_RE };

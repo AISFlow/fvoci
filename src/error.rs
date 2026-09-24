@@ -1,4 +1,4 @@
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -24,6 +24,13 @@ pub enum ProblemCode {
     WorkspaceMemberSelfChangeForbidden,
     CannotManageRoleAboveOwn,
     RateLimitExceeded,
+    UploadIsNotInTheRequiredState,
+    OnlyTheUploaderMayContinueThisUpload,
+    FileExceedsUploadMaxFileSizeMb,
+    PartExceedsUploadPartSizeMb,
+    SubmittedPartsDoNotMatchUploadedParts,
+    AttachmentFailedVirusScan,
+    RangeNotSatisfiable,
     InternalError,
 }
 
@@ -44,6 +51,17 @@ impl ProblemCode {
             Self::WorkspaceMemberSelfChangeForbidden => "workspace_member_self_change_forbidden",
             Self::CannotManageRoleAboveOwn => "cannot_manage_a_role_above_your_own",
             Self::RateLimitExceeded => "rate_limit_exceeded",
+            Self::UploadIsNotInTheRequiredState => "upload_is_not_in_the_required_state",
+            Self::OnlyTheUploaderMayContinueThisUpload => {
+                "only_the_uploader_may_continue_this_upload"
+            }
+            Self::FileExceedsUploadMaxFileSizeMb => "file_exceeds_upload_max_file_size_mb",
+            Self::PartExceedsUploadPartSizeMb => "part_exceeds_upload_part_size_mb",
+            Self::SubmittedPartsDoNotMatchUploadedParts => {
+                "submitted_parts_do_not_match_uploaded_parts"
+            }
+            Self::AttachmentFailedVirusScan => "attachment_failed_virus_scan",
+            Self::RangeNotSatisfiable => "range_not_satisfiable",
             Self::InternalError => "internal_error",
         }
     }
@@ -66,6 +84,17 @@ impl ProblemCode {
             }
             Self::CannotManageRoleAboveOwn => "cannot manage a workspace role above your own",
             Self::RateLimitExceeded => "rate limit exceeded",
+            Self::UploadIsNotInTheRequiredState => "upload is not in the required state",
+            Self::OnlyTheUploaderMayContinueThisUpload => {
+                "only the uploader may continue this upload"
+            }
+            Self::FileExceedsUploadMaxFileSizeMb => "file exceeds upload max file size mb",
+            Self::PartExceedsUploadPartSizeMb => "part exceeds upload part size mb",
+            Self::SubmittedPartsDoNotMatchUploadedParts => {
+                "submitted parts do not match uploaded parts"
+            }
+            Self::AttachmentFailedVirusScan => "attachment failed virus scan",
+            Self::RangeNotSatisfiable => "range not satisfiable",
             Self::InternalError => "internal error",
         }
     }
@@ -79,9 +108,18 @@ impl ProblemCode {
             | Self::PersonalWorkspaceImmutable
             | Self::WorkspaceLastOwnerRequired
             | Self::WorkspaceMemberSelfChangeForbidden => StatusCode::CONFLICT,
-            Self::InsufficientPermissions | Self::CannotManageRoleAboveOwn => StatusCode::FORBIDDEN,
+            Self::InsufficientPermissions
+            | Self::CannotManageRoleAboveOwn
+            | Self::OnlyTheUploaderMayContinueThisUpload
+            | Self::AttachmentFailedVirusScan => StatusCode::FORBIDDEN,
             Self::OriginMismatch => StatusCode::FORBIDDEN,
             Self::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
+            Self::FileExceedsUploadMaxFileSizeMb | Self::PartExceedsUploadPartSizeMb => {
+                StatusCode::PAYLOAD_TOO_LARGE
+            }
+            Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
+            Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
+            Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -193,5 +231,11 @@ impl From<JsonRejection> for AppError {
             }
             _ => AppError::from_code(ProblemCode::InvalidInput),
         }
+    }
+}
+
+impl From<QueryRejection> for AppError {
+    fn from(_rejection: QueryRejection) -> Self {
+        AppError::from_code(ProblemCode::InvalidInput)
     }
 }

@@ -10,7 +10,9 @@
 ## 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Run `run_b01d432a9dee`.
-최신 main `125ef2568d17fba961e569a9d4c0bc007860a643`는 PR1–8의 수락 결과다.
+최신 main `59b6ecd90e5ff42da576c6d0d5336fb78c2c8859`는 PR1–9의 수락 결과다.
+PR9 native 취소/부모 종료 경계도 Opus 검토와 원격11job 및 post-merge11job을
+통과했다. 현재 wiki 첨부 backend/React 통합은 아직 미수락이다.
 PR7 https://github.com/AISFlow/fvoci/pull/7 은 검토 HEAD04f67ae,
 CI 합성merge5a8d0aa(baseba19932)에서11job 성공 후 squash merge했다.
 PR7의 실제 merged/main 반영과 post-merge11job 성공을 확인했다.
@@ -23,9 +25,10 @@ PR8 native client 분리도 merged이며 해당 post-merge11job 성공을 확인
 | --- | --- | --- | --- | --- | --- |
 | 설치·세션·프로필 | identity/routes.ts, core/auth.ts, pg/identity-access.ts | 활성 사용자·철회·프로필/이벤트/감사 원자성 | 첫 slice 수락, PR1 merged | 실제 PostgreSQL/HTTP 및 CI | PAT/OIDC/MFA·계정 생명주기·확장 정책 |
 | 첫 workspace | domains/workspaces, contracts/workspaces | 현재 역할·철회·원자성·RLS | 첫 backend/React 수락, PR4 merged | 실제 앱 역할DB66·양 아키텍처·React·CI·독립 검토 | counts·quota·groups·members-list 등 |
-| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component PR2 + 얇은 client PR8 수락 | native49+49/client6+6 양 아키텍처·CI·독립 검토 | 첨부 권한/업로드/저장/검색/썸네일 미연결 |
+| HWP5/HWPX 본문 | 원본 추출 경로, pinned rhwp e8800c8 | 실제 본문·빈/부분/손상·자원 한도 | native component PR2 + 얇은 client PR8/취소 PR9 수락 | native default51/test-hang54·client8×2 양 아키텍처·CI·독립 검토 | 첨부 추출 job/검색/썸네일 미연결 |
 | 기본 위키 문서 | domains/documents | 생성·조회·metadata·현재 문서 권한 | 첫 backend/React 수락, PR5 merged | 실제 앱 역할DB13·UI·CI·독립 검토 | 댓글·공유·리비전·확장 문서 기능 |
 | 협업 | domains/collab, 기존 React/Tiptap | provider envelope·철회·CRDT 저장/복원 | codec/DB/native engine PR6 수락; 실제 /collab와2UI 연결 PR7 opt-in 수락 | x64/ARM64 lifecycle20/product56/projection19/shutdown7·React14·Opus 검토 | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계 추가 검증, 과거 단발 timeout 원인 미확정. 명시적 opt-in이며 전체 협업 수락 아님 |
+| 위키 첨부 local | domains/attachments, packages/storage | 현재 부모 권한·원본 bytes·원자 완료·취소 | backend791199d/React6c54d8e 통합, 미수락 | 앱 역할DB20·React 첨부5/전체18 성공; Opus 후속 수정 중 | HTTP416·저장/취소 보강 및 최종 CI/검토, 추출 job/S3/썸네일 |
 | 나머지 제품 | 아래 범위 보존 목록 | 원본 기능·보안·데이터 계약 | 재작성 미착수 | 미실행 | 프로젝트/태스크/첨부/검색/알림/운영 등 |
 
 ## 설계·자원 결정
@@ -49,9 +52,9 @@ AGENTS.md → .agents/environment.md → Orca Run task-list → 이 문서 → g
 | 인증 확장·PAT·OIDC·MFA·사용자 생명주기 | packages/contracts/src/routes.ts auth/me/admin, core/auth.ts | 세션 폐기, 범위, 마지막 관리자, 탈퇴/복구 | 재작성 미착수 | 미실행 | 첫 로그인 외 전체 |
 | 워크스페이스·멤버십·그룹·인가 | routes.ts workspaces/groups/apiTokens, server domains/workspaces | 현재 권한, 철회 경합, 테넌트 RLS·풀 컨텍스트 | 첫 backend/React 수락5d8cac8, PR4 merged | 실제 앱 역할DB66 양 아키텍처/React6/CI/Fable | groups/확장 정책 등 미구현 |
 | 프로젝트·태스크·일정 | server domains/projects/tasks, routes.ts ics/holidays | API·공유/멤버 권한·일정 의미 | 재작성 미착수 | 미실행 | 전체 |
-| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata PR5 수락; 본문 협업 PR7 진행 | PR5 실제DB/UI/CI; PR7 검증은 최신 기록 | 댓글·공유·리비전, 협업 최종 수락 미완료 |
-| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine PR6 수락; 실제 제품/2UI PR7 진행 | provider/native/DB/2UI 회귀 실행, 최신 수정 재검증 중 | 종료·재접속·파생 본문 실패 경계 차단 해소 및 전체 수락 필요 |
-| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | rhwp native 본문 추출 PR2 수락; 첨부 제품 미연결 | native52+52·CI·독립 검토 | 부모 권한·업로드·저장·다운로드·썸네일 |
+| 문서·위키·댓글·공유·리비전 | server domains/documents/comments/share | 저장 형식·리비전·읽기/쓰기 권한 | wiki 생성/조회/metadata PR5 수락; 본문 협업 PR7 opt-in 수락 | PR5/7 실제DB/UI/CI·독립 검토 | 댓글·공유·리비전, 협업 최종 수락 미완료 |
+| 협업 | server 협업 구현, editor/package.json | Hocuspocus 4.6.0, Yjs13.6.32, Tiptap3.31.3, 두 클라이언트·철회·재시작 | codec/DB/native engine PR6 수락; 실제 제품/2UI PR7 opt-in 수락 | provider/native/DB/2UI 회귀·CI·Opus | 실제 OS IME·기존 데이터 전체 호환·일부 failure 경계, 과거 단발 timeout 원인 미확정 |
+| 첨부·local/S3·추출·썸네일 | server domains/attachments, packages/storage | 다운로드 인가·지원 형식·취소/자원 제한 | rhwp native/얇은 client PR2/8/9 수락; wiki local 첨부 통합 미수락 | native CI·독립 검토; 첨부DB20/React18 component 성공 | 첨부 최종 CI/검토, 추출 job·S3·다른 부모·썸네일 |
 | 검색·색인·AI | server domains/search, packages/search, routes.ts ai | 검색에서도 인가·철회·색인 복구 | 재작성 미착수 | 미실행 | 전체 |
 | 알림·메일·webhook·연동 | server domains/notifications, packages/jobs, routes.ts github/webhooks | outbox·커밋 후 전달·중복/재시도 | 재작성 미착수 | 미실행 | 전체 |
 | 동의·감사·사용권 | routes.ts legal/auth.consents/admin.audit, packages/ee | 동의 gate·증거·서명·권한 | 재작성 미착수 | 미실행 | 프로필 감사 강화 외 전체 |
@@ -1623,3 +1626,136 @@ thread 수명에 연결되므로 synchronous process caller가 완료까지 살�
 원격 CI/Opus 수락 전이며 HTTP 추출 job은 아직 없다. coordinator는 documents CI에
 default feature clippy를 추가했다. worker는 release했고 target/vendor만 보존했다.
 로컬 heavy slot은 Composer ctx6c0f2c26304a에 반환했다.
+
+PR9 https://github.com/AISFlow/fvoci/pull/9 수락: head b0c954b19b65a8e98bc74d0f49d139cae7222b99,
+base125ef25, CI 합성7e3e234. Rust35976794257/Web35976794253/
+Documents35976794259/Engine35976794258 총11job 성공을 로그로 확인했다.
+x64/ARM native client8×2 및 parser default51/test-hang54 실제 실행, React13/14,
+PG30/66/13와 협업20/56/19/7 회귀 성공. native job x64 2m48s/ARM 3m21s.
+Opus taskab5a433216ec/ctx663d96da5e9f는 동일HEAD 읽기 전용 검토 차단0,
+테스트를 실행하지 않았다. expected-head squash merge59b6ecd90e5ff42da576c6d0d5336fb78c2c8859
+및 main 반영 확인, auto-merge 미사용. post-merge CI는 아직 실행 중이다.
+리뷰 비차단 N1/N2(variadic zero 폭/libc export 주석)는 다음 제품 통합에서
+코디네이터가 최소 수정한다. 기존 wait-error 관측 개선과 완료/취소 경합 의미는
+제품 worker 연결 시 검토한다. 부모 종료의 증거는 termination이며 reap 보장이 아니다.
+
+현재 통합 worktree rust-wiki-attachment-product는 main59b6ecd에서 만들었다.
+Composer taskda62c97fce34/ctx6c0f2c26304a의 backend+006+DTO+검사는 계속
+진행 중이며 미수락이다. 경합 검사에서 초기401만 보는 테스트/다른 pool 검사/
+checked-out conn2를 가진 pool.close 교착을 확인해 실제 제품 경계 검사로 수정을
+요청했다. 해당 낡은 검사 프로세스 종료는 확인됐고 재시도 성공으로 포장하지 않는다.
+frontend와 durable extraction job은 후속 연결이며 아직 없고, 두 작성자 한도를 유지한다.
+
+main59b6ecd post-merge Rust35977269570/Web35977269589/Documents35977269433/
+Engine35977269616도 모두 성공했다. 새 제품 통합67236c9는 Composer 미수락
+9087ebf를 보존·통합한 상태다. fmt check는 실패했고 전체 수락으로 쓰지 않는다.
+기존 backend writer는 release, Grok task1e5d099d23a2/ctx916e9691644b가
+rust-wiki-attachments에서 유일한 backend/Rust/006/API 작성자가 됐다.
+Composer task840322adb88d/ctxaa4232faf80d는 별도 rust-wiki-attachment-react에서
+frontend/generated TS/실제 브라우저 attachment flow만 소유한다. 해당 task는
+명시적 backend9087ebf 의존 checkout이며 동일 파일 병렬 수정이 아니다.
+코디네이터는 새 통합의 CI/실행scripts/RUNNING/진행 기록과 native N1/N2 최소
+수정을 소유한다. 로컬 heavy slot은 Grok, Composer는 E2E 전에 인계를 요청한다.
+발견한 실제 차단: production storage 기본 경로가 매기동 randomtmp였다.
+원본처럼 지속 경로를 요구하고 일회용 E2E만 run별 저장경로를 쓰도록 수정 중이다.
+
+2026-09-24 09:12 UTC 재개 checkpoint: main59b6ecd/PR9의11개 post-merge CI는
+성공했고 새 첨부 제품 통합a545247은 미수락/미push다. Grok task1e5d099d23a2/
+ctx916e9691644b는 backend/006/DTO 및 필요한 Rust fixture만 작성·검사 중이고
+로컬 heavy slot을 소유한다. Composer0990861은 frontend 부분 제출로 보존했으나
+첨부 E2E는 실패했고 수락하지 않았다. 설치 상태 URL의 비동기 판정·빈 editor
+caret fixture·완료 응답 유실 처리가 남았다. final-only 종료한 ctxaa4232faf80d를
+명시 stop/release 후 같은 task840322adb88d를 ctx3987177dca69(실제 Composer2.5,
+effort 미지정)로 재개했다. worktree rust-wiki-attachment-react에 a545247을 정상
+merge했고 기존 커밋/아티팩트를 보존했다. 새 backend/React 검증을 완료한 뒤
+고정 통합 SHA의 Opus5.5 medium 검토와 원격 CI를 실행한다. 아직 열린 PR 없음.
+다음 즉시 확인: /home/kinesis/.local/bin/orca-ide orchestration check --terminal
+term_7fa6590d-5c4a-4db2-92af-6d1b1e1616b5 --json. 활성 worker를 중복 배정하지 않는다.
+추출 pending 상태의 native job은 미구현이며 후속 계약 초안은
+/tmp/fvoci-attachment-extraction-next-task.txt(미dispatch)에 있다. 기존 source/storage
+인가가 수락된 뒤 연결한다. 종료한 옛 dispatch4개는 실제 exited+release 지시에
+따라 release했으며 user_takeover/불명 컨테이너·프로세스는 건드리지 않았다.
+
+2026-09-24 09:29 UTC checkpoint: backend791199d + React9bf450d/6c54d8e를 정상 통합했다.
+backend lib59/실제 앱 역할 attachment DB20, React unit67와 좁은 E2E5/전체18이
+성공했다. c40305a의 Opus5.5 medium 검토는 실행 확인됐고 실제 테스트를 실행한
+검토는 아니다. 416 Content-Range 손실(B1)을 차단으로 반환했고, 기존 payload
+etag 확인·취소 중 create·storage root fsync를 함께 보강한다. Grok task8f8e752be9a2/
+ctxe8025b41879f가 backend와 위임된 OpenAPI 오류등록만 소유하며 heavy slot을
+인계받았다. Composer taskc88f02eb2dde/ctx61ad2de4abd8는 product test-only URL
+제거와 attachment 구조 보존 oracle 보강만 소유한다. 이전 브라우저 성공을
+아직 없는 후속 diff/원격 CI의 성공으로 사용하지 않는다. 세션 lock 취소 누출을
+막는 close_on_drop-before-acquire 순서는 유지하며, pool churn 개선은 안전을
+약화하지 않는 후속 설계가 필요하다. 추출 job은 미구현/미dispatch, 열린 PR 없음.
+
+2026-09-24 09:42 UTC: React3421daf 후속 diff를 통합했고 제품의 test-only URL을
+제거했다. 테스트는 하네스의 Request URL 보완을 사용한다. 코디네이터는 소스
+문자열 존재 여부만 검사하는 새 guard를 제거했고 실제 동작 web67/타입검사 및
+첨부 구조 oracle1을 실행했다. 최초 통합 npm test는 미준비 typescript 때문에
+실패했으며 lockfile npm ci 준비 후 성공했다. 추가 oracle은 기존 Web CI에
+연결했다. 강화된 구조 비교의 브라우저 검사는 최종 CI에서 아직 실행해야 한다.
+Grok ctxe8025b41879f는 취소-safe 파일 생성과 상대/신규 root의 fsync,
+고유 경로별 barrier 및416/etag/OpenAPI 보강을 마무리 중이다.
+
+독립적인 다음 제품 구현을 Composer task6eb96cd402f4/ctx7c634e278fc4에
+배정했다. 실제 requested/effective composer-2.5 일치, effort 미지정과 TUI를
+확인했다. rust-attachment-native-job는 통합cd3515f의 명시적 의존 worktree다.
+새 migration007/추출 job/얇은 client 의존성/config/main만 단독 위임했으며
+Grok의 기존 storage/HTTP/DB attachment/API 파일과 겹치지 않는다. 제한된
+durable claim/lease-token CAS/current-parent 확인과 원본 보존·cancel/join을
+구현한다. 현재 첨부 저장 PR이 수락되면 최신main으로 기준을 통합한 뒤 후속
+PR을 만들며, 지금 추출 기능 완료나 새 PR 생성으로 기록하지 않는다. heavy
+local slot은 여전히 Grok이고 추출 worker는 별도 승인을 기다린다.
+
+Storage 보강 제출810d98c를 정상 통합했다. Grok 실제 첨부 단위10/스키마2 및
+lib clippy 성공, DB20은062f43f에서 실행했고 후속 상대경로/검사 helper 변경의
+성공으로 재사용하지 않는다. 최종 원격 PG에서 다시 확인한다. 초기 OpenAPI
+nullable 검사 실패는 oneOf null 표현 처리로 수정했고 preview assertion은
+유지했다. fsync 증거는 syscall/재열기 검사이며 실제 전원 손실 시험이 아니다.
+ctxe8025b41879f는 worker_done 수락 후 release했다. heavy slot은 통합 API
+생성을 위해 코디네이터가 잠시 사용한 뒤 native-job worker에 인계한다.
+
+최종 API exporter의 새 통합 target cold build53.94s와 OpenAPI/TS 생성이
+성공했다(의존성 다운로드 캐시 재사용, parser 미포함). native-job 첫 제출은
+DB/native 미실행·미커밋인 부분 구현이므로 수락하지 않았다. 같은 Composer
+terminal을 task68c510eee6b0/ctx6d15a07f0517로 재사용해 실제 앱 역할 DB/native
+HTTP 검사, 부모 삭제 경합과 종료 join을 끝까지 수행하게 했다. 기존 diff는
+보존했고 worker가 checkpoint commit 후 최종 storage 기준을 병합한다.
+
+PR10 https://github.com/AISFlow/fvoci/pull/10 생성(Draft, 미merged).
+head7653280d39b1094b56b142cfce3e29c6ded52541, base59b6ecd, CI 합성
+deb87d366e58928284111f8e8c4add9c02156c84. Rust35983576221,
+Web35983576153, Documents35983576184, Engine35983576182의 실제job이
+시작됐다. 아직 성공이 아니다. Claude Code Opus5.5 medium task17f2b2984f34/
+ctx39428db60a34의 requested/effective와 turnStart observed를 대조했다.
+검토는7653280 고정이며 sourcec40305a 이후 delta와 남은 차단 해소만 확인한다.
+로컬 heavy slot은 Composer ctx6d15a07f0517에 인계했다. native-job은 현재
+미수락이며 PR10에는 포함하지 않는다. 검증 중인HEAD는 상태 기록으로 재push하지 않는다.
+
+PR10 첫 Web collaboration-flow는107580924016에서 TS5097(import .ts 확장자)로
+브라우저 시작 전 실패했다. 기존 bundler 규칙과 같은 확장자 없는 import로
+고쳤고 해당 tsc와 oracle1을 로컬에서 다시 통과했다. 이 첫 실행의 네이티브
+4job/fast는 성공했지만 전체 CI 성공으로 기록하지 않는다. 후속HEAD 재실행 필요.
+
+2026-09-24 10:06 UTC: PR10 head808fb429538d1cba692ffa11000ee94c2359dcd6,
+base59b6ecd, merge-test09058f7c119d876406eceaceb63bf7899d5ea363에서 실제11개
+CI job이 모두 성공했다. Rust35984045870/Web35984045816/Documents35984046047/
+Engine35984045800. PG x64/ARM64 각각 attachment20/collab30/auth-workspace66/
+document13, React workspace13/collaboration18 모두 실행·성공(no ignored).
+Opus5.5 medium task17f2b2984f34/ctxc35f3e137676은808 delta 차단없음으로
+완료·release했다. 이전ctx39428db60a34는 bare orca 빈 실행파일을 호출하여
+완료 등록 없이 종료했으므로 해당실행을 stop/release하고 같은task를 재시도했다.
+765의 검토 기록을 보존하고 restart/revoke E2E가6c54d8e에 이미 포함됐다는
+근거 정정을 받았다. 보고서 /tmp/fvoci-attachment-opus-808-delta.md.
+추가D5(오래된 payload 삭제 후 parent fsync 누락)는 낮은 우선순위였지만
+데이터 내구성상 머지 전에 수정한다. 삭제 재시도에서 이미 없는 경우에도
+존재하는 objects 디렉터리를 sync한다. 새HEAD 검사·delta 검토 전은 미수락.
+RUNNING에 ancestor read/search 권한 제한D1을 명시했다. 전원 손실 실험은 아니다.
+
+Native job Composer8a0b664 제출: DB12/native5 통과이나 즉시취소 검사는
+실행중 child 취소를, 같은 프로세스 job 재생성은 프로세스크래시 복원을
+증명하지 않는다. task176ee5558413/ctxe30d201209e5에 같은worktree/모델/소유권으로
+활성 child 종료·회수와 별도 프로세스 복원 검사를 보강 배정했다. heavy slot은
+이 워커가 보유한다. 누락된808 전체기준 정상merge도 명시승인했다. PR10과
+별개이며 아직 새PR 없음. 코디네이터의 D5 로컬검사는 cold compile이 시작되어
+중단(exit130)했고 통과로 기록하지 않는다. 최종원격에서 관련검사를 실행한다.

@@ -225,7 +225,7 @@ pub(crate) async fn recheck_session(
     Ok(live.map(|(v,)| v).unwrap_or(false))
 }
 
-async fn session_is_live(
+pub(crate) async fn session_is_live(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
     session_id: Uuid,
@@ -250,7 +250,7 @@ async fn session_is_live(
     Ok(live.map(|(v,)| v).unwrap_or(false))
 }
 
-async fn membership_role(
+pub(crate) async fn membership_role(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,
@@ -280,7 +280,7 @@ pub(crate) async fn membership_role_for_update(
     Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
 }
 
-pub(crate) async fn workspace_is_live(
+pub async fn workspace_is_live(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
 ) -> Result<bool, sqlx::Error> {

@@ -14,6 +14,7 @@ import {
   createWikiDoc,
   editorLocator,
   editorShape,
+  ensureCollabFixture,
   ensureInstanceSetup,
   expectAwarenessTokenNotSession,
   expectConverged,
@@ -22,6 +23,8 @@ import {
   expectTokens,
   expectTokensAbsent,
   indexedDbNames,
+  attachmentNodes,
+  insertSlashAttachment,
   insertSlashTable,
   installCollabMember,
   installCollabPeer,
@@ -37,9 +40,11 @@ import {
   readEditorSelection,
   sentPersistRequests,
   sessionCookie,
+  storedAttachmentDownloadBytes,
   test,
   expect,
   uniqueBlockIds,
+  UUID_RE,
   waitConnected,
   workspaceId,
 } from "./collab-helpers";
@@ -547,25 +552,170 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   }
 });
 
-test("slash attachment and @ mention do not call unsupported APIs", async ({ page }) => {
-  const attachmentHits: string[] = [];
+test("@ mention does not call unsupported APIs", async ({ page }) => {
   const mentionHits: string[] = [];
   page.on("request", (request) => {
     const url = request.url();
-    if (url.includes("/attachments")) attachmentHits.push(url);
     if (url.includes("/search") || url.includes("/lookup") || url.includes("/members")) {
       mentionHits.push(url);
     }
   });
+  await ensureCollabFixture(page);
   await login(page, member.email, member.password);
-  const doc = await createWikiDoc(page, "미지원 메뉴");
+  const doc = await createWikiDoc(page, "미지원 멘션");
   const editor = await openEditor(page, doc.url);
   await editor.click();
-  await page.keyboard.type("/첨부");
-  await page.keyboard.press("Enter");
   await page.keyboard.type("@");
-  expect(attachmentHits).toEqual([]);
   expect(mentionHits).toEqual([]);
+});
+
+test("slash attachment uploads, shows metadata, downloads bytes, and survives persist reload", async ({
+  page,
+}) => {
+  const uploadHits: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (url.includes("/uploads") || url.includes("/attachments/")) uploadHits.push(url);
+  });
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "첨부 업로드");
+  await openEditor(page, doc.url);
+  const fixtureBytes = Buffer.from("fvoci-attachment-e2e\n", "utf8");
+  await insertSlashAttachment(page, {
+    name: "collab-fixture.bin",
+    buffer: fixtureBytes,
+  });
+  await expect(page.locator(".afn-attachment-badge")).toContainText("application/octet-stream");
+  const downloaded = await storedAttachmentDownloadBytes(page);
+  expect(downloaded.equals(fixtureBytes)).toBe(true);
+  expect(uploadHits.some((url) => url.includes("/uploads"))).toBe(true);
+  expect(uploadHits.some((url) => url.includes("/complete"))).toBe(true);
+  const before = await editorShape(page);
+  const beforeAttachments = attachmentNodes(before);
+  expect(beforeAttachments.length).toBeGreaterThan(0);
+  expect(beforeAttachments[0]?.name).toBe("collab-fixture.bin");
+  expect(beforeAttachments[0]?.attachmentId).toMatch(UUID_RE);
+  expect(beforeAttachments[0]?.image).toBe(false);
+  await persistBody(page);
+  await page.reload();
+  await waitConnected(page);
+  const after = await editorShape(page);
+  expect(attachmentNodes(after)).toEqual(beforeAttachments);
+  await expect(page.locator('.afn-attachment[data-state="stored"]')).toBeVisible();
+  const reloaded = await storedAttachmentDownloadBytes(page);
+  expect(reloaded.equals(fixtureBytes)).toBe(true);
+});
+
+test("stored attachment bytes survive owned-server restart", async ({ page, collabApp }) => {
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "첨부 재시작");
+  await openEditor(page, doc.url);
+  const fixtureBytes = Buffer.from("fvoci-attachment-restart\n", "utf8");
+  await insertSlashAttachment(page, {
+    name: "restart-fixture.bin",
+    buffer: fixtureBytes,
+  });
+  await persistBody(page);
+  const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
+  expect(href).toBeTruthy();
+  await collabApp.crashAndRestart();
+  await page.reload();
+  await waitConnected(page);
+  await expect(page.locator('.afn-attachment[data-state="stored"]')).toBeVisible();
+  const restarted = await storedAttachmentDownloadBytes(page);
+  expect(restarted.equals(fixtureBytes)).toBe(true);
+});
+
+test("revoked member cannot download or create wiki attachments", async ({
+  browser,
+  collabApp,
+}) => {
+  const revokePeer = {
+    ...peer,
+    email: "collab-attach-revoke-peer@example.com",
+    givenName: "첨부철회",
+  };
+  installCollabPeer(revokePeer);
+  const ownerCtx = await newCollabContext(browser, collabApp.baseUrl);
+  const memberCtx = await newCollabContext(browser, collabApp.baseUrl);
+  const ownerPage = await ownerCtx.newPage();
+  const memberPage = await memberCtx.newPage();
+  try {
+    await ensureCollabFixture(ownerPage);
+    await login(memberPage, revokePeer.email, revokePeer.password);
+    const me = await memberPage.request.get("/api/v1/auth/me");
+    expect(me.ok()).toBe(true);
+    const memberId = (await me.json()).userId as string;
+
+    await login(ownerPage, admin.email, admin.password);
+    const doc = await createWikiDoc(ownerPage, "첨부 철회");
+    await openEditor(memberPage, doc.url);
+    const fixtureBytes = Buffer.from("fvoci-attachment-revoke\n", "utf8");
+    await insertSlashAttachment(memberPage, {
+      name: "revoke-fixture.bin",
+      buffer: fixtureBytes,
+    });
+    const href = await memberPage
+      .locator('.afn-attachment[data-state="stored"]')
+      .getAttribute("href");
+    expect(href).toBeTruthy();
+
+    const ws = await workspaceId(ownerPage, admin.workspaceSlug);
+    const revoke = await ownerPage.request.delete(
+      `/api/v1/workspaces/${ws}/members/${memberId}`,
+    );
+    expect(revoke.ok()).toBe(true);
+
+    const revokedDownload = await memberPage.request.get(href!);
+    expect(revokedDownload.status()).toBe(404);
+    const revokedCreate = await memberPage.request.post(
+      `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/uploads`,
+      {
+        data: {
+          name: "blocked-after-revoke.bin",
+          sizeBytes: 8,
+        },
+      },
+    );
+    expect(revokedCreate.status()).toBe(404);
+  } finally {
+    await ownerCtx.close();
+    await memberCtx.close();
+  }
+});
+
+test("guest attachment upload and download are denied by the product APIs", async ({ page }) => {
+  await ensureCollabFixture(page);
+  createE2eUser("collab-attach-guest@example.com", "guestpass1", "첨부게스트", {
+    familyName: "위키",
+    workspaceSlug: admin.workspaceSlug,
+    membershipRole: "guest",
+  });
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "첨부 권한");
+  await openEditor(page, doc.url);
+  await insertSlashAttachment(page, {
+    name: "guest-deny.bin",
+    buffer: Buffer.from("guest-deny\n", "utf8"),
+  });
+  const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
+  expect(href).toBeTruthy();
+  await page.context().clearCookies();
+  await login(page, "collab-attach-guest@example.com", "guestpass1");
+  const guestDownload = await page.request.get(href!);
+  expect(guestDownload.status()).toBe(404);
+  const guestCreate = await page.request.post(
+    `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/uploads`,
+    {
+      data: {
+        name: "blocked.bin",
+        sizeBytes: 8,
+      },
+    },
+  );
+  expect(guestCreate.status()).toBe(404);
 });
 
 test("guest still cannot read wiki documents", async ({ page }) => {

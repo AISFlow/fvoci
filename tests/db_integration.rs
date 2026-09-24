@@ -141,6 +141,8 @@ fn join_db_url(server_url: &str, db_name: &str) -> String {
 
 async fn app_state(app_url: &str) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
+    let storage_root = std::env::temp_dir().join(format!("fvoci-db-test-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool),
@@ -150,6 +152,12 @@ async fn app_state(app_url: &str) -> AppState {
         public_origin: "http://localhost".to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
+        storage: fvoci_server::attachments::LocalStorage::new(storage_root),
+        upload: fvoci_server::attachments::UploadLimits {
+            part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+            max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+            create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+        },
         collab: None,
     }
 }
@@ -854,7 +862,7 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions, 5);
+    assert_eq!(versions, 6);
     admin.close().await;
     harness.cleanup().await;
 }
@@ -877,7 +885,7 @@ async fn versioned_migrations_are_idempotent_on_rerun() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 5);
+    assert_eq!(versions.0, 6);
     admin.close().await;
     harness.cleanup().await;
 }
@@ -2150,7 +2158,7 @@ async fn migration_001_002_database_upgrades_to_003() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 5);
+    assert_eq!(versions.0, 6);
     reapply_app_grants(&harness.admin_url, &harness.role_name).await;
     let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
     let mut tx = app_pool.begin().await.unwrap();

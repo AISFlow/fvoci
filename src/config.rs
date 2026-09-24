@@ -4,7 +4,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::attachments::UploadLimits;
 use crate::auth::password::Keyring;
+
+pub const DEFAULT_UPLOAD_PART_SIZE_BYTES: i64 = 32 * 1024 * 1024;
+pub const DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES: i64 = 5120_i64 * 1024 * 1024;
+pub const DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN: u32 = 120;
 
 pub struct Config {
     pub bind: SocketAddr,
@@ -15,6 +20,8 @@ pub struct Config {
     pub public_origin: String,
     pub cookie_secure: bool,
     pub static_dir: Option<PathBuf>,
+    pub storage_root: PathBuf,
+    pub upload: UploadLimits,
     /// Wall deadline covering HTTP drain, hub join, and pool close after the stop signal.
     pub shutdown_deadline: Duration,
 }
@@ -30,6 +37,8 @@ impl Clone for Config {
             public_origin: self.public_origin.clone(),
             cookie_secure: self.cookie_secure,
             static_dir: self.static_dir.clone(),
+            storage_root: self.storage_root.clone(),
+            upload: self.upload.clone(),
             shutdown_deadline: self.shutdown_deadline,
         }
     }
@@ -45,6 +54,8 @@ impl fmt::Debug for Config {
             .field("public_origin", &self.public_origin)
             .field("cookie_secure", &self.cookie_secure)
             .field("static_dir", &self.static_dir)
+            .field("storage_root", &self.storage_root)
+            .field("upload", &self.upload)
             .field("shutdown_deadline", &self.shutdown_deadline)
             .finish()
     }
@@ -104,6 +115,9 @@ impl Config {
             _ => None,
         };
 
+        let storage_root = required_storage_root_from_env()?;
+        let upload = required_upload_limits_from_env()?;
+
         let shutdown_deadline =
             parse_shutdown_deadline_ms(env::var("FVOCI_SHUTDOWN_DEADLINE_MS").ok().as_deref())?;
 
@@ -116,9 +130,115 @@ impl Config {
             public_origin,
             cookie_secure,
             static_dir,
+            storage_root,
+            upload,
             shutdown_deadline,
         })
     }
+}
+
+fn required_storage_root_from_env() -> Result<PathBuf, String> {
+    let path = storage_root_path_from_values(
+        env::var("FVOCI_STORAGE_DIR").ok().as_deref(),
+        env::var("STORAGE_LOCAL_PATH").ok().as_deref(),
+    )?;
+    std::fs::create_dir_all(&path)
+        .map_err(|e| format!("failed to create storage root {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+fn storage_root_path_from_values(
+    fvoci_storage_dir: Option<&str>,
+    storage_local_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let raw = fvoci_storage_dir.or(storage_local_path).ok_or_else(|| {
+        "FVOCI_STORAGE_DIR or STORAGE_LOCAL_PATH is required and must be a nonempty path"
+            .to_string()
+    })?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "FVOCI_STORAGE_DIR or STORAGE_LOCAL_PATH is required and must be a nonempty path"
+                .into(),
+        );
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+fn required_upload_limits_from_env() -> Result<UploadLimits, String> {
+    upload_limits_from_values(
+        env::var("FVOCI_UPLOAD_PART_SIZE_BYTES").ok().as_deref(),
+        env::var("FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES").ok().as_deref(),
+        env::var("FVOCI_UPLOAD_CREATE_RATE_PER_5MIN")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn upload_limits_from_values(
+    part_size: Option<&str>,
+    max_file_size: Option<&str>,
+    create_rate: Option<&str>,
+) -> Result<UploadLimits, String> {
+    let part_size_bytes = parse_positive_i64(
+        "FVOCI_UPLOAD_PART_SIZE_BYTES",
+        part_size,
+        DEFAULT_UPLOAD_PART_SIZE_BYTES,
+    )?;
+    let max_file_size_bytes = parse_positive_i64(
+        "FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES",
+        max_file_size,
+        DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+    )?;
+    let create_rate_per_5min = parse_positive_u32(
+        "FVOCI_UPLOAD_CREATE_RATE_PER_5MIN",
+        create_rate,
+        DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+    )?;
+    if part_size_bytes > max_file_size_bytes {
+        return Err(
+            "FVOCI_UPLOAD_PART_SIZE_BYTES must be <= FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES".into(),
+        );
+    }
+    Ok(UploadLimits {
+        part_size_bytes,
+        max_file_size_bytes,
+        create_rate_per_5min,
+    })
+}
+
+fn parse_positive_i64(name: &str, raw: Option<&str>, default: i64) -> Result<i64, String> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{name} must be a positive integer"));
+    }
+    let value: i64 = trimmed
+        .parse()
+        .map_err(|e| format!("invalid {name}: {e}"))?;
+    if value <= 0 {
+        return Err(format!("{name} must be a positive integer"));
+    }
+    Ok(value)
+}
+
+fn parse_positive_u32(name: &str, raw: Option<&str>, default: u32) -> Result<u32, String> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{name} must be a positive integer"));
+    }
+    let value: u32 = trimmed
+        .parse()
+        .map_err(|e| format!("invalid {name}: {e}"))?;
+    if value == 0 {
+        return Err(format!("{name} must be a positive integer"));
+    }
+    Ok(value)
 }
 
 /// Default 30s; values below 1ms are rejected so expiry cannot be confused with success.
@@ -139,4 +259,60 @@ fn database_role(url: &str) -> Result<String, String> {
     url::Url::parse(url)
         .map(|parsed| parsed.username().to_string())
         .map_err(|e| format!("invalid database url: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_root_requires_explicit_nonempty_path() {
+        let err = storage_root_path_from_values(None, None).unwrap_err();
+        assert!(err.contains("FVOCI_STORAGE_DIR"));
+        assert!(storage_root_path_from_values(Some("   "), None)
+            .unwrap_err()
+            .contains("nonempty"));
+        assert!(storage_root_path_from_values(None, Some(""))
+            .unwrap_err()
+            .contains("nonempty"));
+    }
+
+    #[test]
+    fn storage_root_accepts_source_alias_and_prefers_primary() {
+        let alias = storage_root_path_from_values(None, Some("/tmp/fvoci-alias")).unwrap();
+        assert_eq!(alias, PathBuf::from("/tmp/fvoci-alias"));
+        let primary =
+            storage_root_path_from_values(Some("/tmp/fvoci-primary"), Some("/tmp/fvoci-alias"))
+                .unwrap();
+        assert_eq!(primary, PathBuf::from("/tmp/fvoci-primary"));
+        let again = storage_root_path_from_values(None, Some("/tmp/fvoci-alias")).unwrap();
+        assert_eq!(again, alias);
+    }
+
+    #[test]
+    fn invalid_upload_limits_fail_closed() {
+        assert!(upload_limits_from_values(Some("0"), None, None)
+            .unwrap_err()
+            .contains("FVOCI_UPLOAD_PART_SIZE_BYTES"));
+        assert!(upload_limits_from_values(Some("-1"), None, None).is_err());
+        assert!(upload_limits_from_values(Some("nope"), None, None).is_err());
+        assert!(upload_limits_from_values(Some("64"), Some("32"), None)
+            .unwrap_err()
+            .contains("must be <="));
+        assert!(parse_positive_u32("FVOCI_UPLOAD_CREATE_RATE_PER_5MIN", Some("0"), 120).is_err());
+    }
+
+    #[test]
+    fn omitted_upload_limits_use_defaults() {
+        let limits = upload_limits_from_values(None, None, None).unwrap();
+        assert_eq!(limits.part_size_bytes, DEFAULT_UPLOAD_PART_SIZE_BYTES);
+        assert_eq!(
+            limits.max_file_size_bytes,
+            DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES
+        );
+        assert_eq!(
+            limits.create_rate_per_5min,
+            DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN
+        );
+    }
 }

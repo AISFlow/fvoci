@@ -19,6 +19,16 @@ function isPackedFvociSource(url) {
 
 /** WHY: editor sources keep source `.js` specifiers; Node strip-types does not remap them to `.ts`. */
 export async function resolve(specifier, context, nextResolve) {
+  if (specifier.startsWith("@/")) {
+    const relative = specifier.slice(2);
+    const base = new URL("../src/", import.meta.url);
+    for (const suffix of ["", ".ts", ".tsx"]) {
+      const candidate = new URL(`${relative}${suffix}`, base);
+      if (existsSync(fileURLToPath(candidate))) {
+        return { shortCircuit: true, url: candidate.href };
+      }
+    }
+  }
   if (specifier.endsWith(".js") && context.parentURL) {
     try {
       const candidate = new URL(specifier, context.parentURL);

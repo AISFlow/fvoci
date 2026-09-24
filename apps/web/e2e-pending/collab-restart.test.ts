@@ -73,6 +73,18 @@ test("child env keeps app/migration URLs and strips fixture-only admin aliases",
   assert.equal(env.FVOCI_E2E_SERVER_BIN, undefined);
   assert.equal(env.PEPPER, undefined);
   assert.equal(env.PASSWORD_PEPPER_ACTIVE_KEY_ID, "test");
+  assert.equal(env.FVOCI_STORAGE_DIR, undefined);
+});
+
+test("owned server child env forwards an explicit storage directory", () => {
+  const env = ownedServerChildEnv("127.0.0.1:4321", {
+    PATH: "/bin",
+    DATABASE_URL: "postgres://owner/db",
+    DATABASE_APP_URL: "postgres://app/db",
+    FVOCI_STORAGE_DIR: "/tmp/owned-storage",
+    FVOCI_COLLAB_ENGINE: "/tmp/collab-engine",
+  });
+  assert.equal(env.FVOCI_STORAGE_DIR, "/tmp/owned-storage");
 });
 
 test("process group observation reads this Node process without pid-file daemons", () => {

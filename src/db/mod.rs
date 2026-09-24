@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod collab;
 pub mod collab_delivery;
 pub mod context;

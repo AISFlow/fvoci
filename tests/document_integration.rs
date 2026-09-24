@@ -138,6 +138,8 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
 
 async fn app_state(app_url: &str) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
+    let storage_root = std::env::temp_dir().join(format!("fvoci-doc-test-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool),
@@ -147,6 +149,12 @@ async fn app_state(app_url: &str) -> AppState {
         public_origin: "http://localhost".to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
+        storage: fvoci_server::attachments::LocalStorage::new(storage_root),
+        upload: fvoci_server::attachments::UploadLimits {
+            part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+            max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+            create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+        },
         collab: None,
     }
 }
@@ -1650,7 +1658,7 @@ async fn app_role_rls_and_secret_grants_hold_for_new_tables() {
         .fetch_one(&admin)
         .await
         .unwrap();
-    assert_eq!(versions.0, 5);
+    assert_eq!(versions.0, 6);
     app_pool.close().await;
     admin.close().await;
     harness.cleanup().await;
@@ -1721,7 +1729,7 @@ async fn migration_001_003_upgrades_to_004_documents() {
         .fetch_one(&migration_pool)
         .await
         .unwrap();
-    assert_eq!(versions.0, 5);
+    assert_eq!(versions.0, 6);
     let has_documents: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'documents')",
     )
