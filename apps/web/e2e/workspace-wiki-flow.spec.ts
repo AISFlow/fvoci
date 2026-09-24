@@ -1,5 +1,13 @@
 import { expect, test } from "@playwright/test";
 import { createE2eUser, login } from "./helpers";
+import {
+  createHoldGate,
+  fetchDocumentMeta,
+  holdMatchingDocumentPatch,
+  waitForSuccessfulDocumentPatch,
+  wikiDocumentIdsByTitle,
+  wikiDocumentIdsFromPage,
+} from "./wiki-metadata-save";
 
 test.describe.configure({ mode: "serial" });
 
@@ -47,10 +55,23 @@ test("member creates wiki document and edits title metadata", async ({ page }) =
   await expect(page).toHaveURL(/\/w\/acme\/WIKI-\d+$/);
   await expect(page.getByLabel("문서 제목")).toHaveValue("제목 없음");
 
+  const ids = await wikiDocumentIdsFromPage(page, "acme");
   const renamed = "연구 노트";
+  const hold = createHoldGate();
+  const pending = await holdMatchingDocumentPatch(page, ids, { title: renamed }, hold.held);
+
   await page.getByLabel("문서 제목").fill(renamed);
   await page.getByLabel("문서 제목").blur();
+  // Local input can advance while the fire-and-forget PATCH is still held.
   await expect(page.getByLabel("문서 제목")).toHaveValue(renamed);
+  expect((await fetchDocumentMeta(page, ids)).title).toBe("제목 없음");
+
+  const saved = waitForSuccessfulDocumentPatch(page, ids, { title: renamed });
+  hold.release();
+  await saved;
+  await pending.unroute();
+
+  expect((await fetchDocumentMeta(page, ids)).title).toBe(renamed);
 
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("link", { name: renamed })).toBeVisible();
@@ -61,16 +82,35 @@ test("document metadata supports icon set/clear and status changes", async ({ pa
   await page.goto("/w/acme/wiki");
   await page.getByRole("link", { name: "연구 노트" }).click();
 
+  const ids = await wikiDocumentIdsByTitle(page, "acme", "연구 노트");
+
+  const iconSaved = waitForSuccessfulDocumentPatch(page, ids, { icon: "📚" });
   await page.getByLabel("아이콘").fill("📚");
   await page.getByLabel("아이콘").blur();
   await expect(page.getByLabel("아이콘")).toHaveValue("📚");
+  await iconSaved;
+  expect((await fetchDocumentMeta(page, ids)).icon).toBe("📚");
 
+  const statusSaved = waitForSuccessfulDocumentPatch(page, ids, { status: "published" });
   await page.getByLabel("문서 상태").selectOption("published");
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
+  await statusSaved;
+  expect((await fetchDocumentMeta(page, ids)).status).toBe("published");
 
+  const iconCleared = waitForSuccessfulDocumentPatch(page, ids, { icon: null });
   await page.getByLabel("아이콘").fill("");
   await page.getByLabel("아이콘").blur();
   await expect(page.getByLabel("아이콘")).toHaveValue("");
+  await iconCleared;
+  const persisted = await fetchDocumentMeta(page, ids);
+  expect(persisted.title).toBe("연구 노트");
+  expect(persisted.icon).toBeNull();
+  expect(persisted.status).toBe("published");
+
+  await page.reload();
+  await expect(page.getByLabel("문서 제목")).toHaveValue("연구 노트");
+  await expect(page.getByLabel("아이콘")).toHaveValue("");
+  await expect(page.getByLabel("문서 상태")).toHaveValue("published");
 });
 
 test("document metadata save failure keeps the previous status", async ({ page }) => {
@@ -78,6 +118,8 @@ test("document metadata save failure keeps the previous status", async ({ page }
   await page.goto("/w/acme/wiki");
   await page.getByRole("link", { name: "연구 노트" }).click();
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
+
+  const ids = await wikiDocumentIdsByTitle(page, "acme", "연구 노트");
 
   await page.route("**/api/v1/workspaces/*/documents/*", async (route) => {
     if (route.request().method() === "PATCH") {
@@ -90,6 +132,7 @@ test("document metadata save failure keeps the previous status", async ({ page }
   await page.getByLabel("문서 상태").selectOption("archived");
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page.getByLabel("문서 상태")).toHaveValue("published");
+  expect((await fetchDocumentMeta(page, ids)).status).toBe("published");
 });
 
 test("member create transport failure shows an error without navigation", async ({ page }) => {
