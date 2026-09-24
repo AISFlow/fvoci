@@ -10,12 +10,13 @@ use crate::api::dto::{
     AddProjectMemberBody, AncestorsResponse, AttachmentOutput, AttachmentPartUrlResponse,
     AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CompleteAttachmentUploadBody,
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateDocumentBody,
-    CreateProjectBody, CreateTaskBody, CreateWorkspaceBody, DocumentMetaResponse, LoginBody,
-    LoginResponse, LookupItemOutput, LookupListResponse, MemberResponse, MemberRoleBody,
-    OkResponse, PatchDocumentBody, PatchMeBody, PatchProjectBody, PatchWorkspaceBody,
-    ProblemResponse, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
-    PutAttachmentPartResponse, ResumeAttachmentUploadResponse, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, TaskChildOutput, TaskChildProgressOutput, TaskListResponse,
+    CreateProjectBody, CreateTaskBody, CreateWorkspaceBody, DocumentMetaResponse,
+    ExpectedDatesBody, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
+    MemberResponse, MemberRoleBody, MoveTaskBody, OkResponse, PatchDocumentBody, PatchMeBody,
+    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectListResponse,
+    ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
+    ResumeAttachmentUploadResponse, SessionUserOutput, SetupBody, SetupResponse,
+    SetupStatusResponse, TaskChildOutput, TaskChildProgressOutput, TaskListResponse,
     TaskMetaOutput, TaskOutput, TaskParentOutput, TreeResponse, WorkflowOutput,
     WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
 };
@@ -69,6 +70,10 @@ impl Modify for CookieSecurityAddon {
         list_tasks,
         create_task,
         get_task,
+        patch_task,
+        move_task,
+        trash_task,
+        restore_task,
         create_document,
         list_tree,
         get_document,
@@ -108,6 +113,9 @@ impl Modify for CookieSecurityAddon {
             AddProjectMemberBody,
             WorkflowOutput,
             CreateTaskBody,
+            PatchTaskBody,
+            ExpectedDatesBody,
+            MoveTaskBody,
             TaskMetaOutput,
             TaskOutput,
             TaskParentOutput,
@@ -570,6 +578,80 @@ fn create_task() {}
     )
 )]
 fn get_task() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    request_body = PatchTaskBody,
+    responses(
+        (status = 200, description = "Updated task", body = TaskMetaOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Conflict", body = ProblemResponse),
+    )
+)]
+fn patch_task() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    request_body = MoveTaskBody,
+    responses(
+        (status = 200, description = "Moved task", body = TaskMetaOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Conflict", body = ProblemResponse),
+    )
+)]
+fn move_task() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    responses(
+        (status = 200, description = "Task trashed", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn trash_task() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/restore",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    responses(
+        (status = 200, description = "Task restored", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn restore_task() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

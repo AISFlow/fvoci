@@ -436,6 +436,38 @@ pub fn map_project_error(err: ProjectDbError) -> AppError {
         }
         ProjectDbError::LeadNotMember => AppError::from_code(ProblemCode::Conflict),
         ProjectDbError::Archived => AppError::from_code(ProblemCode::ProjectArchived),
+        ProjectDbError::VersionConflict => AppError {
+            status: StatusCode::CONFLICT,
+            code: ProblemCode::Conflict,
+            source: None,
+            params: Some(json!({"code":"document_version_mismatch"})),
+            retry_after: None,
+        },
+        ProjectDbError::TaskArchived | ProjectDbError::InvalidAnchor => {
+            AppError::from_code(ProblemCode::Conflict)
+        }
+        ProjectDbError::StatusNotInWorkflow => AppError {
+            status: StatusCode::BAD_REQUEST,
+            code: ProblemCode::InvalidInput,
+            source: None,
+            params: Some(json!({"code":"status_not_in_project_workflow"})),
+            retry_after: None,
+        },
+        ProjectDbError::WipLimitExceeded => AppError {
+            status: StatusCode::CONFLICT,
+            code: ProblemCode::Conflict,
+            source: None,
+            params: Some(json!({"code":"wip_limit_exceeded"})),
+            retry_after: None,
+        },
+        ProjectDbError::WorkflowHasNoStatuses => AppError {
+            status: StatusCode::BAD_REQUEST,
+            code: ProblemCode::InvalidInput,
+            source: None,
+            params: Some(json!({"code":"workflow_has_no_statuses"})),
+            retry_after: None,
+        },
+        ProjectDbError::InvalidMoveAnchors => AppError::from_code(ProblemCode::InvalidInput),
         ProjectDbError::InvalidCursor => AppError {
             status: StatusCode::BAD_REQUEST,
             code: ProblemCode::InvalidInput,
