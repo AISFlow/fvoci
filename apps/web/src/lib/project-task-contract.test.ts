@@ -2,21 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { projectCreatePayload } from "../features/projects/create-payload.ts";
 import { TASK_TITLE_MAX, taskCreatePayload } from "../features/tasks/create-payload.ts";
+import type { components, paths } from "../generated/api.ts";
+import { pickLookupTask, type LookupItem } from "../features/tasks/lookup.ts";
 import {
-  GENERATED_LOOKUP_READY,
-  pickLookupTask,
-  type LookupItem,
-} from "../features/tasks/lookup.ts";
-import {
-  GENERATED_TASK_LIST_PAGINATION,
   appendTaskListPage,
+  mergeTaskListPages,
   statusCountFor,
   taskListHasMore,
 } from "../features/tasks/task-list-page.ts";
 
-test("generated lookup and list pagination latches stay closed until OpenAPI includes them", () => {
-  assert.equal(GENERATED_LOOKUP_READY, false);
-  assert.equal(GENERATED_TASK_LIST_PAGINATION, false);
+test("generated OpenAPI includes lookup and required list nextCursor/statusCounts", () => {
+  const lookupPath: keyof paths = "/api/v1/workspaces/{workspace_id}/lookup/{display_id}";
+  assert.equal(lookupPath, "/api/v1/workspaces/{workspace_id}/lookup/{display_id}");
+  const page: components["schemas"]["TaskListResponse"] = {
+    items: [],
+    nextCursor: null,
+    statusCounts: [{ statusId: "s-backlog", count: 1 }],
+  };
+  assert.equal(page.nextCursor, null);
+  assert.equal(page.statusCounts[0]?.count, 1);
 });
 
 test("project create payload matches source NFKC, reserved, KEY-n, and blank-to-null", () => {
@@ -116,4 +120,6 @@ test("appendTaskListPage concatenates items, keeps first statusCounts, and uses 
   assert.equal(taskListHasMore(merged), false);
   assert.equal(statusCountFor(first.statusCounts, "s-backlog"), 65);
   assert.equal(statusCountFor(first.statusCounts, "missing"), undefined);
+  const fromPages = mergeTaskListPages([first, second]);
+  assert.deepEqual(fromPages, merged);
 });

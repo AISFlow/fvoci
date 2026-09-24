@@ -5,35 +5,47 @@ import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { formatDisplayId, itemPath } from "@/lib/href";
 import type { WorkflowStatus } from "@/features/projects/queries";
+import { statusCountFor, type TaskListStatusCount } from "./task-list-page";
 import { taskTypeLabel } from "./task-types";
-import type { TaskMeta } from "./queries";
+import type { TaskListItem } from "./queries";
 import "@/features/projects/projects.css";
 
 export function TaskList({
   slug,
   projectKey,
   items,
+  statusCounts,
   statuses,
   canCreate,
   defaultStatusId,
+  hasMore,
+  loadMorePending,
+  loadMoreError,
   onCreateClick,
+  onLoadMore,
 }: {
   slug: string;
   projectKey: string;
-  items: readonly TaskMeta[];
+  items: readonly TaskListItem[];
+  statusCounts: readonly TaskListStatusCount[];
   statuses: readonly WorkflowStatus[];
   canCreate: boolean;
   defaultStatusId: string | null;
+  hasMore: boolean;
+  loadMorePending?: boolean;
+  loadMoreError?: string | null;
   onCreateClick: (statusId: string) => void;
+  onLoadMore: () => void;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const byStatus = new Map<string, TaskMeta[]>();
+  const byStatus = new Map<string, TaskListItem[]>();
   for (const status of statuses) byStatus.set(status.id, []);
   for (const item of items) {
     const group = byStatus.get(item.statusId);
     if (group) group.push(item);
     else byStatus.set(item.statusId, [item]);
   }
+  const catalogEmpty = items.length === 0 && !statusCounts.some((row) => row.count > 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -44,11 +56,11 @@ export function TaskList({
           </Button>
         ) : null}
       </div>
-      {items.length === 0 ? <EmptyState title={t("task.view.empty")} /> : null}
+      {catalogEmpty ? <EmptyState title={t("task.view.empty")} /> : null}
       <div className="flex flex-col gap-8">
         {statuses.map((status) => {
           const group = byStatus.get(status.id) ?? [];
-          const count = group.length;
+          const count = statusCountFor(statusCounts, status.id) ?? 0;
           if (count === 0) return null;
           const open = !collapsed.has(status.id);
           return (
@@ -106,6 +118,18 @@ export function TaskList({
           );
         })}
       </div>
+      {hasMore ? (
+        <div className="flex flex-col items-start gap-2">
+          {loadMoreError ? (
+            <p role="alert" className="task-form__alert">
+              {loadMoreError}
+            </p>
+          ) : null}
+          <Button type="button" variant="outline" disabled={loadMorePending} onClick={onLoadMore}>
+            {loadMorePending ? t("load.loading") : t("task.list.loadMore")}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

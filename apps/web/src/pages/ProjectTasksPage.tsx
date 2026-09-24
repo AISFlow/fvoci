@@ -1,5 +1,5 @@
 import { t } from "@fvoci/i18n";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
@@ -12,6 +12,7 @@ import {
 import { TaskCreateDialog } from "@/features/tasks/task-create-dialog";
 import { TaskList } from "@/features/tasks/task-list";
 import { taskListQuery, type CreateTaskBody } from "@/features/tasks/queries";
+import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
@@ -30,7 +31,9 @@ export function ProjectTasksPage() {
   const projects = useQuery(projectsQuery(workspace?.id ?? ""));
   const project = findProjectByKey(projects.data?.items, projectKey ?? "");
   const workflow = useQuery(workflowQuery(workspace?.id ?? "", project?.id ?? ""));
-  const tasks = useQuery(taskListQuery(workspace?.id ?? "", project?.id ?? ""));
+  const tasks = useInfiniteQuery(taskListQuery(workspace?.id ?? "", project?.id ?? ""));
+  const taskPages = mergeTaskListPages(tasks.data?.pages ?? []);
+  const firstPageFailed = tasks.isError && !tasks.isFetchNextPageError;
 
   const createTask = useMutation({
     mutationFn: async (body: CreateTaskBody) =>
@@ -92,26 +95,35 @@ export function ProjectTasksPage() {
             <h1 className="task-home__title">{project.name}</h1>
           </div>
           {workflow.isLoading || tasks.isLoading ? <QueryLoading /> : null}
-          {workflow.isError || tasks.isError ? (
+          {workflow.isError || firstPageFailed ? (
             <QueryError
               message={loadErrorMessage(workflow.error ?? tasks.error)}
               onRetry={() => {
                 if (workflow.isError) void workflow.refetch();
-                if (tasks.isError) void tasks.refetch();
+                if (firstPageFailed) void tasks.refetch();
               }}
             />
           ) : null}
-          {!workflow.isLoading && !tasks.isLoading && !workflow.isError && !tasks.isError ? (
+          {!workflow.isLoading && !tasks.isLoading && !workflow.isError && !firstPageFailed && taskPages ? (
             <TaskList
               slug={slug}
               projectKey={project.key}
-              items={tasks.data?.items ?? []}
+              items={taskPages.items}
+              statusCounts={taskPages.statusCounts}
               statuses={workflow.data?.statuses ?? []}
               canCreate={project.status === "active"}
               defaultStatusId={backlogStatusId(workflow.data?.statuses ?? [])}
+              hasMore={tasks.hasNextPage}
+              loadMorePending={tasks.isFetchingNextPage}
+              loadMoreError={
+                tasks.isFetchNextPageError ? loadErrorMessage(tasks.error) : null
+              }
               onCreateClick={(statusId) => {
                 createTask.reset();
                 setCreateStatusId(statusId);
+              }}
+              onLoadMore={() => {
+                void tasks.fetchNextPage();
               }}
             />
           ) : null}
