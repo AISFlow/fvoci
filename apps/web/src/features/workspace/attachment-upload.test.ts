@@ -70,6 +70,10 @@ async function readJsonBody(init?: RequestInit): Promise<unknown> {
   return JSON.parse(text);
 }
 
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
 function installFetch(
   handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
 ): void {
@@ -149,6 +153,27 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     assert.ok(maxInFlight <= 3);
   });
 
+  await t.test("413 part responses do not resume the upload session", async () => {
+    let resumeCalls = 0;
+    installFetch((url, init) => {
+      if (url.endsWith("/uploads") && init?.method === "POST") {
+        return jsonResponse(createOutput(1), 201);
+      }
+      if (url.endsWith("/upload") && init?.method === "GET") {
+        resumeCalls += 1;
+        throw new Error("unexpected resume");
+      }
+      if (url.includes("/parts/")) {
+        return new Response("too large", { status: 413 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const bridge = await loadBridge({ delay: () => Promise.resolve() });
+    const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
+    await assert.rejects(bridge.upload(file, () => undefined));
+    assert.equal(resumeCalls, 0);
+  });
+
   await t.test("401/403/404 part responses are not retried as transient transport", async () => {
     let partCalls = 0;
     let resumeCalls = 0;
@@ -176,6 +201,58 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     await assert.rejects(bridge.upload(file, () => undefined));
     assert.equal(partCalls, 1);
     assert.equal(resumeCalls, 0);
+  });
+
+  await t.test("abort during part retry delay stops the upload", async () => {
+    let partCalls = 0;
+    installFetch((url, init) => {
+      if (url.endsWith("/uploads") && init?.method === "POST") {
+        return jsonResponse(createOutput(1), 201);
+      }
+      if (url.includes("/parts/")) {
+        partCalls += 1;
+        return new Response("boom", { status: 500 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const bridge = await loadBridge({
+      delay: (ms) =>
+        new Promise((resolve, reject) => {
+          setTimeout(resolve, ms);
+        }),
+    });
+    const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
+    const controller = new AbortController();
+    const upload = bridge.upload(file, () => undefined, controller.signal);
+    setTimeout(() => controller.abort(), 5);
+    await assert.rejects(upload, (err: unknown) => isAbortError(err));
+    assert.equal(partCalls, 1);
+  });
+
+  await t.test("complete fetch rejection reconciles stored metadata without a second POST", async () => {
+    let completeCalls = 0;
+    installFetch(async (url, init) => {
+      if (url.endsWith("/uploads") && init?.method === "POST") {
+        return jsonResponse(createOutput(1), 201);
+      }
+      if (url.endsWith("/complete") && init?.method === "POST") {
+        completeCalls += 1;
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      if (url.endsWith(`/attachments/${ATT}`) && init?.method === "GET") {
+        return jsonResponse({
+          ...storedOutput,
+          completedAt: new Date(0).toISOString(),
+        });
+      }
+      const n = Number(url.split("/").at(-1));
+      return jsonResponse({ etag: `etag-${n}` });
+    });
+    const bridge = await loadBridge({ delay: () => Promise.resolve() });
+    const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
+    const result = await bridge.upload(file, () => undefined);
+    assert.equal(result.id, ATT);
+    assert.equal(completeCalls, 1);
   });
 
   await t.test("ambiguous complete reuses stored metadata instead of retrying complete", async () => {

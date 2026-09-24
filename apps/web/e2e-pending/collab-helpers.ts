@@ -116,14 +116,15 @@ export type EditorShape = {
 };
 
 export async function ensureCollabFixture(page: Page): Promise<void> {
-  await page.goto("/");
-  try {
-    await page.waitForURL(/\/setup$/, { timeout: 5_000 });
+  const setupRes = await page.request.get("/api/v1/setup");
+  expect(setupRes.ok(), `setup status failed: ${setupRes.status()}`).toBe(true);
+  const setup = (await setupRes.json()) as { needed: boolean };
+  if (setup.needed) {
+    await page.goto("/setup");
+    await expect(page).toHaveURL(/\/setup$/);
     await fillInstanceSetup(page);
-    installCollabMember();
-  } catch {
-    // Instance already provisioned for this owned-server database.
   }
+  installCollabMember();
 }
 
 async function fillInstanceSetup(page: Page): Promise<void> {
@@ -563,16 +564,52 @@ export async function indexedDbNames(page: Page): Promise<string[]> {
   });
 }
 
-export async function insertSlashAttachment(page: Page, filePath: string): Promise<void> {
+export type SlashAttachmentFixture =
+  | string
+  | { name: string; buffer: Buffer; mimeType?: string };
+
+async function focusEditorForSlash(page: Page): Promise<void> {
   const editor = editorLocator(page);
-  await editor.click();
+  await editor.focus();
+  await editor.evaluate((root) => {
+    const live = (
+      root as HTMLElement & {
+        editor?: {
+          chain(): {
+            focus(): { setTextSelection(pos: number): { run(): boolean } };
+          };
+          state: { doc: { content: { size: number } } };
+        };
+      }
+    ).editor;
+    if (!live) throw new Error("editor instance missing on ProseMirror root");
+    const size = live.state.doc.content.size;
+    const pos = size > 0 ? Math.min(1, size) : 0;
+    live.chain().focus().setTextSelection(pos).run();
+  });
+}
+
+export async function insertSlashAttachment(
+  page: Page,
+  file: SlashAttachmentFixture,
+): Promise<void> {
+  await focusEditorForSlash(page);
   await page.keyboard.type("/첨부");
+  await expect(page.locator(".fvoci-suggestion")).toBeVisible();
   await page.keyboard.press("Enter");
   const [fileChooser] = await Promise.all([
     page.waitForEvent("filechooser"),
     page.getByRole("button", { name: "파일 선택" }).click(),
   ]);
-  await fileChooser.setFiles(filePath);
+  if (typeof file === "string") {
+    await fileChooser.setFiles(file);
+  } else {
+    await fileChooser.setFiles({
+      name: file.name,
+      mimeType: file.mimeType ?? "application/octet-stream",
+      buffer: file.buffer,
+    });
+  }
   await expect(page.locator('.afn-attachment[data-state="stored"]')).toBeVisible({
     timeout: 30_000,
   });

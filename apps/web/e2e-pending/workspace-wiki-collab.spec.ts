@@ -4,9 +4,6 @@
  * acceptance still requires the recorded security/review gates. Invocation:
  * FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh
  */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   admin,
   applyBoldToSelection,
@@ -582,12 +579,11 @@ test("slash attachment uploads, shows metadata, downloads bytes, and survives pe
   await login(page, member.email, member.password);
   const doc = await createWikiDoc(page, "첨부 업로드");
   await openEditor(page, doc.url);
-  const fixtureDir = join(tmpdir(), `fvoci-attachment-${Date.now()}`);
-  mkdirSync(fixtureDir, { recursive: true });
-  const fixturePath = join(fixtureDir, "collab-fixture.bin");
   const fixtureBytes = Buffer.from("fvoci-attachment-e2e\n", "utf8");
-  writeFileSync(fixturePath, fixtureBytes);
-  await insertSlashAttachment(page, fixturePath);
+  await insertSlashAttachment(page, {
+    name: "collab-fixture.bin",
+    buffer: fixtureBytes,
+  });
   await expect(page.locator(".afn-attachment-badge")).toContainText("application/octet-stream");
   const downloaded = await storedAttachmentDownloadBytes(page);
   expect(downloaded.equals(fixtureBytes)).toBe(true);
@@ -617,12 +613,11 @@ test("guest attachment upload and download are denied by the product APIs", asyn
   });
   await login(page, member.email, member.password);
   const doc = await createWikiDoc(page, "첨부 권한");
-  const fixtureDir = join(tmpdir(), `fvoci-attachment-guest-${Date.now()}`);
-  mkdirSync(fixtureDir, { recursive: true });
-  const fixturePath = join(fixtureDir, "guest-deny.bin");
-  writeFileSync(fixturePath, Buffer.from("guest-deny\n", "utf8"));
   await openEditor(page, doc.url);
-  await insertSlashAttachment(page, fixturePath);
+  await insertSlashAttachment(page, {
+    name: "guest-deny.bin",
+    buffer: Buffer.from("guest-deny\n", "utf8"),
+  });
   const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
   expect(href).toBeTruthy();
   await page.context().clearCookies();

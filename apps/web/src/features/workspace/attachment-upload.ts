@@ -10,11 +10,7 @@ const PART_RETRIES = 2;
 
 type CreateAttachmentUploadResponse = components["schemas"]["CreateAttachmentUploadResponse"];
 type AttachmentOutput = components["schemas"]["AttachmentOutput"];
-
-interface PartTargetRef {
-  partNumber: number;
-  url: string;
-}
+type PartTargetRef = CreateAttachmentUploadResponse["parts"][number];
 
 interface UploadPipelineDeps {
   fetchImpl?: (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
@@ -24,6 +20,32 @@ interface UploadPipelineDeps {
 const defaultDelay = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+async function abortableDelay(
+  ms: number,
+  signal?: AbortSignal,
+  delay: (ms: number) => Promise<void> = defaultDelay,
+): Promise<void> {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+  }
+  if (!signal) {
+    await delay(ms);
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted"));
+    };
+    signal.addEventListener("abort", onAbort);
+  });
+}
+
 function partChunk(file: File, partNumber: number, partSize: number): Blob {
   return file.slice((partNumber - 1) * partSize, partNumber * partSize);
 }
@@ -32,7 +54,11 @@ function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
-function isNonRetryablePartStatus(status: number): boolean {
+function isPermanentPartStatus(status: number): boolean {
+  return status === 400 || status === 401 || status === 403 || status === 404 || status === 409 || status === 413;
+}
+
+function isPermanentAuthStatus(status: number): boolean {
   return status === 401 || status === 403 || status === 404;
 }
 
@@ -46,9 +72,9 @@ class PartUploadError extends Error {
   }
 }
 
-function isNonRetryableUploadError(err: unknown): boolean {
-  if (err instanceof PartUploadError) return isNonRetryablePartStatus(err.status);
-  if (err instanceof ProblemError) return isNonRetryablePartStatus(err.status);
+function isPermanentUploadError(err: unknown): boolean {
+  if (err instanceof PartUploadError) return isPermanentPartStatus(err.status);
+  if (err instanceof ProblemError) return isPermanentPartStatus(err.status);
   return false;
 }
 
@@ -79,7 +105,7 @@ async function putPart(
     if (signal?.aborted) {
       throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
     }
-    if (attempt > 0) await deps.delay(300 * 2 ** (attempt - 1));
+    if (attempt > 0) await abortableDelay(300 * 2 ** (attempt - 1), signal, deps.delay);
     try {
       const res = await deps.fetchImpl(target.url, {
         method: "PUT",
@@ -93,7 +119,7 @@ async function putPart(
         return { partNumber: target.partNumber, etag };
       }
       lastError = new PartUploadError(target.partNumber, res.status);
-      if (res.status < 500 || isNonRetryablePartStatus(res.status)) break;
+      if (res.status < 500) break;
     } catch (err) {
       if (isAbortError(err) || signal?.aborted) throw err;
       lastError = err;
@@ -156,24 +182,38 @@ async function completeUpload(
   parts: { partNumber: number; etag: string }[],
   signal?: AbortSignal,
 ): Promise<AttachmentUploadResult> {
-  const result = await api.POST(
-    "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete",
-    {
-      params: {
-        path: { workspace_id: workspaceId, attachment_id: attachmentId },
-      },
-      body: { parts },
-      signal,
-    },
-  );
-  if (result.response.ok && result.data) return attachmentResult(result.data);
-  const status = result.response.status;
-  if (isNonRetryablePartStatus(status)) {
-    throw new ProblemError(status, result.error?.code);
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
   }
-  const stored = await storedAttachmentMeta(workspaceId, attachmentId, signal);
-  if (stored) return attachmentResult(stored);
-  return ensureOk(result);
+  try {
+    const result = await api.POST(
+      "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete",
+      {
+        params: {
+          path: { workspace_id: workspaceId, attachment_id: attachmentId },
+        },
+        body: { parts },
+        signal,
+      },
+    );
+    if (result.response.ok && result.data) return attachmentResult(result.data);
+    const status = result.response.status;
+    if (isPermanentAuthStatus(status)) {
+      throw new ProblemError(status, result.error?.code);
+    }
+    const stored = await storedAttachmentMeta(workspaceId, attachmentId, signal);
+    if (stored) return attachmentResult(stored);
+    if (isPermanentPartStatus(status)) {
+      throw new ProblemError(status, result.error?.code);
+    }
+    return ensureOk(result);
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) throw err;
+    if (err instanceof ProblemError && isPermanentAuthStatus(err.status)) throw err;
+    const stored = await storedAttachmentMeta(workspaceId, attachmentId, signal);
+    if (stored) return attachmentResult(stored);
+    throw err;
+  }
 }
 
 function attachmentResult(att: AttachmentOutput): AttachmentUploadResult {
@@ -224,7 +264,7 @@ function uploadsBridge(
         );
       } catch (err) {
         if (isAbortError(err) || signal?.aborted) throw err;
-        if (isNonRetryableUploadError(err)) throw err;
+        if (isPermanentUploadError(err)) throw err;
         const resumed = await ensureOk(
           await api.GET("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload", {
             params: {
