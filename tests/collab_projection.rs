@@ -3,9 +3,11 @@
 mod support;
 
 use std::net::SocketAddr;
+use std::panic::{resume_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
-use futures_util::SinkExt;
+use futures_util::future::BoxFuture;
+use futures_util::{FutureExt, SinkExt};
 use fvoci_server::collab::room::{
     arm_force_primary_apply_fail, arm_force_primary_load_fail, disarm_force_primary_apply_fail,
     disarm_force_primary_load_fail,
@@ -26,14 +28,37 @@ use uuid::Uuid;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn run_test<Fut>(name: &str, case: Fut)
+async fn run_test<F>(name: &str, case: F)
 where
-    Fut: std::future::Future<Output = TestRun>,
+    F: for<'a> FnOnce(&'a mut TestRun) -> BoxFuture<'a, ()>,
 {
-    let run = tokio::time::timeout(TEST_TIMEOUT, case)
-        .await
-        .unwrap_or_else(|_| panic!("{name} hung (>{TEST_TIMEOUT:?}) including cleanup"));
-    run.finish().await;
+    let mut run = TestRun::new(TestDb::bootstrap().await);
+    let case_fut = case(&mut run);
+    let case_outcome = tokio::time::timeout(
+        TEST_TIMEOUT,
+        AssertUnwindSafe(case_fut).catch_unwind(),
+    )
+    .await;
+    let cleanup_outcome = run.finish().await;
+
+    match (case_outcome, cleanup_outcome) {
+        (Ok(Ok(())), Ok(())) => {}
+        (Ok(Ok(())), Err(cleanup_err)) => {
+            panic!("{name} cleanup failed after success: {cleanup_err}");
+        }
+        (Ok(Err(panic_payload)), cleanup) => {
+            if let Err(cleanup_err) = cleanup {
+                panic!("{name} cleanup failed after panic: {cleanup_err}");
+            }
+            resume_unwind(panic_payload);
+        }
+        (Err(_elapsed), Ok(())) => {
+            panic!("{name} hung (>{TEST_TIMEOUT:?}) including cleanup");
+        }
+        (Err(_elapsed), Err(cleanup_err)) => {
+            panic!("{name} hung (>{TEST_TIMEOUT:?}); cleanup error: {cleanup_err}");
+        }
+    }
 }
 
 async fn install_derived_document_updated_fail_trigger(admin: &PgPool, fn_name: &str) {
@@ -135,11 +160,9 @@ async fn send_collab_updates(addr: SocketAddr, wiki: &WikiDocFixture, payloads: 
 
 #[tokio::test]
 async fn collab_edit_get_body_reflects_projection() {
-    run_test("collab_edit_get_body_reflects_projection", async {
-        let harness = TestDb::bootstrap().await;
-        let app_url = harness.app_url.clone();
-        let admin_url = harness.admin_url.clone();
-        let mut run = TestRun::new(harness);
+    run_test("collab_edit_get_body_reflects_projection", |run| Box::pin(async {
+        let app_url = run.harness.app_url.clone();
+        let admin_url = run.harness.admin_url.clone();
         let wiki = setup_wiki_doc(&run.harness).await;
         let addr = run
             .spawn_router(&app_url, test_collab_config(4, 30_000))
@@ -167,8 +190,7 @@ async fn collab_edit_get_body_reflects_projection() {
         .await
         .unwrap();
         assert_eq!(channel, "system");
-        run
-    })
+    }))
     .await;
 }
 
@@ -176,11 +198,9 @@ async fn collab_edit_get_body_reflects_projection() {
 async fn collab_korean_edit_get_body_matches_fixture_oracle() {
     run_test(
         "collab_korean_edit_get_body_matches_fixture_oracle",
-        async {
-            let harness = TestDb::bootstrap().await;
-            let app_url = harness.app_url.clone();
-            let admin_url = harness.admin_url.clone();
-            let mut run = TestRun::new(harness);
+        |run| Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let admin_url = run.harness.admin_url.clone();
             let wiki = setup_wiki_doc(&run.harness).await;
             let addr = run
                 .spawn_router(&app_url, test_collab_config(4, 30_000))
@@ -209,19 +229,16 @@ async fn collab_korean_edit_get_body_matches_fixture_oracle() {
                     .unwrap();
             assert_eq!(text, "가중🚀마바사");
             assert!(!chosung.is_empty());
-            run
-        },
+        }),
     )
     .await;
 }
 
 #[tokio::test]
 async fn collab_delete_only_get_body_updates_json() {
-    run_test("collab_delete_only_get_body_updates_json", async {
-        let harness = TestDb::bootstrap().await;
-        let app_url = harness.app_url.clone();
-        let admin_url = harness.admin_url.clone();
-        let mut run = TestRun::new(harness);
+    run_test("collab_delete_only_get_body_updates_json", |run| Box::pin(async {
+        let app_url = run.harness.app_url.clone();
+        let admin_url = run.harness.admin_url.clone();
         let wiki = setup_wiki_doc(&run.harness).await;
         let addr = run
             .spawn_router(&app_url, test_collab_config(4, 30_000))
@@ -245,18 +262,15 @@ async fn collab_delete_only_get_body_updates_json() {
             document_updated_event_count(&admin, wiki.document_id).await,
             2
         );
-        run
-    })
+    }))
     .await;
 }
 
 #[tokio::test]
 async fn collab_seed_join_does_not_overwrite_paragraph() {
-    run_test("collab_seed_join_does_not_overwrite_paragraph", async {
-        let harness = TestDb::bootstrap().await;
-        let app_url = harness.app_url.clone();
-        let admin_url = harness.admin_url.clone();
-        let mut run = TestRun::new(harness);
+    run_test("collab_seed_join_does_not_overwrite_paragraph", |run| Box::pin(async {
+        let app_url = run.harness.app_url.clone();
+        let admin_url = run.harness.admin_url.clone();
         let wiki = setup_wiki_doc(&run.harness).await;
         let addr = run
             .spawn_router(&app_url, test_collab_config(4, 30_000))
@@ -284,8 +298,7 @@ async fn collab_seed_join_does_not_overwrite_paragraph() {
             document_updated_event_count(&admin, wiki.document_id).await,
             0
         );
-        run
-    })
+    }))
     .await;
 }
 
@@ -293,10 +306,8 @@ async fn collab_seed_join_does_not_overwrite_paragraph() {
 async fn collab_primary_unhealthy_skips_projection_until_catch_up() {
     run_test(
         "collab_primary_unhealthy_skips_projection_until_catch_up",
-        async {
-            let harness = TestDb::bootstrap().await;
-            let app_url = harness.app_url.clone();
-            let mut run = TestRun::new(harness);
+        |run| Box::pin(async {
+            let app_url = run.harness.app_url.clone();
             let wiki = setup_wiki_doc(&run.harness).await;
             let addr = run
                 .spawn_router(&app_url, test_collab_config(4, 30_000))
@@ -336,8 +347,7 @@ async fn collab_primary_unhealthy_skips_projection_until_catch_up() {
 
             let body_after = await_persisted_get_body(addr, &wiki, 96).await;
             assert_eq!(body_after["contentJson"], delete_only_json_before());
-            run
-        },
+        }),
     )
     .await;
 }
@@ -346,11 +356,9 @@ async fn collab_primary_unhealthy_skips_projection_until_catch_up() {
 async fn collab_derived_event_failure_preserves_binary_then_retries() {
     run_test(
         "collab_derived_event_failure_preserves_binary_then_retries",
-        async {
-            let harness = TestDb::bootstrap().await;
-            let app_url = harness.app_url.clone();
-            let admin_url = harness.admin_url.clone();
-            let mut run = TestRun::new(harness);
+        |run| Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let admin_url = run.harness.admin_url.clone();
             let wiki = setup_wiki_doc(&run.harness).await;
             let admin = PgPoolOptions::new()
                 .max_connections(2)
@@ -424,8 +432,7 @@ async fn collab_derived_event_failure_preserves_binary_then_retries() {
             let body_retry = await_persisted_get_body(addr, &wiki, 97).await;
             assert_eq!(body_retry["contentJson"], delete_only_json_after());
             assert!(document_updated_event_count(&admin, wiki.document_id).await >= 1);
-            run
-        },
+        }),
     )
     .await;
 }
@@ -434,11 +441,9 @@ async fn collab_derived_event_failure_preserves_binary_then_retries() {
 async fn collab_catch_up_after_server_restart_without_retransmit() {
     run_test(
         "collab_catch_up_after_server_restart_without_retransmit",
-        async {
-            let harness = TestDb::bootstrap().await;
-            let app_url = harness.app_url.clone();
-            let admin_url = harness.admin_url.clone();
-            let mut run = TestRun::new(harness);
+        |run| Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let admin_url = run.harness.admin_url.clone();
             let wiki = setup_wiki_doc(&run.harness).await;
             let admin = PgPoolOptions::new()
                 .max_connections(2)
@@ -469,7 +474,9 @@ async fn collab_catch_up_after_server_restart_without_retransmit() {
                 .await
                 .unwrap();
 
-            run.shutdown_last_server().await;
+            run.shutdown_last_server()
+                .await
+                .expect("restart test must shut down first server");
             let addr2 = run.spawn_router(&app_url, cfg).await;
             let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
             let mut writer = connect_member(addr2, &wiki.session.session_token).await;
@@ -488,19 +495,16 @@ async fn collab_catch_up_after_server_restart_without_retransmit() {
                 document_updated_event_count(&admin, wiki.document_id).await,
                 1
             );
-            run
-        },
+        }),
     )
     .await;
 }
 
 #[tokio::test]
 async fn collab_archived_document_skips_new_projection() {
-    run_test("collab_archived_document_skips_new_projection", async {
-        let harness = TestDb::bootstrap().await;
-        let app_url = harness.app_url.clone();
-        let admin_url = harness.admin_url.clone();
-        let mut run = TestRun::new(harness);
+    run_test("collab_archived_document_skips_new_projection", |run| Box::pin(async {
+        let app_url = run.harness.app_url.clone();
+        let admin_url = run.harness.admin_url.clone();
         let wiki = setup_wiki_doc(&run.harness).await;
         let addr = run
             .spawn_router(&app_url, test_collab_config(4, 30_000))
@@ -555,8 +559,7 @@ async fn collab_archived_document_skips_new_projection() {
             document_updated_event_count(&admin, wiki.document_id).await,
             events_before
         );
-        run
-    })
+    }))
     .await;
 }
 
@@ -564,10 +567,8 @@ async fn collab_archived_document_skips_new_projection() {
 async fn collab_deterministic_project_failure_recovers_primary() {
     run_test(
         "collab_deterministic_project_failure_recovers_primary",
-        async {
-            let harness = TestDb::bootstrap().await;
-            let app_url = harness.app_url.clone();
-            let mut run = TestRun::new(harness);
+        |run| Box::pin(async {
+            let app_url = run.harness.app_url.clone();
             let wiki = setup_wiki_doc(&run.harness).await;
             let addr = run
                 .spawn_router(&app_url, tiny_output_project_collab_config(4, 30_000))
@@ -629,8 +630,7 @@ async fn collab_deterministic_project_failure_recovers_primary() {
                 wait_for_sync_applied(&mut second, Duration::from_secs(5)).await,
                 "follow-up edit must ack after primary recovery"
             );
-            run
-        },
+        }),
     )
     .await;
 }
@@ -639,11 +639,9 @@ async fn collab_deterministic_project_failure_recovers_primary() {
 async fn collab_manual_persist_fails_when_derived_event_insert_blocked() {
     run_test(
         "collab_manual_persist_fails_when_derived_event_insert_blocked",
-        async {
-            let harness = TestDb::bootstrap().await;
-            let app_url = harness.app_url.clone();
-            let admin_url = harness.admin_url.clone();
-            let mut run = TestRun::new(harness);
+        |run| Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let admin_url = run.harness.admin_url.clone();
             let wiki = setup_wiki_doc(&run.harness).await;
             let admin = PgPoolOptions::new()
                 .max_connections(2)
@@ -744,8 +742,56 @@ async fn collab_manual_persist_fails_when_derived_event_insert_blocked() {
             )
             .await;
             assert_eq!(body_after_retry["contentJson"], delete_only_json_before());
-            run
-        },
+        }),
     )
     .await;
+}
+
+#[tokio::test]
+async fn collab_test_run_finishes_cleanup_on_deliberate_panic() {
+    let harness = TestDb::bootstrap().await;
+    let db_name = harness.db_name().to_string();
+    let role_name = harness.role_name().to_string();
+    let admin_url = harness.admin_url.clone();
+    let app_url = harness.app_url.clone();
+
+    let mut run = TestRun::new(harness);
+    let addr = run
+        .spawn_router(&app_url, test_collab_config(2, 30_000))
+        .await;
+    assert!(
+        tokio::net::TcpStream::connect(addr).await.is_ok(),
+        "server must accept connections before panic"
+    );
+
+    let case_outcome = AssertUnwindSafe(async {
+        panic!("deliberate collab projection cleanup regression panic");
+    })
+    .catch_unwind()
+    .await;
+    assert!(
+        case_outcome.is_err(),
+        "case must panic for cleanup regression"
+    );
+
+    run.finish()
+        .await
+        .expect("finish must shut down server and drop database after panic");
+
+    assert!(
+        !TestDb::database_exists(&admin_url, &db_name)
+            .await
+            .expect("database existence probe"),
+        "database must be dropped after panic cleanup"
+    );
+    assert!(
+        !TestDb::role_exists(&admin_url, &role_name)
+            .await
+            .expect("role existence probe"),
+        "role must be dropped after panic cleanup"
+    );
+    assert!(
+        tokio::net::TcpStream::connect(addr).await.is_err(),
+        "server task must join and stop accepting connections after hub shutdown"
+    );
 }

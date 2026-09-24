@@ -128,27 +128,82 @@ impl TestDb {
         }
     }
 
-    pub async fn cleanup(self) {
+    pub fn db_name(&self) -> &str {
+        &self.db_name
+    }
+
+    pub fn role_name(&self) -> &str {
+        &self.role_name
+    }
+
+    pub async fn database_exists(admin_url: &str, db_name: &str) -> Result<bool, String> {
+        let server_url = server_db_url(admin_url);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&server_url)
+            .await
+            .map_err(|e| format!("connect admin to probe database: {e}"))?;
+        let (exists,): (bool,) =
+            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)")
+                .bind(db_name)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| format!("probe database {db_name}: {e}"))?;
+        pool.close().await;
+        Ok(exists)
+    }
+
+    pub async fn role_exists(admin_url: &str, role_name: &str) -> Result<bool, String> {
+        let server_url = server_db_url(admin_url);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&server_url)
+            .await
+            .map_err(|e| format!("connect admin to probe role: {e}"))?;
+        let (exists,): (bool,) =
+            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)")
+                .bind(role_name)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| format!("probe role {role_name}: {e}"))?;
+        pool.close().await;
+        Ok(exists)
+    }
+
+    pub async fn cleanup(self) -> Result<(), String> {
         let server_url = server_db_url(&self.admin_url);
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&server_url)
             .await
-            .ok();
-        if let Some(pool) = pool {
-            let _ = sqlx::query(&format!(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
-                self.db_name
-            ))
+            .map_err(|e| format!("connect admin for cleanup: {e}"))?;
+        let mut errors = Vec::new();
+        if let Err(error) = sqlx::query(&format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
+            self.db_name
+        ))
+        .execute(&pool)
+        .await
+        {
+            errors.push(format!("terminate backends for {}: {error}", self.db_name));
+        }
+        if let Err(error) = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
             .execute(&pool)
-            .await;
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-                .execute(&pool)
-                .await;
-            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-                .execute(&pool)
-                .await;
-            pool.close().await;
+            .await
+        {
+            errors.push(format!("drop database {}: {error}", self.db_name));
+        }
+        if let Err(error) = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
+            .execute(&pool)
+            .await
+        {
+            errors.push(format!("drop role {}: {error}", self.role_name));
+        }
+        pool.close().await;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
         }
     }
 }
@@ -290,30 +345,20 @@ pub struct TestServer {
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-        if let Some(join) = self.join.take() {
-            join.abort();
-        }
-    }
-}
-
 impl TestServer {
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(mut self) -> Result<(), String> {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
         if let Some(join) = self.join.take() {
             if let Err(error) = join.await {
                 if !error.is_cancelled() {
-                    panic!("test server task failed: {error}");
+                    return Err(format!("test server task failed: {error}"));
                 }
             }
         }
         self.hub.shutdown().await;
+        Ok(())
     }
 }
 
@@ -342,17 +387,28 @@ impl TestRun {
         addr
     }
 
-    pub async fn shutdown_last_server(&mut self) {
+    pub async fn shutdown_last_server(&mut self) -> Result<(), String> {
         if let Some(server) = self.servers.pop() {
-            server.shutdown().await;
+            server.shutdown().await?;
         }
+        Ok(())
     }
 
-    pub async fn finish(mut self) {
+    pub async fn finish(mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
         while let Some(server) = self.servers.pop() {
-            server.shutdown().await;
+            if let Err(error) = server.shutdown().await {
+                errors.push(error);
+            }
         }
-        self.harness.cleanup().await;
+        if let Err(error) = self.harness.cleanup().await {
+            errors.push(error);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 }
 
