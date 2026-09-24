@@ -419,6 +419,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "document-extract-client"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -599,6 +608,7 @@ dependencies = [
  "bytes",
  "chrono",
  "collab-engine",
+ "document-extract-client",
  "futures-util",
  "hex",
  "hmac",
