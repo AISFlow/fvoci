@@ -23,6 +23,7 @@ import {
   expectTokens,
   expectTokensAbsent,
   indexedDbNames,
+  attachmentNodeCount,
   insertSlashAttachment,
   insertSlashTable,
   installCollabMember,
@@ -590,18 +591,95 @@ test("slash attachment uploads, shows metadata, downloads bytes, and survives pe
   expect(uploadHits.some((url) => url.includes("/uploads"))).toBe(true);
   expect(uploadHits.some((url) => url.includes("/complete"))).toBe(true);
   const before = await editorShape(page);
-  const attachmentBlocks = before.blocks.filter((block) => block.tag === "attachment");
-  expect(attachmentBlocks.length).toBeGreaterThan(0);
+  const attachmentCount = attachmentNodeCount(before);
+  expect(attachmentCount).toBeGreaterThan(0);
   await persistBody(page);
   await page.reload();
   await waitConnected(page);
   const after = await editorShape(page);
-  expect(after.blocks.filter((block) => block.tag === "attachment").length).toBe(
-    attachmentBlocks.length,
-  );
+  expect(attachmentNodeCount(after)).toBe(attachmentCount);
   await expect(page.locator('.afn-attachment[data-state="stored"]')).toBeVisible();
   const reloaded = await storedAttachmentDownloadBytes(page);
   expect(reloaded.equals(fixtureBytes)).toBe(true);
+});
+
+test("stored attachment bytes survive owned-server restart", async ({ page, collabApp }) => {
+  await ensureCollabFixture(page);
+  await login(page, member.email, member.password);
+  const doc = await createWikiDoc(page, "첨부 재시작");
+  await openEditor(page, doc.url);
+  const fixtureBytes = Buffer.from("fvoci-attachment-restart\n", "utf8");
+  await insertSlashAttachment(page, {
+    name: "restart-fixture.bin",
+    buffer: fixtureBytes,
+  });
+  await persistBody(page);
+  const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
+  expect(href).toBeTruthy();
+  await collabApp.crashAndRestart();
+  await page.reload();
+  await waitConnected(page);
+  await expect(page.locator('.afn-attachment[data-state="stored"]')).toBeVisible();
+  const restarted = await storedAttachmentDownloadBytes(page);
+  expect(restarted.equals(fixtureBytes)).toBe(true);
+});
+
+test("revoked member cannot download or create wiki attachments", async ({
+  browser,
+  collabApp,
+}) => {
+  const revokePeer = {
+    ...peer,
+    email: "collab-attach-revoke-peer@example.com",
+    givenName: "첨부철회",
+  };
+  installCollabPeer(revokePeer);
+  const ownerCtx = await newCollabContext(browser, collabApp.baseUrl);
+  const memberCtx = await newCollabContext(browser, collabApp.baseUrl);
+  const ownerPage = await ownerCtx.newPage();
+  const memberPage = await memberCtx.newPage();
+  try {
+    await ensureCollabFixture(ownerPage);
+    await login(memberPage, revokePeer.email, revokePeer.password);
+    const me = await memberPage.request.get("/api/v1/auth/me");
+    expect(me.ok()).toBe(true);
+    const memberId = (await me.json()).userId as string;
+
+    await login(ownerPage, admin.email, admin.password);
+    const doc = await createWikiDoc(ownerPage, "첨부 철회");
+    await openEditor(memberPage, doc.url);
+    const fixtureBytes = Buffer.from("fvoci-attachment-revoke\n", "utf8");
+    await insertSlashAttachment(memberPage, {
+      name: "revoke-fixture.bin",
+      buffer: fixtureBytes,
+    });
+    const href = await memberPage
+      .locator('.afn-attachment[data-state="stored"]')
+      .getAttribute("href");
+    expect(href).toBeTruthy();
+
+    const ws = await workspaceId(ownerPage, admin.workspaceSlug);
+    const revoke = await ownerPage.request.delete(
+      `/api/v1/workspaces/${ws}/members/${memberId}`,
+    );
+    expect(revoke.ok()).toBe(true);
+
+    const revokedDownload = await memberPage.request.get(href!);
+    expect(revokedDownload.status()).toBe(404);
+    const revokedCreate = await memberPage.request.post(
+      `/api/v1/workspaces/${doc.workspaceId}/documents/${doc.id}/uploads`,
+      {
+        data: {
+          name: "blocked-after-revoke.bin",
+          sizeBytes: 8,
+        },
+      },
+    );
+    expect(revokedCreate.status()).toBe(404);
+  } finally {
+    await ownerCtx.close();
+    await memberCtx.close();
+  }
 });
 
 test("guest attachment upload and download are denied by the product APIs", async ({ page }) => {

@@ -1029,7 +1029,10 @@ export interface operations {
     };
     download_attachment: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Omit for original bytes; preview is not stored in this slice */
+                variant?: string;
+            };
             header?: never;
             path: {
                 /** @description Workspace id */

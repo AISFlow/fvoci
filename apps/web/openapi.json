@@ -632,6 +632,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "variant",
+            "in": "query",
+            "description": "Omit for original bytes; preview is not stored in this slice",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
