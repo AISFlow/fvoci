@@ -22,6 +22,11 @@ name = "fvoci-e2e-fixture"
 path = "src/bin/e2e-fixture.rs"
 required-features = ["db-tests"]
 
+[[bin]]
+name = "extract-job-driver"
+path = "src/bin/extract-job-driver.rs"
+required-features = ["extract-native-tests"]
+
 [dependencies]
 argon2 = "0.5"
 axum = { version = "0.8", default-features = false, features = ["macros", "json", "form", "query", "matched-path", "original-uri", "tokio", "http1", "ws"] }
@@ -61,7 +66,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 
 [features]
 db-tests = []
-extract-native-tests = ["db-tests"]
+extract-native-tests = ["db-tests", "document-extract-client/test-hang"]
 api-schema = ["dep:utoipa"]
 
 [[test]]

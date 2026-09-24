@@ -8,7 +8,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
     (include_str!("../../migrations/004_documents.sql"), 4),
     (include_str!("../../migrations/005_collab_updates.sql"), 5),
     (include_str!("../../migrations/006_attachments.sql"), 6),
-    (include_str!("../../migrations/007_attachment_extract.sql"), 7),
+    (
+        include_str!("../../migrations/007_attachment_extract.sql"),
+        7,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;

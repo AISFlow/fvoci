@@ -113,12 +113,11 @@ pub async fn finish_extract(
         return Ok(false);
     };
 
-    let workspace_live: Option<(bool,)> = sqlx::query_as(
-        "SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1 FOR UPDATE",
-    )
-    .bind(claim.workspace_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let workspace_live: Option<(bool,)> =
+        sqlx::query_as("SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1 FOR UPDATE")
+            .bind(claim.workspace_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     if !workspace_live.map(|(live,)| live).unwrap_or(false) {
         tx.rollback().await?;
         return Ok(false);
@@ -136,7 +135,10 @@ pub async fn finish_extract(
     .bind(document_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if !document_live.map(|(deleted,)| deleted.is_none()).unwrap_or(false) {
+    if !document_live
+        .map(|(deleted,)| deleted.is_none())
+        .unwrap_or(false)
+    {
         tx.rollback().await?;
         return Ok(false);
     }
@@ -227,8 +229,7 @@ pub fn oversize_resource_limit(size_bytes: i64) -> FinishExtract {
         text: String::new(),
         warnings: vec![format!(
             "size_bytes {} exceeds {}-byte extract input limit",
-            size_bytes,
-            MAX_INPUT_BYTES
+            size_bytes, MAX_INPUT_BYTES
         )],
         rhwp_rev: None,
     }

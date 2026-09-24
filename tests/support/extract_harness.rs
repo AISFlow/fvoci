@@ -1,13 +1,16 @@
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
+use fvoci_server::attachments::{
+    spawn_extract_job, ExtractJobSettings, LocalStorage, UploadLimits,
+};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
-use fvoci_server::attachments::{spawn_extract_job, ExtractJobSettings, LocalStorage, UploadLimits};
 use fvoci_server::db::attachment_extract::fetch_extract_state;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
@@ -357,13 +360,18 @@ pub fn require_extractor_bin() -> PathBuf {
     path
 }
 
-pub fn extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
+fn base_extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
     ExtractJobSettings {
         extractor_bin,
         limits: document_extract_client::Limits::for_tests(),
         poll_interval: Duration::from_millis(100),
         retry_backoff: Duration::from_millis(100),
+        test_hang_ms: None,
     }
+}
+
+pub fn extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
+    base_extract_job_settings(extractor_bin)
 }
 
 pub fn idle_extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
@@ -372,7 +380,93 @@ pub fn idle_extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
         limits: document_extract_client::Limits::for_tests(),
         poll_interval: Duration::from_secs(600),
         retry_backoff: Duration::from_secs(600),
+        test_hang_ms: None,
     }
+}
+
+pub fn hang_extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
+    ExtractJobSettings {
+        extractor_bin,
+        limits: document_extract_client::Limits::for_tests(),
+        poll_interval: Duration::from_millis(50),
+        retry_backoff: Duration::from_millis(50),
+        test_hang_ms: Some(20_000),
+    }
+}
+
+pub fn pid_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+pub fn server_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_fvoci-server"))
+}
+
+pub fn extract_job_driver_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_extract-job-driver"))
+}
+
+pub fn server_env_for_harness(
+    harness: &TestDb,
+    storage_root: &PathBuf,
+    extractor_bin: Option<&PathBuf>,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("DATABASE_URL".into(), harness.admin_url.clone()),
+        ("DATABASE_APP_URL".into(), harness.app_url.clone()),
+        ("PASSWORD_PEPPER_KEYS".into(), PEPPER.to_string()),
+        ("PASSWORD_PEPPER_ACTIVE_KEY_ID".into(), "test".to_string()),
+        ("FVOCI_BIND".into(), "127.0.0.1:0".to_string()),
+        ("FVOCI_PUBLIC_ORIGIN".into(), "http://localhost".to_string()),
+        ("FVOCI_COOKIE_SECURE".into(), "0".to_string()),
+        (
+            "FVOCI_STORAGE_DIR".into(),
+            storage_root.to_string_lossy().to_string(),
+        ),
+        ("FVOCI_SHUTDOWN_DEADLINE_MS".into(), "5000".to_string()),
+    ];
+    if let Some(bin) = extractor_bin {
+        env.push((
+            "FVOCI_EXTRACTOR_BIN".into(),
+            bin.to_string_lossy().to_string(),
+        ));
+    }
+    env
+}
+
+pub fn spawn_server_process(
+    harness: &TestDb,
+    storage_root: &PathBuf,
+    extractor_bin: Option<&PathBuf>,
+) -> std::process::Child {
+    let mut command = Command::new(server_bin());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in server_env_for_harness(harness, storage_root, extractor_bin) {
+        command.env(key, value);
+    }
+    command.spawn().expect("spawn fvoci-server")
+}
+
+pub fn run_extract_job_driver(
+    harness: &TestDb,
+    storage_root: &PathBuf,
+    extractor_bin: &PathBuf,
+    mode: &str,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> std::process::Output {
+    Command::new(extract_job_driver_bin())
+        .env("DATABASE_APP_URL", &harness.app_url)
+        .env("FVOCI_STORAGE_DIR", storage_root)
+        .env("FVOCI_EXTRACTOR_BIN", extractor_bin)
+        .env("EXTRACT_JOB_DRIVER_MODE", mode)
+        .env("EXTRACT_JOB_WORKSPACE_ID", workspace_id.to_string())
+        .env("EXTRACT_JOB_ATTACHMENT_ID", attachment_id.to_string())
+        .output()
+        .expect("run extract-job-driver")
 }
 
 pub async fn wait_for_extract(
@@ -404,9 +498,7 @@ pub async fn download_original(
     let (status, bytes, _) = request(
         app.clone(),
         "GET",
-        &format!(
-            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download"
-        ),
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download"),
         None,
         None,
         Some(cookie),

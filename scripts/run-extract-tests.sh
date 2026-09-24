@@ -9,27 +9,22 @@ if [[ -z "${TEST_DATABASE_URL:-}" ]]; then
   exit 1
 fi
 
-cd "$ROOT"
-
-echo "==> cargo check (extract-job target)"
-cargo check --target-dir "$TARGET"
-
-echo "==> DB policy tests"
-cargo test --locked --features db-tests --test attachment_extract_integration --target-dir "$TARGET" -- --nocapture
-
-echo "==> build native helper"
-(
-  cd "$ROOT/crates/document-extract"
-  if [[ ! -d .vendor-src/rhwp ]]; then
-    bash fetch-rhwp.sh
-  fi
-  cargo build --locked --bin document-extract --target-dir "$TARGET"
-)
-export FVOCI_EXTRACTOR_BIN="$TARGET/debug/document-extract"
+if [[ -z "${FVOCI_EXTRACTOR_BIN:-}" ]]; then
+  echo "FVOCI_EXTRACTOR_BIN is required; run scripts/prepare-extract-helper.sh first" >&2
+  exit 1
+fi
 if [[ ! -x "$FVOCI_EXTRACTOR_BIN" ]]; then
-  echo "missing helper binary at $FVOCI_EXTRACTOR_BIN" >&2
+  echo "FVOCI_EXTRACTOR_BIN is not executable: $FVOCI_EXTRACTOR_BIN" >&2
   exit 1
 fi
 
-echo "==> native extract product tests"
-cargo test --locked --features extract-native-tests --test attachment_extract_native --target-dir "$TARGET" -- --nocapture
+cd "$ROOT"
+
+echo "==> cargo check (extract-job target, offline)"
+cargo check --locked --offline --target-dir "$TARGET"
+
+echo "==> DB policy tests (offline)"
+cargo test --locked --offline --features db-tests --test attachment_extract_integration --target-dir "$TARGET" -- --nocapture
+
+echo "==> native extract lifecycle/product tests (offline)"
+cargo test --locked --offline --features extract-native-tests --test attachment_extract_native --target-dir "$TARGET" -- --nocapture

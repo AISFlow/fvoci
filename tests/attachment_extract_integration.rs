@@ -369,7 +369,10 @@ async fn system_ctx_cannot_read_other_tenant_extract_text() {
     tx.commit().await.unwrap();
     assert_eq!(count.0, 0);
 
-    let state_b = fetch_extract_state(&app, ws_b, att_b).await.unwrap().unwrap();
+    let state_b = fetch_extract_state(&app, ws_b, att_b)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(state_b.extract_text, "");
 
     app.close().await;
@@ -796,10 +799,12 @@ async fn migration_006_upgrades_to_007_attachment_extract() {
     ] {
         sqlx::raw_sql(sql).execute(&migration_pool).await.unwrap();
     }
-    sqlx::query("INSERT INTO fvoci.schema_migrations (version) VALUES (1), (2), (3), (4), (5), (6)")
-        .execute(&migration_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.schema_migrations (version) VALUES (1), (2), (3), (4), (5), (6)",
+    )
+    .execute(&migration_pool)
+    .await
+    .unwrap();
     let has_lease: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'fvoci' AND table_name = 'attachments' AND column_name = 'extract_lease_token')",
     )

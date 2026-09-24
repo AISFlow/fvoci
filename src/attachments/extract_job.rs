@@ -15,8 +15,9 @@ use tracing::{debug, warn};
 
 use crate::attachments::LocalStorage;
 use crate::db::attachment_extract::{
-    claim_extract, default_extract_limits, finish_extract, load_extract_input, oversize_resource_limit,
-    release_extract, EXTRACT_LEASE_SECS, EXTRACT_RETRY_BACKOFF_MS, FinishExtract,
+    claim_extract, default_extract_limits, finish_extract, load_extract_input,
+    oversize_resource_limit, release_extract, FinishExtract, EXTRACT_LEASE_SECS,
+    EXTRACT_RETRY_BACKOFF_MS,
 };
 
 const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > DEFAULT_TIMEOUT_MS);
@@ -27,6 +28,8 @@ pub struct ExtractJobSettings {
     pub limits: Limits,
     pub poll_interval: Duration,
     pub retry_backoff: Duration,
+    /// Test-only hang injection; production [`from_env`] always leaves this `None`.
+    pub test_hang_ms: Option<u64>,
 }
 
 impl ExtractJobSettings {
@@ -54,6 +57,7 @@ impl ExtractJobSettings {
             limits,
             poll_interval: Duration::from_secs(poll_secs),
             retry_backoff: Duration::from_millis(EXTRACT_RETRY_BACKOFF_MS),
+            test_hang_ms: None,
         }))
     }
 }
@@ -85,7 +89,7 @@ pub fn validate_extractor_bin(path: &std::path::Path) -> Result<(), String> {
 
 pub struct ExtractJobHandle {
     cancel: CancellationToken,
-    join: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    join: JoinHandle<()>,
     pub wake: Arc<Notify>,
 }
 
@@ -95,12 +99,9 @@ impl ExtractJobHandle {
     }
 
     pub async fn join(self) -> Result<(), String> {
-        let handle = self.join.lock().await.take();
-        if let Some(handle) = handle {
-            handle
-                .await
-                .map_err(|err| format!("attachment extract task join failed: {err}"))?;
-        }
+        self.join
+            .await
+            .map_err(|err| format!("attachment extract task join failed: {err}"))?;
         Ok(())
     }
 }
@@ -120,11 +121,7 @@ pub fn spawn_extract_job(
         child_cancel,
         wake.clone(),
     ));
-    ExtractJobHandle {
-        cancel,
-        join: tokio::sync::Mutex::new(Some(join)),
-        wake,
-    }
+    ExtractJobHandle { cancel, join, wake }
 }
 
 async fn run_extract_loop(
@@ -202,9 +199,10 @@ async fn process_one_claim(
     let finish = if input.size_bytes as u64 > settings.limits.max_input_bytes {
         oversize_resource_limit(input.size_bytes)
     } else {
-        let bytes = read_storage_bytes(storage, &input.storage_key, settings.limits.max_input_bytes)
-            .await
-            .map_err(|e| format!("storage read failed: {e}"))?;
+        let bytes =
+            read_storage_bytes(storage, &input.storage_key, settings.limits.max_input_bytes)
+                .await
+                .map_err(|e| format!("storage read failed: {e}"))?;
         if cancel.is_cancelled() {
             let _ = release_extract(pool, &claim)
                 .await
@@ -243,18 +241,14 @@ async fn read_storage_bytes(
     let size = match storage.head(storage_key).await {
         Ok(Some(size)) => size,
         Ok(None) => {
-            return Err(format!(
-                "storage object missing for key {}",
-                storage_key
-            ));
+            return Err(format!("storage object missing for key {}", storage_key));
         }
         Err(err) => return Err(format!("storage head failed: {err}")),
     };
     if size > max_bytes {
         return Err(format!(
             "storage object {} bytes exceeds {}-byte extract limit",
-            size,
-            max_bytes
+            size, max_bytes
         ));
     }
     if size == 0 {
@@ -278,7 +272,7 @@ async fn run_native_extract(
         name: name.to_string(),
         limits: settings.limits,
         extractor_bin: settings.extractor_bin.clone(),
-        test_hang_ms: None,
+        test_hang_ms: settings.test_hang_ms,
     };
     let worker_cancel = cancel_flag.clone();
     let handle = tokio::task::spawn_blocking(move || {
@@ -409,8 +403,8 @@ mod tests {
 
     #[test]
     fn lease_covers_watchdog() {
-        use document_extract_client::limits::MAX_INPUT_BYTES;
         use crate::db::attachment_extract::EXTRACT_MAX_ATTEMPTS;
+        use document_extract_client::limits::MAX_INPUT_BYTES;
 
         assert!(EXTRACT_LEASE_SECS * 1000 > DEFAULT_TIMEOUT_MS);
         assert_eq!(EXTRACT_MAX_ATTEMPTS, 2);
