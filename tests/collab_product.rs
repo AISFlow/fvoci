@@ -16,10 +16,11 @@ use fvoci_server::collab::config::CollabConfig;
 use fvoci_server::collab::guard::RoomGuard;
 use fvoci_server::collab::hub::RoomLifecyclePhase;
 use fvoci_server::collab::room::{
-    arm_append_revoke_barrier, arm_force_primary_apply_fail, arm_force_primary_load_fail,
-    arm_spawn_room_block, disarm_append_revoke_barrier, disarm_force_primary_apply_fail,
-    disarm_force_primary_load_fail, disarm_spawn_room_block, AuthenticatedConnection,
-    CollabSession, JoinError, RoomClientEvent, RoomJoin,
+    arm_append_in_tx_reject_barrier, arm_append_revoke_barrier, arm_force_primary_apply_fail,
+    arm_force_primary_load_fail, arm_spawn_room_block, disarm_append_in_tx_reject_barrier,
+    disarm_append_revoke_barrier, disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
+    disarm_spawn_room_block, AuthenticatedConnection, CollabSession, JoinError, RoomClientEvent,
+    RoomJoin,
 };
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, SyncMessage, SyncStep,
@@ -27,7 +28,11 @@ use fvoci_server::collab::wire::{
 };
 use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
-use fvoci_server::db::collab::load_collab_document;
+use fvoci_server::db::collab::{load_collab_document, resolve_collab_admission, CollabDbError};
+use fvoci_server::db::collab_delivery::{
+    arm_force_delivery_read_fail, check_delivery_admission, delivery_read_count,
+    disarm_force_delivery_read_fail, reset_delivery_read_count, DeliveryAdmission,
+};
 use fvoci_server::db::documents::CreateDocumentInput;
 use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::workspace;
@@ -270,6 +275,7 @@ fn test_collab_config_with_revoke(
         limits: collab_engine::Limits::for_tests(),
         max_rooms,
         max_collab_sockets: max_rooms * 16,
+        max_collab_sockets_per_session: 4,
         max_connections_per_room: 16,
         max_queued_room_ops: 128,
         max_pending_bytes_per_connection: 4 * 1024 * 1024,
@@ -1713,6 +1719,66 @@ async fn add_session_for_user(
     token
 }
 
+async fn setup_second_member(harness: &TestDb, wiki: &WikiDocFixture) -> SessionFixture {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let user_id = Uuid::now_v7();
+    let hash = fvoci_server::auth::password::hash_password(
+        "supersecret1",
+        &Keyring::parse(PEPPER, "test").unwrap(),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.users (id, email, password_hash, given_name) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user_id)
+    .bind(format!("member-{user_id}@example.com"))
+    .bind(&hash)
+    .bind("Peer")
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+    )
+    .bind(wiki.session.workspace_id)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+
+    let token = new_token();
+    let session_id = Uuid::now_v7();
+    let expires = Utc::now() + ChronoDuration::days(30);
+    let mut tx = wiki.session.pool.begin().await.unwrap();
+    fvoci_server::db::identity::create_session(&mut tx, session_id, user_id, &token.hash, expires)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    SessionFixture {
+        pool: wiki.session.pool.clone(),
+        user_id,
+        session_id,
+        workspace_id: wiki.session.workspace_id,
+        session_token: token.token,
+    }
+}
+
+fn collab_session_from(fixture: &SessionFixture, given_name: &str) -> CollabSession {
+    CollabSession {
+        session_id: fixture.session_id,
+        user_id: fixture.user_id,
+        given_name: given_name.into(),
+        family_name: None,
+        locale: "en".into(),
+    }
+}
+
 #[tokio::test]
 async fn collab_append_revoke_barrier_rejects_writer_not_room() {
     let harness = TestDb::bootstrap().await;
@@ -1760,23 +1826,56 @@ async fn collab_append_revoke_barrier_rejects_writer_not_room() {
         .await
         .unwrap();
     let mut reader_still_live = false;
-    for _ in 0..8 {
-        if let Some(WireFrame::Document {
-            message:
-                DocumentMessage::Sync(SyncMessage {
-                    step: SyncStep::Step2,
-                    ..
-                }),
-            ..
-        }) = recv_document_frame(&mut reader, 1).await
-        {
-            reader_still_live = true;
-            break;
+    let mut saw_rejected_update = false;
+    for _ in 0..12 {
+        match recv_document_frame(&mut reader, 1).await {
+            Some(WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Update,
+                        ..
+                    }),
+                ..
+            }) => {
+                saw_rejected_update = true;
+            }
+            Some(WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Step2,
+                        ..
+                    }),
+                ..
+            }) => {
+                reader_still_live = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
         }
     }
     assert!(
+        !saw_rejected_update,
+        "rejected writer update must not be delivered to a healthy peer"
+    );
+    assert!(
         reader_still_live,
         "reader must remain live after writer-only rejection"
+    );
+
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        load.tail.is_empty(),
+        "rejected writer update must not enter durable save"
     );
 
     let fresh_writer_token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
@@ -1806,6 +1905,106 @@ async fn collab_append_revoke_barrier_rejects_writer_not_room() {
     assert!(
         reader_saw_followup,
         "reader must receive a later update from a live writer after barrier rejection"
+    );
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_append_in_tx_reject_barrier_rejects_writer_not_room() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let update = sample_hi_update();
+    let writer_token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
+
+    let mut reader = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut reader, &routing_key, 220).await;
+    let mut writer = connect_member(addr, &writer_token.token).await;
+    auth_and_join(&mut writer, &routing_key, 221).await;
+
+    let (reached_rx, proceed_tx) = arm_append_in_tx_reject_barrier(wiki.document_id).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), reached_rx)
+        .await
+        .expect("in-tx barrier must be reached after the locking precheck")
+        .expect("barrier signal");
+    revoke_session(
+        &wiki.session.pool,
+        &writer_token.hash,
+        Some(wiki.session.user_id),
+    )
+    .await
+    .expect("revoke writer session");
+    proceed_tx.send(()).expect("release in-tx barrier");
+    disarm_append_in_tx_reject_barrier(wiki.document_id).await;
+
+    assert!(
+        wait_for_ws_close(&mut writer, Duration::from_secs(3)).await,
+        "writer revoked inside append must close after Forbidden"
+    );
+    reader
+        .send(Message::Binary(
+            sync_step1_frame(&routing_key, &[0, 0]).into(),
+        ))
+        .await
+        .unwrap();
+    let mut reader_still_live = false;
+    let mut saw_rejected_update = false;
+    for _ in 0..12 {
+        match recv_document_frame(&mut reader, 1).await {
+            Some(WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Update,
+                        ..
+                    }),
+                ..
+            }) => {
+                saw_rejected_update = true;
+            }
+            Some(WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Step2,
+                        ..
+                    }),
+                ..
+            }) => {
+                reader_still_live = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(
+        !saw_rejected_update,
+        "in-tx rejected update must not enter a healthy client"
+    );
+    assert!(
+        reader_still_live,
+        "reader must remain live after in-tx writer rejection"
+    );
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        load.tail.is_empty(),
+        "in-tx rejected update must not enter durable save"
     );
     harness.cleanup().await;
 }
@@ -2303,7 +2502,7 @@ async fn collab_archived_readonly_scope_allows_sync_refuses_write() {
 async fn collab_revoked_session_closes_without_post_revoke_broadcast() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let cfg = test_collab_config_with_revoke(4, 30_000, 200);
+    let cfg = test_collab_config_with_revoke(4, 30_000, 30_000);
     let app = fvoci_server::http::router(
         collab_app_state_with_config(&harness.app_url, cfg).await,
         None,
@@ -2325,9 +2524,12 @@ async fn collab_revoked_session_closes_without_post_revoke_broadcast() {
     .await
     .unwrap();
     reader_tx.commit().await.unwrap();
+    let observer_token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
 
     let mut writer = connect_member(addr, &wiki.session.session_token).await;
     auth_and_join(&mut writer, &routing_key, 101).await;
+    let mut observer = connect_member(addr, &observer_token.token).await;
+    auth_and_join(&mut observer, &routing_key, 103).await;
     let mut reader = connect_member(addr, &reader_token.token).await;
     auth_and_join(&mut reader, &routing_key, 102).await;
 
@@ -2338,11 +2540,6 @@ async fn collab_revoked_session_closes_without_post_revoke_broadcast() {
     )
     .await
     .expect("revoke");
-
-    assert!(
-        wait_for_ws_close(&mut reader, Duration::from_secs(3)).await,
-        "revoked session must close the socket"
-    );
 
     writer
         .send(Message::Binary(
@@ -2355,8 +2552,28 @@ async fn collab_revoked_session_closes_without_post_revoke_broadcast() {
         "writer should still apply after peer revocation"
     );
 
+    let mut observer_saw_update = false;
+    for _ in 0..12 {
+        if let Some(WireFrame::Document {
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Update,
+                    ..
+                }),
+            ..
+        }) = recv_document_frame(&mut observer, 1).await
+        {
+            observer_saw_update = true;
+            break;
+        }
+    }
+    assert!(
+        observer_saw_update,
+        "healthy peer must receive the live writer's update"
+    );
+
     let mut saw_post_revoke_broadcast = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
     while tokio::time::Instant::now() < deadline {
         match recv_document_frame_within(&mut reader, Duration::from_millis(100)).await {
             Some(WireFrame::Document {
@@ -2371,12 +2588,12 @@ async fn collab_revoked_session_closes_without_post_revoke_broadcast() {
                 break;
             }
             Some(_) => {}
-            None => break,
+            None => {}
         }
     }
     assert!(
         !saw_post_revoke_broadcast,
-        "revoked peer must not receive new broadcasts"
+        "revoked peer must not receive the update while its socket is still open"
     );
     harness.cleanup().await;
 }
@@ -2416,6 +2633,12 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
         )
         .await
         .expect("slow join");
+        hub.send_frame(
+            key,
+            slow_id,
+            awareness_live_frame(&routing_key, 301, 1, &user_id),
+        )
+        .await;
 
         let (writer_tx, mut writer_rx) = mpsc::channel(64);
         let writer_id = Uuid::now_v7();
@@ -2465,6 +2688,36 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
             "saturated outbound queue must signal independent cancel within deadline"
         );
 
+        let mut writer_saw_tombstone = false;
+        let tombstone_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < tombstone_deadline {
+            match writer_rx.try_recv() {
+                Ok(RoomClientEvent::Outbound(frame)) => {
+                    if let Ok(WireFrame::Document {
+                        message: DocumentMessage::Awareness(payload),
+                        ..
+                    }) = fvoci_server::collab::wire::decode(&frame.bytes)
+                    {
+                        let updates = decode_awareness(&payload).expect("awareness");
+                        if updates
+                            .iter()
+                            .any(|u| u.client_id == 301 && u.state.is_none())
+                        {
+                            writer_saw_tombstone = true;
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        assert!(
+            writer_saw_tombstone,
+            "surviving writer must receive a generation-aware tombstone for the evicted peer"
+        );
+
         hub.send_frame(
             key,
             writer_id,
@@ -2486,11 +2739,64 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
         })
         .await
         .unwrap_or(false);
-        hub.shutdown().await;
         assert!(
             writer_still_live,
             "evicting the slow peer must not break the writer connection"
         );
+
+        let (late_tx, mut late_rx) = mpsc::channel(8);
+        hub.join_room(
+            key,
+            RoomJoin {
+                conn: AuthenticatedConnection {
+                    conn_id: Uuid::now_v7(),
+                    session: CollabSession {
+                        session_id: wiki.session.session_id,
+                        user_id: wiki.session.user_id,
+                        given_name: "Late".into(),
+                        family_name: None,
+                        locale: "en".into(),
+                    },
+                    client_id: 303,
+                    read_only: false,
+                    routing_key: routing_key.clone(),
+                },
+                events: late_tx,
+                cancel: None,
+            },
+        )
+        .await
+        .expect("late join");
+        let mut late_saw_ghost = false;
+        let late_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < late_deadline {
+            match late_rx.try_recv() {
+                Ok(RoomClientEvent::Outbound(frame)) => {
+                    if let Ok(WireFrame::Document {
+                        message: DocumentMessage::Awareness(payload),
+                        ..
+                    }) = fvoci_server::collab::wire::decode(&frame.bytes)
+                    {
+                        let updates = decode_awareness(&payload).expect("awareness");
+                        if updates
+                            .iter()
+                            .any(|u| u.client_id == 301 && u.state.is_some())
+                        {
+                            late_saw_ghost = true;
+                            break;
+                        }
+                    }
+                }
+                Ok(RoomClientEvent::Close { .. }) => break,
+                Err(mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        assert!(
+            !late_saw_ghost,
+            "late joiner must not receive ghost presence for the evicted peer"
+        );
+        hub.shutdown().await;
         harness.cleanup().await;
     })
     .await;
@@ -2597,6 +2903,106 @@ async fn collab_awareness_generation_takeover_old_leave_cannot_clear() {
             !saw_tombstone,
             "stale connection leave must not remove newer generation claim"
         );
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_client_id_live_ownership_blocks_other_user() {
+    run_lifecycle_test("collab_client_id_live_ownership", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let mut cfg = test_collab_config(4, 30_000);
+        cfg.client_id_ttl_ms = 5_000;
+        let hub = CollabHub::new(cfg, wiki.session.pool.clone());
+        let key = (wiki.session.workspace_id, wiki.document_id);
+        let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+        let peer = setup_second_member(&harness, &wiki).await;
+
+        let (owner_tx, mut owner_rx) = mpsc::channel(8);
+        let owner_id = Uuid::now_v7();
+        hub.join_room(
+            key,
+            RoomJoin {
+                conn: AuthenticatedConnection {
+                    conn_id: owner_id,
+                    session: collab_session_from(&wiki.session, "Owner"),
+                    client_id: 201,
+                    read_only: false,
+                    routing_key: routing_key.clone(),
+                },
+                events: owner_tx,
+                cancel: None,
+            },
+        )
+        .await
+        .expect("owner join");
+        while owner_rx.try_recv().is_ok() {}
+
+        let (peer_tx, _peer_rx) = mpsc::channel(8);
+        let live_conflict = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: Uuid::now_v7(),
+                        session: collab_session_from(&peer, "Peer"),
+                        client_id: 201,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
+                    },
+                    events: peer_tx,
+                    cancel: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(live_conflict, Err(JoinError::AdmissionDenied)),
+            "a different user must not take a live connection's client id"
+        );
+
+        hub.leave_room(key, owner_id).await;
+        let (peer_tx2, _peer_rx2) = mpsc::channel(8);
+        let after_leave = hub
+            .join_room(
+                key,
+                RoomJoin {
+                    conn: AuthenticatedConnection {
+                        conn_id: Uuid::now_v7(),
+                        session: collab_session_from(&peer, "Peer"),
+                        client_id: 201,
+                        read_only: false,
+                        routing_key: routing_key.clone(),
+                    },
+                    events: peer_tx2,
+                    cancel: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(after_leave, Err(JoinError::AdmissionDenied)),
+            "a different user must not reuse a client id after the owner leaves"
+        );
+
+        let (same_tx, _same_rx) = mpsc::channel(8);
+        hub.join_room(
+            key,
+            RoomJoin {
+                conn: AuthenticatedConnection {
+                    conn_id: Uuid::now_v7(),
+                    session: collab_session_from(&wiki.session, "Owner"),
+                    client_id: 201,
+                    read_only: false,
+                    routing_key,
+                },
+                events: same_tx,
+                cancel: None,
+            },
+        )
+        .await
+        .expect("same user generation takeover must still be allowed");
         hub.shutdown().await;
         harness.cleanup().await;
     })
@@ -2734,9 +3140,11 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
         cfg.max_collab_sockets = 1;
         let hub = CollabHub::new(cfg.clone(), wiki.session.pool.clone());
         assert_eq!(hub.available_collab_sockets(), 1);
-        let held = hub.try_acquire_socket().expect("first permit");
+        let held = hub
+            .try_acquire_socket(wiki.session.session_id)
+            .expect("first permit");
         assert_eq!(hub.available_collab_sockets(), 0);
-        assert!(hub.try_acquire_socket().is_none());
+        assert!(hub.try_acquire_socket(wiki.session.session_id).is_none());
         drop(held);
         assert_eq!(hub.available_collab_sockets(), 1);
 
@@ -2760,6 +3168,37 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
             "released socket permit must allow a new upgrade"
         );
         hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_session_socket_cap_rejects_same_session_allows_other() {
+    run_lifecycle_test("collab_session_socket_cap", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let mut cfg = test_collab_config(4, 30_000);
+        cfg.max_collab_sockets = 4;
+        cfg.max_collab_sockets_per_session = 1;
+        let other = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
+        let app = fvoci_server::http::router(
+            collab_app_state_with_config(&harness.app_url, cfg).await,
+            None,
+        );
+        let addr = spawn_server(app).await;
+        let mut ws1 = connect_member(addr, &wiki.session.session_token).await;
+        assert!(
+            try_connect_member(addr, &wiki.session.session_token)
+                .await
+                .is_err(),
+            "per-session socket cap must reject a second socket for the same session"
+        );
+        assert!(
+            try_connect_member(addr, &other.token).await.is_ok(),
+            "a different session must still obtain a global socket"
+        );
+        ws1.close(None).await.unwrap();
         harness.cleanup().await;
     })
     .await;
@@ -2803,11 +3242,277 @@ async fn collab_pre_auth_outbound_is_bounded() {
         "invalid auth must yield a bounded pre-auth denial"
     );
     ws.send(Message::Binary(invalid_auth.into())).await.unwrap();
-    let second = recv_document_frame_within(&mut ws, Duration::from_millis(250)).await;
     assert!(
-        second.is_none(),
-        "pre-auth outbound allowance must not enqueue further auth responses"
+        wait_for_ws_close(&mut ws, Duration::from_secs(2)).await,
+        "exhausting pre-auth outbound must close the socket instead of dropping later frames"
     );
-    ws.close(None).await.unwrap();
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_pre_auth_exhaustion_does_not_swallow_authenticated() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let mut cfg = test_collab_config(4, 30_000);
+    cfg.max_pre_auth_outbound_frames = 1;
+    cfg.auth_wait_ms = 5_000;
+    let app = fvoci_server::http::router(
+        collab_app_state_with_config(&harness.app_url, cfg).await,
+        None,
+    );
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut ws = connect_member(addr, &wiki.session.session_token).await;
+    let invalid_auth = encode(&WireFrame::Document {
+        routing_key: routing_key.clone(),
+        room: CollabRoomName::parse(&routing_key),
+        message: DocumentMessage::Auth(AuthMessage::Token {
+            token: "not-a-client-id".into(),
+            provider_version: Some("4.6.0".into()),
+        }),
+    })
+    .expect("encode invalid auth");
+    ws.send(Message::Binary(invalid_auth.into())).await.unwrap();
+    let first = recv_document_frame(&mut ws, 2).await;
+    assert!(
+        matches!(
+            first,
+            Some(WireFrame::Document {
+                message: DocumentMessage::Auth(AuthMessage::PermissionDenied { .. }),
+                ..
+            })
+        ),
+        "first invalid auth still receives a denial"
+    );
+    ws.send(Message::Binary(auth_token_frame(&routing_key, 77).into()))
+        .await
+        .unwrap();
+    let mut saw_authenticated = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+    while tokio::time::Instant::now() < deadline {
+        match recv_document_frame_within(&mut ws, Duration::from_millis(100)).await {
+            Some(WireFrame::Document {
+                message: DocumentMessage::Auth(AuthMessage::Authenticated { .. }),
+                ..
+            }) => {
+                saw_authenticated = true;
+                break;
+            }
+            Some(_) => {}
+            None => {}
+        }
+    }
+    assert!(
+        !saw_authenticated,
+        "Authenticated must not be delivered after pre-auth allowance is exhausted"
+    );
+    assert!(
+        wait_for_ws_close(&mut ws, Duration::from_secs(2)).await,
+        "socket must close explicitly instead of joining silently"
+    );
+    harness.cleanup().await;
+}
+
+fn admission_matches(
+    locking: Result<Result<fvoci_server::db::collab::CollabAdmission, CollabDbError>, sqlx::Error>,
+    delivery: Result<DeliveryAdmission, sqlx::Error>,
+) -> bool {
+    match (locking, delivery) {
+        (Ok(Ok(a)), Ok(DeliveryAdmission::Allowed { read_only })) => a.read_only == read_only,
+        (Ok(Err(_)), Ok(DeliveryAdmission::Denied)) => true,
+        _ => false,
+    }
+}
+
+#[tokio::test]
+async fn collab_delivery_admission_parity_with_locking_join() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let pool = &wiki.session.pool;
+    let ws = wiki.session.workspace_id;
+    let user = wiki.session.user_id;
+    let session = wiki.session.session_id;
+    let doc = wiki.document_id;
+
+    let live = resolve_collab_admission(pool, ws, user, session, doc).await;
+    let delivery = check_delivery_admission(pool, ws, user, session, doc).await;
+    assert!(
+        admission_matches(live, delivery),
+        "live wiki member must match on both admission paths"
+    );
+
+    revoke_session(
+        pool,
+        &fvoci_server::auth::token::hash_token(&wiki.session.session_token),
+        Some(user),
+    )
+    .await
+    .expect("revoke");
+    let live = resolve_collab_admission(pool, ws, user, session, doc).await;
+    let delivery = check_delivery_admission(pool, ws, user, session, doc).await;
+    assert!(
+        admission_matches(live, delivery),
+        "revoked session must be Denied on both paths"
+    );
+
+    let token = add_session_for_user(pool, user).await;
+    let sid = sqlx::query_scalar::<_, Uuid>("SELECT id FROM fvoci.app_session_by_token_hash($1)")
+        .bind(&token.hash)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let live = resolve_collab_admission(pool, ws, user, sid, doc).await;
+    let delivery = check_delivery_admission(pool, ws, user, sid, doc).await;
+    assert!(
+        admission_matches(live, delivery),
+        "fresh session must match before mutations"
+    );
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = $1")
+        .bind(doc)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let live = resolve_collab_admission(pool, ws, user, sid, doc).await;
+    let delivery = check_delivery_admission(pool, ws, user, sid, doc).await;
+    assert!(
+        admission_matches(live, delivery),
+        "archived wiki must be read_only on both paths"
+    );
+    sqlx::query(
+        "UPDATE fvoci.documents SET status = 'published', deleted_at = now() WHERE id = $1",
+    )
+    .bind(doc)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let live = resolve_collab_admission(pool, ws, user, sid, doc).await;
+    let delivery = check_delivery_admission(pool, ws, user, sid, doc).await;
+    assert!(
+        admission_matches(live, delivery),
+        "soft-deleted wiki must be Denied on both paths"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_delivery_read_is_nonblocking_while_session_row_locked() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let mut lock_tx = wiki.session.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.sessions WHERE id = $1 FOR UPDATE")
+        .bind(wiki.session.session_id)
+        .fetch_one(&mut *lock_tx)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let delivery = tokio::time::timeout(
+        Duration::from_millis(500),
+        check_delivery_admission(
+            &wiki.session.pool,
+            wiki.session.workspace_id,
+            wiki.session.user_id,
+            wiki.session.session_id,
+            wiki.document_id,
+        ),
+    )
+    .await
+    .expect("delivery read must not wait on FOR UPDATE")
+    .expect("delivery query");
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "nonlocking delivery read must return while the session row is locked"
+    );
+    assert!(matches!(
+        delivery,
+        DeliveryAdmission::Allowed { read_only: false }
+    ));
+    drop(lock_tx);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_delivery_read_failure_closes_1011_without_data_frame() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let app = fvoci_server::http::router(collab_app_state(&harness.app_url, true).await, None);
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 401).await;
+    let reader_token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
+    let mut reader = connect_member(addr, &reader_token.token).await;
+    auth_and_join(&mut reader, &routing_key, 402).await;
+    arm_force_delivery_read_fail(wiki.document_id);
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    let mut saw_update = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        match recv_document_frame_within(&mut reader, Duration::from_millis(100)).await {
+            Some(WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Update,
+                        ..
+                    }),
+                ..
+            }) => {
+                saw_update = true;
+                break;
+            }
+            Some(_) => {}
+            None => {}
+        }
+    }
+    disarm_force_delivery_read_fail(wiki.document_id);
+    assert!(!saw_update, "DB error on delivery must fail closed");
+    assert!(
+        wait_for_ws_close(&mut reader, Duration::from_secs(2)).await,
+        "delivery-read failure must close the socket"
+    );
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_control_frames_skip_delivery_admission_read() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    reset_delivery_read_count(wiki.document_id);
+    let mut cfg = test_collab_config(4, 30_000);
+    cfg.max_pre_auth_outbound_frames = 1;
+    let app = fvoci_server::http::router(
+        collab_app_state_with_config(&harness.app_url, cfg).await,
+        None,
+    );
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let mut ws = connect_member(addr, &wiki.session.session_token).await;
+    let invalid_auth = encode(&WireFrame::Document {
+        routing_key: routing_key.clone(),
+        room: CollabRoomName::parse(&routing_key),
+        message: DocumentMessage::Auth(AuthMessage::Token {
+            token: "not-a-client-id".into(),
+            provider_version: Some("4.6.0".into()),
+        }),
+    })
+    .expect("encode invalid auth");
+    ws.send(Message::Binary(invalid_auth.into())).await.unwrap();
+    let _ = recv_document_frame(&mut ws, 2).await;
+    assert_eq!(
+        delivery_read_count(wiki.document_id),
+        0,
+        "pre-auth denial must not run the outbound delivery read"
+    );
     harness.cleanup().await;
 }

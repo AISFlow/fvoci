@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
-use crate::collab::room::{CollabSession, JoinError, RoomHandle, RoomJoin, RoomKey};
+use crate::collab::room::{JoinError, RoomHandle, RoomJoin, RoomKey};
 use crate::db::collab::resolve_collab_admission;
 
 struct LiveRoom {
@@ -48,6 +48,31 @@ pub enum RoomLifecyclePhase {
     Absent,
 }
 
+struct SessionSocketTracker {
+    counts: std::sync::Mutex<HashMap<Uuid, usize>>,
+    max_per_session: usize,
+}
+
+/// Global + per-session socket lease. Dropping it releases both counters.
+pub struct CollabSocketPermit {
+    _global: OwnedSemaphorePermit,
+    session_id: Uuid,
+    tracker: Arc<SessionSocketTracker>,
+}
+
+impl Drop for CollabSocketPermit {
+    fn drop(&mut self) {
+        if let Ok(mut counts) = self.tracker.counts.lock() {
+            if let Some(count) = counts.get_mut(&self.session_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    counts.remove(&self.session_id);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CollabHub {
     config: CollabConfig,
@@ -55,6 +80,7 @@ pub struct CollabHub {
     rooms: Arc<RwLock<HashMap<RoomKey, Arc<RoomSlot>>>>,
     room_permits: Arc<Semaphore>,
     socket_permits: Arc<Semaphore>,
+    session_sockets: Arc<SessionSocketTracker>,
     shutting_down: Arc<AtomicBool>,
     idle_stop: watch::Sender<bool>,
     idle_task: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -68,6 +94,10 @@ impl CollabHub {
         let rooms = Arc::new(RwLock::new(HashMap::new()));
         let room_permits = Arc::new(Semaphore::new(room_cap));
         let socket_permits = Arc::new(Semaphore::new(config.max_collab_sockets));
+        let session_sockets = Arc::new(SessionSocketTracker {
+            counts: std::sync::Mutex::new(HashMap::new()),
+            max_per_session: config.max_collab_sockets_per_session,
+        });
         let idle_ms = config.idle_evict_ms;
         let idle_rooms = rooms.clone();
         let (idle_stop, stopped) = watch::channel(false);
@@ -80,6 +110,7 @@ impl CollabHub {
             rooms,
             room_permits,
             socket_permits,
+            session_sockets,
             shutting_down: Arc::new(AtomicBool::new(false)),
             idle_stop,
             idle_task: Arc::new(Mutex::new(Some(idle_task))),
@@ -92,11 +123,22 @@ impl CollabHub {
         &self.config
     }
 
-    pub fn try_acquire_socket(&self) -> Option<OwnedSemaphorePermit> {
+    pub fn try_acquire_socket(&self, session_id: Uuid) -> Option<CollabSocketPermit> {
         if self.shutting_down.load(Ordering::Relaxed) {
             return None;
         }
-        self.socket_permits.clone().try_acquire_owned().ok()
+        let mut counts = self.session_sockets.counts.lock().ok()?;
+        let held = counts.get(&session_id).copied().unwrap_or(0);
+        if held >= self.session_sockets.max_per_session {
+            return None;
+        }
+        let global = self.socket_permits.clone().try_acquire_owned().ok()?;
+        counts.insert(session_id, held + 1);
+        Some(CollabSocketPermit {
+            _global: global,
+            session_id,
+            tracker: self.session_sockets.clone(),
+        })
     }
 
     #[cfg(feature = "db-tests")]
@@ -106,27 +148,6 @@ impl CollabHub {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
-    }
-
-    pub async fn session_still_authorized(
-        &self,
-        workspace_id: Uuid,
-        document_id: Uuid,
-        session: &CollabSession,
-        read_only: bool,
-    ) -> bool {
-        match resolve_collab_admission(
-            &self.pool,
-            workspace_id,
-            session.user_id,
-            session.session_id,
-            document_id,
-        )
-        .await
-        {
-            Ok(Ok(admission)) => read_only || !admission.read_only,
-            _ => false,
-        }
     }
 
     #[cfg(feature = "db-tests")]

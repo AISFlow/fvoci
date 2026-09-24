@@ -29,6 +29,7 @@ use crate::db::collab::{
     resolve_collab_admission, AppendCollabInput, AppendCollabResult, CollabDbError,
     CompactCollabInput, VerifyCollabInput,
 };
+use crate::db::collab_delivery::{check_delivery_admission, DeliveryAdmission};
 use crate::db::identity::LiveSession;
 
 #[cfg(feature = "db-tests")]
@@ -133,6 +134,47 @@ async fn pause_for_append_revoke_barrier(document_id: Uuid) {
     }
 }
 
+#[cfg(feature = "db-tests")]
+static APPEND_IN_TX_REJECT_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_append_in_tx_reject_barrier(
+    document_id: Uuid,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    APPEND_IN_TX_REJECT_BARRIERS.lock().await.insert(
+        document_id,
+        AppendRevokeBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_append_in_tx_reject_barrier(document_id: Uuid) {
+    APPEND_IN_TX_REJECT_BARRIERS
+        .lock()
+        .await
+        .remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_append_in_tx_reject_barrier(document_id: Uuid) {
+    let barrier = APPEND_IN_TX_REJECT_BARRIERS
+        .lock()
+        .await
+        .remove(&document_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
 const OUTBOUND_FRAME_OVERHEAD: usize = 48;
 
 async fn wait_spawn_room_block(_document_id: Uuid) {
@@ -195,13 +237,21 @@ impl Drop for OutboundDeliveryPermit {
 
 pub struct OutboundFrame {
     pub bytes: Vec<u8>,
+    pub kind: OutboundKind,
     permit: Option<OutboundDeliveryPermit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundKind {
+    Control,
+    Data,
 }
 
 impl std::fmt::Debug for OutboundFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OutboundFrame")
             .field("bytes", &self.bytes.len())
+            .field("kind", &self.kind)
             .field("permit", &self.permit.is_some())
             .finish()
     }
@@ -211,6 +261,7 @@ impl OutboundFrame {
     pub fn unaccounted(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
+            kind: OutboundKind::Control,
             permit: None,
         }
     }
@@ -338,6 +389,8 @@ struct RoomActor {
     client_id_owner: HashMap<u32, (Uuid, Instant)>,
     shutting_down: bool,
     last_acl_poll: Instant,
+    pending_awareness: VecDeque<Vec<u8>>,
+    flushing_awareness: bool,
 }
 
 pub async fn spawn_room(
@@ -376,12 +429,20 @@ pub async fn spawn_room(
         client_id_owner: HashMap::new(),
         shutting_down: false,
         last_acl_poll: Instant::now(),
+        pending_awareness: VecDeque::new(),
+        flushing_awareness: false,
     };
     tokio::spawn(async move {
         actor.run(rx).await;
         let _ = finished_tx.send(());
     });
     Ok((RoomHandle { tx }, finished_rx))
+}
+
+enum LockingAuth {
+    Allow,
+    Deny,
+    DbError,
 }
 
 impl RoomActor {
@@ -438,35 +499,90 @@ impl RoomActor {
             .map(|(id, c)| (*id, c.session.clone(), c.read_only))
             .collect::<Vec<_>>();
         for (conn_id, session, read_only) in snapshots {
-            if !self.session_authorized(&session, read_only).await {
-                to_close.push(conn_id);
+            match check_delivery_admission(
+                &self.pool,
+                self.workspace_id,
+                session.user_id,
+                session.session_id,
+                self.document_id,
+            )
+            .await
+            {
+                Ok(DeliveryAdmission::Allowed {
+                    read_only: admission_ro,
+                }) => {
+                    if read_only || !admission_ro {
+                        continue;
+                    }
+                    to_close.push((conn_id, 1008, "permission revoked"));
+                }
+                Ok(DeliveryAdmission::Denied) => {
+                    to_close.push((conn_id, 1008, "permission revoked"));
+                }
+                Err(_) => {
+                    // Poll is a sweep, not an authorization point. Keep the
+                    // socket; the next Data-frame delivery read decides.
+                }
             }
         }
-        for conn_id in to_close {
-            self.close_connection(conn_id, 1008, "permission revoked")
-                .await;
+        for (conn_id, code, reason) in to_close {
+            self.close_connection(conn_id, code, reason).await;
         }
     }
 
-    async fn session_authorized(&self, session: &CollabSession, read_only: bool) -> bool {
+    async fn locking_session_auth_by_ids(
+        &self,
+        user_id: Uuid,
+        session_id: Uuid,
+        read_only: bool,
+    ) -> LockingAuth {
         match resolve_collab_admission(
             &self.pool,
             self.workspace_id,
-            session.user_id,
-            session.session_id,
+            user_id,
+            session_id,
             self.document_id,
         )
         .await
         {
             Ok(Ok(admission)) => {
-                if read_only {
-                    true
+                if read_only || !admission.read_only {
+                    LockingAuth::Allow
                 } else {
-                    !admission.read_only
+                    LockingAuth::Deny
                 }
             }
-            _ => false,
+            Ok(Err(_)) => LockingAuth::Deny,
+            Err(_) => LockingAuth::DbError,
         }
+    }
+
+    async fn evict_connection(
+        &mut self,
+        conn_id: Uuid,
+        code: u16,
+        reason: &str,
+    ) -> Option<Vec<u8>> {
+        if let Some(conn) = self.connections.get_mut(&conn_id) {
+            conn.revoked = true;
+        }
+        let tombstone = if let Some(conn) = self.connections.get(&conn_id) {
+            self.awareness
+                .remove_client(conn.client_id, conn.conn_generation)
+        } else {
+            None
+        };
+        if let Some(conn) = self.connections.remove(&conn_id) {
+            Self::enqueue_close(&conn.events, &conn.cancel, code, reason);
+        }
+        tombstone
+    }
+
+    async fn close_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
+        if let Some(encoded) = self.evict_connection(conn_id, code, reason).await {
+            self.pending_awareness.push_back(encoded);
+        }
+        self.flush_pending_awareness().await;
     }
 
     fn signal_cancel(
@@ -494,29 +610,6 @@ impl RoomActor {
             reason: reason.into(),
         };
         let _ = events.try_send(close);
-    }
-
-    async fn evict_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
-        if let Some(conn) = self.connections.get_mut(&conn_id) {
-            conn.revoked = true;
-        }
-        if let Some(conn) = self.connections.remove(&conn_id) {
-            Self::enqueue_close(&conn.events, &conn.cancel, code, reason);
-            self.client_id_owner.remove(&conn.client_id);
-        }
-    }
-
-    async fn close_connection(&mut self, conn_id: Uuid, code: u16, reason: &str) {
-        let tombstone = if let Some(conn) = self.connections.get(&conn_id) {
-            self.awareness
-                .remove_client(conn.client_id, conn.conn_generation)
-        } else {
-            None
-        };
-        self.evict_connection(conn_id, code, reason).await;
-        if let Some(encoded) = tombstone {
-            self.broadcast_awareness(&encoded).await;
-        }
     }
 
     async fn handle_join(&mut self, join: RoomJoin) -> Result<(), JoinError> {
@@ -585,7 +678,6 @@ impl RoomActor {
             .claim_connection_client(join.conn.client_id, conn_generation);
         let conn_id = join.conn.conn_id;
         let routing_key = join.conn.routing_key.clone();
-        let session = join.conn.session.clone();
         let outbound_budget = Arc::new(ConnectionOutboundBudget {
             frame_sem: Arc::new(Semaphore::new(
                 self.config.max_outbound_frames_per_connection,
@@ -618,10 +710,11 @@ impl RoomActor {
                 room: None,
                 message: DocumentMessage::Awareness(encoded),
             }) {
-                self.deliver_outbound(conn_id, &session, read_only, bytes)
+                self.deliver_outbound(conn_id, bytes, OutboundKind::Data)
                     .await;
             }
         }
+        self.flush_pending_awareness().await;
         Ok(())
     }
 
@@ -659,10 +752,22 @@ impl RoomActor {
     fn reserve_client_id(&mut self, client_id: u32, user_id: Uuid) -> bool {
         let now = Instant::now();
         let ttl = Duration::from_millis(self.config.client_id_ttl_ms);
+        let live: std::collections::HashSet<u32> = self
+            .connections
+            .values()
+            .map(|conn| conn.client_id)
+            .collect();
         self.client_id_owner
-            .retain(|_, (_, at)| now.duration_since(*at) < ttl);
-        if let Some((owner, at)) = self.client_id_owner.get(&client_id) {
-            if *owner != user_id && now.duration_since(*at) < ttl {
+            .retain(|cid, (_, at)| live.contains(cid) || now.duration_since(*at) < ttl);
+        if self
+            .connections
+            .values()
+            .any(|conn| conn.client_id == client_id && conn.session.user_id != user_id)
+        {
+            return false;
+        }
+        if let Some((owner, _)) = self.client_id_owner.get(&client_id) {
+            if *owner != user_id {
                 return false;
             }
         }
@@ -717,10 +822,27 @@ impl RoomActor {
                     self.close_connection(conn_id, 1008, "invalid room").await;
                     return;
                 }
-                if !self.session_authorized(&session, read_only).await {
-                    self.close_connection(conn_id, 1008, "permission revoked")
-                        .await;
-                    return;
+                match check_delivery_admission(
+                    &self.pool,
+                    self.workspace_id,
+                    session.user_id,
+                    session.session_id,
+                    self.document_id,
+                )
+                .await
+                {
+                    Ok(DeliveryAdmission::Allowed {
+                        read_only: admission_ro,
+                    }) if read_only || !admission_ro => {}
+                    Ok(DeliveryAdmission::Denied) | Ok(DeliveryAdmission::Allowed { .. }) => {
+                        self.close_connection(conn_id, 1008, "permission revoked")
+                            .await;
+                        return;
+                    }
+                    Err(_) => {
+                        self.close_connection(conn_id, 1011, "internal error").await;
+                        return;
+                    }
                 }
                 self.handle_document_message(
                     conn_id,
@@ -744,11 +866,10 @@ impl RoomActor {
             crate::collab::wire::ConnectionMessage::Pong,
         ))
         .unwrap_or_default();
-        if let Some(conn) = self.connections.get(&conn_id) {
-            let session = conn.session.clone();
-            let read_only = conn.read_only;
-            self.deliver_outbound(conn_id, &session, read_only, pong)
+        if self.connections.contains_key(&conn_id) {
+            self.deliver_outbound(conn_id, pong, OutboundKind::Control)
                 .await;
+            self.flush_pending_awareness().await;
         }
     }
 
@@ -773,10 +894,27 @@ impl RoomActor {
                     .await;
             }
             DocumentMessage::Awareness(payload) => {
-                if !self.session_authorized(session, read_only).await {
-                    self.close_connection(conn_id, 1008, "permission revoked")
-                        .await;
-                    return;
+                match check_delivery_admission(
+                    &self.pool,
+                    self.workspace_id,
+                    session.user_id,
+                    session.session_id,
+                    self.document_id,
+                )
+                .await
+                {
+                    Ok(DeliveryAdmission::Allowed {
+                        read_only: admission_ro,
+                    }) if read_only || !admission_ro => {}
+                    Ok(DeliveryAdmission::Denied) | Ok(DeliveryAdmission::Allowed { .. }) => {
+                        self.close_connection(conn_id, 1008, "permission revoked")
+                            .await;
+                        return;
+                    }
+                    Err(_) => {
+                        self.close_connection(conn_id, 1011, "internal error").await;
+                        return;
+                    }
                 }
                 self.handle_awareness(conn_id, client_id, session, conn_generation, payload)
                     .await;
@@ -978,13 +1116,19 @@ impl RoomActor {
                     .get(&conn_id)
                     .map(|c| (c.session.session_id, c.session.user_id))
                     .unwrap_or_default();
-                if !self
-                    .session_authorized_by_ids(actor_user_id, session_id, read_only)
+                match self
+                    .locking_session_auth_by_ids(actor_user_id, session_id, read_only)
                     .await
                 {
-                    self.reject_candidate(conn_id, routing_key).await;
-                    return;
+                    LockingAuth::Allow => {}
+                    LockingAuth::Deny | LockingAuth::DbError => {
+                        self.reject_candidate(conn_id, routing_key).await;
+                        return;
+                    }
                 }
+
+                #[cfg(feature = "db-tests")]
+                pause_for_append_in_tx_reject_barrier(self.document_id).await;
 
                 let op_id = Uuid::now_v7();
                 let expected_tail = self.committed.tail_seq;
@@ -1073,24 +1217,17 @@ impl RoomActor {
         }
     }
 
-    async fn session_authorized_by_ids(
+    async fn locking_write_still_allowed(
         &self,
         user_id: Uuid,
         session_id: Uuid,
         read_only: bool,
     ) -> bool {
-        match resolve_collab_admission(
-            &self.pool,
-            self.workspace_id,
-            user_id,
-            session_id,
-            self.document_id,
+        matches!(
+            self.locking_session_auth_by_ids(user_id, session_id, read_only)
+                .await,
+            LockingAuth::Allow
         )
-        .await
-        {
-            Ok(Ok(admission)) => read_only || !admission.read_only,
-            _ => false,
-        }
     }
 
     async fn reject_candidate(&mut self, conn_id: Uuid, routing_key: &str) {
@@ -1376,7 +1513,7 @@ impl RoomActor {
         let actor_user_id = conn.session.user_id;
         let session_id = conn.session.session_id;
         if !self
-            .session_authorized_by_ids(actor_user_id, session_id, conn.read_only)
+            .locking_write_still_allowed(actor_user_id, session_id, conn.read_only)
             .await
         {
             return format!("persist-failed:{request_id}");
@@ -1509,16 +1646,9 @@ impl RoomActor {
         let recipients = self
             .connections
             .iter()
-            .map(|(id, conn)| {
-                (
-                    *id,
-                    conn.routing_key.clone(),
-                    conn.session.clone(),
-                    conn.read_only,
-                )
-            })
+            .map(|(id, conn)| (*id, conn.routing_key.clone()))
             .collect::<Vec<_>>();
-        for (conn_id, routing_key, session, read_only) in recipients {
+        for (conn_id, routing_key) in recipients {
             let frame = encode(&WireFrame::Document {
                 routing_key,
                 room: None,
@@ -1528,53 +1658,48 @@ impl RoomActor {
                 }),
             })
             .unwrap_or_default();
-            self.deliver_outbound(conn_id, &session, read_only, frame)
+            self.deliver_outbound(conn_id, frame, OutboundKind::Data)
                 .await;
         }
+        self.flush_pending_awareness().await;
     }
 
     async fn broadcast_awareness(&mut self, encoded: &[u8]) {
-        let recipients = self
-            .connections
-            .iter()
-            .map(|(id, conn)| {
-                (
-                    *id,
-                    conn.routing_key.clone(),
-                    conn.session.clone(),
-                    conn.read_only,
-                )
-            })
-            .collect::<Vec<_>>();
-        for (conn_id, routing_key, session, read_only) in recipients {
-            let frame = encode(&WireFrame::Document {
-                routing_key,
-                room: None,
-                message: DocumentMessage::Awareness(encoded.to_vec()),
-            })
-            .unwrap_or_default();
-            self.deliver_outbound(conn_id, &session, read_only, frame)
-                .await;
-        }
+        self.pending_awareness.push_back(encoded.to_vec());
+        self.flush_pending_awareness().await;
     }
 
-    async fn deliver_outbound(
-        &mut self,
-        conn_id: Uuid,
-        session: &CollabSession,
-        read_only: bool,
-        bytes: Vec<u8>,
-    ) {
+    async fn flush_pending_awareness(&mut self) {
+        if self.flushing_awareness {
+            return;
+        }
+        self.flushing_awareness = true;
+        while let Some(encoded) = self.pending_awareness.pop_front() {
+            let recipients = self
+                .connections
+                .iter()
+                .map(|(id, conn)| (*id, conn.routing_key.clone()))
+                .collect::<Vec<_>>();
+            for (conn_id, routing_key) in recipients {
+                let frame = encode(&WireFrame::Document {
+                    routing_key,
+                    room: None,
+                    message: DocumentMessage::Awareness(encoded.clone()),
+                })
+                .unwrap_or_default();
+                self.deliver_outbound(conn_id, frame, OutboundKind::Data)
+                    .await;
+            }
+        }
+        self.flushing_awareness = false;
+    }
+
+    async fn deliver_outbound(&mut self, conn_id: Uuid, bytes: Vec<u8>, kind: OutboundKind) {
         if self
             .connections
             .get(&conn_id)
             .is_none_or(|conn| conn.revoked)
         {
-            return;
-        }
-        if !self.session_authorized(session, read_only).await {
-            self.evict_connection(conn_id, 1008, "permission revoked")
-                .await;
             return;
         }
         let accounted_bytes = bytes.len().saturating_add(OUTBOUND_FRAME_OVERHEAD);
@@ -1586,21 +1711,33 @@ impl RoomActor {
             return;
         };
         if accounted_bytes > budget.max_bytes {
-            self.evict_connection(conn_id, 1009, "outbound queue full")
-                .await;
+            if let Some(tombstone) = self
+                .evict_connection(conn_id, 1009, "outbound queue full")
+                .await
+            {
+                self.pending_awareness.push_back(tombstone);
+            }
             return;
         }
         let current = budget.queued_bytes.load(Ordering::Relaxed);
         if current + accounted_bytes > budget.max_bytes {
-            self.evict_connection(conn_id, 1009, "outbound queue full")
-                .await;
+            if let Some(tombstone) = self
+                .evict_connection(conn_id, 1009, "outbound queue full")
+                .await
+            {
+                self.pending_awareness.push_back(tombstone);
+            }
             return;
         }
         let frame_permit = match budget.frame_sem.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                self.evict_connection(conn_id, 1009, "outbound queue full")
-                    .await;
+                if let Some(tombstone) = self
+                    .evict_connection(conn_id, 1009, "outbound queue full")
+                    .await
+                {
+                    self.pending_awareness.push_back(tombstone);
+                }
                 return;
             }
         };
@@ -1618,11 +1755,16 @@ impl RoomActor {
         };
         let frame = OutboundFrame {
             bytes,
+            kind,
             permit: Some(delivery_permit),
         };
         if events.try_send(RoomClientEvent::Outbound(frame)).is_err() {
-            self.evict_connection(conn_id, 1009, "outbound queue full")
-                .await;
+            if let Some(tombstone) = self
+                .evict_connection(conn_id, 1009, "outbound queue full")
+                .await
+            {
+                self.pending_awareness.push_back(tombstone);
+            }
         }
     }
 
@@ -1637,12 +1779,9 @@ impl RoomActor {
             room: None,
             message,
         }) {
-            if let Some(conn) = self.connections.get(&conn_id) {
-                let session = conn.session.clone();
-                let read_only = conn.read_only;
-                self.deliver_outbound(conn_id, &session, read_only, bytes)
-                    .await;
-            }
+            self.deliver_outbound(conn_id, bytes, OutboundKind::Data)
+                .await;
+            self.flush_pending_awareness().await;
         }
     }
 

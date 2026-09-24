@@ -16,10 +16,11 @@ use crate::collab::hub::CollabHub;
 use crate::collab::origin::{validate_collab_origin, CollabOriginError};
 use crate::collab::room::{
     parse_client_id, AuthenticatedConnection, CollabSession, ConnectionCancel, JoinError,
-    OutboundFrame, RoomClientEvent, RoomJoin,
+    OutboundFrame, OutboundKind, RoomClientEvent, RoomJoin,
 };
 use crate::collab::wire::{AuthMessage, CollabKind, CollabRoomName, DocumentMessage, WireFrame};
 use crate::db::collab::resolve_collab_admission;
+use crate::db::collab_delivery::{authorize_outbound_delivery, OutboundDeliveryAuth};
 use crate::db::identity::find_live_session;
 use crate::error::SESSION_COOKIE;
 use crate::http::state::AppState;
@@ -115,7 +116,7 @@ async fn collab_upgrade(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let session = CollabSession::from(live.unwrap());
-    let socket_permit = hub.try_acquire_socket();
+    let socket_permit = hub.try_acquire_socket(session.session_id);
     if socket_permit.is_none() {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -168,6 +169,10 @@ impl PreAuthOutboundAllowance {
             false
         }
     }
+
+    fn exhausted(&self) -> bool {
+        self.remaining == 0
+    }
 }
 
 async fn send_ws_message(
@@ -189,6 +194,25 @@ async fn send_ws_message(
         tokio::time::timeout(send_deadline, sender.send(message)).await,
         Ok(Ok(()))
     )
+}
+
+async fn send_close(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    code: u16,
+    reason: &str,
+    send_deadline: Duration,
+    max_frame_bytes: usize,
+) {
+    let _ = send_ws_message(
+        sender,
+        Message::Close(Some(axum::extract::ws::CloseFrame {
+            code,
+            reason: reason.into(),
+        })),
+        send_deadline,
+        max_frame_bytes,
+    )
+    .await;
 }
 
 async fn handle_socket(
@@ -223,13 +247,76 @@ async fn handle_socket(
             room_event = events_rx.recv() => {
                 match room_event {
                     Some(RoomClientEvent::Outbound(outbound)) => {
-                        if let Some((key, _, authenticated, read_only)) = &joined_room {
-                            if *authenticated
-                                && !hub
-                                    .session_still_authorized(key.0, key.1, &live, *read_only)
-                                    .await
-                            {
-                                break;
+                        if outbound.kind == OutboundKind::Data {
+                            if let Some((key, _, authenticated, read_only)) = &joined_room {
+                                if *authenticated {
+                                    let auth = tokio::select! {
+                                        biased;
+                                        _ = cancel_rx.changed() => {
+                                            let cancel = cancel_rx.borrow_and_update().clone();
+                                            if let Some(cancel) = cancel {
+                                                send_close(
+                                                    &mut sender,
+                                                    cancel.code,
+                                                    &cancel.reason,
+                                                    send_deadline,
+                                                    max_frame_bytes,
+                                                )
+                                                .await;
+                                            }
+                                            break;
+                                        }
+                                        auth = tokio::time::timeout(
+                                            send_deadline,
+                                            authorize_outbound_delivery(
+                                                hub.pool(),
+                                                key.0,
+                                                live.user_id,
+                                                live.session_id,
+                                                key.1,
+                                            ),
+                                        ) => auth,
+                                    };
+                                    match auth {
+                                        Err(_) | Ok(OutboundDeliveryAuth::DbError) => {
+                                            send_close(
+                                                &mut sender,
+                                                1011,
+                                                "authorization unavailable",
+                                                send_deadline,
+                                                max_frame_bytes,
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                        Ok(OutboundDeliveryAuth::Denied) => {
+                                            send_close(
+                                                &mut sender,
+                                                1008,
+                                                "permission revoked",
+                                                send_deadline,
+                                                max_frame_bytes,
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                        Ok(OutboundDeliveryAuth::Allowed {
+                                            read_only: admission_ro,
+                                        }) => {
+                                            if !(*read_only || !admission_ro) {
+                                                send_close(
+                                                    &mut sender,
+                                                    1008,
+                                                    "permission revoked",
+                                                    send_deadline,
+                                                    max_frame_bytes,
+                                                )
+                                                .await;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         if !send_ws_message(
@@ -299,7 +386,7 @@ async fn handle_socket(
                             if *authenticated {
                                 hub.send_frame(*key, conn_id, bytes.to_vec()).await;
                             } else {
-                                let (authenticated, joined_read_only) = try_authenticate(
+                                match try_authenticate(
                                     &hub,
                                     conn_id,
                                     &live,
@@ -308,15 +395,19 @@ async fn handle_socket(
                                     ConnectionEvents { events: &events_tx, cancel: &cancel_tx },
                                     &mut pre_auth_outbound,
                                 )
-                                .await;
-                                if authenticated {
-                                    joined_room =
-                                        Some((*key, routing_key.clone(), true, joined_read_only));
-                                    collab_authenticated = true;
+                                .await
+                                {
+                                    AuthAttempt::Joined { read_only } => {
+                                        joined_room =
+                                            Some((*key, routing_key.clone(), true, read_only));
+                                        collab_authenticated = true;
+                                    }
+                                    AuthAttempt::Denied => {}
+                                    AuthAttempt::Closed => break,
                                 }
                             }
-                        } else if let Some((key, routing, auth_ok, read_only)) =
-                            first_room_from_frame(
+                        } else {
+                            match first_room_from_frame(
                                 &bytes,
                                 &live,
                                 conn_id,
@@ -326,10 +417,20 @@ async fn handle_socket(
                                 &mut pre_auth_outbound,
                             )
                             .await
-                        {
-                            joined_room = Some((key, routing, auth_ok, read_only));
-                            if auth_ok {
-                                collab_authenticated = true;
+                            {
+                                FirstRoom::Joined {
+                                    key,
+                                    routing,
+                                    read_only,
+                                } => {
+                                    joined_room = Some((key, routing, true, read_only));
+                                    collab_authenticated = true;
+                                }
+                                FirstRoom::Pending { key, routing } => {
+                                    joined_room = Some((key, routing, false, false));
+                                }
+                                FirstRoom::None => {}
+                                FirstRoom::Closed => break,
                             }
                         }
                     }
@@ -367,38 +468,83 @@ async fn first_room_from_frame(
     events: &mpsc::Sender<RoomClientEvent>,
     cancel: &watch::Sender<Option<ConnectionCancel>>,
     pre_auth_outbound: &mut PreAuthOutboundAllowance,
-) -> Option<(crate::collab::room::RoomKey, String, bool, bool)> {
-    let frame = crate::collab::wire::decode(bytes).ok()?;
-    let WireFrame::Document {
+) -> FirstRoom {
+    let frame = crate::collab::wire::decode(bytes).ok();
+    let Some(WireFrame::Document {
         routing_key,
         room,
         message,
-    } = frame
+    }) = frame
     else {
-        return None;
+        return FirstRoom::None;
     };
-    let room_name = room?;
+    let Some(room_name) = room else {
+        return FirstRoom::None;
+    };
     if room_name.kind != CollabKind::Document {
-        send_auth_denied(pre_auth_outbound, events, &routing_key, "unsupported kind");
-        return None;
+        if !send_auth_denied(pre_auth_outbound, events, &routing_key, "unsupported kind") {
+            signal_pre_auth_close(cancel);
+            return FirstRoom::Closed;
+        }
+        return FirstRoom::None;
     }
     let key = (room_name.workspace_id, room_name.resource_id);
-    let (auth_ok, read_only) =
-        if matches!(message, DocumentMessage::Auth(AuthMessage::Token { .. })) {
-            try_authenticate(
-                hub,
-                conn_id,
-                live,
-                &routing_key,
-                bytes,
-                ConnectionEvents { events, cancel },
-                pre_auth_outbound,
-            )
-            .await
-        } else {
-            (false, false)
-        };
-    Some((key, routing_key, auth_ok, read_only))
+    if matches!(message, DocumentMessage::Auth(AuthMessage::Token { .. })) {
+        match try_authenticate(
+            hub,
+            conn_id,
+            live,
+            &routing_key,
+            bytes,
+            ConnectionEvents { events, cancel },
+            pre_auth_outbound,
+        )
+        .await
+        {
+            AuthAttempt::Joined { read_only } => FirstRoom::Joined {
+                key,
+                routing: routing_key,
+                read_only,
+            },
+            AuthAttempt::Denied => FirstRoom::Pending {
+                key,
+                routing: routing_key,
+            },
+            AuthAttempt::Closed => FirstRoom::Closed,
+        }
+    } else {
+        FirstRoom::Pending {
+            key,
+            routing: routing_key,
+        }
+    }
+}
+
+enum FirstRoom {
+    Joined {
+        key: crate::collab::room::RoomKey,
+        routing: String,
+        read_only: bool,
+    },
+    Pending {
+        key: crate::collab::room::RoomKey,
+        routing: String,
+    },
+    None,
+    Closed,
+}
+
+enum AuthAttempt {
+    Joined { read_only: bool },
+    Denied,
+    Closed,
+}
+
+fn signal_pre_auth_close(cancel: &watch::Sender<Option<ConnectionCancel>>) {
+    let _ = cancel.send_replace(Some(ConnectionCancel {
+        code: 1013,
+        reason: "pre-auth outbound exhausted".into(),
+    }));
 }
 
 struct ConnectionEvents<'a> {
@@ -414,7 +560,7 @@ async fn try_authenticate(
     bytes: &[u8],
     channels: ConnectionEvents<'_>,
     pre_auth_outbound: &mut PreAuthOutboundAllowance,
-) -> (bool, bool) {
+) -> AuthAttempt {
     let ConnectionEvents { events, cancel } = channels;
     let frame = crate::collab::wire::decode(bytes).ok();
     let token = match frame {
@@ -422,19 +568,25 @@ async fn try_authenticate(
             message: DocumentMessage::Auth(AuthMessage::Token { token, .. }),
             ..
         }) => token,
-        _ => return (false, false),
+        _ => return AuthAttempt::Denied,
     };
     let client_id = parse_client_id(&token);
     if client_id.is_none() {
-        send_auth_denied(pre_auth_outbound, events, routing_key, "unauthorized");
-        return (false, false);
+        if !send_auth_denied(pre_auth_outbound, events, routing_key, "unauthorized") {
+            signal_pre_auth_close(cancel);
+            return AuthAttempt::Closed;
+        }
+        return AuthAttempt::Denied;
     }
     let room = CollabRoomName::parse(routing_key.split('\0').next().unwrap_or(routing_key));
     let room = match room {
         Some(r) if r.kind == CollabKind::Document => r,
         _ => {
-            send_auth_denied(pre_auth_outbound, events, routing_key, "not found");
-            return (false, false);
+            if !send_auth_denied(pre_auth_outbound, events, routing_key, "not found") {
+                signal_pre_auth_close(cancel);
+                return AuthAttempt::Closed;
+            }
+            return AuthAttempt::Denied;
         }
     };
     let admission = match resolve_collab_admission(
@@ -448,8 +600,11 @@ async fn try_authenticate(
     {
         Ok(Ok(admission)) => admission,
         _ => {
-            send_auth_denied(pre_auth_outbound, events, routing_key, "not found");
-            return (false, false);
+            if !send_auth_denied(pre_auth_outbound, events, routing_key, "not found") {
+                signal_pre_auth_close(cancel);
+                return AuthAttempt::Closed;
+            }
+            return AuthAttempt::Denied;
         }
     };
     let read_only = admission.read_only;
@@ -470,20 +625,35 @@ async fn try_authenticate(
     {
         Ok(()) => {
             let scope = if read_only { "readonly" } else { "read-write" };
-            send_auth_ok(pre_auth_outbound, events, routing_key, scope);
-            (true, read_only)
+            if send_auth_ok(pre_auth_outbound, events, routing_key, scope) {
+                AuthAttempt::Joined { read_only }
+            } else {
+                hub.leave_room((room.workspace_id, room.resource_id), conn_id)
+                    .await;
+                signal_pre_auth_close(cancel);
+                AuthAttempt::Closed
+            }
         }
         Err(JoinError::AdmissionDenied) => {
-            send_auth_denied(pre_auth_outbound, events, routing_key, "not found");
-            (false, false)
+            if !send_auth_denied(pre_auth_outbound, events, routing_key, "not found") {
+                signal_pre_auth_close(cancel);
+                return AuthAttempt::Closed;
+            }
+            AuthAttempt::Denied
         }
         Err(JoinError::UnsupportedKind) => {
-            send_auth_denied(pre_auth_outbound, events, routing_key, "unsupported kind");
-            (false, false)
+            if !send_auth_denied(pre_auth_outbound, events, routing_key, "unsupported kind") {
+                signal_pre_auth_close(cancel);
+                return AuthAttempt::Closed;
+            }
+            AuthAttempt::Denied
         }
         Err(_) => {
-            send_auth_denied(pre_auth_outbound, events, routing_key, "unauthorized");
-            (false, false)
+            if !send_auth_denied(pre_auth_outbound, events, routing_key, "unauthorized") {
+                signal_pre_auth_close(cancel);
+                return AuthAttempt::Closed;
+            }
+            AuthAttempt::Denied
         }
     }
 }
@@ -493,7 +663,7 @@ fn send_auth_ok(
     events: &mpsc::Sender<RoomClientEvent>,
     routing_key: &str,
     scope: &str,
-) {
+) -> bool {
     let frame = crate::collab::wire::encode(&WireFrame::Document {
         routing_key: routing_key.to_string(),
         room: None,
@@ -502,7 +672,7 @@ fn send_auth_ok(
         }),
     })
     .unwrap_or_default();
-    let _ = pre_auth.try_send(events, frame);
+    pre_auth.try_send(events, frame)
 }
 
 fn send_auth_denied(
@@ -510,7 +680,10 @@ fn send_auth_denied(
     events: &mpsc::Sender<RoomClientEvent>,
     routing_key: &str,
     reason: &str,
-) {
+) -> bool {
+    if pre_auth.exhausted() {
+        return false;
+    }
     let frame = crate::collab::wire::encode(&WireFrame::Document {
         routing_key: routing_key.to_string(),
         room: None,
@@ -519,7 +692,7 @@ fn send_auth_denied(
         }),
     })
     .unwrap_or_default();
-    let _ = pre_auth.try_send(events, frame);
+    pre_auth.try_send(events, frame)
 }
 
 fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

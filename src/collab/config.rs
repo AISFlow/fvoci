@@ -11,6 +11,7 @@ pub struct CollabConfig {
     pub limits: Limits,
     pub max_rooms: usize,
     pub max_collab_sockets: usize,
+    pub max_collab_sockets_per_session: usize,
     pub max_connections_per_room: usize,
     pub max_queued_room_ops: usize,
     pub max_pending_bytes_per_connection: usize,
@@ -51,6 +52,10 @@ impl CollabConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(max_rooms * max_connections_per_room);
+        let max_collab_sockets_per_session = env::var("FVOCI_COLLAB_MAX_SOCKETS_PER_SESSION")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
         let max_queued_room_ops = env::var("FVOCI_COLLAB_MAX_QUEUE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -113,6 +118,7 @@ impl CollabConfig {
             limits: Limits::default(),
             max_rooms: max_rooms.clamp(1, 4),
             max_collab_sockets: max_collab_sockets.max(1),
+            max_collab_sockets_per_session: max_collab_sockets_per_session.clamp(1, 8),
             max_connections_per_room: max_connections_per_room.max(1),
             max_queued_room_ops: max_queued_room_ops.max(16),
             max_pending_bytes_per_connection: max_pending_bytes_per_connection.max(64 * 1024),
