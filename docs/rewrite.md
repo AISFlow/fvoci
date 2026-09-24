@@ -1655,3 +1655,20 @@ frontend/generated TS/실제 브라우저 attachment flow만 소유한다. 해�
 수정을 소유한다. 로컬 heavy slot은 Grok, Composer는 E2E 전에 인계를 요청한다.
 발견한 실제 차단: production storage 기본 경로가 매기동 randomtmp였다.
 원본처럼 지속 경로를 요구하고 일회용 E2E만 run별 저장경로를 쓰도록 수정 중이다.
+
+2026-09-24 09:12 UTC 재개 checkpoint: main59b6ecd/PR9의11개 post-merge CI는
+성공했고 새 첨부 제품 통합a545247은 미수락/미push다. Grok task1e5d099d23a2/
+ctx916e9691644b는 backend/006/DTO 및 필요한 Rust fixture만 작성·검사 중이고
+로컬 heavy slot을 소유한다. Composer0990861은 frontend 부분 제출로 보존했으나
+첨부 E2E는 실패했고 수락하지 않았다. 설치 상태 URL의 비동기 판정·빈 editor
+caret fixture·완료 응답 유실 처리가 남았다. final-only 종료한 ctxaa4232faf80d를
+명시 stop/release 후 같은 task840322adb88d를 ctx3987177dca69(실제 Composer2.5,
+effort 미지정)로 재개했다. worktree rust-wiki-attachment-react에 a545247을 정상
+merge했고 기존 커밋/아티팩트를 보존했다. 새 backend/React 검증을 완료한 뒤
+고정 통합 SHA의 Opus5.5 medium 검토와 원격 CI를 실행한다. 아직 열린 PR 없음.
+다음 즉시 확인: /home/kinesis/.local/bin/orca-ide orchestration check --terminal
+term_7fa6590d-5c4a-4db2-92af-6d1b1e1616b5 --json. 활성 worker를 중복 배정하지 않는다.
+추출 pending 상태의 native job은 미구현이며 후속 계약 초안은
+/tmp/fvoci-attachment-extraction-next-task.txt(미dispatch)에 있다. 기존 source/storage
+인가가 수락된 뒤 연결한다. 종료한 옛 dispatch4개는 실제 exited+release 지시에
+따라 release했으며 user_takeover/불명 컨테이너·프로세스는 건드리지 않았다.
