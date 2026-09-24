@@ -4,6 +4,7 @@ set -euo pipefail
 : "${ROOT:?ROOT is required}"
 : "${SERVER_LOG:?SERVER_LOG is required}"
 : "${PEPPER:?PEPPER is required}"
+: "${RUN_DIR:?RUN_DIR is required}"
 
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 SERVER_BIN="$CARGO_TARGET_DIR/debug/fvoci-server"
@@ -56,6 +57,10 @@ export PASSWORD_PEPPER_ACTIVE_KEY_ID=test
 export FVOCI_BIND="127.0.0.1:0"
 export FVOCI_PUBLIC_ORIGIN="http://127.0.0.1:0"
 export FVOCI_STATIC_DIR="${FVOCI_STATIC_DIR:?run-web-e2e.sh must provide isolated static assets}"
+# A run-owned directory is stable across server restarts and removed by the
+# outer runner only after its owned servers have stopped.
+export FVOCI_STORAGE_DIR="$RUN_DIR/storage"
+mkdir -p "$FVOCI_STORAGE_DIR"
 export FVOCI_E2E_ADMIN_DATABASE_URL="$DATABASE_URL"
 export FVOCI_E2E_SERVER_BIN="$SERVER_BIN"
 export FVOCI_E2E_RESULT_DIR="$RUN_DIR"
