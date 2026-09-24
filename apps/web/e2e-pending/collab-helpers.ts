@@ -115,9 +115,18 @@ export type EditorShape = {
   table: { id: string; rows: string[][] } | null;
 };
 
-export async function ensureInstanceSetup(page: Page): Promise<void> {
+export async function ensureCollabFixture(page: Page): Promise<void> {
   await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  try {
+    await page.waitForURL(/\/setup$/, { timeout: 5_000 });
+    await fillInstanceSetup(page);
+    installCollabMember();
+  } catch {
+    // Instance already provisioned for this owned-server database.
+  }
+}
+
+async function fillInstanceSetup(page: Page): Promise<void> {
   await page.getByLabel("성").fill(admin.familyName);
   await page.getByLabel("이름", { exact: true }).fill(admin.givenName);
   await page.getByLabel("이메일").fill(admin.email);
@@ -126,6 +135,12 @@ export async function ensureInstanceSetup(page: Page): Promise<void> {
   await page.getByLabel("주소(영문)").fill(admin.workspaceSlug);
   await page.getByRole("button", { name: "시작하기" }).click();
   await expect(page).toHaveURL(/\/$/);
+}
+
+export async function ensureInstanceSetup(page: Page): Promise<void> {
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await fillInstanceSetup(page);
 }
 
 export async function login(page: Page, email: string, password: string): Promise<void> {
@@ -546,6 +561,29 @@ export async function indexedDbNames(page: Page): Promise<string[]> {
     const dbs = await indexedDB.databases();
     return dbs.map((db) => db.name ?? "");
   });
+}
+
+export async function insertSlashAttachment(page: Page, filePath: string): Promise<void> {
+  const editor = editorLocator(page);
+  await editor.click();
+  await page.keyboard.type("/첨부");
+  await page.keyboard.press("Enter");
+  const [fileChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.getByRole("button", { name: "파일 선택" }).click(),
+  ]);
+  await fileChooser.setFiles(filePath);
+  await expect(page.locator('.afn-attachment[data-state="stored"]')).toBeVisible({
+    timeout: 30_000,
+  });
+}
+
+export async function storedAttachmentDownloadBytes(page: Page): Promise<Buffer> {
+  const href = await page.locator('.afn-attachment[data-state="stored"]').getAttribute("href");
+  expect(href).toBeTruthy();
+  const response = await page.request.get(href!);
+  expect(response.ok()).toBe(true);
+  return response.body();
 }
 
 export { UUID_RE };
