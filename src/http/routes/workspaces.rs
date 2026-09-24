@@ -10,8 +10,8 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateWorkspaceBody, MemberResponse, MemberRoleBody, OkResponse, PatchWorkspaceBody,
-    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+    CreateWorkspaceBody, MemberResponse, MemberRoleBody, MembersResponse, OkResponse,
+    PatchWorkspaceBody, WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::db::workspace::{WorkspaceDbError, WorkspaceRole};
@@ -29,6 +29,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}",
             get(get_workspace).patch(patch_workspace),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/members",
+            get(list_members),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/members/{user_id}",
@@ -83,6 +87,36 @@ async fn get_workspace(
     .map_err(internal)?;
     match result {
         Ok(meta) => Ok(Json(meta_response(meta))),
+        Err(err) => Err(map_workspace_error(err, false)),
+    }
+}
+
+async fn list_members(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<MembersResponse>, AppError> {
+    reject_bearer(&headers)?;
+    let (user, session_id) = require_session(&state, &jar).await?;
+    let user_id = parse_user_id(&user.user_id)?;
+    let result =
+        crate::db::workspace::list_members(&state.auth.db.pool, workspace_id, user_id, session_id)
+            .await
+            .map_err(internal)?;
+    match result {
+        Ok(members) => Ok(Json(MembersResponse {
+            items: members
+                .into_iter()
+                .map(|member| MemberResponse {
+                    user_id: member.user_id.to_string(),
+                    email: member.email,
+                    given_name: member.given_name,
+                    family_name: member.family_name,
+                    role: member.role.as_str().to_string(),
+                })
+                .collect(),
+        })),
         Err(err) => Err(map_workspace_error(err, false)),
     }
 }

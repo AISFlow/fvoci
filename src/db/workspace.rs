@@ -103,17 +103,17 @@ async fn user_is_active(
     Ok(row.map(|(active,)| active).unwrap_or(false))
 }
 
-struct WorkspaceChangeRecord<'a> {
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    verb: &'a str,
-    target_type: &'a str,
-    target_id: Uuid,
-    payload: serde_json::Value,
-    client_ip: Option<&'a str>,
+pub(crate) struct WorkspaceChangeRecord<'a> {
+    pub workspace_id: Uuid,
+    pub actor_user_id: Uuid,
+    pub verb: &'a str,
+    pub target_type: &'a str,
+    pub target_id: Uuid,
+    pub payload: serde_json::Value,
+    pub client_ip: Option<&'a str>,
 }
 
-async fn record_workspace_event_and_audit(
+pub(crate) async fn record_workspace_event_and_audit(
     tx: &mut Transaction<'_, Postgres>,
     change: WorkspaceChangeRecord<'_>,
 ) -> Result<(), sqlx::Error> {
@@ -230,6 +230,57 @@ pub async fn list_workspaces_for_user(
         }
     }
     Ok(items)
+}
+
+pub async fn list_members(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<MemberRow>, WorkspaceDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    if !role
+        .map(|r| r.at_least(WorkspaceRole::Member))
+        .unwrap_or(false)
+    {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    if workspace_kind_read(&mut tx, workspace_id).await?.is_none() {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
+    }
+    let rows = sqlx::query_as::<_, (Uuid, String, String, Option<String>, String)>(
+        r#"
+        SELECT u.id, u.email, u.given_name, u.family_name, m.role
+        FROM fvoci.memberships m
+        INNER JOIN fvoci.users u ON u.id = m.user_id
+        WHERE m.workspace_id = $1 AND u.deleted_at IS NULL
+        ORDER BY m.created_at ASC, u.id ASC
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(rows
+        .into_iter()
+        .filter_map(|(user_id, email, given_name, family_name, role)| {
+            WorkspaceRole::parse(&role).map(|role| MemberRow {
+                user_id,
+                email,
+                given_name,
+                family_name,
+                role,
+            })
+        })
+        .collect()))
 }
 
 pub async fn get_workspace_meta(
@@ -600,10 +651,36 @@ pub async fn set_member_role(
     .bind(next_role.as_str())
     .execute(&mut *tx)
     .await?;
+    let revoke_roles = if next_role.at_least(WorkspaceRole::Admin) {
+        [
+            WorkspaceRole::Owner,
+            WorkspaceRole::Admin,
+            WorkspaceRole::Member,
+            WorkspaceRole::Guest,
+        ]
+        .into_iter()
+        .filter(|role| !next_role.at_least(*role))
+        .collect::<Vec<_>>()
+    } else {
+        vec![
+            WorkspaceRole::Owner,
+            WorkspaceRole::Admin,
+            WorkspaceRole::Member,
+            WorkspaceRole::Guest,
+        ]
+    };
+    let revoked_invitations = crate::db::invitations::remove_pending_by_inviter(
+        &mut tx,
+        workspace_id,
+        target_user_id,
+        &revoke_roles,
+    )
+    .await?;
     let payload = json!({
         "userId": target_user_id.to_string(),
         "fromRole": target_role.as_str(),
         "role": next_role.as_str(),
+        "revokedInvitations": revoked_invitations,
     });
     record_workspace_event_and_audit(
         &mut tx,
@@ -685,6 +762,18 @@ pub async fn remove_member(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::LastProjectLead));
     }
+    let revoked_invitations = crate::db::invitations::remove_pending_by_inviter(
+        &mut tx,
+        workspace_id,
+        target_user_id,
+        &[
+            WorkspaceRole::Owner,
+            WorkspaceRole::Admin,
+            WorkspaceRole::Member,
+            WorkspaceRole::Guest,
+        ],
+    )
+    .await?;
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
         .bind(workspace_id)
         .bind(target_user_id)
@@ -693,6 +782,7 @@ pub async fn remove_member(
     let payload = json!({
         "userId": target_user_id.to_string(),
         "role": target_role.as_str(),
+        "revokedInvitations": revoked_invitations,
     });
     record_workspace_event_and_audit(
         &mut tx,

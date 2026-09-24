@@ -40,6 +40,26 @@ pub async fn clear_self_user(tx: &mut Transaction<'_, Postgres>) -> Result<(), s
     Ok(())
 }
 
+pub async fn set_invitation_token_hash(
+    tx: &mut Transaction<'_, Postgres>,
+    token_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('app.invitation_token_hash', $1, true)")
+        .bind(token_hash)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn clear_invitation_token_hash(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('app.invitation_token_hash', '', true)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 pub fn lock_key_from_uuid(id: Uuid) -> i32 {
     let hex = id.simple().to_string();
     let tail = hex.chars().rev().take(8).collect::<Vec<_>>();

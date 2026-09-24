@@ -23,6 +23,14 @@ pub enum ProblemCode {
     WorkspaceLastOwnerRequired,
     WorkspaceMemberSelfChangeForbidden,
     CannotManageRoleAboveOwn,
+    CannotInviteARoleAboveYourOwn,
+    InvitationNotFoundOrExpired,
+    Expired,
+    AlreadyAccepted,
+    CannotAcceptInvitation,
+    ConsentRequired,
+    LimitSeats,
+    LimitGuests,
     RateLimitExceeded,
     UploadIsNotInTheRequiredState,
     OnlyTheUploaderMayContinueThisUpload,
@@ -52,6 +60,14 @@ impl ProblemCode {
             Self::WorkspaceLastOwnerRequired => "workspace_last_owner_required",
             Self::WorkspaceMemberSelfChangeForbidden => "workspace_member_self_change_forbidden",
             Self::CannotManageRoleAboveOwn => "cannot_manage_a_role_above_your_own",
+            Self::CannotInviteARoleAboveYourOwn => "cannot_invite_a_role_above_your_own",
+            Self::InvitationNotFoundOrExpired => "invitation_not_found_or_expired",
+            Self::Expired => "expired",
+            Self::AlreadyAccepted => "already_accepted",
+            Self::CannotAcceptInvitation => "cannot_accept_invitation",
+            Self::ConsentRequired => "consent_required",
+            Self::LimitSeats => "limit.seats",
+            Self::LimitGuests => "limit.guests",
             Self::RateLimitExceeded => "rate_limit_exceeded",
             Self::UploadIsNotInTheRequiredState => "upload_is_not_in_the_required_state",
             Self::OnlyTheUploaderMayContinueThisUpload => {
@@ -87,6 +103,14 @@ impl ProblemCode {
                 "workspace members cannot change or remove themselves here"
             }
             Self::CannotManageRoleAboveOwn => "cannot manage a workspace role above your own",
+            Self::CannotInviteARoleAboveYourOwn => "cannot invite a role above your own",
+            Self::InvitationNotFoundOrExpired => "invitation not found or expired",
+            Self::Expired => "expired",
+            Self::AlreadyAccepted => "already_accepted",
+            Self::CannotAcceptInvitation => "cannot accept invitation",
+            Self::ConsentRequired => "consent_required",
+            Self::LimitSeats => "seat limit reached",
+            Self::LimitGuests => "guest limit reached",
             Self::RateLimitExceeded => "rate limit exceeded",
             Self::UploadIsNotInTheRequiredState => "upload is not in the required state",
             Self::OnlyTheUploaderMayContinueThisUpload => {
@@ -107,15 +131,23 @@ impl ProblemCode {
 
     pub fn status(self) -> StatusCode {
         match self {
-            Self::AuthenticationRequired | Self::InvalidEmailOrPassword => StatusCode::UNAUTHORIZED,
+            Self::AuthenticationRequired
+            | Self::InvalidEmailOrPassword
+            | Self::CannotAcceptInvitation => StatusCode::UNAUTHORIZED,
             Self::InvalidInput | Self::PasswordInvalid => StatusCode::BAD_REQUEST,
-            Self::InstanceSetupAlreadyCompleted | Self::NotFound => StatusCode::NOT_FOUND,
+            Self::InstanceSetupAlreadyCompleted
+            | Self::NotFound
+            | Self::InvitationNotFoundOrExpired => StatusCode::NOT_FOUND,
+            Self::Expired | Self::AlreadyAccepted => StatusCode::GONE,
+            Self::ConsentRequired => StatusCode::PRECONDITION_REQUIRED,
+            Self::LimitSeats | Self::LimitGuests => StatusCode::PAYMENT_REQUIRED,
             Self::SlugTaken
             | Self::PersonalWorkspaceImmutable
             | Self::WorkspaceLastOwnerRequired
             | Self::WorkspaceMemberSelfChangeForbidden => StatusCode::CONFLICT,
             Self::InsufficientPermissions
             | Self::CannotManageRoleAboveOwn
+            | Self::CannotInviteARoleAboveYourOwn
             | Self::OnlyTheUploaderMayContinueThisUpload
             | Self::AttachmentFailedVirusScan => StatusCode::FORBIDDEN,
             Self::OriginMismatch => StatusCode::FORBIDDEN,

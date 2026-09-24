@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate } from "react-router-dom";
 import { useState } from "react";
 import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity";
+import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
@@ -82,6 +83,13 @@ export function WorkspaceSettingsPage() {
             await rename.mutateAsync(name);
           }}
         />
+        {roleAtLeast(workspace.role, "member") ? (
+          <WorkspaceMembersSection
+            workspaceId={workspace.id}
+            currentUserId={me.data?.userId ?? null}
+            currentUserRole={workspace.role}
+          />
+        ) : null}
       </div>
     </WorkspaceShell>
   );
