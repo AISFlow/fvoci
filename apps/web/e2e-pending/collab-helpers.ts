@@ -7,6 +7,10 @@ import {
   type Page,
 } from "@playwright/test";
 import { createE2eUser } from "../e2e/helpers";
+import {
+  attachmentNodesFromDocument,
+  type AttachmentNodeShape,
+} from "./collab-attachment-oracle.ts";
 import { startOwnedServer, type OwnedServer } from "./collab-restart";
 import {
   COLLAB_PERSIST_DONE,
@@ -115,14 +119,14 @@ export type EditorShape = {
   table: { id: string; rows: string[][] } | null;
 };
 
+export type { AttachmentNodeShape };
+
+export function attachmentNodes(shape: EditorShape): AttachmentNodeShape[] {
+  return attachmentNodesFromDocument(shape.document);
+}
+
 export function attachmentNodeCount(shape: EditorShape): number {
-  let count = 0;
-  const visit = (node: EditorNode): void => {
-    if (node.type === "attachment") count += 1;
-    for (const child of node.content ?? []) visit(child);
-  };
-  visit(shape.document);
-  return count;
+  return attachmentNodes(shape).length;
 }
 
 export async function ensureCollabFixture(page: Page): Promise<void> {

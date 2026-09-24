@@ -23,7 +23,7 @@ import {
   expectTokens,
   expectTokensAbsent,
   indexedDbNames,
-  attachmentNodeCount,
+  attachmentNodes,
   insertSlashAttachment,
   insertSlashTable,
   installCollabMember,
@@ -44,6 +44,7 @@ import {
   test,
   expect,
   uniqueBlockIds,
+  UUID_RE,
   waitConnected,
   workspaceId,
 } from "./collab-helpers";
@@ -591,13 +592,16 @@ test("slash attachment uploads, shows metadata, downloads bytes, and survives pe
   expect(uploadHits.some((url) => url.includes("/uploads"))).toBe(true);
   expect(uploadHits.some((url) => url.includes("/complete"))).toBe(true);
   const before = await editorShape(page);
-  const attachmentCount = attachmentNodeCount(before);
-  expect(attachmentCount).toBeGreaterThan(0);
+  const beforeAttachments = attachmentNodes(before);
+  expect(beforeAttachments.length).toBeGreaterThan(0);
+  expect(beforeAttachments[0]?.name).toBe("collab-fixture.bin");
+  expect(beforeAttachments[0]?.attachmentId).toMatch(UUID_RE);
+  expect(beforeAttachments[0]?.image).toBe(false);
   await persistBody(page);
   await page.reload();
   await waitConnected(page);
   const after = await editorShape(page);
-  expect(attachmentNodeCount(after)).toBe(attachmentCount);
+  expect(attachmentNodes(after)).toEqual(beforeAttachments);
   await expect(page.locator('.afn-attachment[data-state="stored"]')).toBeVisible();
   const reloaded = await storedAttachmentDownloadBytes(page);
   expect(reloaded.equals(fixtureBytes)).toBe(true);
