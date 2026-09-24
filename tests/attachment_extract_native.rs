@@ -8,8 +8,8 @@ use std::time::Duration;
 use extract_harness::{
     app_pool, create_document, download_original, extract_job_driver_bin, extract_job_settings,
     idle_extract_job_settings, require_extractor_bin, run_extract_job_driver, server_bin,
-    setup_session, spawn_extract_for_storage, spawn_server_process_guarded, TempStorageGuard,
-    upload_bytes, wait_for_extract, wait_for_server_exit, wait_for_server_ready, TestDb,
+    setup_session, spawn_extract_for_storage, spawn_server_process_guarded, upload_bytes,
+    wait_for_extract, wait_for_server_exit, wait_for_server_ready, TempStorageGuard, TestDb,
 };
 use uuid::Uuid;
 
@@ -30,8 +30,7 @@ async fn server_process_exits_on_invalid_configured_extractor_bin() {
     let (mut guard, stderr_lines) =
         spawn_server_process_guarded(&harness, storage.path(), Some(&invalid));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let (status, stderr) =
-        wait_for_server_exit(guard.child_mut(), &stderr_lines, deadline);
+    let (status, stderr) = wait_for_server_exit(guard.child_mut(), &stderr_lines, deadline);
     assert!(
         !status.success(),
         "server must exit nonzero with invalid FVOCI_EXTRACTOR_BIN"
@@ -58,7 +57,10 @@ async fn server_process_starts_when_extractor_env_absent() {
         (200..300).contains(&status),
         "setup status must succeed, got {status}"
     );
-    assert!(body.contains("branding"), "setup body must include branding");
+    assert!(
+        body.contains("branding"),
+        "setup body must include branding"
+    );
     harness.cleanup().await;
 }
 
@@ -271,7 +273,10 @@ async fn fresh_process_recovers_expired_lease_and_completes_extract() {
     .fetch_one(&admin)
     .await
     .unwrap();
-    assert!(leased.0, "claim-crash simulation must leave an active lease");
+    assert!(
+        leased.0,
+        "claim-crash simulation must leave an active lease"
+    );
     sqlx::query(
         "UPDATE fvoci.attachments SET extract_lease_expires_at = now() - interval '1 second' WHERE workspace_id = $1 AND id = $2",
     )

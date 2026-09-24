@@ -4,14 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${CARGO_TARGET_DIR:-$ROOT/target/extract-job}"
 
+# Resolve relative build output before changing directories.
+TARGET="$(realpath -m "$TARGET")"
 cd "$ROOT/crates/document-extract"
-if [[ ! -d .vendor-src/rhwp ]]; then
-  bash fetch-rhwp.sh
-fi
-# Feature changes do not always invalidate the cached helper artifact; remove it so
-# test-hang is definitely compiled into the subprocess used by lifecycle tests.
-rm -f "$TARGET/debug/document-extract"
-cargo build --locked --bin document-extract --features test-hang --target-dir "$TARGET"
+bash fetch-rhwp.sh
+cargo fetch --locked
+cargo build --locked --offline --bin document-extract --features test-hang --target-dir "$TARGET"
+# Prepare the server dependencies explicitly; the test entrypoint is offline.
+cd "$ROOT"
+cargo fetch --locked
 
 export FVOCI_EXTRACTOR_BIN="$TARGET/debug/document-extract"
 if [[ ! -x "$FVOCI_EXTRACTOR_BIN" ]]; then

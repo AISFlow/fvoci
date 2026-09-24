@@ -1783,3 +1783,27 @@ Opus fixed8a0b664 DB/claim/CAS/락순서 예비검토 차단없음, lifecycle변
 원본계약만 조사한다(저장소쓰기없음). 코디네이터는 후속native CI에 실제
 PG와 productionhelper HWP/HWPX 및 test-only취소검사를 병렬runner별연결 중.
 아직추출PR미생성, 제품추출미수락, 검색연결없음. 전체포팅미완료.
+
+2026-09-24 10:24 UTC: main0582c29 post-merge Rust35985930512 및 native2workflow는
+성공했으나 Web35985930227 collaboration-flow가17/18에서실패했다.
+workspace-wiki-collab.spec.ts334의 delete-only후굵은링크 Shift+Home 선택이
+DOM/editor모두빈값이었고본문은존재했다. 무작정재실행하지않는다.
+로그/tmp/fvoci-main058-web-failed.log, error-context artifact10801389478.
+Grok task02ef291a2891/ctx4a1b94234068, rust-collab-selection-regression
+0582c29기준에서 관련editor/브라우저회귀만단독소유, heavy slot인계.
+고정원본project/task계약은/tmp/fvoci-next-project-task-contract.md에보존했고
+연구taskdca4d6671d45/ctx207f905c079d 완료release. 프로젝트구현은아직미배정.
+
+Native lifecycle추가제출은코디네이터가3765249로보존한뒤2f4fc7c와정상merge
+a0a6bb0, 최신main통합branch에서bb1c9fc로통합했다. 검토대상부모혼동에따른
+8개충돌은실제diff대조: commonmanifest/권한/migration/module/첨부count는
+worker의007을보존, CI/docs는코디네이터수락기록을보존했다. 기존7개count가
+여전히6인것을발견하여7로수정했고새assertion삭제없다. 첫통합fmt가테스트
+2파일에서실패해해당파일만format했다. 이후fmt/actionlint/bash-n/offline
+metadata성공. heavy slot은Grok이므로통합전체build/DB는원격으로수행한다.
+Worker실행은DB12/native9/noignored/all-targetextract-native-testsclippy성공,
+/tmp/fvoci-native-job-extract-tests.log 및 final-lifecycle-corrections보고서참조.
+추출CI에서는생산helper의authenticated2개와test-helper전체9개를구분한다.
+공유target경로해석을고치고prepare단계에서고정source검증/fetch명시,검사는
+offline으로분리했다. source경로의존없이제품build가가능해야한다.
+최종Opusdelta/원격CI전추출미수락이며main회귀도별도해결전이다.

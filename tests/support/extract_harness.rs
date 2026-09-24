@@ -524,9 +524,7 @@ fn http_get(base_url: &str, path: &str) -> Result<(u16, String), String> {
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
         .map_err(|e| format!("write timeout failed: {e}"))?;
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .map_err(|e| format!("write request failed: {e}"))?;
@@ -540,11 +538,7 @@ fn http_get(base_url: &str, path: &str) -> Result<(u16, String), String> {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse().ok())
         .unwrap_or(0);
-    let body = response
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
+    let body = response.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
     Ok((status, body))
 }
 
@@ -589,10 +583,7 @@ pub fn spawn_server_process_guarded(
     let mut child = command.spawn().expect("spawn fvoci-server");
     let stderr = child.stderr.take().expect("server stderr");
     let stderr_lines = spawn_stderr_reader(stderr);
-    (
-        ServerProcessGuard { child: Some(child) },
-        stderr_lines,
-    )
+    (ServerProcessGuard { child: Some(child) }, stderr_lines)
 }
 
 pub fn wait_for_server_exit(
@@ -689,5 +680,9 @@ pub async fn spawn_extract_for_storage(
     settings: ExtractJobSettings,
 ) -> fvoci_server::attachments::ExtractJobHandle {
     let pool = app_pool(&harness.app_url).await;
-    spawn_extract_job(settings, pool, LocalStorage::new(storage_root.to_path_buf()))
+    spawn_extract_job(
+        settings,
+        pool,
+        LocalStorage::new(storage_root.to_path_buf()),
+    )
 }
