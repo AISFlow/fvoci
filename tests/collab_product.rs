@@ -29,14 +29,14 @@ use fvoci_server::collab::wire::{
 };
 use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
-use fvoci_server::db::collab::{load_collab_document, resolve_collab_admission, CollabDbError};
+use fvoci_server::db::collab::{load_collab_document, resolve_collab_admission};
 use fvoci_server::db::collab_delivery::{
     arm_delivery_read_barrier, arm_force_delivery_read_fail, arm_force_delivery_tx_error,
     check_delivery_admission, delivery_read_count, disarm_delivery_read_barrier,
     disarm_force_delivery_read_fail, disarm_force_delivery_tx_error, reset_delivery_read_count,
     DeliveryAdmission,
 };
-use fvoci_server::db::documents::CreateDocumentInput;
+use fvoci_server::db::documents::{empty_document_json, CreateDocumentInput};
 use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::workspace;
 use fvoci_server::db::{documents, migrate, pool, Db};
@@ -2405,6 +2405,23 @@ fn awareness_live_frame(routing_key: &str, client_id: u32, clock: u64, user_id: 
     .expect("awareness frame")
 }
 
+fn ws_close_code(frame: &tokio_tungstenite::tungstenite::protocol::CloseFrame) -> u16 {
+    u16::from(frame.code)
+}
+
+fn binary_is_sync_update(bytes: &[u8]) -> bool {
+    matches!(
+        fvoci_server::collab::wire::decode(bytes),
+        Ok(WireFrame::Document {
+            message: DocumentMessage::Sync(SyncMessage {
+                step: SyncStep::Update,
+                ..
+            }),
+            ..
+        })
+    )
+}
+
 async fn wait_for_ws_close(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -2423,6 +2440,52 @@ async fn wait_for_ws_close(
         }
     }
     false
+}
+
+/// Requires an explicit CloseFrame with `expected` code. Bare TCP EOF or a
+/// Close without a code fails; a Sync Update also fails when
+/// `reject_sync_update` is set.
+async fn wait_for_ws_close_code(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    expected: u16,
+    within: Duration,
+    reject_sync_update: bool,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = ws_close_code(&frame);
+                assert_eq!(
+                    code, expected,
+                    "CloseFrame code {code} ({:?}), expected {expected}; reason {:?}",
+                    frame.code, frame.reason
+                );
+                return;
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("Close without code, expected CloseFrame {expected}");
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                assert!(
+                    !(reject_sync_update && binary_is_sync_update(&bytes)),
+                    "Sync Update must not precede CloseFrame {expected}"
+                );
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(None) => {
+                panic!("bare TCP EOF without CloseFrame, expected close code {expected}");
+            }
+            Ok(Some(Err(err))) => {
+                panic!("websocket error before CloseFrame {expected}: {err}");
+            }
+            Err(_) => {}
+        }
+    }
+    panic!("did not receive CloseFrame {expected} within {within:?}");
 }
 
 #[tokio::test]
@@ -2574,30 +2637,7 @@ async fn collab_revoked_session_closes_without_post_revoke_broadcast() {
         observer_saw_update,
         "healthy peer must receive the live writer's update"
     );
-
-    let mut saw_post_revoke_broadcast = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
-    while tokio::time::Instant::now() < deadline {
-        match recv_document_frame_within(&mut reader, Duration::from_millis(100)).await {
-            Some(WireFrame::Document {
-                message:
-                    DocumentMessage::Sync(SyncMessage {
-                        step: SyncStep::Update,
-                        ..
-                    }),
-                ..
-            }) => {
-                saw_post_revoke_broadcast = true;
-                break;
-            }
-            Some(_) => {}
-            None => {}
-        }
-    }
-    assert!(
-        !saw_post_revoke_broadcast,
-        "revoked peer must not receive the update while its socket is still open"
-    );
+    wait_for_ws_close_code(&mut reader, 1008, Duration::from_secs(2), true).await;
     harness.cleanup().await;
 }
 
@@ -3245,10 +3285,7 @@ async fn collab_pre_auth_outbound_is_bounded() {
         "invalid auth must yield a bounded pre-auth denial"
     );
     ws.send(Message::Binary(invalid_auth.into())).await.unwrap();
-    assert!(
-        wait_for_ws_close(&mut ws, Duration::from_secs(2)).await,
-        "exhausting pre-auth outbound must close the socket instead of dropping later frames"
-    );
+    wait_for_ws_close_code(&mut ws, 1013, Duration::from_secs(2), false).await;
     harness.cleanup().await;
 }
 
@@ -3291,18 +3328,35 @@ async fn collab_pre_auth_exhaustion_does_not_swallow_authenticated() {
         .await
         .unwrap();
     let mut saw_authenticated = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut closed_1013 = false;
     while tokio::time::Instant::now() < deadline {
-        match recv_document_frame_within(&mut ws, Duration::from_millis(100)).await {
-            Some(WireFrame::Document {
-                message: DocumentMessage::Auth(AuthMessage::Authenticated { .. }),
-                ..
-            }) => {
-                saw_authenticated = true;
+        match tokio::time::timeout(Duration::from_millis(100), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::Auth(AuthMessage::Authenticated { .. }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    saw_authenticated = true;
+                    break;
+                }
+            }
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                assert_eq!(
+                    ws_close_code(&frame),
+                    1013,
+                    "pre-auth exhaustion CloseFrame {:?}, expected 1013",
+                    frame.code
+                );
+                closed_1013 = true;
                 break;
             }
-            Some(_) => {}
-            None => {}
+            Ok(Some(Ok(Message::Close(None)))) | Ok(None) => {
+                panic!("bare TCP EOF without CloseFrame, expected close code 1013");
+            }
+            Ok(Some(Err(err))) => panic!("websocket error: {err}"),
+            _ => {}
         }
     }
     assert!(
@@ -3310,20 +3364,60 @@ async fn collab_pre_auth_exhaustion_does_not_swallow_authenticated() {
         "Authenticated must not be delivered after pre-auth allowance is exhausted"
     );
     assert!(
-        wait_for_ws_close(&mut ws, Duration::from_secs(2)).await,
-        "socket must close explicitly instead of joining silently"
+        closed_1013,
+        "socket must close with explicit CloseFrame 1013 instead of joining silently"
     );
     harness.cleanup().await;
 }
 
-fn admission_matches(
-    locking: Result<Result<fvoci_server::db::collab::CollabAdmission, CollabDbError>, sqlx::Error>,
-    delivery: Result<DeliveryAdmission, sqlx::Error>,
-) -> bool {
-    match (locking, delivery) {
-        (Ok(Ok(a)), Ok(DeliveryAdmission::Allowed { read_only })) => a.read_only == read_only,
-        (Ok(Err(_)), Ok(DeliveryAdmission::Denied)) => true,
-        _ => false,
+enum AdmissionParity {
+    Allowed { read_only: bool },
+    Denied,
+}
+
+async fn assert_admission_parity(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    expect: AdmissionParity,
+    label: &str,
+) {
+    let locking =
+        resolve_collab_admission(pool, workspace_id, user_id, session_id, document_id).await;
+    let delivery =
+        check_delivery_admission(pool, workspace_id, user_id, session_id, document_id).await;
+    match (&locking, &delivery, expect) {
+        (
+            Ok(Ok(admission)),
+            Ok(DeliveryAdmission::Allowed { read_only }),
+            AdmissionParity::Allowed {
+                read_only: expect_ro,
+            },
+        ) => {
+            assert_eq!(
+                admission.read_only, *read_only,
+                "{label}: locking and delivery read_only disagree"
+            );
+            assert_eq!(
+                admission.read_only, expect_ro,
+                "{label}: unexpected read_only"
+            );
+        }
+        (Ok(Err(_)), Ok(DeliveryAdmission::Denied), AdmissionParity::Denied) => {}
+        (Ok(Ok(admission)), Ok(DeliveryAdmission::Allowed { .. }), AdmissionParity::Denied) => {
+            panic!(
+                "{label}: expected Denied (do not widen grants); got Allowed read_only={}",
+                admission.read_only
+            );
+        }
+        (_, _, AdmissionParity::Allowed { read_only }) => panic!(
+            "{label}: expected Allowed read_only={read_only}; locking={locking:?} delivery={delivery:?}"
+        ),
+        _ => panic!(
+            "{label}: locking and delivery must agree; locking={locking:?} delivery={delivery:?}"
+        ),
     }
 }
 
@@ -3337,12 +3431,16 @@ async fn collab_delivery_admission_parity_with_locking_join() {
     let session = wiki.session.session_id;
     let doc = wiki.document_id;
 
-    let live = resolve_collab_admission(pool, ws, user, session, doc).await;
-    let delivery = check_delivery_admission(pool, ws, user, session, doc).await;
-    assert!(
-        admission_matches(live, delivery),
-        "live wiki member must match on both admission paths"
-    );
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        session,
+        doc,
+        AdmissionParity::Allowed { read_only: false },
+        "live wiki member",
+    )
+    .await;
 
     revoke_session(
         pool,
@@ -3351,12 +3449,16 @@ async fn collab_delivery_admission_parity_with_locking_join() {
     )
     .await
     .expect("revoke");
-    let live = resolve_collab_admission(pool, ws, user, session, doc).await;
-    let delivery = check_delivery_admission(pool, ws, user, session, doc).await;
-    assert!(
-        admission_matches(live, delivery),
-        "revoked session must be Denied on both paths"
-    );
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        session,
+        doc,
+        AdmissionParity::Denied,
+        "revoked session",
+    )
+    .await;
 
     let token = add_session_for_user(pool, user).await;
     let sid = sqlx::query_scalar::<_, Uuid>("SELECT id FROM fvoci.app_session_by_token_hash($1)")
@@ -3364,29 +3466,264 @@ async fn collab_delivery_admission_parity_with_locking_join() {
         .fetch_one(pool)
         .await
         .unwrap();
-    let live = resolve_collab_admission(pool, ws, user, sid, doc).await;
-    let delivery = check_delivery_admission(pool, ws, user, sid, doc).await;
-    assert!(
-        admission_matches(live, delivery),
-        "fresh session must match before mutations"
-    );
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Allowed { read_only: false },
+        "fresh session",
+    )
+    .await;
 
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&harness.admin_url)
         .await
         .unwrap();
+
+    sqlx::query("UPDATE fvoci.sessions SET expires_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(sid)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Denied,
+        "expired session",
+    )
+    .await;
+    sqlx::query("UPDATE fvoci.sessions SET expires_at = now() + interval '30 days' WHERE id = $1")
+        .bind(sid)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Allowed { read_only: false },
+        "restored session expiry",
+    )
+    .await;
+
+    sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
+        .bind(user)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Denied,
+        "suspended user",
+    )
+    .await;
+    sqlx::query("UPDATE fvoci.users SET suspended_at = NULL WHERE id = $1")
+        .bind(user)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Allowed { read_only: false },
+        "restored suspension",
+    )
+    .await;
+
+    sqlx::query("UPDATE fvoci.users SET deleted_at = now() WHERE id = $1")
+        .bind(user)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Denied,
+        "deleted user",
+    )
+    .await;
+    sqlx::query("UPDATE fvoci.users SET deleted_at = NULL WHERE id = $1")
+        .bind(user)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Allowed { read_only: false },
+        "restored deleted user",
+    )
+    .await;
+
+    sqlx::query(
+        "UPDATE fvoci.memberships SET role = 'guest' WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(ws)
+    .bind(user)
+    .execute(&admin)
+    .await
+    .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Denied,
+        "forbidden guest membership",
+    )
+    .await;
+    sqlx::query(
+        "UPDATE fvoci.memberships SET role = 'owner' WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(ws)
+    .bind(user)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+        .bind(ws)
+        .bind(user)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Denied,
+        "removed membership",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(ws)
+    .bind(user)
+    .execute(&admin)
+    .await
+    .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Allowed { read_only: false },
+        "restored membership",
+    )
+    .await;
+
+    sqlx::query("UPDATE fvoci.workspaces SET deleted_at = now() WHERE id = $1")
+        .bind(ws)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Denied,
+        "deleted workspace",
+    )
+    .await;
+    sqlx::query("UPDATE fvoci.workspaces SET deleted_at = NULL WHERE id = $1")
+        .bind(ws)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Allowed { read_only: false },
+        "restored workspace",
+    )
+    .await;
+
+    let project_doc = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, sort_key, project_id, number, status,
+            schema_version, content_json, created_by
+        ) VALUES (
+            $1, $2, 'Project collab lock', $3, 'V', $4, 1, 'draft', 2, $5, $6
+        )
+        "#,
+    )
+    .bind(project_doc)
+    .bind(ws)
+    .bind(project_doc.simple().to_string())
+    .bind(Uuid::now_v7())
+    .bind(empty_document_json())
+    .bind(user)
+    .execute(&admin)
+    .await
+    .unwrap();
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        project_doc,
+        AdmissionParity::Denied,
+        "project document current locking contract",
+    )
+    .await;
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Allowed { read_only: false },
+        "wiki remains Allowed while project doc is Denied",
+    )
+    .await;
+
     sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = $1")
         .bind(doc)
         .execute(&admin)
         .await
         .unwrap();
-    let live = resolve_collab_admission(pool, ws, user, sid, doc).await;
-    let delivery = check_delivery_admission(pool, ws, user, sid, doc).await;
-    assert!(
-        admission_matches(live, delivery),
-        "archived wiki must be read_only on both paths"
-    );
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Allowed { read_only: true },
+        "archived wiki",
+    )
+    .await;
     sqlx::query(
         "UPDATE fvoci.documents SET status = 'published', deleted_at = now() WHERE id = $1",
     )
@@ -3394,12 +3731,16 @@ async fn collab_delivery_admission_parity_with_locking_join() {
     .execute(&admin)
     .await
     .unwrap();
-    let live = resolve_collab_admission(pool, ws, user, sid, doc).await;
-    let delivery = check_delivery_admission(pool, ws, user, sid, doc).await;
-    assert!(
-        admission_matches(live, delivery),
-        "soft-deleted wiki must be Denied on both paths"
-    );
+    assert_admission_parity(
+        pool,
+        ws,
+        user,
+        sid,
+        doc,
+        AdmissionParity::Denied,
+        "soft-deleted wiki",
+    )
+    .await;
     admin.close().await;
     harness.cleanup().await;
 }
@@ -3459,31 +3800,8 @@ async fn collab_delivery_read_failure_closes_1011_without_data_frame() {
         ))
         .await
         .unwrap();
-    let mut saw_update = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while tokio::time::Instant::now() < deadline {
-        match recv_document_frame_within(&mut reader, Duration::from_millis(100)).await {
-            Some(WireFrame::Document {
-                message:
-                    DocumentMessage::Sync(SyncMessage {
-                        step: SyncStep::Update,
-                        ..
-                    }),
-                ..
-            }) => {
-                saw_update = true;
-                break;
-            }
-            Some(_) => {}
-            None => {}
-        }
-    }
+    wait_for_ws_close_code(&mut reader, 1011, Duration::from_secs(2), true).await;
     disarm_force_delivery_read_fail(wiki.document_id);
-    assert!(!saw_update, "DB error on delivery must fail closed");
-    assert!(
-        wait_for_ws_close(&mut reader, Duration::from_secs(2)).await,
-        "delivery-read failure must close the socket"
-    );
     harness.cleanup().await;
 }
 
@@ -3524,32 +3842,42 @@ async fn wait_for_close_without_sync_update(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
+    expected: u16,
     within: Duration,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + within;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining.min(Duration::from_millis(50)), ws.next()).await {
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(()),
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = ws_close_code(&frame);
+                if code == expected {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "close code {code} ({:?}), expected {expected}",
+                    frame.code
+                ));
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                return Err(format!("Close without code, expected {expected}"));
+            }
+            Ok(None) => {
+                return Err(format!(
+                    "bare TCP EOF without CloseFrame, expected close code {expected}"
+                ));
+            }
             Ok(Some(Ok(Message::Binary(bytes)))) => {
-                if let Ok(WireFrame::Document {
-                    message:
-                        DocumentMessage::Sync(SyncMessage {
-                            step: SyncStep::Update,
-                            ..
-                        }),
-                    ..
-                }) = fvoci_server::collab::wire::decode(&bytes)
-                {
-                    return Err("sync update delivered");
+                if binary_is_sync_update(&bytes) {
+                    return Err("sync update delivered".into());
                 }
             }
             Ok(Some(Ok(_))) => {}
-            Ok(Some(Err(_))) => return Err("websocket error"),
+            Ok(Some(Err(err))) => return Err(format!("websocket error: {err}")),
             _ => {}
         }
     }
-    Err("socket did not close")
+    Err(format!("socket did not close with {expected}"))
 }
 
 async fn pooled_tenant_setting(pool: &PgPool) -> String {
@@ -3667,9 +3995,9 @@ async fn collab_delivery_auth_timeout_closes_1011_without_data_frame() {
         .await
         .expect("delivery read must reach the dequeue barrier")
         .expect("barrier signal");
-    wait_for_close_without_sync_update(&mut reader, Duration::from_millis(400))
+    wait_for_close_without_sync_update(&mut reader, 1011, Duration::from_millis(400))
         .await
-        .expect("auth timeout must close without delivering the Data frame");
+        .expect("auth timeout must close 1011 without delivering the Data frame");
     drop(proceed_tx);
     disarm_delivery_read_barrier(wiki.session.session_id);
     harness.cleanup().await;
@@ -3712,9 +4040,9 @@ async fn collab_delivery_auth_cancel_closes_without_waiting_full_deadline() {
     .await
     .expect("revoke reader");
     let started = std::time::Instant::now();
-    wait_for_close_without_sync_update(&mut reader, Duration::from_millis(800))
+    wait_for_close_without_sync_update(&mut reader, 1008, Duration::from_millis(800))
         .await
-        .expect("cancel must close without delivering the Data frame");
+        .expect("cancel must close 1008 without delivering the Data frame");
     assert!(
         started.elapsed() < Duration::from_millis(1500),
         "cancel must not run the full outbound deadline, elapsed {:?}",
@@ -3797,5 +4125,127 @@ async fn collab_delivery_cancel_and_error_reset_pool_tenant_context() {
         DeliveryAdmission::Allowed { read_only: false }
     ));
     pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_authenticated_peer_fanout_records_observed_delivery() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let mut cfg = test_collab_config(4, 30_000);
+    cfg.max_collab_sockets = 16;
+    cfg.max_collab_sockets_per_session = 4;
+    cfg.max_connections_per_room = 16;
+    let app = fvoci_server::http::router(
+        collab_app_state_with_config(&harness.app_url, cfg).await,
+        None,
+    );
+    let addr = spawn_server(app).await;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 600).await;
+
+    const PEER_COUNT: usize = 5;
+    let mut readers = Vec::with_capacity(PEER_COUNT);
+    for index in 0..PEER_COUNT {
+        let token = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
+        let mut reader = connect_member(addr, &token.token).await;
+        auth_and_join(&mut reader, &routing_key, 601 + index as u32).await;
+        readers.push(reader);
+    }
+
+    let drain_until = tokio::time::Instant::now() + Duration::from_millis(250);
+    while tokio::time::Instant::now() < drain_until {
+        for reader in &mut readers {
+            let _ = tokio::time::timeout(Duration::from_millis(20), reader.next()).await;
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(20), writer.next()).await;
+    }
+
+    reset_delivery_read_count(wiki.document_id);
+    let overall_started = std::time::Instant::now();
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut latencies_ms = vec![None; PEER_COUNT];
+    let wait_until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < wait_until && latencies_ms.iter().any(|v| v.is_none()) {
+        for (index, reader) in readers.iter_mut().enumerate() {
+            if latencies_ms[index].is_some() {
+                continue;
+            }
+            match tokio::time::timeout(Duration::from_millis(50), reader.next()).await {
+                Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                    panic!(
+                        "peer {index} unexpected CloseFrame {} ({:?}); 1011/disconnect not allowed on this bounded fan-out",
+                        u16::from(frame.code),
+                        frame.code
+                    );
+                }
+                Ok(Some(Ok(Message::Close(None)))) | Ok(None) => {
+                    panic!("peer {index} disconnected without CloseFrame during bounded fan-out");
+                }
+                Ok(Some(Ok(Message::Binary(bytes)))) => {
+                    if binary_is_sync_update(&bytes) {
+                        latencies_ms[index] = Some(overall_started.elapsed().as_millis());
+                    }
+                }
+                Ok(Some(Err(err))) => panic!("peer {index} websocket error: {err}"),
+                _ => {}
+            }
+        }
+    }
+    let duration = overall_started.elapsed();
+    assert!(
+        latencies_ms.iter().all(|v| v.is_some()),
+        "all {PEER_COUNT} distinct authenticated peers must receive the update; latencies_ms={latencies_ms:?}"
+    );
+    let observed_reads = delivery_read_count(wiki.document_id);
+    assert!(
+        observed_reads >= PEER_COUNT,
+        "current ACL/no-cache must run a delivery read per peer Data frame, got {observed_reads}"
+    );
+
+    let query_started = std::time::Instant::now();
+    let admission = check_delivery_admission(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .expect("admission query");
+    let query_ms = query_started.elapsed().as_millis();
+    assert!(matches!(
+        admission,
+        DeliveryAdmission::Allowed { read_only: false }
+    ));
+
+    let http_started = std::time::Instant::now();
+    let http = reqwest::Client::new()
+        .get(format!("http://{addr}/collab"))
+        .header("origin", PUBLIC_ORIGIN)
+        .send()
+        .await
+        .expect("http /collab");
+    let http_ms = http_started.elapsed().as_millis();
+    assert_eq!(
+        http.status().as_u16(),
+        426,
+        "HTTP /collab must still answer during bounded fan-out"
+    );
+
+    let observed: Vec<u128> = latencies_ms.into_iter().map(|v| v.unwrap()).collect();
+    eprintln!(
+        "collab fan-out observation: peers={PEER_COUNT} updates=1 duration_ms={} rate_updates_per_s={:.3} delivery_latencies_ms={observed:?} delivery_reads={observed_reads} admission_query_ms={query_ms} http_collab_ms={http_ms} unexpected_1011=0 disconnects=0",
+        duration.as_millis(),
+        1000.0 / duration.as_millis().max(1) as f64,
+    );
     harness.cleanup().await;
 }

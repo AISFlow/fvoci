@@ -210,6 +210,33 @@ fn remaining_until(deadline: tokio::time::Instant) -> Duration {
     deadline.saturating_duration_since(tokio::time::Instant::now())
 }
 
+/// Best-effort bound for writing a WebSocket Close after a Data-path failure.
+/// Distinct from the shared Data auth+send budget: leftover time from an
+/// already-expired dequeue deadline cannot deliver 1011. Close uses
+/// `min(send_deadline, this grace)` from `Instant::now()` at the Close attempt.
+const CLEANUP_CLOSE_GRACE: Duration = Duration::from_millis(250);
+
+fn cleanup_close_deadline(send_deadline: Duration) -> tokio::time::Instant {
+    tokio::time::Instant::now() + send_deadline.min(CLEANUP_CLOSE_GRACE)
+}
+
+async fn send_cleanup_close(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    code: u16,
+    reason: &str,
+    send_deadline: Duration,
+    max_frame_bytes: usize,
+) {
+    send_close_until(
+        sender,
+        code,
+        reason,
+        cleanup_close_deadline(send_deadline),
+        max_frame_bytes,
+    )
+    .await;
+}
+
 async fn send_ws_message_until(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     message: Message,
@@ -329,11 +356,11 @@ async fn handle_socket(
                                         _ = cancel_rx.changed() => {
                                             let cancel = cancel_rx.borrow_and_update().clone();
                                             if let Some(cancel) = cancel {
-                                                send_close_until(
+                                                send_cleanup_close(
                                                     &mut sender,
                                                     cancel.code,
                                                     &cancel.reason,
-                                                    deadline,
+                                                    send_deadline,
                                                     max_frame_bytes,
                                                 )
                                                 .await;
@@ -353,22 +380,22 @@ async fn handle_socket(
                                     };
                                     match auth {
                                         Err(_) | Ok(OutboundDeliveryAuth::DbError) => {
-                                            send_close_until(
+                                            send_cleanup_close(
                                                 &mut sender,
                                                 1011,
                                                 "authorization unavailable",
-                                                deadline,
+                                                send_deadline,
                                                 max_frame_bytes,
                                             )
                                             .await;
                                             break;
                                         }
                                         Ok(OutboundDeliveryAuth::Denied) => {
-                                            send_close_until(
+                                            send_cleanup_close(
                                                 &mut sender,
                                                 1008,
                                                 "permission revoked",
-                                                deadline,
+                                                send_deadline,
                                                 max_frame_bytes,
                                             )
                                             .await;
@@ -378,11 +405,11 @@ async fn handle_socket(
                                             read_only: admission_ro,
                                         }) => {
                                             if !(read_only || !admission_ro) {
-                                                send_close_until(
+                                                send_cleanup_close(
                                                     &mut sender,
                                                     1008,
                                                     "permission revoked",
-                                                    deadline,
+                                                    send_deadline,
                                                     max_frame_bytes,
                                                 )
                                                 .await;
@@ -401,11 +428,11 @@ async fn handle_socket(
                                         },
                                     );
                                     if send_remaining.is_zero() {
-                                        send_close_until(
+                                        send_cleanup_close(
                                             &mut sender,
                                             1011,
                                             "authorization unavailable",
-                                            deadline,
+                                            send_deadline,
                                             max_frame_bytes,
                                         )
                                         .await;
@@ -505,7 +532,17 @@ async fn handle_socket(
                                         collab_authenticated = true;
                                     }
                                     AuthAttempt::Denied => {}
-                                    AuthAttempt::Closed => break,
+                                    AuthAttempt::Closed => {
+                                        send_close(
+                                            &mut sender,
+                                            1013,
+                                            "pre-auth outbound exhausted",
+                                            send_deadline,
+                                            max_frame_bytes,
+                                        )
+                                        .await;
+                                        break;
+                                    }
                                 }
                             }
                         } else {
@@ -532,7 +569,17 @@ async fn handle_socket(
                                     joined_room = Some((key, routing, false, false));
                                 }
                                 FirstRoom::None => {}
-                                FirstRoom::Closed => break,
+                                FirstRoom::Closed => {
+                                    send_close(
+                                        &mut sender,
+                                        1013,
+                                        "pre-auth outbound exhausted",
+                                        send_deadline,
+                                        max_frame_bytes,
+                                    )
+                                    .await;
+                                    break;
+                                }
                             }
                         }
                     }

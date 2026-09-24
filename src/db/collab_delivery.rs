@@ -24,9 +24,15 @@
 //! statement started before revoke commit may still return Allowed; that
 //! frame may be written after t_R only if both the read and the write finish
 //! before the shared deadline (R1). Frames already inside `send_ws_message`
-//! are not recalled. Denied / DB-error Close frames in that path also use
-//! leftover time from the same deadline so a slow read cannot add a second
-//! full send budget.
+//! are not recalled. Data is never written after Denied, DbError, timeout, or
+//! cancel during that read.
+//!
+//! Close after those Data-path failures is **not** leftover time from the
+//! Data deadline. An expired dequeue Instant cannot deliver 1011. Transport
+//! writes that Close with a separate best-effort cleanup grace of
+//! `min(outbound_send_deadline_ms, 250ms)` measured from `Instant::now()` at
+//! the Close attempt. That 250ms cap is the documented bound; it is not a
+//! claim that every closing path fits inside an already-expired Data budget.
 //!
 //! Idle sockets with an empty outbound queue wait for `poll_acl` (up to
 //! `revoke_poll_ms`). That delay is not authorization of new data.
