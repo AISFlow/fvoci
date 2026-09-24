@@ -1,5 +1,8 @@
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -360,14 +363,28 @@ pub fn require_extractor_bin() -> PathBuf {
     path
 }
 
-fn base_extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
+fn extract_job_settings_with(
+    extractor_bin: PathBuf,
+    poll_interval: Duration,
+    retry_backoff: Duration,
+    test_hang_ms: Option<u64>,
+) -> ExtractJobSettings {
     ExtractJobSettings {
         extractor_bin,
         limits: document_extract_client::Limits::for_tests(),
-        poll_interval: Duration::from_millis(100),
-        retry_backoff: Duration::from_millis(100),
-        test_hang_ms: None,
+        poll_interval,
+        retry_backoff,
+        test_hang_ms,
     }
+}
+
+fn base_extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
+    extract_job_settings_with(
+        extractor_bin,
+        Duration::from_millis(100),
+        Duration::from_millis(100),
+        None,
+    )
 }
 
 pub fn extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
@@ -375,27 +392,12 @@ pub fn extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
 }
 
 pub fn idle_extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
-    ExtractJobSettings {
+    extract_job_settings_with(
         extractor_bin,
-        limits: document_extract_client::Limits::for_tests(),
-        poll_interval: Duration::from_secs(600),
-        retry_backoff: Duration::from_secs(600),
-        test_hang_ms: None,
-    }
-}
-
-pub fn hang_extract_job_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
-    ExtractJobSettings {
-        extractor_bin,
-        limits: document_extract_client::Limits::for_tests(),
-        poll_interval: Duration::from_millis(50),
-        retry_backoff: Duration::from_millis(50),
-        test_hang_ms: Some(20_000),
-    }
-}
-
-pub fn pid_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
+        Duration::from_secs(600),
+        Duration::from_secs(600),
+        None,
+    )
 }
 
 pub fn server_bin() -> PathBuf {
@@ -408,8 +410,8 @@ pub fn extract_job_driver_bin() -> PathBuf {
 
 pub fn server_env_for_harness(
     harness: &TestDb,
-    storage_root: &PathBuf,
-    extractor_bin: Option<&PathBuf>,
+    storage_root: &Path,
+    extractor_bin: Option<&Path>,
 ) -> Vec<(String, String)> {
     let mut env = vec![
         ("DATABASE_URL".into(), harness.admin_url.clone()),
@@ -434,11 +436,148 @@ pub fn server_env_for_harness(
     env
 }
 
-pub fn spawn_server_process(
+pub struct TempStorageGuard {
+    path: PathBuf,
+}
+
+impl TempStorageGuard {
+    pub fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("fvoci-ext-{label}-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&path).expect("storage root");
+        Self { path }
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
+impl Drop for TempStorageGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+pub struct ServerProcessGuard {
+    child: Option<Child>,
+}
+
+impl ServerProcessGuard {
+    pub fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("server child")
+    }
+}
+
+impl Drop for ServerProcessGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn spawn_stderr_reader(stderr: ChildStderr) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+fn parse_listen_addr(line: &str) -> Option<String> {
+    const PREFIX: &str = "fvoci-server listening on http://";
+    line.strip_prefix(PREFIX).map(str::to_string)
+}
+
+pub fn wait_for_server_listen_addr(
+    stderr_lines: &mpsc::Receiver<String>,
+    deadline: std::time::Instant,
+) -> String {
+    while std::time::Instant::now() < deadline {
+        while let Ok(line) = stderr_lines.try_recv() {
+            if let Some(addr) = parse_listen_addr(&line) {
+                return addr;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for fvoci-server listen address on stderr");
+}
+
+fn http_get(base_url: &str, path: &str) -> Result<(u16, String), String> {
+    let parsed = url::Url::parse(base_url).map_err(|e| format!("invalid base url: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host in base url".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let mut stream =
+        TcpStream::connect((host, port)).map_err(|e| format!("tcp connect failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("read timeout failed: {e}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("write timeout failed: {e}"))?;
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write request failed: {e}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("read response failed: {e}"))?;
+    let status = response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
+    Ok((status, body))
+}
+
+pub fn http_get_setup_status(base_url: &str) -> (u16, String) {
+    http_get(base_url, "/api/v1/setup").expect("setup status request")
+}
+
+pub fn wait_for_server_setup_status(base_url: &str, deadline: std::time::Instant) {
+    while std::time::Instant::now() < deadline {
+        match http_get(base_url, "/api/v1/setup") {
+            Ok((status, body)) if (200..300).contains(&status) && body.contains("branding") => {
+                return;
+            }
+            Ok(_) | Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("timed out waiting for /api/v1/setup from {base_url}");
+}
+
+pub fn wait_for_server_ready(stderr_lines: &mpsc::Receiver<String>) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let addr = wait_for_server_listen_addr(stderr_lines, deadline);
+    let base_url = format!("http://{addr}");
+    wait_for_server_setup_status(&base_url, deadline);
+    base_url
+}
+
+pub fn spawn_server_process_guarded(
     harness: &TestDb,
-    storage_root: &PathBuf,
-    extractor_bin: Option<&PathBuf>,
-) -> std::process::Child {
+    storage_root: &Path,
+    extractor_bin: Option<&Path>,
+) -> (ServerProcessGuard, mpsc::Receiver<String>) {
     let mut command = Command::new(server_bin());
     command
         .stdin(Stdio::null())
@@ -447,13 +586,48 @@ pub fn spawn_server_process(
     for (key, value) in server_env_for_harness(harness, storage_root, extractor_bin) {
         command.env(key, value);
     }
-    command.spawn().expect("spawn fvoci-server")
+    let mut child = command.spawn().expect("spawn fvoci-server");
+    let stderr = child.stderr.take().expect("server stderr");
+    let stderr_lines = spawn_stderr_reader(stderr);
+    (
+        ServerProcessGuard { child: Some(child) },
+        stderr_lines,
+    )
+}
+
+pub fn wait_for_server_exit(
+    child: &mut Child,
+    stderr_lines: &mpsc::Receiver<String>,
+    deadline: std::time::Instant,
+) -> (std::process::ExitStatus, String) {
+    let mut stderr = String::new();
+    while std::time::Instant::now() < deadline {
+        while let Ok(line) = stderr_lines.try_recv() {
+            if !stderr.is_empty() {
+                stderr.push('\n');
+            }
+            stderr.push_str(&line);
+        }
+        if let Some(status) = child.try_wait().expect("wait") {
+            while let Ok(line) = stderr_lines.try_recv() {
+                if !stderr.is_empty() {
+                    stderr.push('\n');
+                }
+                stderr.push_str(&line);
+            }
+            return (status, stderr);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("fvoci-server did not exit before deadline; stderr={stderr}");
 }
 
 pub fn run_extract_job_driver(
     harness: &TestDb,
-    storage_root: &PathBuf,
-    extractor_bin: &PathBuf,
+    storage_root: &Path,
+    extractor_bin: &Path,
     mode: &str,
     workspace_id: Uuid,
     attachment_id: Uuid,
@@ -511,9 +685,9 @@ pub async fn download_original(
 
 pub async fn spawn_extract_for_storage(
     harness: &TestDb,
-    storage_root: &PathBuf,
+    storage_root: &Path,
     settings: ExtractJobSettings,
 ) -> fvoci_server::attachments::ExtractJobHandle {
     let pool = app_pool(&harness.app_url).await;
-    spawn_extract_job(settings, pool, LocalStorage::new(storage_root.clone()))
+    spawn_extract_job(settings, pool, LocalStorage::new(storage_root.to_path_buf()))
 }

@@ -23,6 +23,9 @@ cd "$ROOT"
 echo "==> cargo check (extract-job target, offline)"
 cargo check --locked --offline --target-dir "$TARGET"
 
+echo "==> clippy (extract-native-tests, all-targets, offline)"
+cargo clippy --locked --offline --all-targets --features extract-native-tests --target-dir "$TARGET" -- -D warnings
+
 echo "==> DB policy tests (offline)"
 cargo test --locked --offline --features db-tests --test attachment_extract_integration --target-dir "$TARGET" -- --nocapture
 

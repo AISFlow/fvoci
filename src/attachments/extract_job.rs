@@ -28,8 +28,21 @@ pub struct ExtractJobSettings {
     pub limits: Limits,
     pub poll_interval: Duration,
     pub retry_backoff: Duration,
-    /// Test-only hang injection; production [`from_env`] always leaves this `None`.
+    /// Test-only hang injection; compiled only for `extract-native-tests`.
+    #[cfg(feature = "extract-native-tests")]
     pub test_hang_ms: Option<u64>,
+}
+
+fn extract_request_test_hang(settings: &ExtractJobSettings) -> Option<u64> {
+    #[cfg(feature = "extract-native-tests")]
+    {
+        settings.test_hang_ms
+    }
+    #[cfg(not(feature = "extract-native-tests"))]
+    {
+        let _ = settings;
+        None
+    }
 }
 
 impl ExtractJobSettings {
@@ -57,6 +70,7 @@ impl ExtractJobSettings {
             limits,
             poll_interval: Duration::from_secs(poll_secs),
             retry_backoff: Duration::from_millis(EXTRACT_RETRY_BACKOFF_MS),
+            #[cfg(feature = "extract-native-tests")]
             test_hang_ms: None,
         }))
     }
@@ -272,7 +286,7 @@ async fn run_native_extract(
         name: name.to_string(),
         limits: settings.limits,
         extractor_bin: settings.extractor_bin.clone(),
-        test_hang_ms: settings.test_hang_ms,
+        test_hang_ms: extract_request_test_hang(settings),
     };
     let worker_cancel = cancel_flag.clone();
     let handle = tokio::task::spawn_blocking(move || {
@@ -406,8 +420,8 @@ mod tests {
         use crate::db::attachment_extract::EXTRACT_MAX_ATTEMPTS;
         use document_extract_client::limits::MAX_INPUT_BYTES;
 
-        assert!(EXTRACT_LEASE_SECS * 1000 > DEFAULT_TIMEOUT_MS);
+        const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > DEFAULT_TIMEOUT_MS);
         assert_eq!(EXTRACT_MAX_ATTEMPTS, 2);
-        assert!(MAX_INPUT_BYTES == 20 * 1024 * 1024);
+        const _: () = assert!(MAX_INPUT_BYTES == 20 * 1024 * 1024);
     }
 }

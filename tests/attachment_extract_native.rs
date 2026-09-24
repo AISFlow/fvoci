@@ -1,15 +1,15 @@
 #![cfg(all(feature = "db-tests", feature = "extract-native-tests"))]
 
-mod support;
+#[path = "support/extract_harness.rs"]
+mod extract_harness;
 
 use std::time::Duration;
 
-use document_extract_client::{peek_last_spawn, take_last_spawn};
-use support::extract_harness::{
+use extract_harness::{
     app_pool, create_document, download_original, extract_job_driver_bin, extract_job_settings,
-    hang_extract_job_settings, idle_extract_job_settings, pid_alive, require_extractor_bin,
-    run_extract_job_driver, server_bin, setup_session, spawn_extract_for_storage,
-    spawn_server_process, upload_bytes, wait_for_extract, TestDb,
+    idle_extract_job_settings, require_extractor_bin, run_extract_job_driver, server_bin,
+    setup_session, spawn_extract_for_storage, spawn_server_process_guarded, TempStorageGuard,
+    upload_bytes, wait_for_extract, wait_for_server_exit, wait_for_server_ready, TestDb,
 };
 use uuid::Uuid;
 
@@ -25,25 +25,20 @@ fn validate_extractor_bin_rejects_nonexistent_path() {
 #[tokio::test]
 async fn server_process_exits_on_invalid_configured_extractor_bin() {
     let harness = TestDb::bootstrap().await;
-    let storage_root = std::env::temp_dir().join(format!("fvoci-ext-srv-{}", Uuid::now_v7()));
-    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let storage = TempStorageGuard::new("srv");
     let invalid = std::path::PathBuf::from("/no/such/document-extract");
-    let mut child = spawn_server_process(&harness, &storage_root, Some(&invalid));
+    let (mut guard, stderr_lines) =
+        spawn_server_process_guarded(&harness, storage.path(), Some(&invalid));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("wait") {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("fvoci-server did not exit on invalid FVOCI_EXTRACTOR_BIN");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let (status, stderr) =
+        wait_for_server_exit(guard.child_mut(), &stderr_lines, deadline);
     assert!(
         !status.success(),
         "server must exit nonzero with invalid FVOCI_EXTRACTOR_BIN"
+    );
+    assert!(
+        stderr.contains("FVOCI_EXTRACTOR_BIN must point at an existing file"),
+        "expected configured extractor validation error, got stderr={stderr}"
     );
     harness.cleanup().await;
 }
@@ -51,18 +46,19 @@ async fn server_process_exits_on_invalid_configured_extractor_bin() {
 #[tokio::test]
 async fn server_process_starts_when_extractor_env_absent() {
     let harness = TestDb::bootstrap().await;
-    let storage_root = std::env::temp_dir().join(format!("fvoci-ext-srv-{}", Uuid::now_v7()));
-    std::fs::create_dir_all(&storage_root).expect("storage root");
-    let mut child = spawn_server_process(&harness, &storage_root, None);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if child.try_wait().expect("wait").is_some() {
-            panic!("fvoci-server exited when FVOCI_EXTRACTOR_BIN was unset");
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    let storage = TempStorageGuard::new("srv");
+    let (mut guard, stderr_lines) = spawn_server_process_guarded(&harness, storage.path(), None);
+    let base_url = wait_for_server_ready(&stderr_lines);
+    assert!(
+        guard.child_mut().try_wait().expect("wait").is_none(),
+        "fvoci-server exited when FVOCI_EXTRACTOR_BIN was unset"
+    );
+    let (status, body) = extract_harness::http_get_setup_status(&base_url);
+    assert!(
+        (200..300).contains(&status),
+        "setup status must succeed, got {status}"
+    );
+    assert!(body.contains("branding"), "setup body must include branding");
     harness.cleanup().await;
 }
 
@@ -212,69 +208,20 @@ async fn shutdown_during_active_parse_reaps_helper_and_releases_lease() {
     )
     .await;
     let attachment_id = Uuid::parse_str(&uploaded.attachment_id).unwrap();
-    let _ = take_last_spawn();
-    let job = spawn_extract_for_storage(
+
+    let out = run_extract_job_driver(
         &harness,
         &storage_root,
-        hang_extract_job_settings(extractor),
-    )
-    .await;
-    let pool = app_pool(&harness.app_url).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let helper_pid = loop {
-        let state = fvoci_server::db::attachment_extract::fetch_extract_state(
-            &pool,
-            workspace_id,
-            attachment_id,
-        )
-        .await
-        .unwrap()
-        .expect("attachment row");
-        let trace = peek_last_spawn();
-        if state.lease_token.is_some() && trace.is_some() {
-            break trace.expect("spawn trace").pid;
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for active parse lease and helper pid; state={:?} trace={:?}",
-                state, trace
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    };
-    assert!(
-        pid_alive(helper_pid),
-        "helper must be alive before shutdown"
-    );
-
-    job.request_shutdown();
-    let joined = tokio::time::timeout(Duration::from_secs(15), job.join())
-        .await
-        .expect("active-parse shutdown join must complete within 15s")
-        .expect("extract job join");
-    assert_eq!(joined, ());
-
-    let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while pid_alive(helper_pid) {
-        if std::time::Instant::now() >= reap_deadline {
-            panic!("helper pid {helper_pid} still alive after shutdown join");
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-
-    let state = fvoci_server::db::attachment_extract::fetch_extract_state(
-        &pool,
+        &extractor,
+        "shutdown_active_parse",
         workspace_id,
         attachment_id,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(state.extract_status, "pending");
-    assert_eq!(state.extract_attempts, 0);
-    assert!(state.lease_token.is_none());
-
-    pool.close().await;
+    );
+    assert!(
+        out.status.success(),
+        "shutdown_active_parse driver failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     harness.cleanup().await;
 }
 
@@ -297,18 +244,18 @@ async fn fresh_process_recovers_expired_lease_and_completes_extract() {
     .await;
     let attachment_id = Uuid::parse_str(&uploaded.attachment_id).unwrap();
 
-    let hang_out = run_extract_job_driver(
+    let crash_out = run_extract_job_driver(
         &harness,
         &storage_root,
         &extractor,
-        "hang_on_claim",
+        "claim_crash_recovery",
         workspace_id,
         attachment_id,
     );
     assert!(
-        hang_out.status.success(),
-        "hang_on_claim driver failed: stderr={}",
-        String::from_utf8_lossy(&hang_out.stderr)
+        crash_out.status.success(),
+        "claim_crash_recovery driver failed: stderr={}",
+        String::from_utf8_lossy(&crash_out.stderr)
     );
 
     let admin = sqlx::postgres::PgPoolOptions::new()
@@ -324,7 +271,7 @@ async fn fresh_process_recovers_expired_lease_and_completes_extract() {
     .fetch_one(&admin)
     .await
     .unwrap();
-    assert!(leased.0, "crash simulation must leave an active lease");
+    assert!(leased.0, "claim-crash simulation must leave an active lease");
     sqlx::query(
         "UPDATE fvoci.attachments SET extract_lease_expires_at = now() - interval '1 second' WHERE workspace_id = $1 AND id = $2",
     )

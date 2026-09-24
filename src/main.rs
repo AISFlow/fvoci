@@ -453,6 +453,7 @@ mod shutdown_outcome_tests {
                     DrainOutcome {
                         serve: Ok(()),
                         hub: HubOutcome::Clean,
+                        extract: Ok(()),
                     }
                 },
                 Some(Instant::now()),
