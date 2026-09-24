@@ -34,11 +34,8 @@ where
 {
     let mut run = TestRun::new(TestDb::bootstrap().await);
     let case_fut = case(&mut run);
-    let case_outcome = tokio::time::timeout(
-        TEST_TIMEOUT,
-        AssertUnwindSafe(case_fut).catch_unwind(),
-    )
-    .await;
+    let case_outcome =
+        tokio::time::timeout(TEST_TIMEOUT, AssertUnwindSafe(case_fut).catch_unwind()).await;
     let cleanup_outcome = run.finish().await;
 
     match (case_outcome, cleanup_outcome) {
@@ -48,12 +45,12 @@ where
         }
         (Ok(Err(panic_payload)), cleanup) => {
             if let Err(cleanup_err) = cleanup {
-                panic!("{name} cleanup failed after panic: {cleanup_err}");
+                eprintln!("{name} cleanup also failed: {cleanup_err}");
             }
             resume_unwind(panic_payload);
         }
         (Err(_elapsed), Ok(())) => {
-            panic!("{name} hung (>{TEST_TIMEOUT:?}) including cleanup");
+            panic!("{name} case hung (>{TEST_TIMEOUT:?}); cleanup completed");
         }
         (Err(_elapsed), Err(cleanup_err)) => {
             panic!("{name} hung (>{TEST_TIMEOUT:?}); cleanup error: {cleanup_err}");
@@ -198,396 +195,91 @@ async fn collab_edit_get_body_reflects_projection() {
 async fn collab_korean_edit_get_body_matches_fixture_oracle() {
     run_test(
         "collab_korean_edit_get_body_matches_fixture_oracle",
-        |run| Box::pin(async {
-            let app_url = run.harness.app_url.clone();
-            let admin_url = run.harness.admin_url.clone();
-            let wiki = setup_wiki_doc(&run.harness).await;
-            let addr = run
-                .spawn_router(&app_url, test_collab_config(4, 30_000))
-                .await;
-            let base = engine_fixture("korean_emoji_base.v1");
-            let mid = engine_fixture("korean_emoji_mid_edit.v1");
-            let delete = engine_fixture("korean_emoji_delete.v1");
-            send_collab_updates(addr, &wiki, &[&base, &mid, &delete]).await;
+        |run| {
+            Box::pin(async {
+                let app_url = run.harness.app_url.clone();
+                let admin_url = run.harness.admin_url.clone();
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let addr = run
+                    .spawn_router(&app_url, test_collab_config(4, 30_000))
+                    .await;
+                let base = engine_fixture("korean_emoji_base.v1");
+                let mid = engine_fixture("korean_emoji_mid_edit.v1");
+                let delete = engine_fixture("korean_emoji_delete.v1");
+                send_collab_updates(addr, &wiki, &[&base, &mid, &delete]).await;
 
-            let body = await_persisted_get_body(addr, &wiki, 73).await;
-            assert_eq!(
-                body["contentJson"],
-                expectations()["korean_emoji"]["prosemirror_json"]
-            );
-            let (text, chosung): (String, String) =
-                sqlx::query_as("SELECT text, chosung FROM fvoci.documents WHERE id = $1")
-                    .bind(wiki.document_id)
-                    .fetch_one(
-                        &PgPoolOptions::new()
-                            .max_connections(2)
-                            .connect(&admin_url)
-                            .await
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-            assert_eq!(text, "가중🚀마바사");
-            assert!(!chosung.is_empty());
-        }),
+                let body = await_persisted_get_body(addr, &wiki, 73).await;
+                assert_eq!(
+                    body["contentJson"],
+                    expectations()["korean_emoji"]["prosemirror_json"]
+                );
+                let (text, chosung): (String, String) =
+                    sqlx::query_as("SELECT text, chosung FROM fvoci.documents WHERE id = $1")
+                        .bind(wiki.document_id)
+                        .fetch_one(
+                            &PgPoolOptions::new()
+                                .max_connections(2)
+                                .connect(&admin_url)
+                                .await
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                assert_eq!(text, "가중🚀마바사");
+                assert!(!chosung.is_empty());
+            })
+        },
     )
     .await;
 }
 
 #[tokio::test]
 async fn collab_delete_only_get_body_updates_json() {
-    run_test("collab_delete_only_get_body_updates_json", |run| Box::pin(async {
-        let app_url = run.harness.app_url.clone();
-        let admin_url = run.harness.admin_url.clone();
-        let wiki = setup_wiki_doc(&run.harness).await;
-        let addr = run
-            .spawn_router(&app_url, test_collab_config(4, 30_000))
-            .await;
-        let base = engine_fixture("delete_only_base.v1");
-        let delete_only = engine_fixture("delete_only.v1");
-        send_collab_updates(addr, &wiki, &[&base, &delete_only]).await;
+    run_test("collab_delete_only_get_body_updates_json", |run| {
+        Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let admin_url = run.harness.admin_url.clone();
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let addr = run
+                .spawn_router(&app_url, test_collab_config(4, 30_000))
+                .await;
+            let base = engine_fixture("delete_only_base.v1");
+            let delete_only = engine_fixture("delete_only.v1");
+            send_collab_updates(addr, &wiki, &[&base, &delete_only]).await;
 
-        let body = await_persisted_get_body(addr, &wiki, 74).await;
-        assert_eq!(
-            body["contentJson"],
-            expectations()["delete_only"]["prosemirror_json_after"]
-        );
+            let body = await_persisted_get_body(addr, &wiki, 74).await;
+            assert_eq!(
+                body["contentJson"],
+                expectations()["delete_only"]["prosemirror_json_after"]
+            );
 
-        let admin = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&admin_url)
-            .await
-            .unwrap();
-        assert_eq!(
-            document_updated_event_count(&admin, wiki.document_id).await,
-            2
-        );
-    }))
+            let admin = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&admin_url)
+                .await
+                .unwrap();
+            assert_eq!(
+                document_updated_event_count(&admin, wiki.document_id).await,
+                2
+            );
+        })
+    })
     .await;
 }
 
 #[tokio::test]
 async fn collab_seed_join_does_not_overwrite_paragraph() {
-    run_test("collab_seed_join_does_not_overwrite_paragraph", |run| Box::pin(async {
-        let app_url = run.harness.app_url.clone();
-        let admin_url = run.harness.admin_url.clone();
-        let wiki = setup_wiki_doc(&run.harness).await;
-        let addr = run
-            .spawn_router(&app_url, test_collab_config(4, 30_000))
-            .await;
-        let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-        let mut writer = connect_member(addr, &wiki.session.session_token).await;
-        auth_and_join(&mut writer, &routing_key, 80).await;
-
-        let body = get_document_body(
-            addr,
-            &wiki.session.session_token,
-            wiki.session.workspace_id,
-            wiki.document_id,
-        )
-        .await;
-        assert_eq!(body["contentJson"], empty_document_json());
-        assert_eq!(body["version"], 1);
-
-        let admin = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&admin_url)
-            .await
-            .unwrap();
-        assert_eq!(
-            document_updated_event_count(&admin, wiki.document_id).await,
-            0
-        );
-    }))
-    .await;
-}
-
-#[tokio::test]
-async fn collab_primary_unhealthy_skips_projection_until_catch_up() {
-    run_test(
-        "collab_primary_unhealthy_skips_projection_until_catch_up",
-        |run| Box::pin(async {
+    run_test("collab_seed_join_does_not_overwrite_paragraph", |run| {
+        Box::pin(async {
             let app_url = run.harness.app_url.clone();
+            let admin_url = run.harness.admin_url.clone();
             let wiki = setup_wiki_doc(&run.harness).await;
             let addr = run
                 .spawn_router(&app_url, test_collab_config(4, 30_000))
                 .await;
             let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-            let update = delete_only_base_update();
-
             let mut writer = connect_member(addr, &wiki.session.session_token).await;
-            auth_and_join(&mut writer, &routing_key, 91).await;
-            arm_force_primary_apply_fail(wiki.document_id).await;
-            arm_force_primary_load_fail(wiki.document_id).await;
-            writer
-                .send(Message::Binary(
-                    sync_update_frame(&routing_key, &update).into(),
-                ))
-                .await
-                .unwrap();
-            assert!(
-                wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
-                "durable commit must still ack when primary reload fails"
-            );
-
-            let body_before = get_document_body(
-                addr,
-                &wiki.session.session_token,
-                wiki.session.workspace_id,
-                wiki.document_id,
-            )
-            .await;
-            assert_eq!(body_before["contentJson"], empty_document_json());
-
-            disarm_force_primary_load_fail(wiki.document_id).await;
-            disarm_force_primary_apply_fail(wiki.document_id).await;
-
-            let mut recovery = connect_member(addr, &wiki.session.session_token).await;
-            auth_and_join(&mut recovery, &routing_key, 92).await;
-
-            let body_after = await_persisted_get_body(addr, &wiki, 96).await;
-            assert_eq!(body_after["contentJson"], delete_only_json_before());
-        }),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn collab_derived_event_failure_preserves_binary_then_retries() {
-    run_test(
-        "collab_derived_event_failure_preserves_binary_then_retries",
-        |run| Box::pin(async {
-            let app_url = run.harness.app_url.clone();
-            let admin_url = run.harness.admin_url.clone();
-            let wiki = setup_wiki_doc(&run.harness).await;
-            let admin = PgPoolOptions::new()
-                .max_connections(2)
-                .connect(&admin_url)
-                .await
-                .unwrap();
-            install_derived_document_updated_fail_trigger(&admin, "test_projection_event_fail")
-                .await;
-
-            let addr = run
-                .spawn_router(&app_url, test_collab_config(4, 30_000))
-                .await;
-            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-            let update = delete_only_base_update();
-
-            let mut writer = connect_member(addr, &wiki.session.session_token).await;
-            auth_and_join(&mut writer, &routing_key, 93).await;
-            writer
-                .send(Message::Binary(
-                    sync_update_frame(&routing_key, &update).into(),
-                ))
-                .await
-                .unwrap();
-            assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
-
-            let body_stale = get_document_body(
-                addr,
-                &wiki.session.session_token,
-                wiki.session.workspace_id,
-                wiki.document_id,
-            )
-            .await;
-            assert_eq!(body_stale["contentJson"], empty_document_json());
-            assert_eq!(
-                document_updated_event_count(&admin, wiki.document_id).await,
-                0
-            );
-            assert_eq!(
-                event_count(&admin, wiki.document_id, "document.collab_update_appended",).await,
-                1,
-                "append audit event must commit while derived document.updated is blocked"
-            );
-
-            let load = fvoci_server::db::collab::load_collab_document(
-                &wiki.session.pool,
-                wiki.session.workspace_id,
-                wiki.session.user_id,
-                wiki.session.session_id,
-                wiki.document_id,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert_eq!(load.tail.len(), 1);
-            assert_eq!(load.tail[0].payload, update);
-
-            sqlx::query("DROP TRIGGER fvoci_test_projection_event_fail ON fvoci.events")
-                .execute(&admin)
-                .await
-                .unwrap();
-
-            let follow_up = delete_only_update();
-            writer
-                .send(Message::Binary(
-                    sync_update_frame(&routing_key, &follow_up).into(),
-                ))
-                .await
-                .unwrap();
-            assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
-
-            let body_retry = await_persisted_get_body(addr, &wiki, 97).await;
-            assert_eq!(body_retry["contentJson"], delete_only_json_after());
-            assert!(document_updated_event_count(&admin, wiki.document_id).await >= 1);
-        }),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn collab_catch_up_after_server_restart_without_retransmit() {
-    run_test(
-        "collab_catch_up_after_server_restart_without_retransmit",
-        |run| Box::pin(async {
-            let app_url = run.harness.app_url.clone();
-            let admin_url = run.harness.admin_url.clone();
-            let wiki = setup_wiki_doc(&run.harness).await;
-            let admin = PgPoolOptions::new()
-                .max_connections(2)
-                .connect(&admin_url)
-                .await
-                .unwrap();
-            install_derived_document_updated_fail_trigger(&admin, "test_restart_catchup").await;
-
-            let cfg = test_collab_config(4, 30_000);
-            let addr = run.spawn_router(&app_url, cfg.clone()).await;
-            send_collab_updates(addr, &wiki, &[&delete_only_base_update()]).await;
-
-            let stale = get_document_body(
-                addr,
-                &wiki.session.session_token,
-                wiki.session.workspace_id,
-                wiki.document_id,
-            )
-            .await;
-            assert_eq!(stale["contentJson"], empty_document_json());
-            assert_eq!(
-                document_updated_event_count(&admin, wiki.document_id).await,
-                0
-            );
-
-            sqlx::query("DROP TRIGGER fvoci_test_restart_catchup ON fvoci.events")
-                .execute(&admin)
-                .await
-                .unwrap();
-
-            run.shutdown_last_server()
-                .await
-                .expect("restart test must shut down first server");
-            let addr2 = run.spawn_router(&app_url, cfg).await;
-            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-            let mut writer = connect_member(addr2, &wiki.session.session_token).await;
-            auth_and_join(&mut writer, &routing_key, 75).await;
-
-            let body_after = get_document_body(
-                addr2,
-                &wiki.session.session_token,
-                wiki.session.workspace_id,
-                wiki.document_id,
-            )
-            .await;
-            assert_eq!(body_after["contentJson"], delete_only_json_before());
-            assert_eq!(body_after["version"], 1);
-            assert_eq!(
-                document_updated_event_count(&admin, wiki.document_id).await,
-                1
-            );
-        }),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn collab_archived_document_skips_new_projection() {
-    run_test("collab_archived_document_skips_new_projection", |run| Box::pin(async {
-        let app_url = run.harness.app_url.clone();
-        let admin_url = run.harness.admin_url.clone();
-        let wiki = setup_wiki_doc(&run.harness).await;
-        let addr = run
-            .spawn_router(&app_url, test_collab_config(4, 30_000))
-            .await;
-        send_collab_updates(addr, &wiki, &[&delete_only_base_update()]).await;
-
-        let projected = await_persisted_get_body(addr, &wiki, 76).await;
-        let admin = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&admin_url)
-            .await
-            .unwrap();
-        let events_before = document_updated_event_count(&admin, wiki.document_id).await;
-
-        sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = $1")
-            .bind(wiki.document_id)
-            .execute(&admin)
-            .await
-            .unwrap();
-
-        let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-        let mut writer = connect_member(addr, &wiki.session.session_token).await;
-        auth_and_join(&mut writer, &routing_key, 94).await;
-        writer
-            .send(Message::Binary(
-                sync_update_frame(&routing_key, &delete_only_update()).into(),
-            ))
-            .await
-            .unwrap();
-        let mut saw_reject = false;
-        for _ in 0..8 {
-            if let Some(WireFrame::Document {
-                message: DocumentMessage::SyncStatus { applied: false },
-                ..
-            }) = recv_document_frame(&mut writer, 1).await
-            {
-                saw_reject = true;
-                break;
-            }
-        }
-        assert!(saw_reject, "archived wiki doc must reject collab mutation");
-
-        let body = get_document_body(
-            addr,
-            &wiki.session.session_token,
-            wiki.session.workspace_id,
-            wiki.document_id,
-        )
-        .await;
-        assert_eq!(body["contentJson"], projected["contentJson"]);
-        assert_eq!(
-            document_updated_event_count(&admin, wiki.document_id).await,
-            events_before
-        );
-    }))
-    .await;
-}
-
-#[tokio::test]
-async fn collab_deterministic_project_failure_recovers_primary() {
-    run_test(
-        "collab_deterministic_project_failure_recovers_primary",
-        |run| Box::pin(async {
-            let app_url = run.harness.app_url.clone();
-            let wiki = setup_wiki_doc(&run.harness).await;
-            let addr = run
-                .spawn_router(&app_url, tiny_output_project_collab_config(4, 30_000))
-                .await;
-            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-            let update = delete_only_base_update();
-
-            let mut writer = connect_member(addr, &wiki.session.session_token).await;
-            auth_and_join(&mut writer, &routing_key, 81).await;
-            writer
-                .send(Message::Binary(
-                    sync_update_frame(&routing_key, &update).into(),
-                ))
-                .await
-                .unwrap();
-            assert!(
-                wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
-                "durable append must still ack when project is deterministically skipped"
-            );
+            auth_and_join(&mut writer, &routing_key, 80).await;
 
             let body = get_document_body(
                 addr,
@@ -597,40 +289,361 @@ async fn collab_deterministic_project_failure_recovers_primary() {
             )
             .await;
             assert_eq!(body["contentJson"], empty_document_json());
+            assert_eq!(body["version"], 1);
 
-            let mut second = connect_member(addr, &wiki.session.session_token).await;
-            auth_and_join(&mut second, &routing_key, 82).await;
-            complete_sync_handshake(&mut second, &routing_key).await;
-
-            let request_id = Uuid::now_v7();
-            second
-                .send(Message::Binary(
-                    stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
-                ))
+            let admin = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&admin_url)
                 .await
                 .unwrap();
-            assert!(
-                wait_for_stateless_exact(
-                    &mut second,
-                    &format!("persisted:{request_id}"),
-                    Duration::from_secs(5),
+            assert_eq!(
+                document_updated_event_count(&admin, wiki.document_id).await,
+                0
+            );
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_primary_unhealthy_skips_projection_until_catch_up() {
+    run_test(
+        "collab_primary_unhealthy_skips_projection_until_catch_up",
+        |run| {
+            Box::pin(async {
+                let app_url = run.harness.app_url.clone();
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let addr = run
+                    .spawn_router(&app_url, test_collab_config(4, 30_000))
+                    .await;
+                let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let update = delete_only_base_update();
+
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 91).await;
+                arm_force_primary_apply_fail(wiki.document_id).await;
+                arm_force_primary_load_fail(wiki.document_id).await;
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &update).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+                    "durable commit must still ack when primary reload fails"
+                );
+
+                let body_before = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
                 )
-                .await,
-                "persist must succeed after deterministic project skip"
-            );
+                .await;
+                assert_eq!(body_before["contentJson"], empty_document_json());
 
-            let follow_up = delete_only_update();
-            second
+                disarm_force_primary_load_fail(wiki.document_id).await;
+                disarm_force_primary_apply_fail(wiki.document_id).await;
+
+                let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut recovery, &routing_key, 92).await;
+
+                let body_after = await_persisted_get_body(addr, &wiki, 96).await;
+                assert_eq!(body_after["contentJson"], delete_only_json_before());
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_derived_event_failure_preserves_binary_then_retries() {
+    run_test(
+        "collab_derived_event_failure_preserves_binary_then_retries",
+        |run| {
+            Box::pin(async {
+                let app_url = run.harness.app_url.clone();
+                let admin_url = run.harness.admin_url.clone();
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let admin = PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect(&admin_url)
+                    .await
+                    .unwrap();
+                install_derived_document_updated_fail_trigger(&admin, "test_projection_event_fail")
+                    .await;
+
+                let addr = run
+                    .spawn_router(&app_url, test_collab_config(4, 30_000))
+                    .await;
+                let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let update = delete_only_base_update();
+
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 93).await;
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &update).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
+
+                let body_stale = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(body_stale["contentJson"], empty_document_json());
+                assert_eq!(
+                    document_updated_event_count(&admin, wiki.document_id).await,
+                    0
+                );
+                assert_eq!(
+                    event_count(&admin, wiki.document_id, "document.collab_update_appended",).await,
+                    1,
+                    "append audit event must commit while derived document.updated is blocked"
+                );
+
+                let load = fvoci_server::db::collab::load_collab_document(
+                    &wiki.session.pool,
+                    wiki.session.workspace_id,
+                    wiki.session.user_id,
+                    wiki.session.session_id,
+                    wiki.document_id,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(load.tail.len(), 1);
+                assert_eq!(load.tail[0].payload, update);
+
+                sqlx::query("DROP TRIGGER fvoci_test_projection_event_fail ON fvoci.events")
+                    .execute(&admin)
+                    .await
+                    .unwrap();
+
+                let follow_up = delete_only_update();
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &follow_up).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
+
+                let body_retry = await_persisted_get_body(addr, &wiki, 97).await;
+                assert_eq!(body_retry["contentJson"], delete_only_json_after());
+                assert!(document_updated_event_count(&admin, wiki.document_id).await >= 1);
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_catch_up_after_server_restart_without_retransmit() {
+    run_test(
+        "collab_catch_up_after_server_restart_without_retransmit",
+        |run| {
+            Box::pin(async {
+                let app_url = run.harness.app_url.clone();
+                let admin_url = run.harness.admin_url.clone();
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let admin = PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect(&admin_url)
+                    .await
+                    .unwrap();
+                install_derived_document_updated_fail_trigger(&admin, "test_restart_catchup").await;
+
+                let cfg = test_collab_config(4, 30_000);
+                let addr = run.spawn_router(&app_url, cfg.clone()).await;
+                send_collab_updates(addr, &wiki, &[&delete_only_base_update()]).await;
+
+                let stale = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(stale["contentJson"], empty_document_json());
+                assert_eq!(
+                    document_updated_event_count(&admin, wiki.document_id).await,
+                    0
+                );
+
+                sqlx::query("DROP TRIGGER fvoci_test_restart_catchup ON fvoci.events")
+                    .execute(&admin)
+                    .await
+                    .unwrap();
+
+                run.shutdown_last_server()
+                    .await
+                    .expect("restart test must shut down first server");
+                let addr2 = run.spawn_router(&app_url, cfg).await;
+                let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let mut writer = connect_member(addr2, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 75).await;
+
+                let body_after = get_document_body(
+                    addr2,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(body_after["contentJson"], delete_only_json_before());
+                assert_eq!(body_after["version"], 1);
+                assert_eq!(
+                    document_updated_event_count(&admin, wiki.document_id).await,
+                    1
+                );
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_archived_document_skips_new_projection() {
+    run_test("collab_archived_document_skips_new_projection", |run| {
+        Box::pin(async {
+            let app_url = run.harness.app_url.clone();
+            let admin_url = run.harness.admin_url.clone();
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let addr = run
+                .spawn_router(&app_url, test_collab_config(4, 30_000))
+                .await;
+            send_collab_updates(addr, &wiki, &[&delete_only_base_update()]).await;
+
+            let projected = await_persisted_get_body(addr, &wiki, 76).await;
+            let admin = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&admin_url)
+                .await
+                .unwrap();
+            let events_before = document_updated_event_count(&admin, wiki.document_id).await;
+
+            sqlx::query("UPDATE fvoci.documents SET status = 'archived' WHERE id = $1")
+                .bind(wiki.document_id)
+                .execute(&admin)
+                .await
+                .unwrap();
+
+            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+            let mut writer = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut writer, &routing_key, 94).await;
+            writer
                 .send(Message::Binary(
-                    sync_update_frame(&routing_key, &follow_up).into(),
+                    sync_update_frame(&routing_key, &delete_only_update()).into(),
                 ))
                 .await
                 .unwrap();
-            assert!(
-                wait_for_sync_applied(&mut second, Duration::from_secs(5)).await,
-                "follow-up edit must ack after primary recovery"
+            let mut saw_reject = false;
+            for _ in 0..8 {
+                if let Some(WireFrame::Document {
+                    message: DocumentMessage::SyncStatus { applied: false },
+                    ..
+                }) = recv_document_frame(&mut writer, 1).await
+                {
+                    saw_reject = true;
+                    break;
+                }
+            }
+            assert!(saw_reject, "archived wiki doc must reject collab mutation");
+
+            let body = get_document_body(
+                addr,
+                &wiki.session.session_token,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await;
+            assert_eq!(body["contentJson"], projected["contentJson"]);
+            assert_eq!(
+                document_updated_event_count(&admin, wiki.document_id).await,
+                events_before
             );
-        }),
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_deterministic_project_failure_recovers_primary() {
+    run_test(
+        "collab_deterministic_project_failure_recovers_primary",
+        |run| {
+            Box::pin(async {
+                let app_url = run.harness.app_url.clone();
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let addr = run
+                    .spawn_router(&app_url, tiny_output_project_collab_config(4, 30_000))
+                    .await;
+                let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let update = delete_only_base_update();
+
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 81).await;
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &update).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+                    "durable append must still ack when project is deterministically skipped"
+                );
+
+                let body = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(body["contentJson"], empty_document_json());
+
+                let mut second = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut second, &routing_key, 82).await;
+                complete_sync_handshake(&mut second, &routing_key).await;
+
+                let request_id = Uuid::now_v7();
+                second
+                    .send(Message::Binary(
+                        stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_stateless_exact(
+                        &mut second,
+                        &format!("persisted:{request_id}"),
+                        Duration::from_secs(5),
+                    )
+                    .await,
+                    "persist must succeed after deterministic project skip"
+                );
+
+                let follow_up = delete_only_update();
+                second
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &follow_up).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_sync_applied(&mut second, Duration::from_secs(5)).await,
+                    "follow-up edit must ack after primary recovery"
+                );
+            })
+        },
     )
     .await;
 }
@@ -639,110 +652,112 @@ async fn collab_deterministic_project_failure_recovers_primary() {
 async fn collab_manual_persist_fails_when_derived_event_insert_blocked() {
     run_test(
         "collab_manual_persist_fails_when_derived_event_insert_blocked",
-        |run| Box::pin(async {
-            let app_url = run.harness.app_url.clone();
-            let admin_url = run.harness.admin_url.clone();
-            let wiki = setup_wiki_doc(&run.harness).await;
-            let admin = PgPoolOptions::new()
-                .max_connections(2)
-                .connect(&admin_url)
-                .await
-                .unwrap();
-            install_derived_document_updated_fail_trigger(
-                &admin,
-                "test_manual_persist_derive_fail",
-            )
-            .await;
-
-            let addr = run
-                .spawn_router(&app_url, test_collab_config(4, 30_000))
+        |run| {
+            Box::pin(async {
+                let app_url = run.harness.app_url.clone();
+                let admin_url = run.harness.admin_url.clone();
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let admin = PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect(&admin_url)
+                    .await
+                    .unwrap();
+                install_derived_document_updated_fail_trigger(
+                    &admin,
+                    "test_manual_persist_derive_fail",
+                )
                 .await;
-            let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
-            let request_id = Uuid::now_v7();
 
-            let mut writer = connect_member(addr, &wiki.session.session_token).await;
-            auth_and_join(&mut writer, &routing_key, 95).await;
-            writer
-                .send(Message::Binary(
-                    sync_update_frame(&routing_key, &delete_only_base_update()).into(),
-                ))
-                .await
-                .unwrap();
-            assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
+                let addr = run
+                    .spawn_router(&app_url, test_collab_config(4, 30_000))
+                    .await;
+                let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let request_id = Uuid::now_v7();
 
-            let body_after_edit = get_document_body(
-                addr,
-                &wiki.session.session_token,
-                wiki.session.workspace_id,
-                wiki.document_id,
-            )
-            .await;
-            assert_eq!(body_after_edit["contentJson"], empty_document_json());
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 95).await;
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &delete_only_base_update()).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await);
 
-            writer
-                .send(Message::Binary(
-                    stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
-                ))
-                .await
-                .unwrap();
+                let body_after_edit = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(body_after_edit["contentJson"], empty_document_json());
 
-            let mut saw_persist_failed = false;
-            for _ in 0..12 {
-                if let Some(WireFrame::Document {
-                    message: DocumentMessage::Stateless(body),
-                    ..
-                }) = recv_document_frame(&mut writer, 1).await
-                {
-                    if body == format!("persist-failed:{request_id}") {
-                        saw_persist_failed = true;
-                        break;
+                writer
+                    .send(Message::Binary(
+                        stateless_frame(&routing_key, &format!("persist:{request_id}")).into(),
+                    ))
+                    .await
+                    .unwrap();
+
+                let mut saw_persist_failed = false;
+                for _ in 0..12 {
+                    if let Some(WireFrame::Document {
+                        message: DocumentMessage::Stateless(body),
+                        ..
+                    }) = recv_document_frame(&mut writer, 1).await
+                    {
+                        if body == format!("persist-failed:{request_id}") {
+                            saw_persist_failed = true;
+                            break;
+                        }
                     }
                 }
-            }
-            assert!(
-                saw_persist_failed,
-                "manual persist must fail when derived event insert is blocked"
-            );
+                assert!(
+                    saw_persist_failed,
+                    "manual persist must fail when derived event insert is blocked"
+                );
 
-            sqlx::query("DROP TRIGGER fvoci_test_manual_persist_derive_fail ON fvoci.events")
-                .execute(&admin)
-                .await
-                .unwrap();
+                sqlx::query("DROP TRIGGER fvoci_test_manual_persist_derive_fail ON fvoci.events")
+                    .execute(&admin)
+                    .await
+                    .unwrap();
 
-            let retry_id = Uuid::now_v7();
-            writer
-                .send(Message::Binary(
-                    stateless_frame(&routing_key, &format!("persist:{retry_id}")).into(),
-                ))
-                .await
-                .unwrap();
-            let mut saw_persisted = false;
-            for _ in 0..12 {
-                if let Some(WireFrame::Document {
-                    message: DocumentMessage::Stateless(body),
-                    ..
-                }) = recv_document_frame(&mut writer, 1).await
-                {
-                    if body == format!("persisted:{retry_id}") {
-                        saw_persisted = true;
-                        break;
+                let retry_id = Uuid::now_v7();
+                writer
+                    .send(Message::Binary(
+                        stateless_frame(&routing_key, &format!("persist:{retry_id}")).into(),
+                    ))
+                    .await
+                    .unwrap();
+                let mut saw_persisted = false;
+                for _ in 0..12 {
+                    if let Some(WireFrame::Document {
+                        message: DocumentMessage::Stateless(body),
+                        ..
+                    }) = recv_document_frame(&mut writer, 1).await
+                    {
+                        if body == format!("persisted:{retry_id}") {
+                            saw_persisted = true;
+                            break;
+                        }
                     }
                 }
-            }
-            assert!(
-                saw_persisted,
-                "manual persist must succeed after derive repair"
-            );
+                assert!(
+                    saw_persisted,
+                    "manual persist must succeed after derive repair"
+                );
 
-            let body_after_retry = get_document_body(
-                addr,
-                &wiki.session.session_token,
-                wiki.session.workspace_id,
-                wiki.document_id,
-            )
-            .await;
-            assert_eq!(body_after_retry["contentJson"], delete_only_json_before());
-        }),
+                let body_after_retry = get_document_body(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await;
+                assert_eq!(body_after_retry["contentJson"], delete_only_json_before());
+            })
+        },
     )
     .await;
 }

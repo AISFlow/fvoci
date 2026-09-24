@@ -350,15 +350,14 @@ impl TestServer {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
-        if let Some(join) = self.join.take() {
-            if let Err(error) = join.await {
-                if !error.is_cancelled() {
-                    return Err(format!("test server task failed: {error}"));
-                }
-            }
-        }
+        let server_result = match self.join.take() {
+            Some(join) => join
+                .await
+                .map_err(|error| format!("test server task failed: {error}")),
+            None => Ok(()),
+        };
         self.hub.shutdown().await;
-        Ok(())
+        server_result
     }
 }
 
