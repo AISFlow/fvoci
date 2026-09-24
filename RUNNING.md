@@ -18,6 +18,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. An explicit port `0` follows the actual bound port. |
 | `FVOCI_COOKIE_SECURE` | `true`/`1` to set `Secure` on session cookies; defaults from `FVOCI_PUBLIC_ORIGIN` scheme. |
 | `FVOCI_STATIC_DIR` | Optional built frontend directory containing index.html; validated at startup. |
+| `FVOCI_STORAGE_DIR` | Required persistent local attachment directory, writable by the server. Reuse the same directory across restarts and preserve it with the database. |
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
 
 Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. The crate uses SQLx `runtime-tokio-rustls`.
@@ -40,8 +41,14 @@ Never grant the app role before the role exists. Keep database credentials and p
 ## Start server
 
 ```sh
+export FVOCI_STORAGE_DIR='/path/to/persistent/fvoci-storage'
 cargo run --bin fvoci-server
 ```
+
+Local attachment storage must be on persistent storage. A new empty directory
+does not restore the files referenced by an existing database. Uploads retain
+their original bytes separately from derived extraction results; native
+extraction job integration and search indexing are not yet accepted.
 
 Migrations run once at startup via the owner URL; the server connects only through `DATABASE_APP_URL`. The app pool is closed explicitly on shutdown and startup failures.
 
