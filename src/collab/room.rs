@@ -178,6 +178,41 @@ async fn pause_for_append_in_tx_reject_barrier(document_id: Uuid) {
     }
 }
 
+#[cfg(feature = "db-tests")]
+static APPEND_PROJECTION_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_append_projection_barrier(
+    document_id: Uuid,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    APPEND_PROJECTION_BARRIERS.lock().await.insert(
+        document_id,
+        AppendRevokeBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_append_projection_barrier(document_id: Uuid) {
+    APPEND_PROJECTION_BARRIERS.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_append_projection_barrier(document_id: Uuid) {
+    let barrier = APPEND_PROJECTION_BARRIERS.lock().await.remove(&document_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
 const OUTBOUND_FRAME_OVERHEAD: usize = 48;
 
 async fn wait_spawn_room_block(_document_id: Uuid) {
@@ -748,12 +783,16 @@ impl RoomActor {
                     self.committed.tail_seq,
                     join.conn.session.user_id,
                     join.conn.session.session_id,
+                    true,
                 )
                 .await,
                 ProjectDerivedOutcome::StaleWriter
             )
         {
             return Err(JoinError::WriterStale);
+        }
+        if !self.primary_loaded {
+            return Err(JoinError::EngineUnavailable);
         }
         if !self.reserve_client_id(join.conn.client_id, join.conn.session.user_id) {
             return Err(JoinError::AdmissionDenied);
@@ -816,10 +855,10 @@ impl RoomActor {
         }
     }
 
-    async fn recover_primary_after_engine_fault(&mut self) {
+    async fn recover_primary_after_engine_fault(&mut self) -> bool {
         self.primary_loaded = false;
         self.primary_dirty = true;
-        let _ = self.reload_primary_from_committed().await;
+        self.reload_primary_from_committed().await.is_ok() && self.primary_loaded
     }
 
     fn is_definite_append_rejection(err: &CollabDbError) -> bool {
@@ -1171,7 +1210,11 @@ impl RoomActor {
                 }
 
                 if self.ensure_primary_capacity().await.is_err() {
-                    self.reject_candidate(conn_id, routing_key).await;
+                    if let Some(c) = self.connections.get_mut(&conn_id) {
+                        c.in_flight = false;
+                    }
+                    self.close_connection(conn_id, 1011, "engine unavailable")
+                        .await;
                     return;
                 }
 
@@ -1296,13 +1339,27 @@ impl RoomActor {
                     return;
                 }
                 self.broadcast_update(&sync.y_protocol).await;
-                let _ = self
-                    .maybe_project_derived_body(seq, actor_user_id, session_id)
-                    .await;
+                #[cfg(feature = "db-tests")]
+                pause_for_append_projection_barrier(self.document_id).await;
                 if let Some(c) = self.connections.get_mut(&conn_id) {
                     c.in_flight = false;
                 }
                 self.send_sync_status(conn_id, routing_key, true).await;
+                match self
+                    .maybe_project_derived_body(seq, actor_user_id, session_id, false)
+                    .await
+                {
+                    ProjectDerivedOutcome::StaleWriter => {
+                        self.fatal_writer_stale_ordered().await;
+                        return;
+                    }
+                    _ if !self.primary_loaded => {
+                        self.fatal_primary_unhealthy(actor_user_id, session_id)
+                            .await;
+                        return;
+                    }
+                    _ => {}
+                }
                 self.flush_connection_persist(conn_id, op_prefix).await;
                 self.maybe_compact().await;
             }
@@ -1401,10 +1458,18 @@ impl RoomActor {
     }
 
     async fn fatal_writer_stale(&mut self) {
+        self.writer_generation = None;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
             self.close_connection(conn_id, 1008, "writer stale").await;
         }
+    }
+
+    async fn fatal_writer_stale_ordered(&mut self) {
         self.writer_generation = None;
+        for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
+            self.close_connection_ordered(conn_id, 1008, "writer stale")
+                .await;
+        }
     }
 
     async fn fatal_room_divergence(&mut self, actor_user_id: Uuid, session_id: Uuid) {
@@ -1458,6 +1523,7 @@ impl RoomActor {
         seq: i64,
         actor_user_id: Uuid,
         session_id: Uuid,
+        preemptive_stale_close: bool,
     ) -> ProjectDerivedOutcome {
         if seq < 1 {
             return ProjectDerivedOutcome::SkippedSeed;
@@ -1656,7 +1722,9 @@ impl RoomActor {
             }
             Ok(Ok(ProjectDerivedBodyResult::SkippedSeed)) => ProjectDerivedOutcome::SkippedSeed,
             Ok(Err(CollabDbError::StaleWriter)) => {
-                self.fatal_writer_stale().await;
+                if preemptive_stale_close {
+                    self.fatal_writer_stale().await;
+                }
                 ProjectDerivedOutcome::StaleWriter
             }
             Ok(Err(CollabDbError::StaleCutoff)) => ProjectDerivedOutcome::StaleCutoff,
@@ -1944,8 +2012,13 @@ impl RoomActor {
                         return format!("persist-failed:{request_id}");
                     }
                     if Self::manual_persist_projection_failed(
-                        self.maybe_project_derived_body(load.tail_seq, actor_user_id, session_id)
-                            .await,
+                        self.maybe_project_derived_body(
+                            load.tail_seq,
+                            actor_user_id,
+                            session_id,
+                            true,
+                        )
+                        .await,
                     ) {
                         self.compact_unhealthy = true;
                         self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());

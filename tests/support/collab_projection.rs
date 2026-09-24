@@ -25,6 +25,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
@@ -699,6 +700,100 @@ pub async fn wait_for_sync_applied(
         }
     }
     false
+}
+
+pub fn ws_close_code(frame: &CloseFrame) -> u16 {
+    u16::from(frame.code)
+}
+
+pub async fn wait_for_ws_close_code(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    expected: u16,
+    within: Duration,
+    reject_sync_update: bool,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut saw_applied_false = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = ws_close_code(&frame);
+                assert_eq!(
+                    code, expected,
+                    "CloseFrame {code} ({:?}), expected {expected}; reason {:?}",
+                    frame.code, frame.reason
+                );
+                assert!(
+                    !saw_applied_false,
+                    "must not receive applied:false before CloseFrame {expected}"
+                );
+                return;
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("Close without code, expected CloseFrame {expected}");
+            }
+            Ok(None) => panic!("bare TCP EOF, expected CloseFrame {expected}"),
+            Ok(Some(Err(err))) => panic!("websocket error before CloseFrame {expected}: {err}"),
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::SyncStatus { applied: false },
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    saw_applied_false = true;
+                }
+                if reject_sync_update
+                    && matches!(
+                        fvoci_server::collab::wire::decode(&bytes),
+                        Ok(WireFrame::Document {
+                            message: DocumentMessage::Sync(SyncMessage {
+                                step: SyncStep::Update,
+                                ..
+                            }),
+                            ..
+                        })
+                    )
+                {
+                    panic!("rejected update must not broadcast Sync Update before close");
+                }
+            }
+            Ok(Some(Ok(_))) | Err(_) => {}
+        }
+    }
+    panic!("timed out waiting for CloseFrame {expected}; saw_applied_false={saw_applied_false}");
+}
+
+pub async fn join_denied(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    routing_key: &str,
+    client_id: u32,
+) {
+    ws.send(Message::Binary(
+        auth_token_frame(routing_key, client_id).into(),
+    ))
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("timeout")
+        .expect("stream")
+        .expect("frame");
+    let frame = fvoci_server::collab::wire::decode(&msg.into_data()).expect("decode");
+    assert!(
+        matches!(
+            frame,
+            WireFrame::Document {
+                message: DocumentMessage::Auth(AuthMessage::PermissionDenied { .. }),
+                ..
+            }
+        ),
+        "join must be denied when room engine is unavailable, got {frame:?}"
+    );
 }
 
 pub async fn get_document_body(
