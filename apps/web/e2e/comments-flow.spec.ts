@@ -57,4 +57,10 @@ test("member adds and resolves a wiki document comment", async ({ page }) => {
 
   await panel.getByRole("button", { name: "반응 👍" }).click();
   await expect(panel.getByRole("button", { name: "반응 👍", pressed: true })).toContainText("1");
+
+  await panel.getByRole("button", { name: "답글" }).click();
+  const reply = panel.locator("[data-comment-reply] textarea");
+  await reply.fill("답글 초안은 본문과 분리");
+  await expect(compose).toHaveValue("");
+  await expect(reply).toHaveValue("답글 초안은 본문과 분리");
 });

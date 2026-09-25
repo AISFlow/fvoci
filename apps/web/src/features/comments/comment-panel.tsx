@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { ensureOk, ProblemError, api } from "@/lib/api";
 import { documentCommentsQuery } from "@/lib/queries/comments";
+import { nextReplyTarget } from "./comment-drafts";
 import { buildCommentTree, type CommentNode } from "./comment-tree";
 
 const REACTIONS = ["👍", "❤️", "🎉"] as const;
@@ -26,6 +27,7 @@ export function CommentPanel({
   const queryClient = useQueryClient();
   const list = useInfiniteQuery(documentCommentsQuery(workspaceId, documentId));
   const [draft, setDraft] = useState("");
+  const [replyDraft, setReplyDraft] = useState("");
   const [replyToId, setReplyToId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
@@ -54,6 +56,7 @@ export function CommentPanel({
       ),
     onSuccess: async () => {
       setDraft("");
+      setReplyDraft("");
       setReplyToId(null);
       setActionError(null);
       await invalidate();
@@ -183,7 +186,10 @@ export function CommentPanel({
               size="sm"
               variant="outline"
               disabled={pending}
-              onClick={() => setReplyToId((current) => (current === comment.id ? null : comment.id))}
+              onClick={() => {
+                setReplyToId((current) => nextReplyTarget(current, comment.id));
+                setReplyDraft("");
+              }}
             >
               {t("comment.reply")}
             </Button>
@@ -248,22 +254,23 @@ export function CommentPanel({
         ) : null}
         {replyToId === comment.id && !readOnly ? (
           <form
+            data-comment-reply=""
             className="comment-thread__compose"
             onSubmit={(event) => {
               event.preventDefault();
-              const text = draft.trim();
+              const text = replyDraft.trim();
               if (!text) return;
               void create.mutateAsync({ text, parentId: comment.id });
             }}
           >
             <textarea
               className="comment-thread__input"
-              value={draft}
+              value={replyDraft}
               aria-label={t("comment.placeholder")}
               disabled={pending}
-              onChange={(event) => setDraft(event.target.value)}
+              onChange={(event) => setReplyDraft(event.target.value)}
             />
-            <Button type="submit" size="sm" disabled={pending || draft.trim() === ""}>
+            <Button type="submit" size="sm" disabled={pending || replyDraft.trim() === ""}>
               {t("comment.submit")}
             </Button>
           </form>

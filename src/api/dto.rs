@@ -997,7 +997,7 @@ pub struct LookupListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct CreateCommentBody {
     pub body: String,
@@ -1010,7 +1010,7 @@ pub struct CreateCommentBody {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct PatchCommentBody {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1018,7 +1018,7 @@ pub struct PatchCommentBody {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct CommentReactionBody {
     pub emoji: String,

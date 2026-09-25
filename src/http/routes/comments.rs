@@ -96,7 +96,11 @@ fn comment_to_output(comment: &crate::db::comments::CommentRow, viewer_id: Uuid)
 }
 
 fn validate_create_body(body: &CreateCommentBody) -> Result<Vec<Uuid>, CommentApiError> {
-    if body.mentioned_group_ids.is_some() {
+    if body
+        .mentioned_group_ids
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
+    {
         return Err(CommentApiError::App(AppError::from_code(
             ProblemCode::InvalidInput,
         )));
@@ -145,40 +149,15 @@ async fn list_project_document_comments_route(
     State(state): State<AppState>,
     headers: HeaderMap,
     jar: CookieJar,
-    Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+    Path((_workspace_id, _project_id, _document_id)): Path<(Uuid, Uuid, Uuid)>,
     query: Result<Query<CommentListQueryParams>, QueryRejection>,
 ) -> Result<Json<CommentListResponse>, CommentApiError> {
     reject_bearer(&headers)?;
-    let Query(query) = query.map_err(AppError::from)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let actor_user_id = parse_user_id(&user.user_id)?;
-    ensure_project_document(&state.auth.db.pool, workspace_id, project_id, document_id)
-        .await
-        .map_err(internal)?;
-    let page = list_document_comments(
-        &state.auth.db.pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        CommentListQuery {
-            limit: query.limit.unwrap_or(50),
-            cursor: query.cursor,
-        },
-    )
-    .await
-    .map_err(internal)?;
-    match page {
-        Ok(page) => Ok(Json(CommentListResponse {
-            items: page
-                .items
-                .iter()
-                .map(|row| comment_to_output(row, actor_user_id))
-                .collect(),
-            next_cursor: page.next_cursor,
-        })),
-        Err(err) => Err(map_comment_error(err)),
-    }
+    let Query(_query) = query.map_err(AppError::from)?;
+    let _ = require_session(&state, &jar).await?;
+    // Wiki `document_permission` returns None for project documents; keep the
+    // same not-found mask as GET /documents/{id} rather than querying without a tenant.
+    Err(map_comment_error(CommentDbError::NotFound))
 }
 
 async fn list_task_comments_route(
@@ -267,52 +246,17 @@ async fn create_document_comment_route(
 
 async fn create_project_document_comment_route(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
-    Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+    Path((_workspace_id, _project_id, _document_id)): Path<(Uuid, Uuid, Uuid)>,
     body: Result<Json<CreateCommentBody>, JsonRejection>,
 ) -> Result<Response, CommentApiError> {
     let Json(body) = body.map_err(AppError::from)?;
     reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let mentioned_user_ids = validate_create_body(&body)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let actor_user_id = parse_user_id(&user.user_id)?;
-    ensure_project_document(&state.auth.db.pool, workspace_id, project_id, document_id)
-        .await
-        .map_err(internal)?;
-    let ip = peer_ip(peer.ip());
-    if let Err(retry_after) = state
-        .rate_limiter
-        .allow(&format!("comment-create:{actor_user_id}"), 60)
-        .await
-    {
-        return Err(AppError::rate_limited(retry_after).into());
-    }
-    let created = create_document_comment(
-        &state.auth.db.pool,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        CreateCommentInput {
-            body: &body.body,
-            parent_id: body.parent_id,
-            mentioned_user_ids: &mentioned_user_ids,
-        },
-        Some(&ip),
-    )
-    .await
-    .map_err(internal)?;
-    match created {
-        Ok(row) => Ok((
-            StatusCode::CREATED,
-            Json(comment_to_output(&row, actor_user_id)),
-        )
-            .into_response()),
-        Err(err) => Err(map_comment_error(err)),
-    }
+    let _ = validate_create_body(&body)?;
+    let _ = require_session(&state, &jar).await?;
+    Err(map_comment_error(CommentDbError::NotFound))
 }
 
 async fn create_task_comment_route(
@@ -436,6 +380,7 @@ async fn resolve_comment_route(
     Path((workspace_id, comment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<CommentOutput>, CommentApiError> {
     reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
@@ -463,6 +408,7 @@ async fn unresolve_comment_route(
     Path((workspace_id, comment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<CommentOutput>, CommentApiError> {
     reject_bearer(&headers)?;
+    check_origin(&headers, &state.public_origin)?;
     let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
@@ -513,29 +459,6 @@ async fn react_comment_route(
     match updated {
         Ok(row) => Ok(Json(comment_to_output(&row, actor_user_id))),
         Err(err) => Err(map_comment_error(err)),
-    }
-}
-
-async fn ensure_project_document(
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    project_id: Uuid,
-    document_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-        r#"
-        SELECT project_id
-        FROM fvoci.documents
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(pool)
-    .await?;
-    match row {
-        Some((Some(doc_project),)) if doc_project == project_id => Ok(()),
-        _ => Err(sqlx::Error::RowNotFound),
     }
 }
 
@@ -604,6 +527,13 @@ fn map_comment_error(err: CommentDbError) -> CommentApiError {
             status: StatusCode::CONFLICT,
             code: "conflict",
             title: "conflict".to_string(),
+            params: None,
+        },
+        CommentDbError::ProjectArchived => AppError::from_code(ProblemCode::ProjectArchived).into(),
+        CommentDbError::TaskArchived => CommentApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "task_archived",
+            title: "task archived".to_string(),
             params: None,
         },
     }

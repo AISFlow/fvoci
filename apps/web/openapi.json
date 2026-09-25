@@ -4659,7 +4659,8 @@
           "on": {
             "type": "boolean"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CommentReactionSummary": {
         "type": "object",
@@ -4774,7 +4775,8 @@
             ],
             "format": "uuid"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateDocumentBody": {
         "type": "object",
@@ -5350,7 +5352,8 @@
               "null"
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "PatchDocumentBody": {
         "type": "object",

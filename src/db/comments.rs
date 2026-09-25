@@ -12,7 +12,7 @@ use crate::collab::derived_body::to_chosung;
 use crate::db::context::set_tenant;
 use crate::db::documents::{
     assert_document_writable, document_permission, lock_membership_users, recheck_session,
-    session_is_live, workspace_is_live, DocumentDbError, DocumentPermission,
+    session_is_live, workspace_is_live, DocumentDbError,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission};
@@ -48,6 +48,8 @@ pub enum CommentDbError {
     InvalidInput,
     InvalidCursor,
     Conflict,
+    ProjectArchived,
+    TaskArchived,
 }
 
 #[derive(Debug, Clone)]
@@ -103,9 +105,14 @@ pub struct ReactionSummary {
     pub reacted_by_me: bool,
 }
 
+fn body_unit_len(body: &str) -> usize {
+    // Source zod `.max(8000)` uses JS string `.length` (UTF-16 code units).
+    body.encode_utf16().count()
+}
+
 fn normalize_body(body: &str) -> Result<String, CommentDbError> {
     let trimmed = body.trim();
-    if trimmed.is_empty() || trimmed.len() > COMMENT_BODY_MAX {
+    if trimmed.is_empty() || body_unit_len(trimmed) > COMMENT_BODY_MAX {
         return Err(CommentDbError::InvalidInput);
     }
     Ok(trimmed.to_string())
@@ -268,7 +275,7 @@ async fn require_document_access(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     document_id: Uuid,
-    min: DocumentPermission,
+    min: ProjectPermission,
     writable: bool,
 ) -> Result<(), CommentDbError> {
     // Single wiki document permission path (db::documents::document_permission).
@@ -276,12 +283,7 @@ async fn require_document_access(
     let permission = document_permission(tx, workspace_id, actor_user_id, document_id, true)
         .await
         .map_err(|_| CommentDbError::NotFound)?;
-    let required = match min {
-        DocumentPermission::None => ProjectPermission::None,
-        DocumentPermission::View => ProjectPermission::View,
-        DocumentPermission::Edit => ProjectPermission::Edit,
-    };
-    if permission < required || permission == ProjectPermission::None {
+    if !permission.at_least(min) || permission == ProjectPermission::None {
         return Err(CommentDbError::NotFound);
     }
     if writable {
@@ -305,17 +307,19 @@ async fn require_task_access(
         .await
         .map_err(|_| CommentDbError::NotFound)?
         .ok_or(CommentDbError::NotFound)?;
-    if locked.status == "archived" {
-        return Err(CommentDbError::NotFound);
-    }
     let permission = project_permission(tx, workspace_id, actor_user_id, &locked)
         .await
         .map_err(|_| CommentDbError::NotFound)?;
     if !permission.at_least(min) {
         return Err(CommentDbError::NotFound);
     }
-    if writable && task.archived_at.is_some() {
-        return Err(CommentDbError::NotFound);
+    if writable {
+        if locked.status == "archived" {
+            return Err(CommentDbError::ProjectArchived);
+        }
+        if task.archived_at.is_some() {
+            return Err(CommentDbError::TaskArchived);
+        }
     }
     Ok(())
 }
@@ -325,8 +329,7 @@ async fn require_parent_access(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     target: &ParentTarget,
-    min_doc: DocumentPermission,
-    min_task: ProjectPermission,
+    min: ProjectPermission,
     writable: bool,
 ) -> Result<(), CommentDbError> {
     match target {
@@ -336,13 +339,13 @@ async fn require_parent_access(
                 workspace_id,
                 actor_user_id,
                 doc.document_id,
-                min_doc,
+                min,
                 writable,
             )
             .await
         }
         ParentTarget::Task(task) => {
-            require_task_access(tx, workspace_id, actor_user_id, task, min_task, writable).await
+            require_task_access(tx, workspace_id, actor_user_id, task, min, writable).await
         }
     }
 }
@@ -352,8 +355,7 @@ async fn require_author_or_level(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     comment: &CommentRow,
-    min_doc: DocumentPermission,
-    min_task: ProjectPermission,
+    min: ProjectPermission,
     writable: bool,
 ) -> Result<(), CommentDbError> {
     let target = target_of_comment(tx, workspace_id, comment).await?;
@@ -362,7 +364,6 @@ async fn require_author_or_level(
         workspace_id,
         actor_user_id,
         &target,
-        DocumentPermission::View,
         ProjectPermission::View,
         writable,
     )
@@ -370,16 +371,7 @@ async fn require_author_or_level(
     if comment.created_by == actor_user_id {
         return Ok(());
     }
-    require_parent_access(
-        tx,
-        workspace_id,
-        actor_user_id,
-        &target,
-        min_doc,
-        min_task,
-        writable,
-    )
-    .await
+    require_parent_access(tx, workspace_id, actor_user_id, &target, min, writable).await
 }
 
 async fn record_comment_event(
@@ -535,9 +527,15 @@ async fn comment_page(
     target_id: Uuid,
     query: CommentListQuery,
 ) -> Result<CommentListPage, CommentDbError> {
-    let limit = query.limit.clamp(1, 100);
+    if !(1..=100).contains(&query.limit) {
+        return Err(CommentDbError::InvalidInput);
+    }
+    let limit = query.limit;
     let scope = comment_scope(workspace_id, kind, target_id);
     let after = if let Some(cursor) = &query.cursor {
+        if cursor.len() > 1024 {
+            return Err(CommentDbError::InvalidInput);
+        }
         let id = decode_cursor(cursor, &scope)?;
         let anchor = fetch_comment(tx, workspace_id, id)
             .await
@@ -679,7 +677,6 @@ pub async fn list_document_comments(
         workspace_id,
         actor_user_id,
         &ParentTarget::Document(target),
-        DocumentPermission::View,
         ProjectPermission::View,
         false,
     )
@@ -720,7 +717,6 @@ pub async fn list_task_comments(
         workspace_id,
         actor_user_id,
         &ParentTarget::Task(target),
-        DocumentPermission::View,
         ProjectPermission::View,
         false,
     )
@@ -754,7 +750,6 @@ pub async fn create_document_comment(
         workspace_id,
         actor_user_id,
         &ParentTarget::Document(target),
-        DocumentPermission::Edit,
         ProjectPermission::Edit,
         true,
     )
@@ -798,7 +793,6 @@ pub async fn create_task_comment(
         workspace_id,
         actor_user_id,
         &ParentTarget::Task(target),
-        DocumentPermission::Edit,
         ProjectPermission::Edit,
         true,
     )
@@ -846,7 +840,6 @@ pub async fn update_comment(
         workspace_id,
         actor_user_id,
         &comment,
-        DocumentPermission::Edit,
         ProjectPermission::Edit,
         true,
     )
@@ -911,7 +904,6 @@ pub async fn purge_comment(
         workspace_id,
         actor_user_id,
         &comment,
-        DocumentPermission::Edit,
         ProjectPermission::Manage,
         true,
     )
@@ -965,7 +957,6 @@ pub async fn resolve_comment(
         workspace_id,
         actor_user_id,
         &target,
-        DocumentPermission::Edit,
         ProjectPermission::Edit,
         true,
     )
@@ -1031,7 +1022,6 @@ pub async fn unresolve_comment(
         workspace_id,
         actor_user_id,
         &target,
-        DocumentPermission::Edit,
         ProjectPermission::Edit,
         true,
     )
@@ -1124,7 +1114,6 @@ pub async fn set_comment_reaction(
         workspace_id,
         actor_user_id,
         &target,
-        DocumentPermission::View,
         ProjectPermission::View,
         true,
     )
