@@ -503,6 +503,9 @@ async fn collab_app_state_with_config(app_url: &str, cfg: CollabConfig) -> AppSt
         },
         collab: Some(Arc::new(CollabHub::new(cfg, pool))),
         meili: None,
+        document_convert: None,
+        import_settings: None,
+        import_queue: fvoci_server::import_job::ImportQueue::new(),
     }
 }
 
@@ -534,6 +537,9 @@ async fn collab_app_state(app_url: &str, with_collab: bool) -> AppState {
         },
         collab,
         meili: None,
+        document_convert: None,
+        import_settings: None,
+        import_queue: fvoci_server::import_job::ImportQueue::new(),
     }
 }
 

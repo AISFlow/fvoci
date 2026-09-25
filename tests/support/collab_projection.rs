@@ -435,6 +435,9 @@ pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> (AppState, Ar
         },
         collab: Some(hub.clone()),
         meili: None,
+        document_convert: None,
+        import_settings: None,
+        import_queue: fvoci_server::import_job::ImportQueue::new(),
     };
     (state, hub)
 }

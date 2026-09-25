@@ -23,6 +23,9 @@ use crate::db::documents::{
     trash_wiki_document, update_wiki_document_meta, CreateDocumentInput, DocumentDbError,
     DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
 };
+use crate::documents::export::{
+    export_filename, render_document_export, ExportFormat, ExportRenderError,
+};
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
@@ -66,6 +69,22 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/body",
             get(get_body),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/md",
+            get(export_markdown),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/pdf",
+            get(export_pdf),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/docx",
+            get(export_docx),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/pptx",
+            get(export_pptx),
         )
 }
 
@@ -527,6 +546,166 @@ async fn list_trash(
         })),
         Err(err) => Err(map_document_error(err)),
     }
+}
+
+async fn export_markdown(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, DocumentApiError> {
+    export_document(
+        &state,
+        peer,
+        &headers,
+        &jar,
+        workspace_id,
+        document_id,
+        ExportFormat::Markdown,
+    )
+    .await
+}
+
+async fn export_pdf(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, DocumentApiError> {
+    export_document(
+        &state,
+        peer,
+        &headers,
+        &jar,
+        workspace_id,
+        document_id,
+        ExportFormat::Pdf,
+    )
+    .await
+}
+
+async fn export_docx(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, DocumentApiError> {
+    export_document(
+        &state,
+        peer,
+        &headers,
+        &jar,
+        workspace_id,
+        document_id,
+        ExportFormat::Docx,
+    )
+    .await
+}
+
+async fn export_pptx(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, DocumentApiError> {
+    export_document(
+        &state,
+        peer,
+        &headers,
+        &jar,
+        workspace_id,
+        document_id,
+        ExportFormat::Pptx,
+    )
+    .await
+}
+
+async fn export_document(
+    state: &AppState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    format: ExportFormat,
+) -> Result<Response, DocumentApiError> {
+    let (_user, user_id, session_id) = require_session(
+        state,
+        headers,
+        jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let _ = peer_ip(peer.ip());
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow_window(
+            &format!("doc-export-user:{user_id}"),
+            10,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after).into());
+    }
+    let Some(convert) = state.document_convert.as_ref() else {
+        return Err(AppError::internal().into());
+    };
+    let result = get_wiki_document(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        document_id,
+    )
+    .await
+    .map_err(internal)?;
+    let meta = match result {
+        Ok(meta) => meta,
+        Err(err) => return Err(map_document_error(err)),
+    };
+    let rendered = match render_document_export(convert, format, &meta.title, &meta.content_json) {
+        Ok(v) => v,
+        Err(ExportRenderError::InvalidInput) => {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+        Err(ExportRenderError::TooLarge) => {
+            return Err(DocumentApiError::Coded {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: "document_body_exceeds_document_max_body_bytes",
+                title: "document body exceeds document max body bytes".to_string(),
+                params: None,
+            });
+        }
+        Err(ExportRenderError::Unavailable | ExportRenderError::Failed) => {
+            return Err(AppError::internal().into());
+        }
+    };
+    let filename = export_filename(&meta.title, &rendered.ext);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_str(&rendered.content_type).map_err(|_| AppError::internal())?,
+    );
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .map_err(|_| AppError::internal())?,
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok((StatusCode::OK, headers, rendered.bytes).into_response())
 }
 
 async fn get_body(

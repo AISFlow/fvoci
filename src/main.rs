@@ -14,8 +14,10 @@ use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
 use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
+use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
+use fvoci_server::import_job::{spawn_import_job, ImportJobSettings, ImportQueue};
 use fvoci_server::outbox::{
     spawn_outbox_dispatcher, OutboxDispatcherHandle, OutboxDispatcherSettings,
 };
@@ -241,6 +243,17 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("outbox dispatcher idle (no consumers registered)");
     }
+    let document_convert = ConvertClient::from_env();
+    if document_convert.is_some() {
+        tracing::info!("document convert helper enabled");
+    } else {
+        tracing::info!("document convert helper disabled (FVOCI_DOCUMENT_CONVERT_BIN unset)");
+    }
+    let import_queue = ImportQueue::new();
+    let import_settings = document_convert.clone().map(ImportJobSettings::from_env);
+    let _import_job = import_settings
+        .as_ref()
+        .map(|settings| spawn_import_job(pool.clone(), settings.clone(), import_queue.clone()));
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
@@ -254,6 +267,9 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         upload: config.upload.clone(),
         collab: collab.clone(),
         meili: config.meili.clone(),
+        document_convert,
+        import_settings,
+        import_queue,
     };
 
     let deadline = config.shutdown_deadline;

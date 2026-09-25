@@ -56,6 +56,9 @@ async fn search_state(app_url: &str, meili: Option<MeiliConfig>) -> AppState {
         },
         collab: None,
         meili,
+        document_convert: None,
+        import_settings: None,
+        import_queue: fvoci_server::import_job::ImportQueue::new(),
     }
 }
 

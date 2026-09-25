@@ -1,0 +1,10 @@
+{
+  "name": "fvoci-document-convert",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@fvoci/editor": "file:../../packages/editor",
+    "tsx": "^4.8.1",
+    "yjs": "13.6.32"
+  }
+}

@@ -172,6 +172,9 @@ async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppStat
         },
         collab: None,
         meili: None,
+        document_convert: None,
+        import_settings: None,
+        import_queue: fvoci_server::import_job::ImportQueue::new(),
     }
 }
 

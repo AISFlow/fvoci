@@ -16,12 +16,12 @@ use crate::api::dto::{
     CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
     DeleteWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody, GroupListResponse,
     GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
-    IcsTokenResponse, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
-    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LabelListResponse,
-    LabelOutput, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
-    MeApiTokenCreateBody, MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse,
-    MilestoneOutput, MoveDocumentBody, MoveTaskBody, NotificationItemOutput,
-    NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
+    IcsTokenResponse, ImportJobResponse, InvitationAcceptBody, InvitationConsentItem,
+    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
+    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
+    MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
+    NotificationItemOutput, NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
     NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PatchCommentBody,
     PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody, PatchProjectBody,
     PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
@@ -30,10 +30,11 @@ use crate::api::dto::{
     ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
     RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
     SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, SortDocumentBody, TaskChildOutput, TaskChildProgressOutput,
-    TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
-    TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse, WorkflowOutput,
-    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+    SetupResponse, SetupStatusResponse, SortDocumentBody, StartImportBody, TaskChildOutput,
+    TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse,
+    TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse,
+    TreeResponse, WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse,
+    WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -141,6 +142,12 @@ impl Modify for CookieSecurityAddon {
         patch_document,
         get_ancestors,
         get_body,
+        export_markdown,
+        export_pdf,
+        export_docx,
+        export_pptx,
+        start_import,
+        get_import_status,
     create_revision, list_revisions, get_revision, restore_revision, move_document, sort_document, trash_document, restore_document, list_trash,
         create_attachment_upload,
         put_attachment_part,
@@ -259,7 +266,9 @@ impl Modify for CookieSecurityAddon {
             TreeResponse,
             AncestorsResponse,
             BodyResponse,
-    RevisionCreateResponse, RevisionMetaResponse, RevisionListResponse, RevisionDetailResponse, RevisionRestoreBody, RevisionRestoreResponse, MoveDocumentBody, SortDocumentBody, TrashListResponse, TrashItemResponse,
+            StartImportBody,
+            ImportJobResponse,
+            RevisionCreateResponse, RevisionMetaResponse, RevisionListResponse, RevisionDetailResponse, RevisionRestoreBody, RevisionRestoreResponse, MoveDocumentBody, SortDocumentBody, TrashListResponse, TrashItemResponse,
             CreateAttachmentUploadBody,
             CreateAttachmentUploadResponse,
             AttachmentPartUrlResponse,
@@ -2038,6 +2047,122 @@ fn get_ancestors() {}
     )
 )]
 fn get_body() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/md",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Markdown export", content_type = "text/markdown"),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Export unavailable", body = ProblemResponse),
+    )
+)]
+fn export_markdown() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/pdf",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "PDF export", content_type = "application/pdf"),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Export unavailable", body = ProblemResponse),
+    )
+)]
+fn export_pdf() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/docx",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "DOCX export", content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Export unavailable", body = ProblemResponse),
+    )
+)]
+fn export_docx() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/pptx",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "PPTX export", content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Export unavailable", body = ProblemResponse),
+    )
+)]
+fn export_pptx() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/import",
+    tag = "import",
+    security(("fvoci_session" = [])),
+    request_body = StartImportBody,
+    responses(
+        (status = 201, description = "Import job created", body = ImportJobResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Forbidden", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn start_import() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/import/{import_job_id}",
+    tag = "import",
+    security(("fvoci_session" = [])),
+    params(
+        ("import_job_id" = String, description = "Import job id"),
+        ("workspace_id" = String, Query, description = "Workspace id"),
+    ),
+    responses(
+        (status = 200, description = "Import job status", body = ImportJobResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_import_status() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

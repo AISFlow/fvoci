@@ -58,6 +58,7 @@ url = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 bytes = "1"
 infer = "0.19"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
 
 [dev-dependencies]
@@ -78,6 +79,11 @@ required-features = ["db-tests"]
 [[test]]
 name = "document_integration"
 path = "tests/document_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "document_import_export_integration"
+path = "tests/document_import_export_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
