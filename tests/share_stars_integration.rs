@@ -636,6 +636,9 @@ async fn document_share_scope_rechecks_state_on_every_request() {
     );
     assert_eq!(headers["cache-control"], "private, no-store");
     assert!(csp.contains("img-src 'self' data: blob:"), "{csp}");
+    // The global security layer adds its other headers but keeps this CSP.
+    assert_eq!(headers["x-frame-options"], "SAMEORIGIN");
+    assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
     assert_eq!(headers["referrer-policy"], "no-referrer");
     assert!(
         html.contains("<meta name=\"referrer\" content=\"no-referrer\"/>"),
@@ -731,6 +734,7 @@ async fn document_share_scope_rechecks_state_on_every_request() {
     assert_eq!(headers["content-security-policy"], "sandbox");
     assert_eq!(headers["x-content-type-options"], "nosniff");
     assert_eq!(headers["content-type"], "application/octet-stream");
+    assert_eq!(headers["cross-origin-resource-policy"], "same-origin");
     for id in [sibling_att, infected, uploading, Uuid::now_v7()] {
         let (status, _) = public_json(app.clone(), &format!("{base}/attachments/{id}")).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "meta {id}");

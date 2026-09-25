@@ -1,5 +1,6 @@
 import path from "node:path";
 import { expect, test } from "@playwright/test";
+import { watchCspViolations } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -13,6 +14,7 @@ const owner = {
 const importZip = path.resolve(import.meta.dirname, "fixtures/markdown-import.zip");
 
 test("owner imports markdown zip and exports document markdown", async ({ page }) => {
+  const cspViolations = watchCspViolations(page);
   test.setTimeout(120_000);
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
@@ -59,4 +61,5 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
     return Buffer.concat(chunks).toString("utf8");
   });
   expect(text).toContain("E2E note");
+  expect(cspViolations).toEqual([]);
 });

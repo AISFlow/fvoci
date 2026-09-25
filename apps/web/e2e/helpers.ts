@@ -72,6 +72,21 @@ export function createE2eUser(
   );
 }
 
+// Collects Content-Security-Policy violations the browser reports for a page
+// (Chromium logs every blocked script/style/connect/frame as a console error).
+// Assert the list is empty at the end of a flow to prove the global policy does
+// not block the app.
+export function watchCspViolations(page: Page): string[] {
+  const violations: string[] = [];
+  page.on("console", (message) => {
+    const text = message.text();
+    if (/Content Security Policy|Refused to (load|execute|apply|connect|frame|create)/i.test(text)) {
+      violations.push(text);
+    }
+  });
+  return violations;
+}
+
 // Logout ends on /login once the session is gone; navigating earlier races the
 // in-flight logout and /login redirects the still-authenticated page away.
 export async function logout(page: Page): Promise<void> {

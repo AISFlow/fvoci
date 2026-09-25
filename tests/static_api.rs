@@ -219,7 +219,7 @@ async fn static_shell_and_assets_send_no_referrer() {
     std::fs::create_dir_all(&dir).expect("tmpdir");
     std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
     std::fs::write(dir.join("assets.txt"), "asset").unwrap();
-    let app: Router = static_router(dir.clone());
+    let app: Router = router(app_state().await, Some(dir.clone()));
     // The SPA shell for a share URL carries the token in the path.
     for (uri, status) in [
         ("/s/some-share-token", StatusCode::OK),
@@ -240,4 +240,97 @@ async fn static_shell_and_assets_send_no_referrer() {
         );
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Source `http-security.ts` (nosecone defaults + application CSP) on the SPA
+/// shell, an asset, an API problem response and the 404 fallback.
+#[tokio::test]
+async fn global_security_headers_on_shell_assets_and_api() {
+    let dir = std::env::temp_dir().join(format!("fvoci-static-sec-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    // An inline theme script is allowed by its build-time hash only.
+    std::fs::write(
+        dir.join("index.html"),
+        "<html><head><script>document.documentElement.dataset.t='1'</script><script type=\"module\" src=\"/assets/a.js\"></script></head></html>",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("assets/a.js"), "export{}").unwrap();
+    let app: Router = router(app_state().await, Some(dir.clone()));
+    let inline_hash = {
+        use base64::Engine;
+        use sha2::Digest;
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(
+            b"document.documentElement.dataset.t='1'",
+        ))
+    };
+    for (uri, status) in [
+        ("/", StatusCode::OK),
+        ("/w/some/wiki", StatusCode::OK),
+        ("/assets/a.js", StatusCode::OK),
+        ("/assets/missing.js", StatusCode::NOT_FOUND),
+        ("/api/v1/unknown-endpoint", StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{uri}");
+        let h = response.headers();
+        let csp = h["content-security-policy"].to_str().unwrap();
+        assert_eq!(
+            csp,
+            format!(
+                "default-src 'self'; base-uri 'self'; font-src 'self' data:; form-action 'self'; \
+                 frame-ancestors 'self'; img-src 'self' data: blob:; object-src 'none'; \
+                 script-src 'self' 'wasm-unsafe-eval' 'sha256-{inline_hash}'; script-src-attr 'none'; \
+                 style-src 'self'; connect-src 'self'; \
+                 frame-src 'self' blob: https://www.youtube.com https://player.vimeo.com https://www.figma.com;"
+            ),
+            "{uri}"
+        );
+        assert_eq!(h["referrer-policy"], "no-referrer", "{uri}");
+        assert_eq!(h["x-content-type-options"], "nosniff", "{uri}");
+        assert_eq!(h["x-frame-options"], "SAMEORIGIN", "{uri}");
+        assert_eq!(h["cross-origin-opener-policy"], "same-origin", "{uri}");
+        assert_eq!(h["cross-origin-resource-policy"], "same-origin", "{uri}");
+        assert_eq!(h["origin-agent-cluster"], "?1", "{uri}");
+        assert_eq!(h["x-dns-prefetch-control"], "off", "{uri}");
+        assert_eq!(h["x-download-options"], "noopen", "{uri}");
+        assert_eq!(h["x-permitted-cross-domain-policies"], "none", "{uri}");
+        assert_eq!(h["x-xss-protection"], "0", "{uri}");
+        assert!(h["permissions-policy"]
+            .to_str()
+            .unwrap()
+            .contains("camera=()"));
+        // The public origin of this state is http: no HSTS, no upgrade.
+        assert!(h.get("strict-transport-security").is_none(), "{uri}");
+        assert!(h.get("cross-origin-embedder-policy").is_none(), "{uri}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn https_origin_adds_hsts_and_upgrade_insecure_requests() {
+    let mut state = app_state().await;
+    state.public_origin = "https://fvoci.example".to_string();
+    let response = router(state, None)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/unknown-endpoint")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let h = response.headers();
+    assert_eq!(
+        h["strict-transport-security"],
+        "max-age=31536000; includeSubDomains"
+    );
+    assert!(h["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .ends_with("; upgrade-insecure-requests;"));
 }

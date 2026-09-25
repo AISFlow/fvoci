@@ -69,15 +69,10 @@ impl Service<Request<Body>> for StaticFallback {
     }
 }
 
-/// Every shell/asset response sends `Referrer-Policy: no-referrer` (source
-/// global security headers): `/s/{token}` and invite paths carry secrets.
+/// `Referrer-Policy: no-referrer` (`/s/{token}` and invite paths carry
+/// secrets) comes from the router's global security headers layer.
 async fn serve_static(req: Request<Body>, root: PathBuf, index: PathBuf) -> Response {
-    let mut response = serve_static_file(req, root, index).await;
-    response.headers_mut().insert(
-        header::REFERRER_POLICY,
-        header::HeaderValue::from_static("no-referrer"),
-    );
-    response
+    serve_static_file(req, root, index).await
 }
 
 async fn serve_static_file(req: Request<Body>, root: PathBuf, index: PathBuf) -> Response {
