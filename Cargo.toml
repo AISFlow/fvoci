@@ -101,6 +101,11 @@ path = "tests/task_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "task_labels_integration"
+path = "tests/task_labels_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "comment_integration"
 path = "tests/comment_integration.rs"
 required-features = ["db-tests"]

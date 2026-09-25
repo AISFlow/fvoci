@@ -1720,9 +1720,8 @@ async fn r10_requeued_retry_is_not_reapplied_across_a_lease_steal() {
         let admin = admin.clone();
         Box::pin(async move {
             sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation \
-                 WHERE NOT l.granted AND c.relname = 'outbox_consumers') \
-                 OR EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND locktype = 'transactionid')",
+                "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid \
+                 WHERE NOT l.granted AND a.datname = current_database())",
             )
             .fetch_one(&admin)
             .await
