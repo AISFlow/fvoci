@@ -7,6 +7,7 @@ pub mod db;
 pub mod display_id;
 pub mod error;
 pub mod http;
+pub mod outbox;
 pub mod projects;
 pub mod search;
 pub mod tasks;

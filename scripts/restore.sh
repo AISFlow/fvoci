@@ -243,7 +243,18 @@ docker cp "$DUMP" "${PG_CID}:/tmp/fvoci-restore.dump"
   'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --exit-on-error --single-transaction --no-owner --use-list=/tmp/fvoci-restore.list /tmp/fvoci-restore.dump'
 "${COMPOSE[@]}" exec -T postgres rm -f /tmp/fvoci-restore.dump /tmp/fvoci-restore.list
 
-echo "running migrate, grant-app-role, and ensure-meili-key, then starting the server"
+echo "running migrate, grant-app-role, and ensure-meili-key"
+"${COMPOSE[@]}" run --rm init
+
+# Event xids from the old cluster are not comparable with this one; rebase the
+# outbox cursors before any server starts (writers are still stopped here).
+read -r SNAPSHOT_AT SINCE < <(python3 -c 'import datetime,json,sys; t=datetime.datetime.strptime(json.load(open(sys.argv[1]))["createdAt"],"%Y-%m-%dT%H:%M:%SZ"); f="%Y-%m-%dT%H:%M:%SZ"; print(t.strftime(f),(t-datetime.timedelta(days=29)).strftime(f))' "$MANIFEST")
+echo "rebasing outbox cursors (snapshot $SNAPSHOT_AT)"
+"${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
+  --recover-outbox --since "$SINCE" --snapshot-at "$SNAPSHOT_AT" \
+  --apply --reason "restore into $PROJECT" --ack-external-replay
+
+echo "starting the server"
 "${COMPOSE[@]}" up -d --wait server
 
 python3 -c 'import json,sys; json.dump({"restoredProject": sys.argv[1], "searchRebuilt": "ensure-meili-key"}, sys.stdout)' "$PROJECT"
