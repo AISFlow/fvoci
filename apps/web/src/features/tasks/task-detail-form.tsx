@@ -1,5 +1,5 @@
 import { t, formatPersonName } from "@fvoci/i18n";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,12 +9,12 @@ import type { WorkflowStatus } from "@/features/projects/queries";
 import {
   PRIORITIES,
   clearsHierarchyParent,
-  eligibleParentCandidates,
   patchTypeBody,
   priorityLabel,
   type TaskDetail,
   type TaskListItem,
 } from "./task-edit-payload";
+import { TaskParentSelect } from "./task-parent-select";
 import { TASK_TYPES, TASK_TYPE_LABELS, isTaskType, type TaskType } from "./task-types";
 import type { MemberOutput } from "@/lib/contracts";
 import type { LabelItem, MilestoneItem, TaskDependency } from "./queries";
@@ -25,10 +25,11 @@ const DEP_TYPES = ["FS", "SS", "FF"] as const;
 
 export function TaskDetailForm({
   slug,
+  workspaceId,
+  projectId,
   projectKey,
   task,
   statuses,
-  parentItems,
   members,
   labels,
   milestones,
@@ -54,10 +55,11 @@ export function TaskDetailForm({
   trashPending,
 }: {
   slug: string;
+  workspaceId: string;
+  projectId: string;
   projectKey: string;
   task: TaskDetail;
   statuses: readonly WorkflowStatus[];
-  parentItems: readonly Pick<TaskListItem, "id" | "type" | "number" | "title">[];
   members: readonly MemberOutput[];
   labels: readonly LabelItem[];
   milestones: readonly MilestoneItem[];
@@ -106,10 +108,6 @@ export function TaskDetailForm({
     setHierarchyError(null);
   }, [task.id, task.type, task.parentId]);
 
-  const parentCandidates = useMemo(
-    () => eligibleParentCandidates({ id: task.id, type: draftType }, parentItems),
-    [draftType, parentItems, task.id],
-  );
   const showParent = draftType !== "epic";
   const hierarchyDirty = draftType !== task.type || draftParentId !== task.parentId;
 
@@ -199,24 +197,24 @@ export function TaskDetailForm({
           {showParent ? (
             <div className="task-form__field">
               <Label htmlFor="task-edit-parent">{t("task.parent.label")}</Label>
-              <select
-                id="task-edit-parent"
-                data-testid="task-edit-parent"
-                disabled={readOnly || pending}
-                value={draftParentId ?? NONE}
-                onChange={(event) => {
-                  const next = event.target.value;
-                  setDraftParentId(next === NONE ? null : next);
+              <TaskParentSelect
+                workspaceId={workspaceId}
+                projectId={projectId}
+                projectKey={projectKey}
+                childType={draftType}
+                excludeTaskId={task.id}
+                value={draftParentId}
+                currentTitle={
+                  task.parent && draftParentId === task.parent.id
+                    ? `${formatDisplayId(projectKey, task.parent.number)} ${task.parent.title}`
+                    : undefined
+                }
+                onChange={(next) => {
+                  setDraftParentId(next);
                   setHierarchyError(null);
                 }}
-              >
-                <option value={NONE}>{t("task.parent.none")}</option>
-                {parentCandidates.map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {formatDisplayId(projectKey, candidate.number)} {candidate.title}
-                  </option>
-                ))}
-              </select>
+                disabled={readOnly || pending}
+              />
               {task.parent ? (
                 <p className="task-home__note">
                   <Link to={itemPath(slug, formatDisplayId(projectKey, task.parent.number))}>

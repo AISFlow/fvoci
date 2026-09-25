@@ -5,15 +5,18 @@ import type { WorkflowStatus } from "@/features/projects/queries";
 import { TaskDetailForm } from "./task-detail-form";
 import type { TaskDetail, TaskListItem, LabelItem, MilestoneItem } from "./queries";
 import type { MemberOutput } from "@/lib/contracts";
+import { CommentPanel } from "@/features/comments/comment-panel";
 import "@/features/projects/projects.css";
 
 export function TaskDetailView({
   slug,
+  workspaceId,
+  projectId,
   projectKey,
   projectName,
   task,
   statuses,
-  parentItems,
+  currentUserId,
   members,
   labels,
   milestones,
@@ -40,11 +43,13 @@ export function TaskDetailView({
   onTrash,
 }: {
   slug: string;
+  workspaceId: string;
+  projectId: string;
   projectKey: string;
   projectName?: string;
+  currentUserId: string;
   task: TaskDetail;
   statuses: readonly WorkflowStatus[];
-  parentItems: readonly Pick<TaskListItem, "id" | "type" | "number" | "title">[];
   members: readonly MemberOutput[];
   labels: readonly LabelItem[];
   milestones: readonly MilestoneItem[];
@@ -85,10 +90,11 @@ export function TaskDetailView({
       <TaskDetailForm
         key={`${task.id}:${formEpoch ?? 0}`}
         slug={slug}
+        workspaceId={workspaceId}
+        projectId={projectId}
         projectKey={projectKey}
         task={task}
         statuses={statuses}
-        parentItems={parentItems}
         members={members}
         labels={labels}
         milestones={milestones}
@@ -116,6 +122,15 @@ export function TaskDetailView({
       <section className="task-detail__body" aria-label={t("doc.body.a11y")}>
         <p className="task-home__note">{t("task.body.unavailable")}</p>
       </section>
+      {currentUserId ? (
+        <CommentPanel
+          workspaceId={workspaceId}
+          kind="task"
+          targetId={task.id}
+          currentUserId={currentUserId}
+          readOnly={readOnly}
+        />
+      ) : null}
     </div>
   );
 }

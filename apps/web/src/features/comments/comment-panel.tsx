@@ -5,27 +5,30 @@ import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { ensureOk, ProblemError, api } from "@/lib/api";
-import { documentCommentsQuery } from "@/lib/queries/comments";
+import { commentsQuery, type CommentsTargetKind } from "@/lib/queries/comments";
 import { nextReplyTarget } from "./comment-drafts";
 import { buildCommentTree, type CommentNode } from "./comment-tree";
+import "./comments.css";
 
 const REACTIONS = ["👍", "❤️", "🎉"] as const;
 
 interface CommentPanelProps {
   workspaceId: string;
-  documentId: string;
+  kind: CommentsTargetKind;
+  targetId: string;
   currentUserId: string;
   readOnly?: boolean;
 }
 
 export function CommentPanel({
   workspaceId,
-  documentId,
+  kind,
+  targetId,
   currentUserId,
   readOnly = false,
 }: CommentPanelProps) {
   const queryClient = useQueryClient();
-  const list = useInfiniteQuery(documentCommentsQuery(workspaceId, documentId));
+  const list = useInfiniteQuery(commentsQuery(workspaceId, kind, targetId));
   const [draft, setDraft] = useState("");
   const [replyDraft, setReplyDraft] = useState("");
   const [replyToId, setReplyToId] = useState<string | null>(null);
@@ -38,21 +41,30 @@ export function CommentPanel({
     [list.data],
   );
   const roots = useMemo(() => buildCommentTree(items), [items]);
+  const testId = kind === "document" ? "document-comments" : "task-comments";
 
   const invalidate = async () => {
-    await queryClient.invalidateQueries({ queryKey: ["comments", workspaceId, documentId] });
+    await queryClient.invalidateQueries({ queryKey: ["comments", workspaceId, kind, targetId] });
   };
 
   const create = useMutation({
     mutationFn: async (body: { text: string; parentId?: string | null }) =>
       ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments", {
-          params: { path: { workspace_id: workspaceId, document_id: documentId } },
-          body: {
-            body: body.text,
-            parentId: body.parentId ?? undefined,
-          },
-        }),
+        kind === "document"
+          ? await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments", {
+              params: { path: { workspace_id: workspaceId, document_id: targetId } },
+              body: {
+                body: body.text,
+                parentId: body.parentId ?? undefined,
+              },
+            })
+          : await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments", {
+              params: { path: { workspace_id: workspaceId, task_id: targetId } },
+              body: {
+                body: body.text,
+                parentId: body.parentId ?? undefined,
+              },
+            }),
       ),
     onSuccess: async () => {
       setDraft("");
@@ -300,10 +312,10 @@ export function CommentPanel({
 
   return (
     <section
-      id="document-comments"
+      id={testId}
       className="comment-panel"
       aria-label={t("comment.title")}
-      data-testid="document-comments"
+      data-testid={testId}
     >
       <h2 className="comment-panel__title">{t("comment.title")}</h2>
       {actionError ? <p role="alert" className="comment-panel__error">{actionError}</p> : null}
