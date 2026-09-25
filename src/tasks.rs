@@ -25,6 +25,25 @@ pub fn parse_iso_date(value: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
 }
 
+/// Source `z.iso.datetime()`: UTC `Z` suffix only, seconds and fraction optional.
+pub fn parse_iso_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?Z$")
+            .expect("iso datetime regex")
+    });
+    if !RE.is_match(value) || value.starts_with("0000") {
+        return None;
+    }
+    let normalized = if value.len() == 17 {
+        format!("{}:00Z", &value[..16])
+    } else {
+        value.to_string()
+    };
+    chrono::DateTime::parse_from_rfc3339(&normalized)
+        .ok()
+        .map(|at| at.with_timezone(&chrono::Utc))
+}
+
 pub fn title_is_valid(title: &str) -> bool {
     let trimmed = title.trim();
     !trimmed.is_empty() && trimmed.chars().count() <= 500

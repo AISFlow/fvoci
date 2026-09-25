@@ -103,6 +103,10 @@ export function settingsPath(slug: string): string {
   return `/w/${slug.toLowerCase()}/settings`;
 }
 
+export function documentTagsSettingsPath(slug: string): string {
+  return `${settingsPath(slug)}/document-tags`;
+}
+
 export function projectsPath(slug: string): string {
   return `/w/${slug.toLowerCase()}/projects`;
 }
@@ -130,4 +134,18 @@ export function projectTasksPath(slug: string, key: string): string {
 
 export function projectPath(slug: string, key: string): string {
   return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}`;
+}
+
+/** Source `href.projectTable/Board/Calendar`: collection views of a project's tasks. */
+export function projectCollectionPath(
+  slug: string,
+  key: string,
+  type: "table" | "board" | "calendar",
+): string {
+  return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}/${type}`;
+}
+
+/** Source `href.projectFields`: project collection field settings. */
+export function projectFieldsPath(slug: string, key: string): string {
+  return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}/settings/fields`;
 }

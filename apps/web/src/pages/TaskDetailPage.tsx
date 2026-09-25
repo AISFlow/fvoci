@@ -24,6 +24,7 @@ import { parseRef, projectsPath, projectTasksPath } from "@/lib/href";
 import { CommentPanel } from "@/features/comments/comment-panel";
 import { ShareDialog } from "@/features/share/share-dialog";
 import { StarToggle } from "@/features/share/star-toggle";
+import { DocumentTagsBar } from "@/features/documents/document-tags-bar";
 import "@/features/projects/projects.css";
 
 export function TaskDetailPage() {
@@ -208,6 +209,12 @@ export function TaskDetailPage() {
               ) : null}
             </div>
           </header>
+          <DocumentTagsBar
+            workspaceId={workspace.id}
+            documentId={projectDocument.id}
+            projectId={projectDocument.projectId ?? project?.id ?? null}
+            readOnly={!(project?.canEdit ?? false) || project?.status === "archived"}
+          />
           <p className="task-home__note">{t("task.document.unsupported")}</p>
           {me.data ? (
             <CommentPanel

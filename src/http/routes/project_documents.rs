@@ -92,7 +92,13 @@ async fn list_tree(
     headers: HeaderMap,
     jar: CookieJar,
     Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+    query: Result<
+        axum::extract::Query<crate::http::routes::documents::TreeQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
 ) -> Result<Json<TreeResponse>, DocumentApiError> {
+    let axum::extract::Query(query) = query.map_err(AppError::from)?;
+    let tag = crate::http::routes::documents::parse_tree_tag(query.tag.as_deref())?;
     let (_user, user_id, session_id) = require_session(
         &state,
         &headers,
@@ -110,10 +116,23 @@ async fn list_tree(
     )
     .await
     .map_err(internal)?;
+    let tagged = match tag {
+        Some(tag) => Some(
+            crate::db::document_tags::tagged_document_id_set(
+                &state.auth.db.pool,
+                workspace_id,
+                tag,
+            )
+            .await
+            .map_err(internal)?,
+        ),
+        None => None,
+    };
     match result {
         Ok(nodes) => Ok(Json(TreeResponse {
             items: nodes
                 .into_iter()
+                .filter(|n| tagged.as_ref().is_none_or(|ids| ids.contains(&n.id)))
                 .map(|node| TreeNodeResponse {
                     id: node.id.to_string(),
                     workspace_id: node.workspace_id.to_string(),
