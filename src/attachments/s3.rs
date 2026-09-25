@@ -38,6 +38,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Idle read timeout. There is deliberately no total timeout: downloads are
 /// streamed to the client and a slow reader must not cut a healthy transfer.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Streamed part PUT deadline: `UPLOAD_BASE_DEADLINE` plus the part length at
+/// `UPLOAD_MIN_BYTES_PER_SEC`. It bounds a stalled endpoint (zero TCP window)
+/// and a client that trickles its body alike.
+const UPLOAD_BASE_DEADLINE: Duration = Duration::from_secs(60);
+const UPLOAD_MIN_BYTES_PER_SEC: u64 = 64 * 1024;
+/// Wait for UploadPart response headers once the whole body has been sent.
+const UPLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 const LIST_PAGE_SIZE: u16 = 1000;
 const MAX_PART_NUMBER: i32 = 10_000;
 
@@ -48,6 +56,7 @@ pub struct S3Storage {
     /// wait for response headers, which for a streamed PUT includes the whole
     /// upload of a client-paced body, so this client has none.
     upload_client: Client,
+    upload_timeouts: UploadTimeouts,
     bucket: Bucket,
     credentials: Credentials,
     endpoint: String,
@@ -91,10 +100,17 @@ impl S3Storage {
         Ok(Self {
             client,
             upload_client,
+            upload_timeouts: UploadTimeouts::default(),
             bucket,
             credentials: Credentials::new(settings.access_key_id, settings.secret_access_key),
             endpoint: settings.endpoint,
         })
+    }
+
+    /// Overrides the streamed part deadlines (tests use short ones).
+    pub fn with_upload_timeouts(mut self, timeouts: UploadTimeouts) -> Self {
+        self.upload_timeouts = timeouts;
+        self
     }
 
     pub fn bucket_name(&self) -> &str {
@@ -217,16 +233,37 @@ impl S3Storage {
             .sign(SIGN_TTL);
         let body = ExactLength::new(stream, content_length);
         let outcome = body.outcome.clone();
-        let sent = self
+        let body_sent = body.sent.clone();
+        let send = self
             .upload_client
             .put(url)
             .header(reqwest::header::CONTENT_LENGTH, content_length)
             .body(reqwest::Body::wrap_stream(body))
-            .send()
-            .await;
-        if outcome.load(Ordering::Acquire) == BODY_LENGTH_MISMATCH {
-            return Err(StorageError::LengthMismatch);
+            .send();
+        let timeouts = self.upload_timeouts;
+        let sent = tokio::time::timeout(timeouts.deadline(content_length), async {
+            tokio::pin!(send);
+            tokio::select! {
+                sent = &mut send => Some(sent),
+                () = body_sent.notified() => {
+                    tokio::time::timeout(timeouts.response, &mut send).await.ok()
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        match outcome.load(Ordering::Acquire) {
+            BODY_LENGTH_MISMATCH => return Err(StorageError::LengthMismatch),
+            BODY_SOURCE_FAILED => return Err(StorageError::ClientBody),
+            _ => {}
         }
+        let Some(sent) = sent else {
+            return Err(StorageError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "UploadPart timed out",
+            )));
+        };
         let res = sent.map_err(transport)?;
         let status = res.status();
         if !status.is_success() {
@@ -437,9 +474,11 @@ impl S3Storage {
         let body = read_text(res).await?;
         let code = error_code(&body);
         // A missing key is already deleted; a missing bucket (also a 404) is
-        // a misconfiguration and must not let callers drop their DB rows.
+        // a misconfiguration and must not let callers drop their DB rows. A
+        // bodiless 404 is ambiguous, so the bucket is checked before trusting it.
         match code.as_deref() {
-            None | Some("NoSuchKey") if status == StatusCode::NOT_FOUND => Ok(()),
+            Some("NoSuchKey") if status == StatusCode::NOT_FOUND => Ok(()),
+            None if status == StatusCode::NOT_FOUND => self.head_bucket().await,
             code => Err(op_error("DeleteObject", status, code)),
         }
     }
@@ -547,15 +586,46 @@ impl S3Storage {
 
 /// No redirects (a redirect would replay a signed PUT body elsewhere) and no
 /// implicit `HTTP(S)_PROXY`: signed URLs go only to the configured endpoint.
+/// TCP keepalive detects a peer that vanished without closing.
 fn client_builder() -> reqwest::ClientBuilder {
     Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
+        .tcp_keepalive(TCP_KEEPALIVE)
         .redirect(redirect::Policy::none())
         .no_proxy()
 }
 
+/// Deadlines for one streamed UploadPart.
+#[derive(Debug, Clone, Copy)]
+pub struct UploadTimeouts {
+    /// Fixed allowance on top of the length-scaled part.
+    pub base: Duration,
+    /// Slowest accepted average transfer rate for the whole part.
+    pub min_bytes_per_sec: u64,
+    /// Wait for response headers after the body has been fully sent.
+    pub response: Duration,
+}
+
+impl Default for UploadTimeouts {
+    fn default() -> Self {
+        Self {
+            base: UPLOAD_BASE_DEADLINE,
+            min_bytes_per_sec: UPLOAD_MIN_BYTES_PER_SEC,
+            response: UPLOAD_RESPONSE_TIMEOUT,
+        }
+    }
+}
+
+impl UploadTimeouts {
+    fn deadline(&self, content_length: u64) -> Duration {
+        let rate = self.min_bytes_per_sec.max(1);
+        self.base + Duration::from_secs_f64(content_length as f64 / rate as f64)
+    }
+}
+
 const BODY_OK: u8 = 0;
 const BODY_LENGTH_MISMATCH: u8 = 1;
+const BODY_SOURCE_FAILED: u8 = 2;
 
 /// Passes a part body through while enforcing its declared length. The
 /// chunk that completes the length is held back until the source ends, so
@@ -569,6 +639,8 @@ struct ExactLength<S> {
     held: Option<Bytes>,
     done: bool,
     outcome: Arc<AtomicU8>,
+    /// Notified once the complete body has been handed to the HTTP client.
+    sent: Arc<tokio::sync::Notify>,
 }
 
 impl<S> ExactLength<S> {
@@ -579,6 +651,7 @@ impl<S> ExactLength<S> {
             held: None,
             done: false,
             outcome: Arc::new(AtomicU8::new(BODY_OK)),
+            sent: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -604,6 +677,13 @@ where
         let this = self.get_mut();
         loop {
             if this.done {
+                if this.outcome.load(Ordering::Acquire) == BODY_OK {
+                    // The final bytes are handed over now; the HTTP client
+                    // stops polling once `Content-Length` is reached, so this
+                    // is the last reliable "body sent" point. `notify_one`
+                    // keeps a permit, so a later waiter still sees it.
+                    this.sent.notify_one();
+                }
                 return Poll::Ready(this.held.take().map(Ok));
             }
             match this.inner.as_mut().poll_next(cx) {
@@ -623,6 +703,7 @@ where
                 Poll::Ready(Some(Err(err))) => {
                     this.done = true;
                     this.held = None;
+                    this.outcome.store(BODY_SOURCE_FAILED, Ordering::Release);
                     return Poll::Ready(Some(Err(io::Error::other(err))));
                 }
                 Poll::Ready(None) if this.remaining > 0 => return this.mismatch(),
@@ -911,6 +992,220 @@ mod tests {
         assert_eq!(
             run(&[b"", b"abcd", b""], 4).await,
             (b"abcd".to_vec(), false, BODY_OK)
+        );
+    }
+
+    /// A local endpoint that accepts connections and never answers. With
+    /// `read_request` it first consumes one full request (headers plus
+    /// `body_len` bytes); otherwise it never reads, so the client's writes
+    /// stall once the socket buffers fill.
+    async fn silent_endpoint(read_request: bool, body_len: usize) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                if read_request {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+                        if head_end.is_some_and(|end| buf.len() >= end + 4 + body_len) {
+                            break;
+                        }
+                    }
+                }
+                held.push(socket);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn stalling_storage(endpoint: &str, timeouts: UploadTimeouts) -> S3Storage {
+        S3Storage::new(settings(endpoint, true))
+            .unwrap()
+            .with_upload_timeouts(timeouts)
+    }
+
+    const KEY: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    fn assert_timed_out(err: StorageError) {
+        match err {
+            StorageError::Io(io) => assert_eq!(io.kind(), io::ErrorKind::TimedOut, "{io}"),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_part_times_out_waiting_for_headers_after_the_body() {
+        let endpoint = silent_endpoint(true, 10).await;
+        let storage = stalling_storage(
+            &endpoint,
+            UploadTimeouts {
+                base: Duration::from_secs(20),
+                min_bytes_per_sec: 1 << 30,
+                response: Duration::from_millis(200),
+            },
+        );
+        let started = std::time::Instant::now();
+        let body =
+            futures_util::stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(b"0123456789"))]);
+        let err = storage
+            .upload_part_stream(KEY, "upload", 1, body, 10)
+            .await
+            .unwrap_err();
+        assert_timed_out(err);
+        // The response timeout fired, not the overall part deadline.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_part_deadline_bounds_a_stalled_client_body() {
+        use futures_util::StreamExt;
+
+        let endpoint = silent_endpoint(true, 1 << 20).await;
+        let storage = stalling_storage(
+            &endpoint,
+            UploadTimeouts {
+                base: Duration::from_millis(300),
+                min_bytes_per_sec: 1 << 30,
+                response: Duration::from_secs(20),
+            },
+        );
+        // One chunk, then the client goes silent without closing.
+        let body = futures_util::stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(b"ab"))])
+            .chain(futures_util::stream::pending());
+        let started = std::time::Instant::now();
+        let err = storage
+            .upload_part_stream(KEY, "upload", 1, body, 1 << 20)
+            .await
+            .unwrap_err();
+        assert_timed_out(err);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_part_deadline_bounds_an_endpoint_that_stops_reading() {
+        let endpoint = silent_endpoint(false, 0).await;
+        let storage = stalling_storage(
+            &endpoint,
+            UploadTimeouts {
+                base: Duration::from_millis(500),
+                min_bytes_per_sec: 1 << 30,
+                response: Duration::from_secs(20),
+            },
+        );
+        // Far more than the socket buffers hold, so writes block on a zero
+        // window once the peer stops reading.
+        let len: u64 = 64 << 20;
+        let chunk = Bytes::from(vec![7u8; 1 << 20]);
+        let body =
+            futures_util::stream::iter((0..64).map(move |_| Ok::<_, io::Error>(chunk.clone())));
+        let started = std::time::Instant::now();
+        let err = storage
+            .upload_part_stream(KEY, "upload", 1, body, len)
+            .await
+            .unwrap_err();
+        assert_timed_out(err);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_part_reports_a_failed_client_body_as_client_error() {
+        let endpoint = silent_endpoint(false, 0).await;
+        let storage = stalling_storage(&endpoint, UploadTimeouts::default());
+        let body = futures_util::stream::iter(vec![
+            Ok::<_, io::Error>(Bytes::from_static(b"ab")),
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "client went away",
+            )),
+        ]);
+        let err = storage
+            .upload_part_stream(KEY, "upload", 1, body, 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::ClientBody), "{err:?}");
+    }
+
+    /// A minimal S3 stand-in: DELETE answers a bodiless 404; HEAD (the
+    /// bucket probe) answers `head_status`.
+    async fn bodiless_404_endpoint(head_status: u16) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                            buf.drain(..end + 4);
+                            let status = if head.starts_with("HEAD ") {
+                                head_status
+                            } else {
+                                404
+                            };
+                            let reply = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\n\r\n");
+                            if socket.write_all(reply.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn bodiless_404_delete_is_trusted_only_when_the_bucket_exists() {
+        let present = S3Storage::new(settings(&bodiless_404_endpoint(200).await, true)).unwrap();
+        present
+            .delete_object(KEY)
+            .await
+            .expect("bucket exists: key already gone");
+        let missing = S3Storage::new(settings(&bodiless_404_endpoint(404).await, true)).unwrap();
+        assert!(
+            missing.delete_object(KEY).await.is_err(),
+            "a bodiless 404 from a missing bucket must not count as deleted"
+        );
+    }
+
+    #[test]
+    fn upload_deadline_scales_with_part_length() {
+        let t = UploadTimeouts::default();
+        assert_eq!(t.deadline(0), UPLOAD_BASE_DEADLINE);
+        assert_eq!(
+            t.deadline(32 * 1024 * 1024),
+            UPLOAD_BASE_DEADLINE + Duration::from_secs(512)
         );
     }
 

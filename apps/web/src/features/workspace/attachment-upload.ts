@@ -7,6 +7,8 @@ import { api, ensureOk, ProblemError } from "@/lib/api";
 
 const PARALLEL = 3;
 const PART_RETRIES = 2;
+/** Total time a part may wait out 503 `Retry-After` (server upload capacity). */
+const CAPACITY_WAIT_BUDGET_MS = 120_000;
 
 type CreateAttachmentUploadResponse = components["schemas"]["CreateAttachmentUploadResponse"];
 type AttachmentOutput = components["schemas"]["AttachmentOutput"];
@@ -93,6 +95,15 @@ async function readPartEtag(res: Response): Promise<string> {
   throw new Error("missing etag");
 }
 
+function retryAfterMillis(res: Response): number | null {
+  const header = res.headers.get("retry-after");
+  if (header === null) return null;
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  // At least 1 s so a zero value still spends the capacity budget.
+  return Math.max(1, Math.min(seconds, 30)) * 1000;
+}
+
 async function putPart(
   target: PartTargetRef,
   file: File,
@@ -101,11 +112,20 @@ async function putPart(
   signal?: AbortSignal,
 ): Promise<{ partNumber: number; etag: string }> {
   let lastError: unknown;
+  let capacityWaitMs = 0;
+  let retryAfterMs: number | null = null;
   for (let attempt = 0; attempt <= PART_RETRIES; attempt += 1) {
     if (signal?.aborted) {
       throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
     }
-    if (attempt > 0) await abortableDelay(300 * 2 ** (attempt - 1), signal, deps.delay);
+    if (retryAfterMs !== null) {
+      // Capacity refusals are answered before the body is read; waiting them
+      // out does not use up the transport retries.
+      await abortableDelay(retryAfterMs, signal, deps.delay);
+      retryAfterMs = null;
+    } else if (attempt > 0) {
+      await abortableDelay(300 * 2 ** (attempt - 1), signal, deps.delay);
+    }
     try {
       const res = await deps.fetchImpl(target.url, {
         method: "PUT",
@@ -119,6 +139,13 @@ async function putPart(
         return { partNumber: target.partNumber, etag };
       }
       lastError = new PartUploadError(target.partNumber, res.status);
+      const wait = res.status === 503 ? retryAfterMillis(res) : null;
+      if (wait !== null && capacityWaitMs + wait <= CAPACITY_WAIT_BUDGET_MS) {
+        capacityWaitMs += wait;
+        retryAfterMs = wait;
+        attempt -= 1;
+        continue;
+      }
       if (res.status < 500) break;
     } catch (err) {
       if (isAbortError(err) || signal?.aborted) throw err;

@@ -150,6 +150,7 @@ async fn run_maintenance_loop(
 ) {
     let mut last_daily: Option<Instant> = None;
     let mut last_upload_gc: Option<Instant> = None;
+    let mut upload_gc_cursor = None;
     let mut ticker = tokio::time::interval(settings.tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -161,11 +162,15 @@ async fn run_maintenance_loop(
                         &pool,
                         &storage,
                         settings.upload_incomplete_ttl,
+                        upload_gc_cursor,
                         &cancel,
                     )
                     .await
                     {
-                        Ok(Some(_)) => last_upload_gc = Some(Instant::now()),
+                        Ok(Some(stats)) => {
+                            last_upload_gc = Some(Instant::now());
+                            upload_gc_cursor = stats.resume_after;
+                        }
                         Ok(None) => {}
                         Err(err) => warn!(error = %err, "maintenance.upload_gc_failed"),
                     }
@@ -190,11 +195,13 @@ fn is_due(last: Option<Instant>, interval: Duration) -> bool {
 }
 
 /// Claim the upload cleanup lock and remove one bounded batch of incomplete
-/// uploads older than `ttl`. `None` means another process holds the lock.
+/// uploads older than `ttl`, resuming after `after` (the previous batch's
+/// `resume_after`). `None` means another process holds the lock.
 pub async fn run_stale_upload_sweep(
     pool: &PgPool,
     storage: &ObjectStorage,
     ttl: Duration,
+    after: Option<crate::db::attachments::StaleUploadCursor>,
     cancel: &CancellationToken,
 ) -> Result<Option<StaleUploadGcStats>, sqlx::Error> {
     let Some(claim) = JobClaim::try_claim(pool, JOB_KEY_UPLOADS).await? else {
@@ -204,7 +211,7 @@ pub async fn run_stale_upload_sweep(
     let cutoff = Utc::now()
         .checked_sub_signed(ttl)
         .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC);
-    let result = run_stale_upload_gc(pool, storage, cutoff, cancel).await;
+    let result = run_stale_upload_gc(pool, storage, cutoff, after, UPLOAD_GC_BATCH, cancel).await;
     claim.release().await;
     let stats = result?;
     if stats.claimed > 0 {
