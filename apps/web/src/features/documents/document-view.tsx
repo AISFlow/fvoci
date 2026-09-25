@@ -16,11 +16,13 @@ import {
   documentMetaQuery,
   treeQuery,
 } from "@/lib/queries/documents";
+import { CommentPanel } from "@/features/comments/comment-panel";
 import { createAttachmentBridge } from "@/features/workspace/attachment-upload";
 import { bindBlockPresence, isBlockPresenceAwareness } from "./block-presence";
 import { collabBadge } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
 import { collabUserOf, setTitleEditing, useCollabSession } from "./collab-session";
+import { RevisionPanel } from "./revision-panel";
 import "./document-shell.css";
 
 type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
@@ -243,6 +245,7 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
     } catch (error) {
       const timedOut = error instanceof Error && error.message.includes("timed out");
       setPersistError(timedOut ? t("collab timeout — retry") : t("collab unavailable"));
+      throw error;
     } finally {
       setPersisting(false);
     }
@@ -422,6 +425,12 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
             {collabSession ? (
               <CollabPresence peers={collabSession.peers} onJump={flashBlock} />
             ) : null}
+            <RevisionPanel
+              workspaceId={workspaceId}
+              documentId={documentId}
+              readOnly={readOnly}
+              persistNow={canPersist ? persistBody : undefined}
+            />
           </div>
           {saveError ? <p role="alert" className="document-page__error">{saveError}</p> : null}
           {persistError ? <p role="alert" className="document-page__error">{persistError}</p> : null}
@@ -454,6 +463,14 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
           </AttachmentBlockContext.Provider>
         ) : null}
       </section>
+      {me.data ? (
+        <CommentPanel
+          workspaceId={workspaceId}
+          documentId={documentId}
+          currentUserId={me.data.userId}
+          readOnly={readOnly}
+        />
+      ) : null}
     </article>
   );
 }

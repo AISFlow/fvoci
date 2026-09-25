@@ -232,6 +232,54 @@ pub(crate) async fn document_permission(
     Ok(workspace_base_permission(role))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DocumentPermission {
+    None,
+    View,
+    Edit,
+}
+
+impl DocumentPermission {
+    pub fn at_least(self, min: Self) -> bool {
+        self >= min
+    }
+}
+
+pub(crate) async fn assert_document_writable(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
+    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((project_id, deleted_at)) = row else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if deleted_at.is_some() {
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    if let Some(project_id) = project_id {
+        let locked = lock_project(tx, workspace_id, project_id).await?;
+        let Some(locked) = locked else {
+            return Ok(Err(DocumentDbError::NotFound));
+        };
+        if locked.status == "archived" {
+            return Ok(Err(DocumentDbError::NotFound));
+        }
+    }
+    Ok(Ok(()))
+}
+
 pub(crate) async fn membership_role(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,

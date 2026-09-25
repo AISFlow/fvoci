@@ -8,16 +8,19 @@ use utoipa::{Modify, OpenApi};
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
     AddProjectMemberBody, AncestorsResponse, AttachmentOutput, AttachmentPartUrlResponse,
-    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CompleteAttachmentUploadBody,
-    CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateDocumentBody,
-    CreateProjectBody, CreateTaskBody, CreateWorkspaceBody, DocumentMetaResponse,
-    ExpectedDatesBody, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
-    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LoginBody,
-    LoginResponse, LookupItemOutput, LookupListResponse, MemberResponse, MemberRoleBody,
-    MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse, PatchDocumentBody, PatchMeBody,
-    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectListResponse,
-    ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
-    ResumeAttachmentUploadResponse, SessionUserOutput, SetupBody, SetupResponse,
+    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
+    CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
+    CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
+    CreateDocumentBody, CreateProjectBody, CreateTaskBody, CreateWorkspaceBody,
+    DocumentMetaResponse, ExpectedDatesBody, InvitationAcceptBody, InvitationConsentItem,
+    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    InvitationPublicResponse, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
+    MemberResponse, MemberRoleBody, MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse,
+    PatchCommentBody, PatchDocumentBody, PatchMeBody, PatchProjectBody, PatchTaskBody,
+    PatchWorkspaceBody, ProblemResponse, ProjectListResponse, ProjectMembersResponse,
+    ProjectOutput, PutAttachmentPartResponse, ResumeAttachmentUploadResponse,
+    RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse,
+    RevisionRestoreBody, RevisionRestoreResponse, SessionUserOutput, SetupBody, SetupResponse,
     SetupStatusResponse, SortDocumentBody, TaskChildOutput, TaskChildProgressOutput,
     TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
     TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
@@ -87,17 +90,22 @@ impl Modify for CookieSecurityAddon {
         patch_document,
         get_ancestors,
         get_body,
-        move_document,
-        sort_document,
-        trash_document,
-        restore_document,
-        list_trash,
+    create_revision, list_revisions, get_revision, restore_revision, move_document, sort_document, trash_document, restore_document, list_trash,
         create_attachment_upload,
         put_attachment_part,
         resume_attachment_upload,
         complete_attachment_upload,
         get_attachment_meta,
         download_attachment,
+        list_document_comments,
+        create_document_comment,
+        list_task_comments,
+        create_task_comment,
+        patch_comment,
+        delete_comment,
+        resolve_comment,
+        unresolve_comment,
+        react_comment,
     ),
     components(
         schemas(
@@ -149,10 +157,7 @@ impl Modify for CookieSecurityAddon {
             TreeResponse,
             AncestorsResponse,
             BodyResponse,
-            MoveDocumentBody,
-            SortDocumentBody,
-            TrashListResponse,
-            TrashItemResponse,
+    RevisionCreateResponse, RevisionMetaResponse, RevisionListResponse, RevisionDetailResponse, RevisionRestoreBody, RevisionRestoreResponse, MoveDocumentBody, SortDocumentBody, TrashListResponse, TrashItemResponse,
             CreateAttachmentUploadBody,
             CreateAttachmentUploadResponse,
             AttachmentPartUrlResponse,
@@ -161,6 +166,12 @@ impl Modify for CookieSecurityAddon {
             CompleteAttachmentUploadBody,
             AttachmentOutput,
             PutAttachmentPartResponse,
+            CreateCommentBody,
+            PatchCommentBody,
+            CommentReactionBody,
+            CommentReactionSummary,
+            CommentOutput,
+            CommentListResponse,
             ProblemResponse,
         )
     ),
@@ -174,9 +185,180 @@ impl Modify for CookieSecurityAddon {
         (name = "tasks", description = "Project task operations"),
         (name = "documents", description = "Wiki documents"),
         (name = "attachments", description = "Wiki document attachments"),
+        (name = "comments", description = "Document and task comments"),
     )
 )]
 pub struct ApiDoc;
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size"),
+    ),
+    responses(
+        (status = 200, description = "Document comments", body = CommentListResponse),
+        (status = 400, description = "Invalid cursor", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_document_comments() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = CreateCommentBody,
+    responses(
+        (status = 201, description = "Created comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_document_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size"),
+    ),
+    responses(
+        (status = 200, description = "Task comments", body = CommentListResponse),
+        (status = 400, description = "Invalid cursor", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_task_comments() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    request_body = CreateCommentBody,
+    responses(
+        (status = 201, description = "Created comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_task_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    request_body = PatchCommentBody,
+    responses(
+        (status = 200, description = "Updated comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn patch_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted comment", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn delete_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/resolve",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    responses(
+        (status = 200, description = "Resolved comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn resolve_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/unresolve",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    responses(
+        (status = 200, description = "Unresolved comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn unresolve_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/reactions",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    request_body = CommentReactionBody,
+    responses(
+        (status = 200, description = "Updated reactions", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Reaction conflict", body = ProblemResponse),
+    )
+)]
+fn react_comment() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -927,6 +1109,89 @@ fn get_ancestors() {}
     )
 )]
 fn get_body() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 201, description = "Revision created", body = RevisionCreateResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Collab unavailable", body = ProblemResponse),
+    )
+)]
+fn create_revision() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("limit" = Option<i64>, Query, description = "Page size 1..=100, default 50"),
+        ("cursor" = Option<String>, Query, description = "Opaque list cursor"),
+    ),
+    responses(
+        (status = 200, description = "Revision list", body = RevisionListResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_revisions() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("revision_id" = String, description = "Revision id"),
+    ),
+    responses(
+        (status = 200, description = "Revision detail", body = RevisionDetailResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_revision() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("revision_id" = String, description = "Revision id"),
+    ),
+    request_body = RevisionRestoreBody,
+    responses(
+        (status = 200, description = "Restored", body = RevisionRestoreResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Restore rejected", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 504, description = "Collab timeout", body = ProblemResponse),
+    )
+)]
+fn restore_revision() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

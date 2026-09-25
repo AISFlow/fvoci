@@ -9,5 +9,6 @@ pub mod error;
 pub mod http;
 pub mod outbox;
 pub mod projects;
+pub mod search;
 pub mod tasks;
 pub mod validate;

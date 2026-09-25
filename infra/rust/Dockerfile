@@ -54,8 +54,8 @@ COPY --from=rust-build --chown=root:root /src/target/release/document-extract ./
 COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --chown=root:root infra/rust/init-db.sh ./sbin/init-db.sh
 RUN chmod 755 ./sbin/init-db.sh ./bin/* \
- && mkdir -p /data/storage \
- && chown fvoci:fvoci /data/storage
+ && mkdir -p /data/storage /run/fvoci/meili \
+ && chown fvoci:fvoci /data/storage /run/fvoci/meili
 ENV FVOCI_STATIC_DIR=/opt/fvoci/static \
     FVOCI_COLLAB_ENGINE=/opt/fvoci/bin/collab-engine \
     FVOCI_EXTRACTOR_BIN=/opt/fvoci/bin/document-extract \

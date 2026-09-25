@@ -458,6 +458,65 @@ pub struct BodyResponse {
     pub version: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionCreateResponse {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionMetaResponse {
+    pub id: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub reason: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionListResponse {
+    pub items: Vec<RevisionMetaResponse>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionDetailResponse {
+    pub id: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub reason: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub content_json: Value,
+    pub y_snapshot: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionRestoreBody {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub correlation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionRestoreResponse {
+    pub restored: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
@@ -935,6 +994,69 @@ pub struct LookupItemOutput {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct LookupListResponse {
     pub items: Vec<LookupItemOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateCommentBody {
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_user_ids: Option<Vec<Uuid>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_group_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchCommentBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentReactionBody {
+    pub emoji: String,
+    pub on: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentReactionSummary {
+    pub count: usize,
+    pub reacted_by_me: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentOutput {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub document_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+    pub parent_id: Option<Uuid>,
+    pub created_by: Uuid,
+    pub body: String,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub reactions: std::collections::HashMap<String, CommentReactionSummary>,
+    pub other_reaction_count: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentListResponse {
+    pub items: Vec<CommentOutput>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

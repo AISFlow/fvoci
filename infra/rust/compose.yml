@@ -1,4 +1,4 @@
-# FVOCI Rust slice install stack: PostgreSQL, one-shot init, and server.
+# FVOCI Rust slice install stack: PostgreSQL, Meilisearch, one-shot init, and server.
 # Secrets belong in .env (see .env.example); never commit real credentials.
 name: fvoci-rust-install
 
@@ -18,6 +18,21 @@ services:
       retries: 30
       start_period: 5s
 
+  meilisearch:
+    image: getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9
+    environment:
+      MEILI_ENV: production
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?MEILI_MASTER_KEY is required}
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - searchdata:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7700/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
   init:
     image: ${FVOCI_IMAGE:?FVOCI_IMAGE is required}
     entrypoint: ["/opt/fvoci/sbin/init-db.sh"]
@@ -25,8 +40,15 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-fvoci_owner}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fvoci}
       FVOCI_APP_ROLE: ${FVOCI_APP_ROLE:-fvoci_app}
       FVOCI_APP_PASSWORD: ${FVOCI_APP_PASSWORD:?FVOCI_APP_PASSWORD is required}
+      FVOCI_MEILI_URL: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?MEILI_MASTER_KEY is required}
+      FVOCI_MEILI_KEY_FILE: /run/fvoci/meili/api_key
+    volumes:
+      - meili_key:/run/fvoci/meili
     depends_on:
       postgres:
+        condition: service_healthy
+      meilisearch:
         condition: service_healthy
     restart: "no"
 
@@ -47,12 +69,17 @@ services:
       FVOCI_EXTRACTOR_BIN: /opt/fvoci/bin/document-extract
       FVOCI_EXTRACT_POLL_SECS: ${FVOCI_EXTRACT_POLL_SECS:-2}
       FVOCI_SHUTDOWN_DEADLINE_MS: ${FVOCI_SHUTDOWN_DEADLINE_MS:-30000}
+      FVOCI_MEILI_URL: http://meilisearch:7700
+      FVOCI_MEILI_KEY_FILE: /run/fvoci/meili/api_key
     volumes:
       - storage:/data/storage
+      - meili_key:/run/fvoci/meili:ro
     depends_on:
       init:
         condition: service_completed_successfully
       postgres:
+        condition: service_healthy
+      meilisearch:
         condition: service_healthy
     stop_grace_period: 45s
     healthcheck:
@@ -65,3 +92,5 @@ services:
 volumes:
   pgdata:
   storage:
+  searchdata:
+  meili_key:
