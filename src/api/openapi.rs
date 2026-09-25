@@ -1564,6 +1564,7 @@ fn list_project_labels() {}
         (status = 201, description = "Created label", body = LabelOutput),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn create_label() {}
@@ -1584,6 +1585,7 @@ fn create_label() {}
         (status = 200, description = "Label updated", body = OkResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn update_label() {}
@@ -1602,6 +1604,7 @@ fn update_label() {}
     responses(
         (status = 200, description = "Label deleted", body = OkResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn delete_label() {}
@@ -1638,6 +1641,7 @@ fn list_project_milestones() {}
         (status = 201, description = "Created milestone", body = MilestoneOutput),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn create_milestone() {}
@@ -1658,6 +1662,7 @@ fn create_milestone() {}
         (status = 200, description = "Milestone updated", body = OkResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn update_milestone() {}
@@ -1676,6 +1681,7 @@ fn update_milestone() {}
     responses(
         (status = 200, description = "Milestone deleted", body = OkResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn delete_milestone() {}
@@ -1712,6 +1718,7 @@ fn list_project_dependencies() {}
         (status = 200, description = "Dependency added", body = OkResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project or task archived", body = ProblemResponse),
     )
 )]
 fn add_task_dependency() {}
@@ -1730,6 +1737,7 @@ fn add_task_dependency() {}
     responses(
         (status = 200, description = "Dependency removed", body = OkResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project or task archived", body = ProblemResponse),
     )
 )]
 fn remove_task_dependency() {}

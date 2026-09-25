@@ -1391,7 +1391,7 @@ export interface components {
             /** Format: uuid */
             blockedId: string;
             /** Format: int32 */
-            lagDays?: number | null;
+            lagDays?: number;
             type?: string | null;
         };
         CreateWorkspaceBody: {
@@ -1689,6 +1689,7 @@ export interface components {
             groupId: string;
         };
         ProjectListItemOutput: {
+            canEdit: boolean;
             /** Format: date-time */
             createdAt: string;
             createdBy: string;
@@ -5714,6 +5715,15 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
+            /** @description Project archived */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
         };
     };
     delete_label: {
@@ -5743,6 +5753,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Project archived */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5792,6 +5811,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Project archived */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6055,6 +6083,15 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
+            /** @description Project archived */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
         };
     };
     delete_milestone: {
@@ -6084,6 +6121,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Project archived */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6133,6 +6179,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Project archived */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6592,6 +6647,15 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
+            /** @description Project or task archived */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
         };
     };
     remove_task_dependency: {
@@ -6621,6 +6685,15 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Project or task archived */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

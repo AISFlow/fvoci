@@ -170,7 +170,7 @@ export function ProjectTasksPage() {
             <ProjectMilestonesSection
               workspaceId={workspace.id}
               projectId={project.id}
-              canManage={project.status === "active" && roleAtLeast(workspace.role, "member")}
+              canManage={project.status === "active" && project.canEdit}
             />
           ) : null}
           {workspace ? (

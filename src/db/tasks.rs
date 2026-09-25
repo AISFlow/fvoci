@@ -3166,6 +3166,10 @@ pub async fn remove_task_dependency(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
+    if blocker_archived.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::TaskArchived));
+    }
     let Some((blocked_project_id, blocked_archived, _)) =
         load_task_schedule(&mut tx, workspace_id, blocked_id).await?
     else {
@@ -3176,7 +3180,7 @@ pub async fn remove_task_dependency(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::DependencyNotFound));
     }
-    if blocker_archived.is_some() || blocked_archived.is_some() {
+    if blocked_archived.is_some() {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::TaskArchived));
     }
