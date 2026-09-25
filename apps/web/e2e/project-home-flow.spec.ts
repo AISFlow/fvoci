@@ -134,7 +134,8 @@ test("project home shows wiki, documents can be created and moved in the tree", 
 
   // Create lands on the project's tasks, as in the source; the home is its own page.
   await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/HOME/tasks$`));
-  await page.goto(`/w/${admin.workspaceSlug}/HOME`);
+  await page.locator(".task-home__crumb").getByRole("link", { name: "HOME" }).click();
+  await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/HOME$`));
   await expect(page.getByRole("heading", { name: "Home Wiki" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
   await expect(page.getByText("비공개")).toBeVisible();
