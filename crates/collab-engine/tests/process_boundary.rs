@@ -20,6 +20,8 @@ fn spawn(limits: Limits) -> EngineSession {
     EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -54,6 +56,8 @@ fn extract_killable_timeout_reaps_product_helper() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: Some(20_000),
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -231,6 +235,8 @@ fn zero_timeout_is_invalid_limits() {
     let report = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -307,22 +313,26 @@ fn two_document_rooms_can_live_together() {
 }
 
 #[test]
-fn ninth_live_child_is_immediate_resource_limit() {
+fn limit_plus_one_live_child_is_immediate_resource_limit() {
     let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let cap = 4usize;
+    collab_engine::process::set_max_child_concurrency(cap);
     let mut live = Vec::new();
-    for i in 0..collab_engine::limits::MAX_CHILD_CONCURRENCY {
+    for i in 0..cap {
         live.push(spawn(Limits::for_tests()));
         let _ = i;
     }
-    let ninth = EngineSession::spawn(SpawnRequest {
+    let over = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits: Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
         test_exit_after_write: None,
     });
-    let err = ninth.err().expect("9th must be refused");
+    let err = over.err().expect("limit+1 must be refused");
     assert!(
         matches!(
             err.outcome,
@@ -339,6 +349,20 @@ fn ninth_live_child_is_immediate_resource_limit() {
 
 #[cfg(feature = "test-hang")]
 #[test]
+fn child_sets_oom_score_adj() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut session = spawn(Limits::for_tests());
+    let pid = session.pid().expect("pid");
+    assert_eq!(
+        collab_engine::process::child_oom_score_adj(pid),
+        Some(1000),
+        "helper must raise oom_score_adj so cgroup OOM prefers helpers"
+    );
+    session.kill_and_reap();
+}
+
+#[cfg(feature = "test-hang")]
+#[test]
 fn write_times_out_when_child_stops_reading() {
     let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let mut limits = Limits::for_tests();
@@ -350,6 +374,8 @@ fn write_times_out_when_child_stops_reading() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: Some(20_000),
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -389,6 +415,8 @@ fn abrupt_child_exit_is_crash_not_protocol() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: Some(7),
         test_close_stdout_hang_ms: None,
@@ -429,6 +457,8 @@ fn stdout_close_with_live_child_is_protocol() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: Some(20_000),
@@ -516,6 +546,8 @@ fn delivered_frame_survives_child_exit() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits: Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,

@@ -90,13 +90,16 @@ struct DrainOutcome {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    collab_engine::process::raise_nofile_to_hard_limit();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("fvoci_server=info".parse()?))
         .init();
 
     let config = Config::from_env()?;
-
-    let pool = pool::connect_app(&config.app_database_url).await?;
+    let app_pool_max = CollabConfig::from_env()
+        .map(|cfg| fvoci_server::collab::config::derive_app_pool_max_connections(cfg.max_rooms))
+        .unwrap_or(fvoci_server::collab::config::APP_POOL_MAX_CONNECTIONS);
+    let pool = pool::connect_app_with_max(&config.app_database_url, app_pool_max).await?;
     if let Err(message) = migrate::assert_app_role(&pool).await {
         pool.close().await;
         return Err(message.into());
@@ -209,7 +212,19 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let public_origin =
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
 
-    let collab = CollabConfig::from_env().map(|cfg| Arc::new(CollabHub::new(cfg, pool.clone())));
+    let collab = match CollabConfig::from_env() {
+        Some(cfg) => {
+            if let Err(message) =
+                fvoci_server::collab::config::assert_collab_fits_postgres(&pool, cfg.max_rooms)
+                    .await
+            {
+                pool.close().await;
+                return Err(message.into());
+            }
+            Some(Arc::new(CollabHub::new(cfg, pool.clone())))
+        }
+        None => None,
+    };
     let extract_job = match ExtractJobSettings::from_env()? {
         Some(settings) => {
             tracing::info!(

@@ -3,6 +3,7 @@
 //! Enabled only when `FVOCI_COLLAB_ENGINE` points at a built `collab-engine`
 //! helper binary. Without it the route returns 503 `collab_unavailable`.
 
+pub mod admission;
 pub mod awareness;
 pub mod config;
 pub mod derived_body;

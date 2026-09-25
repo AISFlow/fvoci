@@ -17,6 +17,8 @@ pub fn capture_revision_offline(
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin,
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,

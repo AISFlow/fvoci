@@ -1,12 +1,15 @@
 use std::path::Path;
+use std::time::Duration;
 
 use collab_engine::b64;
 use collab_engine::limits::{Limits, MAX_OUTPUT_BYTES};
 use collab_engine::outcome::{EngineStatus, LimitKind};
-use collab_engine::process::{EngineSession, SpawnRequest};
+use collab_engine::process::{ChildSlotKind, EngineSession, SpawnPhaseTimings, SpawnRequest};
 use collab_engine::protocol::Request;
+use std::time::Instant;
 
 const ADMISSION_TIMEOUT_MS: u64 = 4_000;
+const VALIDATOR_SLOT_WAIT: Duration = Duration::from_millis(ADMISSION_TIMEOUT_MS);
 
 /// Stricter wall clock for pre-commit admission; product recovery limits stay unchanged.
 pub fn admission_limits(limits: Limits) -> Limits {
@@ -20,6 +23,8 @@ pub fn admission_limits(limits: Limits) -> Limits {
 pub enum BundleValidation {
     Ok,
     Rejected,
+    /// Validator child pool saturated after bounded wait; retryable capacity pressure.
+    CapacityPressure,
     EngineUnavailable,
 }
 
@@ -68,16 +73,39 @@ pub(crate) fn classify_admission_snapshot(
     }
 }
 
-fn spawn_validator(engine_bin: &Path, limits: Limits) -> Option<EngineSession> {
-    EngineSession::spawn(SpawnRequest {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ValidateStageTimings {
+    pub load_us: u64,
+}
+
+fn spawn_validator(
+    engine_bin: &Path,
+    limits: Limits,
+) -> Result<(EngineSession, SpawnPhaseTimings), BundleValidation> {
+    match EngineSession::spawn_with_timings(SpawnRequest {
         engine_bin: engine_bin.to_path_buf(),
         limits,
+        slot_kind: ChildSlotKind::Validator,
+        slot_wait: Some(VALIDATOR_SLOT_WAIT),
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
         test_exit_after_write: None,
-    })
-    .ok()
+    }) {
+        Ok(pair) => Ok(pair),
+        Err(report)
+            if matches!(
+                report.outcome,
+                EngineStatus::ResourceLimit {
+                    kind: LimitKind::Ops,
+                    ..
+                }
+            ) =>
+        {
+            Err(BundleValidation::CapacityPressure)
+        }
+        Err(_) => Err(BundleValidation::EngineUnavailable),
+    }
 }
 
 /// Validate the exact durable recovery bundle: committed snapshot + ordered tail + candidate.
@@ -89,34 +117,56 @@ pub fn validate_recovery_bundle_blocking(
     committed_tail: &[Vec<u8>],
     candidate: &[u8],
 ) -> BundleValidation {
+    validate_recovery_bundle_blocking_with_timings(
+        engine_bin,
+        product_limits,
+        snapshot,
+        committed_tail,
+        candidate,
+    )
+    .0
+}
+
+pub fn validate_recovery_bundle_blocking_with_timings(
+    engine_bin: &Path,
+    product_limits: Limits,
+    snapshot: &[u8],
+    committed_tail: &[Vec<u8>],
+    candidate: &[u8],
+) -> (BundleValidation, ValidateStageTimings) {
     if candidate.is_empty() {
-        return BundleValidation::Rejected;
+        return (BundleValidation::Rejected, ValidateStageTimings::default());
     }
     let limits = admission_limits(product_limits);
-    let mut session = match spawn_validator(engine_bin, limits) {
-        Some(s) => s,
-        None => return BundleValidation::EngineUnavailable,
+    let (mut session, _spawn_timings) = match spawn_validator(engine_bin, limits) {
+        Ok(pair) => pair,
+        Err(outcome) => return (outcome, ValidateStageTimings::default()),
     };
     let mut tail = committed_tail.to_vec();
     tail.push(candidate.to_vec());
+    let load_started = Instant::now();
     let load = session.call(&Request::Load {
         snapshot_b64: Some(snapshot.to_vec()),
         tail_b64: tail,
         encoding: 1,
     });
+    let load_us = load_started.elapsed().as_micros() as u64;
     if let Err(outcome) = classify_admission_load(&load.outcome) {
         session.kill_and_reap();
-        return outcome;
+        return (outcome, ValidateStageTimings { load_us });
     }
+    let snapshot_started = Instant::now();
     let snap = session.call(&Request::Snapshot);
+    let _snapshot_us = snapshot_started.elapsed().as_micros() as u64;
     session.kill_and_reap();
-    match &snap.outcome {
+    let outcome = match &snap.outcome {
         EngineStatus::Ok {
             update_b64: Some(bytes_b64),
             ..
         } => classify_admission_snapshot(snap.outcome.clone(), b64::decode(bytes_b64)),
         other => classify_admission_snapshot(other.clone(), Ok(Vec::new())),
-    }
+    };
+    (outcome, ValidateStageTimings { load_us })
 }
 
 pub async fn validate_recovery_bundle(
@@ -126,8 +176,26 @@ pub async fn validate_recovery_bundle(
     committed_tail: Vec<Vec<u8>>,
     candidate: Vec<u8>,
 ) -> BundleValidation {
+    validate_recovery_bundle_with_timings(
+        engine_bin,
+        product_limits,
+        snapshot,
+        committed_tail,
+        candidate,
+    )
+    .await
+    .0
+}
+
+pub async fn validate_recovery_bundle_with_timings(
+    engine_bin: std::path::PathBuf,
+    product_limits: Limits,
+    snapshot: Vec<u8>,
+    committed_tail: Vec<Vec<u8>>,
+    candidate: Vec<u8>,
+) -> (BundleValidation, ValidateStageTimings) {
     tokio::task::spawn_blocking(move || {
-        validate_recovery_bundle_blocking(
+        validate_recovery_bundle_blocking_with_timings(
             &engine_bin,
             product_limits,
             &snapshot,
@@ -136,7 +204,10 @@ pub async fn validate_recovery_bundle(
         )
     })
     .await
-    .unwrap_or(BundleValidation::EngineUnavailable)
+    .unwrap_or((
+        BundleValidation::EngineUnavailable,
+        ValidateStageTimings::default(),
+    ))
 }
 
 /// Compaction candidate: load snapshot only in a fresh child under admission limits.
@@ -150,9 +221,9 @@ pub fn validate_snapshot_only_blocking(
         return false;
     }
     let limits = admission_limits(product_limits);
-    let mut session = match spawn_validator(engine_bin, limits) {
-        Some(s) => s,
-        None => return false,
+    let (mut session, _) = match spawn_validator(engine_bin, limits) {
+        Ok(pair) => pair,
+        Err(_) => return false,
     };
     let load = session.call(&Request::Load {
         snapshot_b64: Some(snapshot.to_vec()),
