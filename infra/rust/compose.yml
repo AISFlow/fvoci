@@ -81,6 +81,14 @@ services:
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-}
       SMTP_FROM: ${SMTP_FROM:-}
+      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:-}
+      ENCRYPTION_ACTIVE_KEY_ID: ${ENCRYPTION_ACTIVE_KEY_ID:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_STATE_SECRET: ${GITHUB_STATE_SECRET:-}
+      FVOCI_AI_ENABLED: ${FVOCI_AI_ENABLED:-}
+      FVOCI_AI_SECRET: ${FVOCI_AI_SECRET:-}
     volumes:
       - storage:/data/storage
       - meili_key:/run/fvoci/meili:ro

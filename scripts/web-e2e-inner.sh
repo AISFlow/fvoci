@@ -58,6 +58,12 @@ psql_admin -d "$DB_NAME" -c "CREATE ROLE \"$ROLE_NAME\" LOGIN PASSWORD '$ROLE_PA
 
 export PASSWORD_PEPPER_KEYS="$PEPPER"
 export PASSWORD_PEPPER_ACTIVE_KEY_ID=test
+# Webhook secrets are sealed with this run-only keyring; the integrations flow
+# delivers to a receiver the spec binds on 127.0.0.1:0.
+ENCRYPTION_KEYS="{\"e2e\":\"$(openssl rand -hex 32)\"}"
+export ENCRYPTION_KEYS
+export ENCRYPTION_ACTIVE_KEY_ID=e2e
+export FVOCI_WEBHOOK_ALLOW_TARGETS=127.0.0.1
 export FVOCI_BIND="127.0.0.1:0"
 export FVOCI_PUBLIC_ORIGIN="http://127.0.0.1:0"
 export FVOCI_STATIC_DIR="${FVOCI_STATIC_DIR:?run-web-e2e.sh must provide isolated static assets}"

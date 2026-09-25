@@ -93,6 +93,40 @@ export const apiTokenCreateInput = z.object({
   service: z.boolean().optional(),
 });
 
+/** Source `webhookCreateInput`: an http(s) URL of at most 2048 chars and ≥1 event. */
+export const webhookUrl = z
+  .string()
+  .trim()
+  .min(1, "i18n:webhook.url.invalid")
+  .max(2048, "i18n:webhook.url.invalid")
+  .refine((value) => {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "http:" || parsed.protocol === "https:";
+    } catch {
+      return false;
+    }
+  }, "i18n:webhook.url.invalid");
+
+export const webhookCreateInput = z.object({
+  url: webhookUrl,
+  events: z.array(z.string().min(1)).min(1, "i18n:webhook.events.required").max(64),
+});
+
+/** GitHub issue link form: a task UUID, an `owner/name` repo and a positive issue number. */
+export const githubIssueLinkForm = z.object({
+  taskId: z.string().trim().uuid("i18n:github.issue.invalid"),
+  repo: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "i18n:github.issue.invalid"),
+  issueNumber: z
+    .string()
+    .trim()
+    .regex(/^[1-9][0-9]{0,9}$/, "i18n:github.issue.invalid")
+    .refine((value) => Number(value) <= 2_147_483_647, "i18n:github.issue.invalid"),
+});
+
 export const magicLinkInput = z.object({
   email: z.string().trim().email("i18n:form.email"),
 });

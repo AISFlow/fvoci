@@ -6,6 +6,20 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder
 use utoipa::{Modify, OpenApi};
 
 #[cfg(feature = "api-schema")]
+use crate::api::collections_dto::{
+    CollectionAttachBody, CollectionCreateBody, CollectionFieldCreateBody,
+    CollectionFieldListResponse, CollectionFieldOutput, CollectionFieldPatchBody,
+    CollectionItemLookupResponse, CollectionItemOutput, CollectionListResponse,
+    CollectionOptionOutput, CollectionOptionPatch, CollectionOutput, CollectionQueryBody,
+    CollectionQueryDayOutput, CollectionQueryGroupOutput, CollectionQueryItemOutput,
+    CollectionQueryPreviewOutput, CollectionQueryResponse, CollectionQueryWindow,
+    CollectionValueBody, CollectionValueResponse, CollectionViewBody, CollectionViewListResponse,
+    CollectionViewOutput, DocumentTagAssignBody, DocumentTagCreateBody, DocumentTagListResponse,
+    DocumentTagOutput, DocumentTagPatchBody, DocumentTagPoolItemOutput,
+    DocumentTagPoolListResponse, ProjectCollectionOutput, ProjectViewCreateBody,
+    ProjectViewListResponse, ProjectViewOutput, ProjectViewPatchBody,
+};
+#[cfg(feature = "api-schema")]
 use crate::api::dto::{
     ActivityActorOutput, ActivityChangeOutput, ActivityCommentParentOutput, ActivityItemOutput,
     ActivityListResponse, AddProjectMemberBody, AdminInstanceSettingsOutput, AdminSystemOutput,
@@ -49,6 +63,12 @@ use crate::api::dto::{
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
+    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
+    GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
+    WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
+};
+#[cfg(feature = "api-schema")]
+use crate::api::dto::{
     DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, EmailChangeBody,
     ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse,
     MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, TokenBody, WithdrawBody,
@@ -59,21 +79,6 @@ use crate::settings::catalog::{
     AttachmentPreviewSettings, AuthSettings, BrandingAsset, BrandingSettings, DefaultsUserSettings,
     EmbedSettings, FeaturesSettings, I18nSettings, OperatorSettings, SecuritySettings,
     SettingsValues, SharePolicy,
-};
-
-#[cfg(feature = "api-schema")]
-use crate::api::collections_dto::{
-    CollectionAttachBody, CollectionCreateBody, CollectionFieldCreateBody,
-    CollectionFieldListResponse, CollectionFieldOutput, CollectionFieldPatchBody,
-    CollectionItemLookupResponse, CollectionItemOutput, CollectionListResponse,
-    CollectionOptionOutput, CollectionOptionPatch, CollectionOutput, CollectionQueryBody,
-    CollectionQueryDayOutput, CollectionQueryGroupOutput, CollectionQueryItemOutput,
-    CollectionQueryPreviewOutput, CollectionQueryResponse, CollectionQueryWindow,
-    CollectionValueBody, CollectionValueResponse, CollectionViewBody, CollectionViewListResponse,
-    CollectionViewOutput, DocumentTagAssignBody, DocumentTagCreateBody, DocumentTagListResponse,
-    DocumentTagOutput, DocumentTagPatchBody, DocumentTagPoolItemOutput,
-    DocumentTagPoolListResponse, ProjectCollectionOutput, ProjectViewCreateBody,
-    ProjectViewListResponse, ProjectViewOutput, ProjectViewPatchBody,
 };
 
 #[cfg(feature = "api-schema")]
@@ -242,6 +247,18 @@ impl Modify for CookieSecurityAddon {
         delete_workspace_holiday,
         create_ics_token,
         get_ics_feed,
+        list_webhooks_path,
+        create_webhook_path,
+        remove_webhook_path,
+        get_github_path,
+        remove_github_path,
+        install_github_path,
+        link_github_issue_path,
+        github_callback_path,
+        github_webhook_path,
+        ai_summarize_path,
+        ai_generate_tasks_path,
+        ai_suggest_links_path,
         list_stars,
         create_star,
         delete_star,
@@ -261,6 +278,24 @@ impl Modify for CookieSecurityAddon {
         get_share_document,
         get_share_attachment,
         download_share_attachment,
+        admin_audit,
+        admin_system,
+        admin_users,
+        admin_update_users,
+        admin_workspaces,
+        admin_instance_settings,
+        admin_update_instance_settings,
+        admin_instance_admins,
+        admin_publish_legal,
+        admin_upload_branding_asset,
+        admin_remove_branding_asset,
+        branding_asset,
+        instance_settings_public,
+        legal_get,
+        legal_versions,
+        pending_consents,
+        submit_consents,
+        workspace_consents,
         list_document_tags,
         create_document_tag,
         update_document_tag,
@@ -290,27 +325,21 @@ impl Modify for CookieSecurityAddon {
         create_project_view,
         update_project_view,
         delete_project_view,
-        admin_audit,
-        admin_system,
-        admin_users,
-        admin_update_users,
-        admin_workspaces,
-        admin_instance_settings,
-        admin_update_instance_settings,
-        admin_instance_admins,
-        admin_publish_legal,
-        admin_upload_branding_asset,
-        admin_remove_branding_asset,
-        branding_asset,
-        instance_settings_public,
-        legal_get,
-        legal_versions,
-        pending_consents,
-        submit_consents,
-        workspace_consents,
     ),
     components(
         schemas(
+            WebhookCreateBody,
+            WebhookOutput,
+            WebhookCreatedOutput,
+            WebhookListResponse,
+            GithubInstallOutput,
+            GithubInstallUrlOutput,
+            GithubIssueLinkBody,
+            GithubIssueLinkOutput,
+            AiDocumentBody,
+            AiSummarizeOutput,
+            AiGenerateTasksOutput,
+            AiSuggestLinksOutput,
             SetupStatusResponse,
             BrandingOutput,
             SetupBody,
@@ -424,42 +453,6 @@ impl Modify for CookieSecurityAddon {
             ActivityListResponse,
             CommentListResponse,
     DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, DocumentShareLinkCreateBody, EmailChangeBody, ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse, MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, RecentItemOutput, RecentListResponse, ShareCreateBody, ShareLinkCreatedOutput, ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput, StarCreateBody, StarItemOutput, StarListResponse, TokenBody, WithdrawBody, WorkspaceStatusOutput,
-            DocumentTagOutput,
-            DocumentTagPoolItemOutput,
-            DocumentTagPoolListResponse,
-            DocumentTagListResponse,
-            DocumentTagCreateBody,
-            DocumentTagPatchBody,
-            DocumentTagAssignBody,
-            CollectionOutput,
-            CollectionListResponse,
-            ProjectCollectionOutput,
-            CollectionOptionOutput,
-            CollectionFieldOutput,
-            CollectionFieldListResponse,
-            CollectionItemOutput,
-            CollectionItemLookupResponse,
-            CollectionValueResponse,
-            CollectionQueryItemOutput,
-            CollectionQueryPreviewOutput,
-            CollectionQueryGroupOutput,
-            CollectionQueryDayOutput,
-            CollectionQueryResponse,
-            CollectionViewOutput,
-            CollectionViewListResponse,
-            ProjectViewOutput,
-            ProjectViewListResponse,
-            CollectionCreateBody,
-            CollectionFieldCreateBody,
-            CollectionOptionPatch,
-            CollectionFieldPatchBody,
-            CollectionAttachBody,
-            CollectionValueBody,
-            CollectionQueryWindow,
-            CollectionQueryBody,
-            CollectionViewBody,
-            ProjectViewCreateBody,
-            ProjectViewPatchBody,
             ProblemResponse,
             AuditLogItemOutput,
             AuditLogListResponse,
@@ -499,6 +492,42 @@ impl Modify for CookieSecurityAddon {
             I18nSettings,
             SecuritySettings,
             OperatorSettings,
+            DocumentTagOutput,
+            DocumentTagPoolItemOutput,
+            DocumentTagPoolListResponse,
+            DocumentTagListResponse,
+            DocumentTagCreateBody,
+            DocumentTagPatchBody,
+            DocumentTagAssignBody,
+            CollectionOutput,
+            CollectionListResponse,
+            ProjectCollectionOutput,
+            CollectionOptionOutput,
+            CollectionFieldOutput,
+            CollectionFieldListResponse,
+            CollectionItemOutput,
+            CollectionItemLookupResponse,
+            CollectionValueResponse,
+            CollectionQueryItemOutput,
+            CollectionQueryPreviewOutput,
+            CollectionQueryGroupOutput,
+            CollectionQueryDayOutput,
+            CollectionQueryResponse,
+            CollectionViewOutput,
+            CollectionViewListResponse,
+            ProjectViewOutput,
+            ProjectViewListResponse,
+            CollectionCreateBody,
+            CollectionFieldCreateBody,
+            CollectionOptionPatch,
+            CollectionFieldPatchBody,
+            CollectionAttachBody,
+            CollectionValueBody,
+            CollectionQueryWindow,
+            CollectionQueryBody,
+            CollectionViewBody,
+            ProjectViewCreateBody,
+            ProjectViewPatchBody,
         )
     ),
     modifiers(&CookieSecurityAddon),
@@ -514,6 +543,7 @@ impl Modify for CookieSecurityAddon {
         (name = "comments", description = "Document and task comments"),
         (name = "notifications", description = "In-app notifications"),
         (name = "schedule", description = "Holidays and ICS calendar feeds"),
+        (name = "integrations", description = "Webhooks, GitHub App and document AI actions"),
         (name = "document-tags", description = "Workspace document tags"),
         (name = "collections", description = "Typed collections, values, queries and views"),
     )
@@ -3692,214 +3722,6 @@ fn submit_consents() {}
 )]
 fn workspace_consents() {}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::{json, Value};
-
-    fn schema_is_nullable(schema: &Value) -> bool {
-        if schema["type"]
-            .as_array()
-            .is_some_and(|types| types.iter().any(|ty| ty == "null"))
-        {
-            return true;
-        }
-        for key in ["oneOf", "anyOf"] {
-            let Some(alts) = schema[key].as_array() else {
-                continue;
-            };
-            let has_null = alts
-                .iter()
-                .any(|alt| alt.get("type") == Some(&json!("null")));
-            let has_value = alts
-                .iter()
-                .any(|alt| alt.get("type") != Some(&json!("null")));
-            if has_null && has_value {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn assert_required_nullable(schemas: &Value, name: &str, field: &str) {
-        assert!(
-            schemas[name]["required"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{name} missing required"))
-                .contains(&json!(field)),
-            "{name}.{field} must be required"
-        );
-        assert!(
-            schema_is_nullable(&schemas[name]["properties"][field]),
-            "{name}.{field} must be nullable, got {}",
-            schemas[name]["properties"][field]
-        );
-    }
-
-    fn assert_required_non_nullable(schemas: &Value, name: &str, field: &str) {
-        assert!(
-            schemas[name]["required"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{name} missing required"))
-                .contains(&json!(field)),
-            "{name}.{field} must be required"
-        );
-        assert!(
-            !schema_is_nullable(&schemas[name]["properties"][field]),
-            "{name}.{field} must not be nullable, got {}",
-            schemas[name]["properties"][field]
-        );
-    }
-
-    #[test]
-    fn generated_nullability_matches_runtime_contract() {
-        let spec: Value = serde_json::from_str(&spec_json()).unwrap();
-        let schemas = &spec["components"]["schemas"];
-        for (name, fields) in [
-            ("SessionUserOutput", &["familyName", "emailVerifiedAt"][..]),
-            ("MemberResponse", &["familyName"][..]),
-            ("ApiTokenOutput", &["userId", "expiresAt"][..]),
-            ("ApiTokenCreatedOutput", &["userId", "expiresAt"][..]),
-        ] {
-            for field in fields {
-                assert_required_nullable(schemas, name, field);
-            }
-        }
-        for (name, fields) in [
-            (
-                "DocumentMetaResponse",
-                &["icon", "parentId", "projectId"][..],
-            ),
-            ("TreeNodeResponse", &["icon", "parentId", "projectId"][..]),
-            ("AncestorResponse", &["icon", "projectId"][..]),
-            (
-                "AttachmentOutput",
-                &["sizeBytes", "completedAt", "preview"][..],
-            ),
-        ] {
-            for field in fields {
-                assert_required_nullable(schemas, name, field);
-            }
-        }
-        for field in ["id", "name", "mime", "scanStatus"] {
-            assert_required_non_nullable(schemas, "AttachmentOutput", field);
-        }
-        for field in ["id", "workspaceId", "name", "scopes", "createdAt"] {
-            assert_required_non_nullable(schemas, "ApiTokenOutput", field);
-            assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", field);
-        }
-        assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", "token");
-        let create = &schemas["CreateDocumentBody"];
-        assert!(create["required"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("parentId")));
-        assert_eq!(create["properties"]["parentId"]["format"], "uuid");
-        assert_eq!(schemas["PatchWorkspaceBody"]["required"], json!(["name"]));
-        assert_eq!(
-            schemas["PatchWorkspaceBody"]["properties"]["name"]["type"],
-            "string"
-        );
-        for field in ["title", "status"] {
-            assert_eq!(
-                schemas["PatchDocumentBody"]["properties"][field]["type"],
-                "string"
-            );
-        }
-        let patch = &schemas["PatchMeBody"];
-        assert_eq!(patch["required"], json!(["givenName"]));
-        assert!(patch["properties"]["familyName"]["type"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("null")));
-        for field in ["locale", "timezone", "weekStartsOn", "textScale"] {
-            assert!(patch["properties"][field]["type"].is_string());
-            let mut body = json!({"givenName":"A"});
-            body.as_object_mut()
-                .unwrap()
-                .insert(field.into(), Value::Null);
-            let error = crate::http::json_input::parse_patch_me(body)
-                .err()
-                .expect("null rejected");
-            assert_eq!(error.source, Some(format!("/{field}")));
-        }
-    }
-
-    fn response_statuses(spec: &Value, path: &str, method: &str) -> Vec<String> {
-        spec["paths"][path][method]["responses"]
-            .as_object()
-            .expect("responses")
-            .keys()
-            .cloned()
-            .collect()
-    }
-
-    #[test]
-    fn attachment_routes_declare_runtime_error_statuses() {
-        let spec: Value = serde_json::from_str(&spec_json()).unwrap();
-        let create = response_statuses(
-            &spec,
-            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads",
-            "post",
-        );
-        for status in ["201", "400", "401", "404", "413", "429"] {
-            assert!(
-                create.iter().any(|s| s == status),
-                "create missing {status}"
-            );
-        }
-        let put = response_statuses(
-            &spec,
-            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/parts/{part_number}",
-            "put",
-        );
-        for status in ["200", "400", "401", "403", "404", "409", "413"] {
-            assert!(put.iter().any(|s| s == status), "put missing {status}");
-        }
-        let resume = response_statuses(
-            &spec,
-            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload",
-            "get",
-        );
-        for status in ["200", "401", "403", "404", "409"] {
-            assert!(
-                resume.iter().any(|s| s == status),
-                "resume missing {status}"
-            );
-        }
-        let complete = response_statuses(
-            &spec,
-            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete",
-            "post",
-        );
-        for status in ["200", "400", "401", "403", "404", "409"] {
-            assert!(
-                complete.iter().any(|s| s == status),
-                "complete missing {status}"
-            );
-        }
-        let meta = response_statuses(
-            &spec,
-            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}",
-            "get",
-        );
-        for status in ["200", "401", "404"] {
-            assert!(meta.iter().any(|s| s == status), "meta missing {status}");
-        }
-        let download = response_statuses(
-            &spec,
-            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download",
-            "get",
-        );
-        for status in ["200", "206", "400", "401", "404", "416"] {
-            assert!(
-                download.iter().any(|s| s == status),
-                "download missing {status}"
-            );
-        }
-    }
-}
-
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
     get,
@@ -4485,3 +4307,409 @@ fn update_project_view() {}
     )
 )]
 fn delete_project_view() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn schema_is_nullable(schema: &Value) -> bool {
+        if schema["type"]
+            .as_array()
+            .is_some_and(|types| types.iter().any(|ty| ty == "null"))
+        {
+            return true;
+        }
+        for key in ["oneOf", "anyOf"] {
+            let Some(alts) = schema[key].as_array() else {
+                continue;
+            };
+            let has_null = alts
+                .iter()
+                .any(|alt| alt.get("type") == Some(&json!("null")));
+            let has_value = alts
+                .iter()
+                .any(|alt| alt.get("type") != Some(&json!("null")));
+            if has_null && has_value {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn assert_required_nullable(schemas: &Value, name: &str, field: &str) {
+        assert!(
+            schemas[name]["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} missing required"))
+                .contains(&json!(field)),
+            "{name}.{field} must be required"
+        );
+        assert!(
+            schema_is_nullable(&schemas[name]["properties"][field]),
+            "{name}.{field} must be nullable, got {}",
+            schemas[name]["properties"][field]
+        );
+    }
+
+    fn assert_required_non_nullable(schemas: &Value, name: &str, field: &str) {
+        assert!(
+            schemas[name]["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} missing required"))
+                .contains(&json!(field)),
+            "{name}.{field} must be required"
+        );
+        assert!(
+            !schema_is_nullable(&schemas[name]["properties"][field]),
+            "{name}.{field} must not be nullable, got {}",
+            schemas[name]["properties"][field]
+        );
+    }
+
+    #[test]
+    fn generated_nullability_matches_runtime_contract() {
+        let spec: Value = serde_json::from_str(&spec_json()).unwrap();
+        let schemas = &spec["components"]["schemas"];
+        for (name, fields) in [
+            ("SessionUserOutput", &["familyName", "emailVerifiedAt"][..]),
+            ("MemberResponse", &["familyName"][..]),
+            ("ApiTokenOutput", &["userId", "expiresAt"][..]),
+            ("ApiTokenCreatedOutput", &["userId", "expiresAt"][..]),
+        ] {
+            for field in fields {
+                assert_required_nullable(schemas, name, field);
+            }
+        }
+        for (name, fields) in [
+            (
+                "DocumentMetaResponse",
+                &["icon", "parentId", "projectId"][..],
+            ),
+            ("TreeNodeResponse", &["icon", "parentId", "projectId"][..]),
+            ("AncestorResponse", &["icon", "projectId"][..]),
+            (
+                "AttachmentOutput",
+                &["sizeBytes", "completedAt", "preview"][..],
+            ),
+        ] {
+            for field in fields {
+                assert_required_nullable(schemas, name, field);
+            }
+        }
+        for field in ["id", "name", "mime", "scanStatus"] {
+            assert_required_non_nullable(schemas, "AttachmentOutput", field);
+        }
+        for field in ["id", "workspaceId", "name", "scopes", "createdAt"] {
+            assert_required_non_nullable(schemas, "ApiTokenOutput", field);
+            assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", field);
+        }
+        assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", "token");
+        let create = &schemas["CreateDocumentBody"];
+        assert!(create["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("parentId")));
+        assert_eq!(create["properties"]["parentId"]["format"], "uuid");
+        assert_eq!(schemas["PatchWorkspaceBody"]["required"], json!(["name"]));
+        assert_eq!(
+            schemas["PatchWorkspaceBody"]["properties"]["name"]["type"],
+            "string"
+        );
+        for field in ["title", "status"] {
+            assert_eq!(
+                schemas["PatchDocumentBody"]["properties"][field]["type"],
+                "string"
+            );
+        }
+        let patch = &schemas["PatchMeBody"];
+        assert_eq!(patch["required"], json!(["givenName"]));
+        assert!(patch["properties"]["familyName"]["type"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("null")));
+        for field in ["locale", "timezone", "weekStartsOn", "textScale"] {
+            assert!(patch["properties"][field]["type"].is_string());
+            let mut body = json!({"givenName":"A"});
+            body.as_object_mut()
+                .unwrap()
+                .insert(field.into(), Value::Null);
+            let error = crate::http::json_input::parse_patch_me(body)
+                .err()
+                .expect("null rejected");
+            assert_eq!(error.source, Some(format!("/{field}")));
+        }
+    }
+
+    fn response_statuses(spec: &Value, path: &str, method: &str) -> Vec<String> {
+        spec["paths"][path][method]["responses"]
+            .as_object()
+            .expect("responses")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn attachment_routes_declare_runtime_error_statuses() {
+        let spec: Value = serde_json::from_str(&spec_json()).unwrap();
+        let create = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads",
+            "post",
+        );
+        for status in ["201", "400", "401", "404", "413", "429"] {
+            assert!(
+                create.iter().any(|s| s == status),
+                "create missing {status}"
+            );
+        }
+        let put = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/parts/{part_number}",
+            "put",
+        );
+        for status in ["200", "400", "401", "403", "404", "409", "413"] {
+            assert!(put.iter().any(|s| s == status), "put missing {status}");
+        }
+        let resume = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload",
+            "get",
+        );
+        for status in ["200", "401", "403", "404", "409"] {
+            assert!(
+                resume.iter().any(|s| s == status),
+                "resume missing {status}"
+            );
+        }
+        let complete = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete",
+            "post",
+        );
+        for status in ["200", "400", "401", "403", "404", "409"] {
+            assert!(
+                complete.iter().any(|s| s == status),
+                "complete missing {status}"
+            );
+        }
+        let meta = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}",
+            "get",
+        );
+        for status in ["200", "401", "404"] {
+            assert!(meta.iter().any(|s| s == status), "meta missing {status}");
+        }
+        let download = response_statuses(
+            &spec,
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download",
+            "get",
+        );
+        for status in ["200", "206", "400", "401", "404", "416"] {
+            assert!(
+                download.iter().any(|s| s == status),
+                "download missing {status}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace webhooks (secrets are never listed)", body = WebhookListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn list_webhooks_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = WebhookCreateBody,
+    responses(
+        (status = 201, description = "Created webhook; the signing secret is shown only here", body = WebhookCreatedOutput),
+        (status = 400, description = "Invalid URL or events", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+        (status = 503, description = "Secret encryption keys are not configured", body = ProblemResponse),
+    )
+)]
+fn create_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks/{webhook_id}",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("webhook_id" = String, description = "Webhook id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted webhook and its deliveries", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn remove_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/github",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "GitHub App installation", body = GithubInstallOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn get_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/github",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Removed the installation link", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "No installation, or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn remove_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/github/install",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "GitHub App install URL with a signed state", body = GithubInstallUrlOutput),
+        (status = 400, description = "GitHub App not configured or unreachable", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn install_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/github/issue-links",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = GithubIssueLinkBody,
+    responses(
+        (status = 201, description = "Linked the task to an issue", body = GithubIssueLinkOutput),
+        (status = 400, description = "Invalid repo/number or already linked", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Task not found or no project edit permission", body = ProblemResponse),
+    )
+)]
+fn link_github_issue_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/github/callback",
+    tag = "integrations",
+    params(
+        ("state" = Option<String>, Query, description = "Signed install state"),
+        ("installation_id" = Option<String>, Query, description = "GitHub installation id"),
+    ),
+    responses(
+        (status = 302, description = "Installed; redirects to the app"),
+        (status = 400, description = "Invalid or expired state", body = ProblemResponse),
+    )
+)]
+fn github_callback_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/github/webhook",
+    tag = "integrations",
+    responses(
+        (status = 200, description = "Accepted", body = OkResponse),
+        (status = 400, description = "Not configured or invalid payload", body = ProblemResponse),
+        (status = 401, description = "Signature invalid", body = ProblemResponse),
+        (status = 413, description = "Body too large", body = ProblemResponse),
+    )
+)]
+fn github_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/summarize",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Summary", body = AiSummarizeOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_summarize_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/generate-tasks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Task titles", body = AiGenerateTasksOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_generate_tasks_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/suggest-links",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Visible document ids", body = AiSuggestLinksOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_suggest_links_path() {}

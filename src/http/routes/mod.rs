@@ -10,6 +10,7 @@ pub mod documents;
 pub mod groups;
 pub mod ics;
 pub mod import;
+pub mod integrations;
 pub mod invitations;
 pub mod legal;
 pub mod lookup;

@@ -34,6 +34,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
         25,
     ),
     (include_str!("../../migrations/026_admin_console.sql"), 26),
+    (include_str!("../../migrations/027_integrations.sql"), 27),
     (
         include_str!("../../migrations/028_collections_views.sql"),
         28,
@@ -316,7 +317,9 @@ pub async fn assert_app_role(pool: &PgPool) -> Result<(), String> {
                   'outbox_failures', 'processed_events', 'attachment_text', 'labels',
                   'task_assignees', 'task_labels', 'milestones', 'task_dependencies',
                   'notifications', 'notification_prefs', 'workspace_holidays', 'ics_tokens',
-                  'magic_tokens', 'task_activity'
+                  'magic_tokens', 'task_activity', 'webhooks', 'webhook_deliveries',
+                  'github_installations', 'github_install_states', 'github_issue_links',
+                  'github_deliveries'
               )
               AND pg_get_userbyid(c.relowner) = current_user
         )
@@ -465,6 +468,10 @@ mod tests {
         (
             26,
             "fc1035798930f9c1c96f654066a8552f03d0700be02199b7f2de9072fc75588d",
+        ),
+        (
+            27,
+            "abb60b87ee539663e93c9fa68b8eb986748c2acccd210c0f655c061b378c9d68",
         ),
         (
             28,
