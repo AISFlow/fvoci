@@ -12,6 +12,7 @@ COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" --env-file 
 
 OWNER_PASSWORD="$(openssl rand -hex 16)"
 APP_PASSWORD="$(openssl rand -hex 16)"
+MEILI_MASTER_KEY="$(openssl rand -hex 16)"
 PEPPER="{\"install\":\"$(openssl rand -hex 32)\"}"
 FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
 ASSERT_LOG="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-assert.${RUN_ID}.XXXXXX")"
@@ -70,6 +71,7 @@ FVOCI_PUBLIC_ORIGIN=${ORIGIN}
 FVOCI_COOKIE_SECURE=false
 FVOCI_PUBLISH_PORT=${HOST_PORT}
 FVOCI_EXTRACT_POLL_SECS=2
+MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
 EOF
 
 poll_extract_field() {
@@ -226,6 +228,22 @@ if grep -Eq '^(DATABASE_URL|FVOCI_MIGRATION_URL)=' <<<"$SERVER_ENV"; then
   exit 1
 fi
 log_assert "server holds only the app database URL: ok"
+if grep -Eq '^(MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY)=' <<<"$SERVER_ENV"; then
+  echo "server container must not receive the Meilisearch master key" >&2
+  exit 1
+fi
+if ! grep -Eq '^FVOCI_MEILI_URL=' <<<"$SERVER_ENV"; then
+  echo "server container missing FVOCI_MEILI_URL" >&2
+  exit 1
+fi
+if ! grep -Eq '^FVOCI_MEILI_KEY_FILE=' <<<"$SERVER_ENV"; then
+  echo "server container missing FVOCI_MEILI_KEY_FILE" >&2
+  exit 1
+fi
+log_assert "server holds Meili URL and key file, not the master key: ok"
+SETTINGS_JSON="$(docker exec "$SERVER_CID" sh -c 'curl -fsS -H "Authorization: Bearer $(cat /run/fvoci/meili/api_key)" http://meilisearch:7700/indexes/fvoci/settings')"
+python3 -c 'import json,sys; s=json.load(sys.stdin); assert s.get("searchableAttributes")==["title","body","chosung","stem"], s; assert "resourceKey" in s.get("filterableAttributes",[]), s' <<<"$SETTINGS_JSON"
+log_assert "meili index settings ensured: ok"
 
 STORAGE_SAMPLE="$(docker exec "$SERVER_CID" sh -c 'find /data/storage -type f | head -1')"
 if [[ -z "$STORAGE_SAMPLE" ]]; then

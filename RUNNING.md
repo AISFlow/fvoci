@@ -24,6 +24,10 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES` | Upload size ceiling; defaults to 5120 MiB. This is independent of the native extractor's 20 MiB input ceiling. |
 | `FVOCI_UPLOAD_CREATE_RATE_PER_5MIN` | Upload creation rate limit; defaults to 120. Must be positive. |
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
+| `FVOCI_MEILI_URL` | Meilisearch HTTP origin. Unset disables search (later routes return a problem). |
+| `FVOCI_MEILI_KEY` | API key used when `FVOCI_MEILI_KEY_FILE` is unset. Required (with the file form) if the URL is set. Never logged. |
+| `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. |
+| `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 
 Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. The crate uses SQLx `runtime-tokio-rustls`.
 
@@ -298,9 +302,18 @@ docker compose -f infra/rust/compose.yml --env-file infra/rust/.env up -d --wait
 
 The `init` service runs `fvoci-migrate`, creates the non-superuser
 `FVOCI_APP_ROLE` if missing, then `fvoci-migrate --grant-app-role <role>` with the
-owner `DATABASE_URL`. The stack fails if init exits nonzero; `server` starts only
-after init succeeds. The server receives only `DATABASE_APP_URL`; the owner URL is
-given to the one-shot init service alone. Preserve the `storage` and `pgdata` volumes across restarts.
+owner `DATABASE_URL`. When `FVOCI_MEILI_URL` is set it also runs
+`fvoci-migrate --ensure-meili-key` with the Meilisearch **master** key, writes a
+scoped API key (index `fvoci` only) to `/run/fvoci/meili/api_key` (mode 0600,
+uid 1000), and ensures index settings. The stack fails if init exits nonzero;
+`server` starts only after init succeeds. The server receives only
+`DATABASE_APP_URL` and `FVOCI_MEILI_URL` + `FVOCI_MEILI_KEY_FILE`; it never
+receives the owner database URL or `MEILI_MASTER_KEY`. Preserve the `storage`,
+`pgdata`, `searchdata`, and `meili_key` volumes across restarts.
+
+Search is disabled when `FVOCI_MEILI_URL` is unset. If the URL is set without
+`FVOCI_MEILI_KEY` or `FVOCI_MEILI_KEY_FILE`, the server refuses to start. Keys
+are never logged.
 
 The server is published on `FVOCI_PUBLISH_ADDR:FVOCI_PUBLISH_PORT` (default
 `127.0.0.1`, loopback only). `FVOCI_PUBLIC_ORIGIN` must be the exact origin browsers
