@@ -28,8 +28,29 @@ pub struct PartInfo {
 pub struct StagedPart {
     pub etag: String,
     pub size_bytes: u64,
-    writing_path: PathBuf,
+    /// Local temp file awaiting publish; `None` once the bytes already live
+    /// in remote multipart storage.
+    writing_path: Option<PathBuf>,
     keep: bool,
+}
+
+impl StagedPart {
+    /// A part the remote store already holds under its multipart upload.
+    pub(crate) fn uploaded(etag: String, size_bytes: u64) -> Self {
+        Self {
+            etag,
+            size_bytes,
+            writing_path: None,
+            keep: true,
+        }
+    }
+
+    pub async fn discard(&mut self) {
+        if let Some(path) = &self.writing_path {
+            let _ = fs::remove_file(path).await;
+        }
+        self.keep = true;
+    }
 }
 
 struct WritingGuard {
@@ -84,6 +105,16 @@ pub enum StorageError {
     PartTooLarge,
     #[error("etag mismatch")]
     EtagMismatch,
+    /// A non-final part is below the backend's minimum part size
+    /// (S3 `EntityTooSmall`).
+    #[error("part too small (EntityTooSmall)")]
+    PartTooSmall,
+    /// The part body has no declared length and the backend needs one.
+    #[error("part length required")]
+    LengthRequired,
+    /// The part body ended before, or ran past, its declared length.
+    #[error("part body does not match its declared length")]
+    LengthMismatch,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 }
@@ -199,7 +230,7 @@ impl LocalStorage {
         Ok(StagedPart {
             etag,
             size_bytes,
-            writing_path,
+            writing_path: Some(writing_path),
             keep: false,
         })
     }
@@ -212,13 +243,17 @@ impl LocalStorage {
     ) -> Result<PartInfo, StorageError> {
         Self::assert_key(key)?;
         let dir = self.parts_dir(key);
+        let writing_path = staged
+            .writing_path
+            .clone()
+            .ok_or(StorageError::UploadGone)?;
         if fs::metadata(&dir).await.is_err() {
-            let _ = fs::remove_file(&staged.writing_path).await;
+            let _ = fs::remove_file(&writing_path).await;
             return Err(StorageError::UploadGone);
         }
         let final_path = dir.join(part_number.to_string());
-        if let Err(err) = durable_rename(&staged.writing_path, &final_path).await {
-            let _ = fs::remove_file(&staged.writing_path).await;
+        if let Err(err) = durable_rename(&writing_path, &final_path).await {
+            let _ = fs::remove_file(&writing_path).await;
             return Err(if err.kind() == io::ErrorKind::NotFound {
                 StorageError::UploadGone
             } else {
@@ -234,8 +269,19 @@ impl LocalStorage {
     }
 
     pub async fn discard_staged_part(staged: &mut StagedPart) {
-        let _ = fs::remove_file(&staged.writing_path).await;
-        staged.keep = true;
+        staged.discard().await;
+    }
+
+    pub async fn list_multipart_uploads(
+        &self,
+        key: &str,
+    ) -> Result<Vec<Option<String>>, StorageError> {
+        Self::assert_key(key)?;
+        match fs::metadata(self.parts_dir(key)).await {
+            Ok(_) => Ok(vec![None]),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(err) => Err(StorageError::Io(err)),
+        }
     }
 
     pub async fn list_parts(&self, key: &str) -> Result<Vec<PartInfo>, StorageError> {
@@ -471,7 +517,9 @@ async fn copy_hashed(path: &Path, out: &mut fs::File) -> Result<(String, u64), S
 impl Drop for StagedPart {
     fn drop(&mut self) {
         if !self.keep {
-            let _ = std::fs::remove_file(&self.writing_path);
+            if let Some(path) = &self.writing_path {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 }

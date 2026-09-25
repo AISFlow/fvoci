@@ -164,7 +164,7 @@ async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppStat
         public_origin: "http://localhost".to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
-        storage: fvoci_server::attachments::LocalStorage::new(storage_root),
+        storage: fvoci_server::attachments::LocalStorage::new(storage_root).into(),
         upload: fvoci_server::attachments::UploadLimits {
             part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
@@ -1082,10 +1082,12 @@ async fn put_stream_revocation_blocks_part_publication() {
         .storage
         .stage_part_stream(
             &storage_key,
+            None,
             1,
             stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
                 bytes::Bytes::from_static(payload),
             )]),
+            None,
             payload.len() as u64,
         )
         .await
@@ -1113,7 +1115,7 @@ async fn put_stream_revocation_blocks_part_publication() {
     .unwrap()
     .unwrap_err();
     assert!(matches!(denied, AttachmentDbError::Forbidden));
-    let parts = state.storage.list_parts(&storage_key).await.unwrap();
+    let parts = state.storage.list_parts(&storage_key, None).await.unwrap();
     assert!(parts.is_empty());
     pool.close().await;
     harness.cleanup().await;
@@ -1274,7 +1276,11 @@ async fn attachment_event_and_audit_failures_roll_back_and_retry() {
             .fetch_one(&admin)
             .await
             .unwrap();
-    let parts = state.storage.list_parts(&storage_key.0).await.unwrap();
+    let parts = state
+        .storage
+        .list_parts(&storage_key.0, None)
+        .await
+        .unwrap();
     assert_eq!(parts.len(), 1);
     sqlx::query("DROP TRIGGER fvoci_test_att_event_fail ON fvoci.events")
         .execute(&admin)
@@ -2143,6 +2149,228 @@ async fn aborted_put_before_publish_removes_staged_and_keeps_part() {
     harness.cleanup().await;
 }
 
+#[tokio::test]
+async fn stale_upload_gc_removes_expired_uploading_and_is_idempotent() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-gc-{}", Uuid::now_v7()));
+    let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
+    let storage = state.storage.clone();
+    let pool = state.auth.db.pool.clone();
+    let app = app_router(state);
+    let (_, _, cookie_hdr) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "gc@example.com",
+            "password": "supersecret1",
+            "givenName": "Gc",
+            "workspaceSlug": "gcws",
+            "workspaceName": "Gc"
+        })),
+        None,
+    )
+    .await;
+    let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'gcws'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"stale-part";
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "stale.bin",
+        payload,
+    )
+    .await;
+    let (status, _, _) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    sqlx::query(
+        "UPDATE fvoci.attachments SET created_at = NOW() - INTERVAL '25 hours' WHERE id = $1",
+    )
+    .bind(attachment_uuid)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let storage_key: String =
+        sqlx::query_scalar("SELECT storage_key FROM fvoci.attachments WHERE id = $1")
+            .bind(attachment_uuid)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let tmp_dir = storage_root.join("tmp").join(&storage_key);
+    assert!(tmp_dir.exists(), "multipart temp must exist before GC");
+    let purged = gc_stale_uploads(&pool, &storage, Utc::now())
+        .await
+        .expect("gc");
+    assert_eq!(purged, 1);
+    let purged_again = gc_stale_uploads(&pool, &storage, Utc::now())
+        .await
+        .expect("gc idempotent");
+    assert_eq!(purged_again, 0);
+    let gone: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM fvoci.attachments WHERE id = $1")
+        .bind(attachment_uuid)
+        .fetch_optional(&admin)
+        .await
+        .unwrap();
+    assert!(gone.is_none());
+    assert!(!tmp_dir.exists(), "GC must abort local multipart temp");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn stale_upload_gc_skips_stored_and_yields_to_in_flight_complete() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-gc-stored-{}", Uuid::now_v7()));
+    let state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
+    let storage = state.storage.clone();
+    let pool = state.auth.db.pool.clone();
+    let app = app_router(state);
+    let (_, _, cookie_hdr) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "gcstored@example.com",
+            "password": "supersecret1",
+            "givenName": "Stored",
+            "workspaceSlug": "gcstored",
+            "workspaceName": "Stored"
+        })),
+        None,
+    )
+    .await;
+    let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'gcstored'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let uploaded = upload_bytes(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "kept.bin",
+        b"keep-me",
+        None,
+    )
+    .await;
+    let kept_id = Uuid::parse_str(&uploaded.attachment_id).unwrap();
+    sqlx::query(
+        "UPDATE fvoci.attachments SET created_at = NOW() - INTERVAL '25 hours' WHERE id = $1",
+    )
+    .bind(kept_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let skipped = gc_stale_uploads(&pool, &storage, Utc::now())
+        .await
+        .expect("gc stored");
+    assert_eq!(skipped, 0);
+    let kept_status: String =
+        sqlx::query_scalar("SELECT status FROM fvoci.attachments WHERE id = $1")
+            .bind(kept_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(kept_status, "stored");
+
+    let payload = b"inflight";
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "inflight.bin",
+        payload,
+    )
+    .await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    sqlx::query(
+        "UPDATE fvoci.attachments SET created_at = NOW() - INTERVAL '25 hours' WHERE id = $1",
+    )
+    .bind(attachment_uuid)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let mut barrier = test_barrier::arm_pre_mark_stored(attachment_uuid);
+    let complete = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let attachment_id = attachment_id.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+                Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+        .await
+        .expect("complete should reach pre-mark barrier")
+        .expect("barrier entered");
+    let during_lock = gc_stale_uploads(&pool, &storage, Utc::now())
+        .await
+        .expect("gc while complete holds lock");
+    assert_eq!(during_lock, 0);
+    barrier.proceed();
+    let (status, _, _) = complete.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    let status_after: String =
+        sqlx::query_scalar("SELECT status FROM fvoci.attachments WHERE id = $1")
+            .bind(attachment_uuid)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(status_after, "stored");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
 async fn writing_temps(root: &Path) -> usize {
     let mut count = 0usize;
     let mut stack = vec![root.to_path_buf()];
@@ -2164,4 +2392,20 @@ async fn writing_temps(root: &Path) -> usize {
         }
     }
     count
+}
+
+/// One bounded maintenance upload-GC pass; returns the number of rows purged.
+async fn gc_stale_uploads(
+    pool: &sqlx::PgPool,
+    storage: &fvoci_server::attachments::ObjectStorage,
+    cutoff: chrono::DateTime<Utc>,
+) -> Result<u32, sqlx::Error> {
+    fvoci_server::jobs::run_stale_upload_gc(
+        pool,
+        storage,
+        cutoff,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map(|stats| stats.purged)
 }

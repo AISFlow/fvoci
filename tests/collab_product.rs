@@ -575,7 +575,7 @@ async fn collab_app_state_with_config(app_url: &str, cfg: CollabConfig) -> AppSt
         public_origin: PUBLIC_ORIGIN.to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
-        storage: fvoci_server::attachments::LocalStorage::new(storage_root),
+        storage: fvoci_server::attachments::LocalStorage::new(storage_root).into(),
         upload: fvoci_server::attachments::UploadLimits {
             part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
@@ -617,7 +617,7 @@ async fn collab_app_state(
         public_origin: PUBLIC_ORIGIN.to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
-        storage: fvoci_server::attachments::LocalStorage::new(storage_root),
+        storage: fvoci_server::attachments::LocalStorage::new(storage_root).into(),
         upload: fvoci_server::attachments::UploadLimits {
             part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,

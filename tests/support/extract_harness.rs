@@ -153,7 +153,7 @@ pub async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> App
         public_origin: "http://localhost".to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
-        storage: LocalStorage::new(storage_root.clone()),
+        storage: LocalStorage::new(storage_root.clone()).into(),
         upload: UploadLimits {
             part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
@@ -690,6 +690,6 @@ pub async fn spawn_extract_for_storage(
     spawn_extract_job(
         settings,
         pool,
-        LocalStorage::new(storage_root.to_path_buf()),
+        fvoci_server::attachments::ObjectStorage::local(storage_root.to_path_buf()),
     )
 }

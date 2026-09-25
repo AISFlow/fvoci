@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::attachments::{LocalStorage, UploadLimits};
+use crate::attachments::{ObjectStorage, UploadLimits};
 use crate::auth::AuthService;
 use crate::collab::CollabHub;
 use crate::documents::convert::ConvertClient;
@@ -14,7 +14,7 @@ pub struct AppState {
     pub public_origin: String,
     pub cookie_secure: bool,
     pub rate_limiter: RateLimiter,
-    pub storage: LocalStorage,
+    pub storage: ObjectStorage,
     pub upload: UploadLimits,
     pub collab: Option<Arc<CollabHub>>,
     pub meili: Option<MeiliConfig>,

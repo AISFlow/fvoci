@@ -12,8 +12,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use tokio::io::AsyncReadExt;
-use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::api::dto::{
@@ -220,7 +218,7 @@ async fn put_upload_part(
     )
     .await
     .map_err(internal)?;
-    let (storage_key, max_bytes) = match auth {
+    let (storage_key, max_bytes, upload_ref) = match auth {
         Ok(v) => v,
         Err(AttachmentDbError::UploadForbidden) => {
             return Err(AppError::from_code(
@@ -245,10 +243,18 @@ async fn put_upload_part(
         }
         Err(_) => return Err(AppError::internal()),
     };
+    let declared_len = declared_body_length(&headers, &body)?;
     let stream = body.into_data_stream();
     let mut staged = state
         .storage
-        .stage_part_stream(&storage_key, part_number, stream, max_bytes)
+        .stage_part_stream(
+            &storage_key,
+            upload_ref.as_deref(),
+            part_number,
+            stream,
+            declared_len,
+            max_bytes,
+        )
         .await
         .map_err(map_storage_error)?;
     #[cfg(feature = "db-tests")]
@@ -568,11 +574,10 @@ async fn serve_download(
             }
             let file = state
                 .storage
-                .open_payload_at(&att.storage_key, 0)
+                .open_payload_stream(&att.storage_key, 0, (size as u64).saturating_sub(1))
                 .await
                 .map_err(|_| AppError::internal())?;
-            let stream = ReaderStream::with_capacity(file.take(size as u64), 64 * 1024);
-            Ok((StatusCode::OK, response_headers, Body::from_stream(stream)).into_response())
+            Ok((StatusCode::OK, response_headers, Body::from_stream(file)).into_response())
         }
         ParsedRange::Bytes { start, end } => {
             let len = end - start + 1;
@@ -588,12 +593,11 @@ async fn serve_download(
             if head_only {
                 return Ok((StatusCode::PARTIAL_CONTENT, response_headers).into_response());
             }
-            let file = state
+            let stream = state
                 .storage
-                .open_payload_at(&att.storage_key, start)
+                .open_payload_stream(&att.storage_key, start, end)
                 .await
                 .map_err(|_| AppError::internal())?;
-            let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
             Ok((
                 StatusCode::PARTIAL_CONTENT,
                 response_headers,
@@ -604,14 +608,32 @@ async fn serve_download(
     }
 }
 
+/// The part's declared length: `Content-Length`, or the exact size the body
+/// already knows (e.g. a buffered body). A malformed header is rejected; no
+/// declared length at all (chunked) yields `None`, which the S3 driver refuses.
+fn declared_body_length(headers: &HeaderMap, body: &Body) -> Result<Option<u64>, AppError> {
+    match headers.get(CONTENT_LENGTH) {
+        Some(value) => value
+            .to_str()
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Some)
+            .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput)),
+        None => Ok(axum::body::HttpBody::size_hint(body).exact()),
+    }
+}
+
 fn map_storage_error(err: StorageError) -> AppError {
     match err {
         StorageError::PartTooLarge => AppError::from_code(ProblemCode::PartExceedsUploadPartSizeMb),
         StorageError::UploadGone | StorageError::InvalidKey => {
             AppError::from_code(ProblemCode::UploadIsNotInTheRequiredState)
         }
-        StorageError::EtagMismatch => {
+        StorageError::EtagMismatch | StorageError::PartTooSmall => {
             AppError::from_code(ProblemCode::SubmittedPartsDoNotMatchUploadedParts)
+        }
+        StorageError::LengthRequired | StorageError::LengthMismatch => {
+            AppError::from_code(ProblemCode::InvalidInput)
         }
         _ => AppError::internal(),
     }

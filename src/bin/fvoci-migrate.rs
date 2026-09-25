@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use fvoci_server::attachments::{verify_stored_objects, ObjectStorage};
+use fvoci_server::config::storage_settings_from_env;
 use fvoci_server::db::migrate;
 use fvoci_server::db::outbox_recover::{parse_recover_outbox_args, recover_outbox};
 use fvoci_server::search::index::{rebuild_pool, rebuild_search_index};
@@ -36,6 +38,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let workspace_id = Uuid::parse_str(workspace).map_err(|_| "invalid workspace ID")?;
             rebuild(Some(workspace_id)).await?;
         }
+        [flag] if flag == "--verify-storage" => {
+            verify_storage().await?;
+        }
         [flag, rest @ ..] if flag == "--recover-outbox" => {
             let url = migration_url()?;
             let opts = parse_recover_outbox_args(rest)?;
@@ -44,7 +49,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
             );
         }
     }
@@ -65,6 +70,32 @@ async fn rebuild(workspace_id: Option<Uuid>) -> Result<(), Box<dyn std::error::E
         outcome.workspaces, outcome.pages
     );
     pool.close().await;
+    Ok(())
+}
+
+/// Post-restore check: every stored attachment exists in the configured
+/// storage (local volume or S3 bucket) with its recorded size. Runs with the
+/// server's environment (`DATABASE_APP_URL` and the storage variables), so it
+/// needs no owner credentials and reads under the app role's RLS.
+async fn verify_storage() -> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("DATABASE_APP_URL")
+        .or_else(|_| std::env::var("FVOCI_APP_DATABASE_URL"))
+        .map_err(|_| "DATABASE_APP_URL is required for --verify-storage")?;
+    let storage = ObjectStorage::from_settings(&storage_settings_from_env()?)?;
+    storage.probe().await?;
+    let pool = fvoci_server::db::pool::connect_app(&url).await?;
+    let report = verify_stored_objects(&pool, &storage).await;
+    pool.close().await;
+    let report = report?;
+    println!("{}", serde_json::to_string(&report)?);
+    if !report.is_complete() {
+        return Err(format!(
+            "storage is missing {} and has {} size-mismatched stored attachment(s)",
+            report.missing.len(),
+            report.size_mismatch.len()
+        )
+        .into());
+    }
     Ok(())
 }
 
