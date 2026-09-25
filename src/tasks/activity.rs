@@ -93,10 +93,18 @@ pub enum ActivityCursorError {
     Invalid,
 }
 
+/// A validated keyset position: `at` is a real timestamp, `item_type` a feed type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityCursor {
+    pub id: Uuid,
+    pub at: DateTime<Utc>,
+    pub item_type: String,
+}
+
 pub fn decode_activity_cursor(
     raw: &str,
     scope: &str,
-) -> Result<ActivityCursorPayload, ActivityCursorError> {
+) -> Result<ActivityCursor, ActivityCursorError> {
     if raw.len() > 1024 {
         return Err(ActivityCursorError::Invalid);
     }
@@ -105,13 +113,17 @@ pub fn decode_activity_cursor(
         .map_err(|_| ActivityCursorError::Invalid)?;
     let payload: ActivityCursorPayload =
         serde_json::from_slice(&bytes).map_err(|_| ActivityCursorError::Invalid)?;
-    if payload.f != scope {
+    if payload.f != scope || !matches!(payload.item_type.as_str(), "change" | "comment") {
         return Err(ActivityCursorError::Invalid);
     }
-    if payload.item_type != "change" && payload.item_type != "comment" {
-        return Err(ActivityCursorError::Invalid);
-    }
-    Ok(payload)
+    let at = DateTime::parse_from_rfc3339(&payload.at)
+        .map_err(|_| ActivityCursorError::Invalid)?
+        .with_timezone(&Utc);
+    Ok(ActivityCursor {
+        id: payload.id,
+        at,
+        item_type: payload.item_type,
+    })
 }
 
 pub type ActivitySnapshot = serde_json::Map<String, Value>;
@@ -148,13 +160,10 @@ pub fn diff_activity(
     let mut changes = Vec::new();
     if let Some(before) = before {
         for field in ACTIVITY_FIELDS {
-            let before_value = before.get(*field);
-            let after_value = after.get(*field);
-            if before_value.is_none() || after_value.is_none() {
+            let (Some(before_value), Some(after_value)) = (before.get(*field), after.get(*field))
+            else {
                 continue;
-            }
-            let before_value = before_value.expect("checked");
-            let after_value = after_value.expect("checked");
+            };
             if value_identity(before_value) != value_identity(after_value) {
                 changes.push(json!({
                     "field": field,

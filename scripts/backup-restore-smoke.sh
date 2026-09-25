@@ -47,6 +47,11 @@ require_cmd() {
 
 cleanup() {
   local status=$?
+  if (( status != 0 )); then
+    echo "== server/init logs (last 200 lines per stack)" >&2
+    "${SOURCE_COMPOSE[@]}" logs --no-color --tail 200 init server >&2 || true
+    "${RESTORE_COMPOSE[@]}" logs --no-color --tail 200 init server >&2 || true
+  fi
   "${SOURCE_COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   "${RESTORE_COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$BACKUP_DIR"

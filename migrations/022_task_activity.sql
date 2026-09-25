@@ -29,7 +29,12 @@ CREATE INDEX task_activity_actor_idx ON fvoci.task_activity (actor_user_id);
 
 ALTER TABLE fvoci.task_activity ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fvoci.task_activity FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON fvoci.task_activity
-    AS PERMISSIVE FOR ALL TO public
-    USING (workspace_id = (SELECT public.app_tenant_id()))
+-- Append-only: the app role may read and append, never rewrite or erase.
+-- With RLS forced and no UPDATE/DELETE policy, both are denied; FK cascades
+-- from tasks and users run as the owner and are unaffected.
+CREATE POLICY task_activity_read ON fvoci.task_activity
+    AS PERMISSIVE FOR SELECT TO public
+    USING (workspace_id = (SELECT public.app_tenant_id()));
+CREATE POLICY task_activity_append ON fvoci.task_activity
+    AS PERMISSIVE FOR INSERT TO public
     WITH CHECK (workspace_id = (SELECT public.app_tenant_id()));

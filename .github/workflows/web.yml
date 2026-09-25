@@ -29,6 +29,8 @@ jobs:
             specs: e2e/workspace-flow.spec.ts e2e/workspace-wiki-flow.spec.ts
           - flow: project-task-flow
             specs: e2e/project-task-flow.spec.ts
+          - flow: project-home-flow
+            specs: e2e/project-home-flow.spec.ts
           - flow: invite-flow
             specs: e2e/workspace-invite-flow.spec.ts
           - flow: task-edit-flow
@@ -43,10 +45,14 @@ jobs:
             specs: e2e/notifications-flow.spec.ts
           - flow: task-comments-flow
             specs: e2e/task-comments-flow.spec.ts
+          - flow: task-activity-flow
+            specs: e2e/task-activity-flow.spec.ts
           - flow: search-flow
             specs: e2e/search-flow.spec.ts
           - flow: schedule-ics-flow
             specs: e2e/schedule-ics-flow.spec.ts
+          - flow: workspace-lifecycle-flow
+            specs: e2e/workspace-lifecycle-flow.spec.ts
           - flow: mail-reset-flow
             specs: e2e/mail-reset-flow.spec.ts
           - flow: wiki-lifecycle-flow

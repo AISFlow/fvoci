@@ -10,6 +10,7 @@ export type ProjectCreateFormValues = {
   visibility: "workspace" | "private";
   description?: string;
   icon?: string;
+  leadUserId?: string;
 };
 
 export type ProjectCreateBody = {
@@ -18,6 +19,7 @@ export type ProjectCreateBody = {
   visibility: "workspace" | "private";
   description: string | null;
   icon: string | null;
+  leadUserId?: string;
 };
 
 export type ProjectCreateIssue =
@@ -50,14 +52,15 @@ export function projectCreatePayload(
   if (icon !== null && icon.length > PROJECT_ICON_MAX) {
     return { ok: false, issue: { field: "icon", code: "too_big" } };
   }
-  return {
-    ok: true,
-    body: {
-      key,
-      name,
-      visibility: values.visibility,
-      description,
-      icon,
-    },
+  const body: ProjectCreateBody = {
+    key,
+    name,
+    visibility: values.visibility,
+    description,
+    icon,
   };
+  if (values.leadUserId) {
+    body.leadUserId = values.leadUserId;
+  }
+  return { ok: true, body };
 }

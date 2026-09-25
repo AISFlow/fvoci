@@ -104,8 +104,16 @@ test("태스크 활동: 변경과 댓글을 한 흐름에서 필터하고 다시
     activity.getByText("태스크를 생성했습니다.", { exact: false }),
   ).toHaveCount(0);
 
+  // In-page edits refresh the feed without a reload.
+  await filter.selectOption("all");
+  const inPageTitle = "페이지에서 바꾼 제목";
+  const titleInput = page.getByLabel("태스크 제목");
+  await titleInput.fill(inPageTitle);
+  await titleInput.blur();
+  await expect(activity.getByText(inPageTitle, { exact: true })).toBeVisible();
+
   await page.reload();
-  await expect(page.getByLabel("태스크 제목")).toHaveValue(changedTitle);
+  await expect(page.getByLabel("태스크 제목")).toHaveValue(inPageTitle);
   await expect(
     page.locator("#fv-comments").getByText(replyBody, { exact: true }),
   ).toBeVisible();

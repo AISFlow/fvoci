@@ -2520,27 +2520,11 @@ pub async fn patch_task_meta(
     }
 
     if let Some(before_activity) = before_activity {
-        let after_row = sqlx::query(
-            r#"
-            SELECT id, project_id, number, title, type AS task_type, priority, status_id,
-                   start_date, due_date, due_at, estimate::text AS estimate, parent_id,
-                   milestone_id, sort_key, schema_version, version, archived_at, created_by,
-                   created_at, updated_at
-            FROM fvoci.tasks
-            WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(task_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let after_record = map_task_row(&after_row)?;
-        let after_recurrence = load_task_recurrence(&mut tx, workspace_id, task_id).await?;
         let after_activity = task_activity_snapshot(
             &mut tx,
             workspace_id,
-            &after_record,
-            after_recurrence.as_ref(),
+            &row,
+            recurrence.as_ref(),
             &activity_fields,
         )
         .await?;

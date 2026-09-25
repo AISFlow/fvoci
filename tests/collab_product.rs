@@ -3,10 +3,13 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
+use collab_engine::limits::room_memory_reservation_bytes;
 use collab_engine::outcome::EngineStatus;
 use collab_engine::process::{EngineSession, SpawnRequest};
 use collab_engine::protocol::Request;
@@ -32,13 +35,17 @@ use fvoci_server::collab::wire::{
 };
 use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
-use fvoci_server::db::collab::{load_collab_document, resolve_collab_admission};
+use fvoci_server::db::collab::{
+    arm_force_estimate_fail, disarm_force_estimate_fail, estimate_persisted_collab_bytes,
+    load_collab_document, resolve_collab_admission, COLLAB_ROOM_SESSION_LOCK_NAMESPACE,
+};
 use fvoci_server::db::collab_delivery::{
     arm_delivery_read_barrier, arm_force_delivery_read_fail, arm_force_delivery_tx_error,
     check_delivery_admission, delivery_read_count, disarm_delivery_read_barrier,
     disarm_force_delivery_read_fail, disarm_force_delivery_tx_error, reset_delivery_read_count,
     DeliveryAdmission,
 };
+use fvoci_server::db::context::lock_key_from_uuid;
 use fvoci_server::db::documents::{empty_document_json, CreateDocumentInput};
 use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::workspace;
@@ -49,7 +56,7 @@ use rand::RngCore;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -59,6 +66,80 @@ const PEPPER: &str =
 const PUBLIC_ORIGIN: &str = "http://localhost";
 const LIFECYCLE_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const OP_CAP_TEST_TIMEOUT: Duration = Duration::from_secs(45);
+const FIXTURE_PASSWORD: &str = "supersecret1";
+
+static FIXTURE_PASSWORD_HASH: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+
+/// One Argon2 hash per test binary. Password verification is not under test here.
+async fn fixture_password_hash() -> &'static str {
+    FIXTURE_PASSWORD_HASH
+        .get_or_init(|| async {
+            fvoci_server::auth::password::hash_password(
+                FIXTURE_PASSWORD,
+                &Keyring::parse(PEPPER, "test").unwrap(),
+            )
+            .await
+            .expect("fixture password hash")
+        })
+        .await
+}
+
+/// Parallel tests in one binary must not storm past the process-wide live-helper cap.
+/// Reserve one slot per hub/server (four for `collab_lifecycle_max_rooms_then_reuse_after_leave`).
+static HELPER_CHILD_CAPACITY: LazyLock<Mutex<(usize, Arc<Semaphore>)>> =
+    LazyLock::new(|| Mutex::new((0, Arc::new(Semaphore::new(1)))));
+
+fn helper_capacity_semaphore(config: &CollabConfig) -> Arc<Semaphore> {
+    let cap = config.max_rooms.max(1);
+    let mut guard = HELPER_CHILD_CAPACITY.lock().expect("helper capacity");
+    if guard.0 != cap {
+        guard.0 = cap;
+        guard.1 = Arc::new(Semaphore::new(cap));
+        config.apply_runtime_limits();
+    }
+    guard.1.clone()
+}
+
+struct HelperChildCapacityHold {
+    #[allow(dead_code)]
+    permits: Vec<OwnedSemaphorePermit>,
+}
+
+impl HelperChildCapacityHold {
+    async fn reserve(room_slots: usize, config: &CollabConfig) -> Self {
+        let semaphore = helper_capacity_semaphore(config);
+        let room_slots = room_slots.min(config.max_rooms);
+        let mut permits = Vec::with_capacity(room_slots);
+        for _ in 0..room_slots {
+            permits.push(
+                semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("helper child capacity"),
+            );
+        }
+        Self { permits }
+    }
+}
+
+async fn new_test_collab_hub(
+    config: CollabConfig,
+    pool: PgPool,
+    reserved_helpers: usize,
+) -> (CollabHub, HelperChildCapacityHold) {
+    let capacity = HelperChildCapacityHold::reserve(reserved_helpers, &config).await;
+    (CollabHub::new(config, pool), capacity)
+}
+
+async fn new_test_collab_hub_arc(
+    config: CollabConfig,
+    pool: PgPool,
+    reserved_helpers: usize,
+) -> (Arc<CollabHub>, HelperChildCapacityHold) {
+    let (hub, capacity) = new_test_collab_hub(config, pool, reserved_helpers).await;
+    (Arc::new(hub), capacity)
+}
 
 async fn run_lifecycle_test<Fut>(name: &str, case: Fut)
 where
@@ -214,18 +295,13 @@ async fn setup_owner_session(harness: &TestDb) -> SessionFixture {
         .unwrap();
     let user_id = Uuid::now_v7();
     let workspace_id = Uuid::now_v7();
-    let hash = fvoci_server::auth::password::hash_password(
-        "supersecret1",
-        &Keyring::parse(PEPPER, "test").unwrap(),
-    )
-    .await
-    .unwrap();
+    let hash = fixture_password_hash().await;
     sqlx::query(
         "INSERT INTO fvoci.users (id, email, password_hash, given_name) VALUES ($1, $2, $3, $4)",
     )
     .bind(user_id)
     .bind(format!("owner-{user_id}@example.com"))
-    .bind(&hash)
+    .bind(hash)
     .bind("Owner")
     .execute(&admin)
     .await
@@ -278,6 +354,10 @@ fn test_collab_config_with_revoke(
         engine_bin: engine_bin(),
         limits: collab_engine::Limits::for_tests(),
         max_rooms,
+        max_child_concurrency: fvoci_server::collab::config::derive_max_child_concurrency(
+            max_rooms,
+        ),
+        memory_budget_bytes: fvoci_server::collab::config::DEFAULT_MEMORY_BUDGET_BYTES,
         max_collab_sockets: max_rooms * 16,
         max_collab_sockets_per_session: 4,
         max_connections_per_room: 16,
@@ -507,18 +587,25 @@ async fn collab_app_state_with_config(app_url: &str, cfg: CollabConfig) -> AppSt
     }
 }
 
-async fn collab_app_state(app_url: &str, with_collab: bool) -> AppState {
+async fn collab_app_state(
+    app_url: &str,
+    with_collab: bool,
+) -> (AppState, Option<HelperChildCapacityHold>) {
     let pool = pool::connect_app(app_url).await.expect("app pool");
-    let collab = if with_collab {
+    let (collab, helper_capacity) = if with_collab {
         let cfg = test_collab_config(4, 30_000);
-        Some(Arc::new(CollabHub::new(cfg, pool.clone())))
+        let capacity = HelperChildCapacityHold::reserve(1, &cfg).await;
+        (
+            Some(Arc::new(CollabHub::new(cfg, pool.clone()))),
+            Some(capacity),
+        )
     } else {
-        None
+        (None, None)
     };
     let storage_root =
         std::env::temp_dir().join(format!("fvoci-collab-product-store-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    AppState {
+    let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
@@ -536,18 +623,25 @@ async fn collab_app_state(app_url: &str, with_collab: bool) -> AppState {
         collab,
         meili: None,
         mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
-    }
+    };
+    (state, helper_capacity)
 }
 
 struct TestServer {
     addr: SocketAddr,
     collab: Option<Arc<CollabHub>>,
+    #[allow(dead_code)]
+    helper_capacity: Option<HelperChildCapacityHold>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TestServer {
-    async fn start(app: Router, collab: Option<Arc<CollabHub>>) -> Self {
+    async fn start(
+        app: Router,
+        collab: Option<Arc<CollabHub>>,
+        helper_capacity: Option<HelperChildCapacityHold>,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -565,6 +659,7 @@ impl TestServer {
         Self {
             addr,
             collab,
+            helper_capacity,
             shutdown: Some(shutdown_tx),
             join: Some(join),
         }
@@ -583,10 +678,24 @@ impl TestServer {
     }
 }
 
-async fn start_test_server(state: AppState) -> TestServer {
+async fn start_test_server(
+    state: AppState,
+    helper_capacity: Option<HelperChildCapacityHold>,
+) -> TestServer {
     let collab = state.collab.clone();
     let app = fvoci_server::http::router(state, None);
-    TestServer::start(app, collab).await
+    TestServer::start(app, collab, helper_capacity).await
+}
+
+async fn start_product_test_server(app_url: &str, with_collab: bool) -> TestServer {
+    let (state, helper_capacity) = collab_app_state(app_url, with_collab).await;
+    start_test_server(state, helper_capacity).await
+}
+
+async fn start_configured_test_server(app_url: &str, cfg: CollabConfig) -> TestServer {
+    let helper_capacity = HelperChildCapacityHold::reserve(1, &cfg).await;
+    let state = collab_app_state_with_config(app_url, cfg).await;
+    start_test_server(state, Some(helper_capacity)).await
 }
 
 fn room_key(workspace_id: Uuid, document_id: Uuid) -> String {
@@ -634,6 +743,8 @@ fn project_snapshot_json(snapshot: &[u8]) -> Value {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: engine_bin(),
         limits: collab_engine::Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -961,7 +1072,7 @@ async fn collab_requires_native_helper_env() {
 #[tokio::test]
 async fn collab_unavailable_without_helper_config() {
     let harness = TestDb::bootstrap().await;
-    let server = start_test_server(collab_app_state(&harness.app_url, false).await).await;
+    let server = start_product_test_server(&harness.app_url, false).await;
     let addr = server.addr;
     let response = reqwest::Client::new()
         .get(format!("http://{addr}/collab"))
@@ -977,7 +1088,7 @@ async fn collab_unavailable_without_helper_config() {
 #[tokio::test]
 async fn collab_rejects_missing_origin_on_upgrade() {
     let harness = TestDb::bootstrap().await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let request = format!("ws://{addr}/collab").into_client_request().unwrap();
     let err = tokio_tungstenite::connect_async(request).await.unwrap_err();
@@ -993,7 +1104,7 @@ async fn collab_rejects_missing_origin_on_upgrade() {
 async fn collab_auth_handshake_succeeds_for_member() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let client_id = 42_424_242u32;
@@ -1041,7 +1152,7 @@ async fn collab_nonmember_is_denied() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
     let outsider = setup_owner_session(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut ws = connect_member(addr, &outsider.session_token).await;
@@ -1063,6 +1174,59 @@ async fn collab_nonmember_is_denied() {
     ));
     server.shutdown().await;
     harness.cleanup().await;
+}
+
+async fn wait_for_capacity_retry_close_without_auth_denied(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = ws_close_code(&frame);
+                assert_eq!(
+                    code, 1013,
+                    "capacity refusal CloseFrame {code} ({:?}), expected 1013; reason {:?}",
+                    frame.code, frame.reason
+                );
+                return;
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("Close without code, expected CloseFrame 1013 try again later");
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::Auth(AuthMessage::PermissionDenied { reason }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    panic!(
+                        "capacity refusal must not send PermissionDenied ({reason}); expected Close 1013"
+                    );
+                }
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::Auth(AuthMessage::Authenticated { scope }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    panic!("capacity refusal must not authenticate (scope={scope})");
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(None) => {
+                panic!("bare TCP EOF without CloseFrame, expected close code 1013");
+            }
+            Ok(Some(Err(err))) => {
+                panic!("websocket error before CloseFrame 1013: {err}");
+            }
+            Err(_) => {}
+        }
+    }
+    panic!("did not receive CloseFrame 1013 within {within:?}");
 }
 
 async fn wait_for_unavailable_close_without_auth_denied(
@@ -1134,7 +1298,7 @@ async fn collab_ws_writer_stale_lock_closes_1011_then_join_after_release() {
                 .await
                 .expect("db")
                 .expect("room lock should be free");
-            let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+            let server = start_product_test_server(&harness.app_url, true).await;
             let addr = server.addr;
             let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
             let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -1162,7 +1326,7 @@ async fn collab_ws_pending_room_writer_stale_closes_1011() {
             .await
             .expect("db")
             .expect("room lock should be free");
-        let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+        let server = start_product_test_server(&harness.app_url, true).await;
         let addr = server.addr;
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
         let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -1194,8 +1358,7 @@ async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
                 std::env::temp_dir().join(format!("fvoci-f7-missing-engine-{}", Uuid::now_v7()));
             let mut cfg = test_collab_config(4, 30_000);
             cfg.engine_bin = missing;
-            let server =
-                start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+            let server = start_configured_test_server(&harness.app_url, cfg).await;
             let addr = server.addr;
             let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
             let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -1204,8 +1367,7 @@ async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
                 .unwrap();
             wait_for_unavailable_close_without_auth_denied(&mut ws, Duration::from_secs(5)).await;
 
-            let healthy_server =
-                start_test_server(collab_app_state(&harness.app_url, true).await).await;
+            let healthy_server = start_product_test_server(&harness.app_url, true).await;
             let healthy_addr = healthy_server.addr;
             let other_key = room_key(other.session.workspace_id, other.document_id);
             let mut recovered = connect_member(healthy_addr, &other.session.session_token).await;
@@ -1219,16 +1381,15 @@ async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
 }
 
 #[tokio::test]
-async fn collab_ws_room_full_closes_1011_without_auth_denied() {
+async fn collab_ws_room_full_closes_1013_without_auth_denied() {
     run_lifecycle_test(
-        "collab_ws_room_full_closes_1011_without_auth_denied",
+        "collab_ws_room_full_closes_1013_without_auth_denied",
         async {
             let harness = TestDb::bootstrap().await;
             let docs = setup_wiki_doc_batch(&harness, 2).await;
             let mut cfg = test_collab_config(1, 30_000);
             cfg.max_collab_sockets = 8;
-            let server =
-                start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+            let server = start_configured_test_server(&harness.app_url, cfg).await;
             let addr = server.addr;
             let first_key = room_key(docs[0].session.workspace_id, docs[0].document_id);
             let mut first = connect_member(addr, &docs[0].session.session_token).await;
@@ -1239,7 +1400,7 @@ async fn collab_ws_room_full_closes_1011_without_auth_denied() {
                 .send(Message::Binary(auth_token_frame(&second_key, 52).into()))
                 .await
                 .unwrap();
-            wait_for_unavailable_close_without_auth_denied(&mut second, Duration::from_secs(5))
+            wait_for_capacity_retry_close_without_auth_denied(&mut second, Duration::from_secs(5))
                 .await;
             drop(first);
             server.shutdown().await;
@@ -1254,7 +1415,7 @@ async fn collab_ws_true_access_denial_stays_auth_frame() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
     let outsider = setup_owner_session(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut ws = connect_member(addr, &outsider.session_token).await;
@@ -1289,7 +1450,7 @@ async fn collab_ws_true_access_denial_stays_auth_frame() {
 async fn collab_ws_unsupported_kind_stays_auth_frame() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = CollabRoomName {
         workspace_id: wiki.session.workspace_id,
@@ -1319,7 +1480,7 @@ async fn collab_ws_unsupported_kind_stays_auth_frame() {
 async fn collab_two_clients_update_persists_and_broadcasts() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let update = sample_hi_update();
@@ -1406,10 +1567,9 @@ async fn collab_concurrent_first_joins_both_succeed() {
     run_lifecycle_test("collab_concurrent_first_joins_both_succeed", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let hub = Arc::new(CollabHub::new(
-            test_collab_config(4, 30_000),
-            wiki.session.pool.clone(),
-        ));
+        let (hub, _helper_capacity) =
+            new_test_collab_hub_arc(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1)
+                .await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let slots_before = hub.available_room_slots();
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -1458,7 +1618,8 @@ async fn collab_lifecycle_failed_start_reuses_slot() {
             .await
             .expect("db")
             .expect("room lock should be free");
-        let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let mut leases = DirectHubLeases::new();
         assert_eq!(hub.available_room_slots(), 4);
         let failed = hub_join(&mut leases, &hub, &wiki, 1).await;
@@ -1479,10 +1640,9 @@ async fn collab_lifecycle_cancelled_start_releases_slot() {
     run_lifecycle_test("collab_lifecycle_cancelled_start_releases_slot", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let hub = Arc::new(CollabHub::new(
-            test_collab_config(4, 30_000),
-            wiki.session.pool.clone(),
-        ));
+        let (hub, _helper_capacity) =
+            new_test_collab_hub_arc(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1)
+                .await;
         let join_task = tokio::spawn({
             let hub = hub.clone();
             let wiki = wiki.clone_fixture();
@@ -1509,7 +1669,9 @@ async fn collab_lifecycle_denied_joins_do_not_reserve_slots() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let outsider = setup_owner_session(&harness).await;
-            let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+            let (hub, _helper_capacity) =
+                new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1)
+                    .await;
             let mut leases = DirectHubLeases::new();
             assert_eq!(hub.available_room_slots(), 4);
 
@@ -1547,10 +1709,12 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let release = arm_spawn_room_block(wiki.document_id).await;
-            let hub = Arc::new(CollabHub::new(
+            let (hub, _helper_capacity) = new_test_collab_hub_arc(
                 test_collab_config(4, 30_000),
                 wiki.session.pool.clone(),
-            ));
+                1,
+            )
+            .await;
             let key = (wiki.session.workspace_id, wiki.document_id);
             let slots_before = hub.available_room_slots();
             let mut leases = DirectHubLeases::new();
@@ -1604,10 +1768,9 @@ async fn collab_lifecycle_aborted_booting_creator_releases_slot() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let release = arm_spawn_room_block(wiki.document_id).await;
-            let hub = Arc::new(CollabHub::new(
-                test_collab_config(4, 200),
-                wiki.session.pool.clone(),
-            ));
+            let (hub, _helper_capacity) =
+                new_test_collab_hub_arc(test_collab_config(4, 200), wiki.session.pool.clone(), 1)
+                    .await;
             let key = (wiki.session.workspace_id, wiki.document_id);
             let join_task = tokio::spawn({
                 let hub = hub.clone();
@@ -1640,7 +1803,8 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
     run_lifecycle_test("collab_lifecycle_max_rooms_then_reuse_after_leave", async {
         let harness = TestDb::bootstrap().await;
         let docs = setup_wiki_doc_batch(&harness, 5).await;
-        let hub = CollabHub::new(test_collab_config(4, 200), docs[0].session.pool.clone());
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 200), docs[0].session.pool.clone(), 4).await;
         let mut leases = DirectHubLeases::new();
 
         let mut conn_ids = Vec::new();
@@ -1667,11 +1831,391 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
 }
 
 #[tokio::test]
+async fn collab_memory_budget_refusal_frees_room_slot() {
+    run_lifecycle_test("collab_memory_budget_refusal_frees_room_slot", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let mut cfg = test_collab_config(4, 200);
+        cfg.memory_budget_bytes = 1;
+        let (hub, _helper_capacity) = new_test_collab_hub(cfg, wiki.session.pool.clone(), 1).await;
+        let mut leases = DirectHubLeases::new();
+        let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
+        assert!(matches!(denied, Err(JoinError::CapacityRetry)));
+        assert_eq!(hub.available_room_slots(), 4);
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+struct GuestCollabSession {
+    session_token: String,
+    group_id: Uuid,
+}
+
+async fn admin_seed_document_state_bytes(
+    admin_url: &str,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    state_len: usize,
+) {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(admin_url)
+        .await
+        .unwrap();
+    let state = vec![0xABu8; state_len];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (
+            workspace_id, document_id, state, writer_generation, snapshot_cutoff_seq, tail_seq
+        ) VALUES ($1, $2, $3, 1, 0, 0)
+        ON CONFLICT (workspace_id, document_id) DO UPDATE
+        SET state = EXCLUDED.state
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(state)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+}
+
+async fn setup_guest_with_wiki_group_edit(
+    harness: &TestDb,
+    wiki: &WikiDocFixture,
+) -> GuestCollabSession {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let guest_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, $3)")
+        .bind(guest_id)
+        .bind(format!("guest-{guest_id}@example.com"))
+        .bind("Guest")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'guest')",
+    )
+    .bind(wiki.session.workspace_id)
+    .bind(guest_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let group_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.groups (id, workspace_id, name) VALUES ($1, $2, $3)")
+        .bind(group_id)
+        .bind(wiki.session.workspace_id)
+        .bind("wiki-editors")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.group_members (workspace_id, group_id, user_id) VALUES ($1, $2, $3)",
+    )
+    .bind(wiki.session.workspace_id)
+    .bind(group_id)
+    .bind(guest_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let member_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_members (id, workspace_id, document_id, group_id, role)
+        VALUES ($1, $2, $3, $4, 'member')
+        "#,
+    )
+    .bind(member_id)
+    .bind(wiki.session.workspace_id)
+    .bind(wiki.document_id)
+    .bind(group_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let token = new_token();
+    let session_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fvoci.sessions (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, now() + interval '1 hour')",
+    )
+    .bind(session_id)
+    .bind(guest_id)
+    .bind(&token.hash)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    GuestCollabSession {
+        session_token: token.token,
+        group_id,
+    }
+}
+
+fn huge_varint_memory_candidate() -> Vec<u8> {
+    vec![0xff, 0xff, 0xff, 0xff, 0x0f]
+}
+
+#[tokio::test]
+async fn collab_guest_group_grant_can_append_and_revoke_rejects() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let guest = setup_guest_with_wiki_group_edit(&harness, &wiki).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let update = sample_hi_update();
+
+    let mut writer = connect_member(addr, &guest.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 701).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "guest with group edit grant must append through collab"
+    );
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM fvoci.document_members WHERE workspace_id = $1 AND document_id = $2 AND group_id = $3",
+    )
+    .bind(wiki.session.workspace_id)
+    .bind(wiki.document_id)
+    .bind(guest.group_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), true).await;
+
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_persisted_estimate_nonzero_under_rls() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    admin_seed_document_state_bytes(
+        &harness.admin_url,
+        wiki.session.workspace_id,
+        wiki.document_id,
+        4096,
+    )
+    .await;
+    let mut conn = wiki.session.pool.acquire().await.unwrap();
+    let estimate =
+        estimate_persisted_collab_bytes(&mut conn, wiki.session.workspace_id, wiki.document_id)
+            .await
+            .expect("estimate");
+    assert!(
+        estimate >= 4096,
+        "RLS-aware estimate must include seeded snapshot bytes, got {estimate}"
+    );
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_memory_budget_uses_persisted_factor_not_floor_only() {
+    run_lifecycle_test(
+        "collab_memory_budget_uses_persisted_factor_not_floor_only",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let persisted = 2 * 1024 * 1024;
+            admin_seed_document_state_bytes(
+                &harness.admin_url,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                persisted,
+            )
+            .await;
+            let reservation = room_memory_reservation_bytes(persisted as u64);
+            assert!(
+                reservation > collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES,
+                "2 MiB persisted must exceed the 16 MiB floor via the 14× factor"
+            );
+            let mut tight_cfg = test_collab_config(4, 200);
+            tight_cfg.memory_budget_bytes = 20 * 1024 * 1024;
+            let tight_budget = tight_cfg.memory_budget_bytes;
+            let (hub, _helper_capacity) =
+                new_test_collab_hub(tight_cfg, wiki.session.pool.clone(), 1).await;
+            let mut leases = DirectHubLeases::new();
+            let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
+            assert!(matches!(denied, Err(JoinError::CapacityRetry)));
+            assert_eq!(hub.available_room_slots(), 4);
+            assert!(
+            collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES < tight_budget,
+            "20 MiB budget would admit the 16 MiB floor alone; denial must come from 14× persisted"
+        );
+            hub.shutdown().await;
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_estimate_fail_frees_room_slot() {
+    run_lifecycle_test("collab_estimate_fail_frees_room_slot", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 200), wiki.session.pool.clone(), 1).await;
+        arm_force_estimate_fail();
+        let mut leases = DirectHubLeases::new();
+        let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
+        disarm_force_estimate_fail();
+        assert!(matches!(denied, Err(JoinError::DbError)));
+        assert_eq!(hub.available_room_slots(), 4);
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_user_reject_budget_survives_reconnect() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let hostile = invalid_utf8_update_candidate();
+
+    for client_id in 1..=8u32 {
+        let mut writer = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut writer, &routing_key, client_id).await;
+        writer
+            .send(Message::Binary(
+                sync_update_frame(&routing_key, &hostile).into(),
+            ))
+            .await
+            .unwrap();
+        wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), true).await;
+    }
+
+    // Budget exhausted: even a valid update from the same user is refused
+    // (without the budget it would apply), across a fresh connection.
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 709).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), false).await;
+
+    // Another user in the same room keeps writing.
+    let other = setup_second_member(&harness, &wiki).await;
+    let mut peer = connect_member(addr, &other.session_token).await;
+    auth_and_join(&mut peer, &routing_key, 710).await;
+    peer.send(Message::Binary(
+        sync_update_frame(&routing_key, &sample_hi_update()).into(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut peer, Duration::from_secs(5)).await,
+        "a different user in the same room is not blocked by another user's budget"
+    );
+
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_primary_huge_varint_memory_rejected_1008() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let poison = huge_varint_memory_candidate();
+    let valid = sample_hi_update();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 801).await;
+    let mut peer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut peer, &routing_key, 802).await;
+
+    let load_before = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &poison).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), true).await;
+
+    let load_after = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(load_after.snapshot, load_before.snapshot);
+    assert_eq!(load_after.tail_seq, load_before.tail_seq);
+
+    let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut recovery, &routing_key, 803).await;
+    recovery
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &valid).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut recovery, Duration::from_secs(5)).await,
+        "room must keep editing after primary reload rejects huge-varint candidate"
+    );
+
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn collab_lifecycle_idle_eviction_allows_rejoin() {
     run_lifecycle_test("collab_lifecycle_idle_eviction_allows_rejoin", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let hub = CollabHub::new(test_collab_config(4, 200), wiki.session.pool.clone());
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 200), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let mut leases = DirectHubLeases::new();
         let conn_id = hub_join(&mut leases, &hub, &wiki, 1).await.expect("join");
@@ -1703,7 +2247,7 @@ async fn collab_archived_document_rejects_mutation() {
         .unwrap();
     admin.close().await;
 
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -1735,7 +2279,7 @@ async fn collab_archived_document_rejects_mutation() {
 async fn collab_reconnect_step1_includes_server_state_vector() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let update = sample_hi_update();
@@ -1794,7 +2338,7 @@ async fn collab_reconnect_step1_includes_server_state_vector() {
 async fn collab_empty_byte_update_is_rejected() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
 
@@ -1840,7 +2384,7 @@ async fn collab_empty_byte_update_is_rejected() {
 async fn collab_canonical_noop_update_is_not_stored() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
 
@@ -1888,7 +2432,7 @@ async fn collab_canonical_noop_update_is_not_stored() {
 async fn collab_persist_barrier_and_id_correlation() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let first = tiptap_xml_pending_u1();
@@ -1993,7 +2537,7 @@ async fn collab_primary_recycles_after_op_cap_then_edits_persist() {
     tokio::time::timeout(OP_CAP_TEST_TIMEOUT, async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+        let server = start_product_test_server(&harness.app_url, true).await;
         let addr = server.addr;
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
         let update = tiptap_xml_pending_u1();
@@ -2112,7 +2656,7 @@ async fn collab_readonly_first_then_writer_edits() {
         .unwrap();
     admin.close().await;
 
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
 
@@ -2185,7 +2729,7 @@ async fn collab_readonly_first_then_writer_edits() {
 async fn collab_delete_only_round_trip_persists() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let base = engine_fixture("delete_only_base.v1");
@@ -2263,18 +2807,13 @@ async fn setup_second_member(harness: &TestDb, wiki: &WikiDocFixture) -> Session
         .await
         .unwrap();
     let user_id = Uuid::now_v7();
-    let hash = fvoci_server::auth::password::hash_password(
-        "supersecret1",
-        &Keyring::parse(PEPPER, "test").unwrap(),
-    )
-    .await
-    .unwrap();
+    let hash = fixture_password_hash().await;
     sqlx::query(
         "INSERT INTO fvoci.users (id, email, password_hash, given_name) VALUES ($1, $2, $3, $4)",
     )
     .bind(user_id)
     .bind(format!("member-{user_id}@example.com"))
-    .bind(&hash)
+    .bind(hash)
     .bind("Peer")
     .execute(&admin)
     .await
@@ -2320,7 +2859,7 @@ fn collab_session_from(fixture: &SessionFixture, given_name: &str) -> CollabSess
 async fn collab_append_revoke_barrier_rejects_writer_not_room() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let update = sample_hi_update();
@@ -2451,7 +2990,7 @@ async fn collab_append_revoke_barrier_rejects_writer_not_room() {
 async fn collab_append_in_tx_reject_barrier_rejects_writer_not_room() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let update = sample_hi_update();
@@ -2552,7 +3091,7 @@ async fn collab_append_in_tx_reject_barrier_rejects_writer_not_room() {
 async fn collab_malformed_step1_closes_offender_healthy_peer_syncs() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
 
@@ -2617,7 +3156,8 @@ async fn collab_two_readonly_joins_then_writer_edits() {
             .unwrap();
         admin.close().await;
 
-        let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let mut leases = DirectHubLeases::new();
         assert!(hub_join_readonly(&mut leases, &hub, &wiki, 81)
@@ -2683,7 +3223,7 @@ async fn collab_two_readonly_joins_then_writer_edits() {
 async fn collab_committed_update_survives_primary_apply_fail_reload() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let update = sample_hi_update();
@@ -2744,7 +3284,7 @@ async fn collab_committed_update_survives_primary_apply_fail_reload() {
 async fn collab_reload_failure_after_commit_preserves_durable_tail() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let update = sample_hi_update();
@@ -2881,7 +3421,8 @@ async fn collab_lifecycle_foreign_leave_does_not_evict_member() {
         async {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
-            let hub = CollabHub::new(test_collab_config(4, 200), wiki.session.pool.clone());
+            let (hub, _helper_capacity) =
+                new_test_collab_hub(test_collab_config(4, 200), wiki.session.pool.clone(), 1).await;
             let key = (wiki.session.workspace_id, wiki.document_id);
             let mut leases = DirectHubLeases::new();
             let conn_id = hub_join(&mut leases, &hub, &wiki, 1).await.expect("join");
@@ -2918,10 +3459,12 @@ async fn collab_lifecycle_shutdown_during_booting_reclaims_slot() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let release = arm_spawn_room_block(wiki.document_id).await;
-            let hub = Arc::new(CollabHub::new(
+            let (hub, _helper_capacity) = new_test_collab_hub_arc(
                 test_collab_config(4, 30_000),
                 wiki.session.pool.clone(),
-            ));
+                1,
+            )
+            .await;
             let key = (wiki.session.workspace_id, wiki.document_id);
             let slots_before = hub.available_room_slots();
 
@@ -3077,7 +3620,7 @@ async fn collab_archived_readonly_scope_allows_sync_refuses_write() {
         .unwrap();
     admin.close().await;
 
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -3143,7 +3686,7 @@ async fn collab_revoked_session_closes_without_post_revoke_broadcast() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
     let cfg = test_collab_config_with_revoke(4, 30_000, 30_000);
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
 
@@ -3218,7 +3761,8 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
     run_lifecycle_test("collab_outbound_queue_saturation", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
         let user_id = wiki.session.user_id.to_string();
@@ -3425,7 +3969,8 @@ async fn collab_awareness_generation_takeover_old_leave_cannot_clear() {
     run_lifecycle_test("collab_awareness_generation_takeover", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
         let user_id = wiki.session.user_id.to_string();
@@ -3536,7 +4081,7 @@ async fn collab_client_id_live_ownership_blocks_other_user() {
         let wiki = setup_wiki_doc(&harness).await;
         let mut cfg = test_collab_config(4, 30_000);
         cfg.client_id_ttl_ms = 5_000;
-        let hub = CollabHub::new(cfg, wiki.session.pool.clone());
+        let (hub, _helper_capacity) = new_test_collab_hub(cfg, wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
         let peer = setup_second_member(&harness, &wiki).await;
@@ -3636,7 +4181,8 @@ async fn collab_late_join_receives_peer_awareness_snapshot() {
     run_lifecycle_test("collab_late_join_awareness", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let hub = CollabHub::new(test_collab_config(4, 30_000), wiki.session.pool.clone());
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
         let user_id = wiki.session.user_id.to_string();
@@ -3742,7 +4288,7 @@ async fn collab_idle_socket_closes_without_auth() {
     let wiki = setup_wiki_doc(&harness).await;
     let mut cfg = test_collab_config(4, 30_000);
     cfg.auth_wait_ms = 400;
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let mut ws = connect_member(addr, &wiki.session.session_token).await;
     assert!(
@@ -3760,7 +4306,8 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
         let wiki = setup_wiki_doc(&harness).await;
         let mut cfg = test_collab_config(4, 30_000);
         cfg.max_collab_sockets = 1;
-        let hub = CollabHub::new(cfg.clone(), wiki.session.pool.clone());
+        let (hub, _hub_capacity) =
+            new_test_collab_hub(cfg.clone(), wiki.session.pool.clone(), 1).await;
         assert_eq!(hub.available_collab_sockets(), 1);
         let held = hub
             .try_acquire_socket(wiki.session.session_id)
@@ -3770,8 +4317,7 @@ async fn collab_socket_cap_rejects_excess_and_releases() {
         drop(held);
         assert_eq!(hub.available_collab_sockets(), 1);
 
-        let server =
-            start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+        let server = start_configured_test_server(&harness.app_url, cfg).await;
         let addr = server.addr;
         let mut ws1 = connect_member(addr, &wiki.session.session_token).await;
         assert!(
@@ -3803,8 +4349,7 @@ async fn collab_session_socket_cap_rejects_same_session_allows_other() {
         cfg.max_collab_sockets = 4;
         cfg.max_collab_sockets_per_session = 1;
         let other = add_session_for_user(&wiki.session.pool, wiki.session.user_id).await;
-        let server =
-            start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+        let server = start_configured_test_server(&harness.app_url, cfg).await;
         let addr = server.addr;
         let mut ws1 = connect_member(addr, &wiki.session.session_token).await;
         assert!(
@@ -3831,7 +4376,7 @@ async fn collab_pre_auth_outbound_is_bounded() {
     let mut cfg = test_collab_config(4, 30_000);
     cfg.max_pre_auth_outbound_frames = 1;
     cfg.auth_wait_ms = 5_000;
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -3871,7 +4416,7 @@ async fn collab_pre_auth_exhaustion_does_not_swallow_authenticated() {
     let mut cfg = test_collab_config(4, 30_000);
     cfg.max_pre_auth_outbound_frames = 1;
     cfg.auth_wait_ms = 5_000;
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -4372,7 +4917,7 @@ async fn collab_delivery_read_is_nonblocking_while_session_row_locked() {
 async fn collab_delivery_read_failure_closes_1011_without_data_frame() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
-    let server = start_test_server(collab_app_state(&harness.app_url, true).await).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut writer = connect_member(addr, &wiki.session.session_token).await;
@@ -4400,7 +4945,7 @@ async fn collab_control_frames_skip_delivery_admission_read() {
     reset_delivery_read_count(wiki.document_id);
     let mut cfg = test_collab_config(4, 30_000);
     cfg.max_pre_auth_outbound_frames = 1;
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut ws = connect_member(addr, &wiki.session.session_token).await;
@@ -4483,7 +5028,7 @@ async fn collab_delivery_auth_and_send_share_one_dequeue_deadline() {
     let wiki = setup_wiki_doc(&harness).await;
     let mut cfg = test_collab_config(4, 30_000);
     cfg.outbound_send_deadline_ms = 200;
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut reader = connect_member(addr, &wiki.session.session_token).await;
@@ -4556,7 +5101,7 @@ async fn collab_delivery_auth_timeout_closes_1011_without_data_frame() {
     let wiki = setup_wiki_doc(&harness).await;
     let mut cfg = test_collab_config(4, 30_000);
     cfg.outbound_send_deadline_ms = 100;
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut reader = connect_member(addr, &wiki.session.session_token).await;
@@ -4591,7 +5136,7 @@ async fn collab_delivery_auth_cancel_closes_without_waiting_full_deadline() {
     let wiki = setup_wiki_doc(&harness).await;
     let mut cfg = test_collab_config_with_revoke(4, 30_000, 50);
     cfg.outbound_send_deadline_ms = 5_000;
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
     let mut reader = connect_member(addr, &wiki.session.session_token).await;
@@ -4735,7 +5280,7 @@ async fn collab_authenticated_peer_fanout_records_observed_delivery() {
     cfg.max_collab_sockets = 16;
     cfg.max_collab_sockets_per_session = 4;
     cfg.max_connections_per_room = 16;
-    let server = start_test_server(collab_app_state_with_config(&harness.app_url, cfg).await).await;
+    let server = start_configured_test_server(&harness.app_url, cfg).await;
     let addr = server.addr;
     let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
 
@@ -4847,4 +5392,223 @@ async fn collab_authenticated_peer_fanout_records_observed_delivery() {
     );
     server.shutdown().await;
     harness.cleanup().await;
+}
+
+fn invalid_utf8_update_candidate() -> Vec<u8> {
+    let mut bytes = engine_fixture("utf8_korean.v1");
+    let marker = [0xEC, 0x95, 0x88];
+    let pos = bytes
+        .windows(3)
+        .position(|w| w == marker)
+        .expect("안녕 utf8 marker in utf8_korean.v1 fixture");
+    bytes[pos] = 0xFF;
+    bytes
+}
+
+async fn room_fence_backend_pid(pool: &PgPool, document_id: Uuid) -> Option<i32> {
+    let lock_key = lock_key_from_uuid(document_id);
+    sqlx::query_scalar(
+        "SELECT l.pid FROM pg_locks l
+         WHERE l.locktype = 'advisory'
+           AND l.classid = $1
+           AND l.objid = $2
+           AND l.granted = true
+         LIMIT 1",
+    )
+    .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
+    .bind(lock_key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tokio::test]
+async fn collab_reject_reload_failure_closes_room_without_serving_rejected_to_peer() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let good = sample_hi_update();
+    let hostile = invalid_utf8_update_candidate();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 501).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &good).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(3)).await,
+        "baseline edit must apply"
+    );
+
+    let mut reader = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut reader, &routing_key, 502).await;
+
+    arm_force_primary_load_fail(wiki.document_id).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &hostile).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1013, Duration::from_secs(5), false).await;
+    disarm_force_primary_load_fail(wiki.document_id).await;
+
+    let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut recovery, &routing_key, 503).await;
+    recovery
+        .send(Message::Binary(
+            sync_step1_frame(&routing_key, &[0, 0]).into(),
+        ))
+        .await
+        .unwrap();
+    let mut step2_payload = None;
+    for _ in 0..12 {
+        if let Some(WireFrame::Document {
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Step2,
+                    y_protocol,
+                    ..
+                }),
+            ..
+        }) = recv_document_frame(&mut recovery, 1).await
+        {
+            step2_payload = Some(
+                parse_sync_payload(&y_protocol, 4 * 1024 * 1024)
+                    .expect("step2")
+                    .1,
+            );
+            break;
+        }
+    }
+    let step2 = step2_payload.expect("peer must receive SyncStep2 after room reload failure close");
+    assert_ne!(
+        step2, hostile,
+        "peer SyncStep2 must not contain the rejected hostile candidate"
+    );
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(load.tail.len(), 1);
+    assert_eq!(load.tail[0].payload, good);
+
+    let _ = reader.close(None).await;
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_room_fence_connection_loss_closes_room_and_recovers() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 601).await;
+    let fence_pid = room_fence_backend_pid(&wiki.session.pool, wiki.document_id)
+        .await
+        .expect("live room must hold session advisory lock on dedicated connection");
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(fence_pid)
+        .execute(&wiki.session.pool)
+        .await
+        .expect("terminate room fence backend");
+
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1013, Duration::from_secs(5), false).await;
+
+    let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut recovery, &routing_key, 602).await;
+    recovery
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut recovery, Duration::from_secs(5)).await,
+        "room must recover edits after fence connection loss and client reconnect"
+    );
+
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_cold_reload_fragmented_document_fits_rlimits() {
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin: engine_bin(),
+        limits: collab_engine::Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .expect("spawn primary for fragmented cold reload");
+    let mut tail = Vec::new();
+    for i in 0..48usize {
+        let update = engine_fixture(&format!("pending_u{}.v1", (i % 2) + 1));
+        let apply = session.call(&Request::Apply {
+            update_b64: update.clone(),
+            encoding: 1,
+        });
+        assert!(
+            apply.outcome.is_applied_ok(),
+            "fragmented apply {i} must succeed before cold reload, got {:?}",
+            apply.outcome
+        );
+        tail.push(update);
+    }
+    let snap = session.call(&Request::Snapshot);
+    let snapshot = match snap.outcome {
+        EngineStatus::Ok {
+            update_b64: Some(bytes_b64),
+            ..
+        } => collab_engine::b64::decode(&bytes_b64).expect("snapshot bytes"),
+        other => panic!("snapshot before cold reload failed: {other:?}"),
+    };
+    session.kill_and_reap();
+    let mut cold = EngineSession::spawn(SpawnRequest {
+        engine_bin: engine_bin(),
+        limits: collab_engine::Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .expect("spawn fresh primary for cold reload");
+    let load = cold.call(&Request::Load {
+        snapshot_b64: Some(snapshot),
+        tail_b64: tail,
+        encoding: 1,
+    });
+    assert!(
+        load.outcome.is_applied_ok(),
+        "cold reload of fragmented document must fit helper rlimits, got {:?}",
+        load.outcome
+    );
 }

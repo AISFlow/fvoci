@@ -84,7 +84,7 @@ struct TrashQuery {
     children: Option<String>,
 }
 
-enum DocumentApiError {
+pub(crate) enum DocumentApiError {
     App(AppError),
     Coded {
         status: StatusCode,
@@ -565,7 +565,7 @@ async fn get_body(
     }
 }
 
-fn meta_response(meta: &DocumentMeta, include_display_id: bool) -> DocumentMetaResponse {
+pub(crate) fn meta_response(meta: &DocumentMeta, include_display_id: bool) -> DocumentMetaResponse {
     DocumentMetaResponse {
         id: meta.id.to_string(),
         workspace_id: meta.workspace_id.to_string(),
@@ -599,7 +599,7 @@ fn parse_trash_children(value: Option<&str>) -> Result<TrashChildrenMode, Docume
     }
 }
 
-fn map_document_error(err: DocumentDbError) -> DocumentApiError {
+pub(crate) fn map_document_error(err: DocumentDbError) -> DocumentApiError {
     match err {
         DocumentDbError::NotFound | DocumentDbError::Forbidden => {
             AppError::from_code(ProblemCode::NotFound).into()

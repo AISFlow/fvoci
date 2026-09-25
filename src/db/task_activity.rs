@@ -1,19 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::db::comments::{comment_output, CommentRow};
+use crate::db::comments::{row_to_comment, CommentRow};
 use crate::db::context::set_tenant;
-use crate::db::projects::{lock_project, project_permission};
+use crate::db::projects::{lock_project, project_permission, project_permission_by_id};
 use crate::db::tasks::{list_task_assignee_ids, list_task_label_ids, TaskRowRecord};
-use crate::db::workspace::WorkspaceRole;
-use crate::projects::{effective_permission, ProjectMemberRole, ProjectPermission};
+use crate::projects::ProjectPermission;
 use crate::tasks::activity::{
-    activity_scope, decode_activity_cursor, diff_activity, encode_activity_cursor,
-    normalize_estimate, ActivityFilter, ActivityListQuery, ActivitySnapshot,
+    activity_scope, decode_activity_cursor, diff_activity, normalize_estimate, ActivityFilter,
+    ActivityListQuery, ActivitySnapshot,
 };
 
 #[derive(Debug)]
@@ -23,26 +22,29 @@ pub enum TaskActivityDbError {
     InvalidCursor,
 }
 
-#[derive(Debug, Clone)]
-pub struct TaskActivityRow {
-    pub id: Uuid,
-    pub actor_user_id: Option<Uuid>,
-    pub channel: String,
-    pub kind: String,
-    pub changes: Value,
-    pub created_at: DateTime<Utc>,
-}
-
+/// One page of the task feed before response shaping. `has_more` means a row
+/// exists past `items`; the route applies the response byte budget and encodes
+/// the cursor with `scope`.
 #[derive(Debug, Clone)]
 pub struct TaskActivityListPage {
     pub items: Vec<TaskActivityOutputItem>,
-    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub scope: String,
 }
 
 #[derive(Debug, Clone)]
 pub enum TaskActivityOutputItem {
     Change(TaskActivityChangeOutput),
     Comment(TaskActivityCommentOutput),
+}
+
+impl TaskActivityOutputItem {
+    pub fn position(&self) -> (Uuid, DateTime<Utc>, &'static str) {
+        match self {
+            Self::Change(change) => (change.id, change.created_at, "change"),
+            Self::Comment(comment) => (comment.comment.id, comment.comment.created_at, "comment"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,10 +59,8 @@ pub struct TaskActivityChangeOutput {
 
 #[derive(Debug, Clone)]
 pub struct TaskActivityCommentOutput {
-    pub id: Uuid,
-    pub created_at: DateTime<Utc>,
     pub actor: Option<ActivityActorOutput>,
-    pub comment: Value,
+    pub comment: CommentRow,
     pub parent: Option<TaskActivityCommentParentOutput>,
 }
 
@@ -75,13 +75,6 @@ pub struct TaskActivityCommentParentOutput {
 pub struct ActivityActorOutput {
     pub id: Uuid,
     pub name: String,
-}
-
-type ParentVisibilityRow = (Uuid, Option<DateTime<Utc>>, String, Option<String>, String);
-
-struct FeedPosition {
-    id: Uuid,
-    item_type: String,
 }
 
 pub async fn record_task_activity(
@@ -182,7 +175,7 @@ pub async fn task_activity_snapshot(
         snapshot.insert(
             "dueAt".to_string(),
             task.due_at
-                .map(|value| json!(value.to_rfc3339()))
+                .map(|value| json!(value.to_rfc3339_opts(SecondsFormat::Millis, true)))
                 .unwrap_or(Value::Null),
         );
     }
@@ -304,286 +297,135 @@ pub async fn list_task_activity(
     if !(1..=100).contains(&query.limit) {
         return Ok(Err(TaskActivityDbError::InvalidInput));
     }
+    let scope = activity_scope(workspace_id, task_id, query.filter);
+    let after = match query.cursor.as_deref() {
+        Some(raw) => match decode_activity_cursor(raw, &scope) {
+            Ok(cursor) => Some(cursor),
+            Err(_) => return Ok(Err(TaskActivityDbError::InvalidCursor)),
+        },
+        None => None,
+    };
+
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    if !crate::db::context::session_is_live(&mut tx, actor_user_id, session_id).await? {
+    if !crate::db::context::session_is_live(&mut tx, actor_user_id, session_id).await?
+        || !crate::db::documents::workspace_is_live(&mut tx, workspace_id).await?
+    {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     }
-    if !crate::db::documents::workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(TaskActivityDbError::NotFound));
-    }
-    let task_row: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
+    let project_id: Option<Uuid> = sqlx::query_scalar(
         r#"
-        SELECT project_id, deleted_at
+        SELECT project_id
         FROM fvoci.tasks
-        WHERE workspace_id = $1 AND id = $2
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
     .bind(workspace_id)
     .bind(task_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((project_id, deleted_at)) = task_row else {
+    let Some(project_id) = project_id else {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     };
-    if deleted_at.is_some() {
-        tx.rollback().await?;
-        return Ok(Err(TaskActivityDbError::NotFound));
-    }
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
+    let Some(locked) = lock_project(&mut tx, workspace_id, project_id).await? else {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
-        .await?
-        .at_least(ProjectPermission::View)
-    {
+    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+    if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok(Err(TaskActivityDbError::NotFound));
     }
 
-    let scope = activity_scope(workspace_id, task_id, query.filter);
-    let after_payload = match &query.cursor {
-        Some(cursor) => match decode_activity_cursor(cursor, &scope) {
-            Ok(value) => Some(value),
-            Err(_) => {
-                tx.rollback().await?;
-                return Ok(Err(TaskActivityDbError::InvalidCursor));
-            }
-        },
-        None => None,
-    };
-
-    let include_changes = query.filter != ActivityFilter::Comments;
-    let include_comments = query.filter != ActivityFilter::Changes;
-    let limit = query.limit + 1;
-    let positions = if let Some(after) = after_payload {
-        sqlx::query(
-            r#"
-            SELECT id, type, created_at,
-                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
-            FROM (
-                SELECT id, 'change'::text AS type, created_at
-                FROM fvoci.task_activity
-                WHERE workspace_id = $1 AND task_id = $2 AND $4
-                UNION ALL
-                SELECT id, 'comment'::text AS type, created_at
-                FROM fvoci.comments
-                WHERE workspace_id = $1 AND task_id = $2 AND $5
-            ) AS feed
-            WHERE (created_at, id, type) < ($6::timestamptz, $7::uuid, $8::text)
-            ORDER BY created_at DESC, id DESC, type DESC
-            LIMIT $3
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(task_id)
-        .bind(limit)
-        .bind(include_changes)
-        .bind(include_comments)
-        .bind(
-            DateTime::parse_from_rfc3339(&after.at)
-                .map_err(|_| sqlx::Error::Protocol("bad cursor at".into()))?
-                .with_timezone(&Utc),
-        )
-        .bind(after.id)
-        .bind(after.item_type)
-        .fetch_all(&mut *tx)
-        .await?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT id, type, created_at,
-                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
-            FROM (
-                SELECT id, 'change'::text AS type, created_at
-                FROM fvoci.task_activity
-                WHERE workspace_id = $1 AND task_id = $2 AND $4
-                UNION ALL
-                SELECT id, 'comment'::text AS type, created_at
-                FROM fvoci.comments
-                WHERE workspace_id = $1 AND task_id = $2 AND $5
-            ) AS feed
-            ORDER BY created_at DESC, id DESC, type DESC
-            LIMIT $3
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(task_id)
-        .bind(limit)
-        .bind(include_changes)
-        .bind(include_comments)
-        .fetch_all(&mut *tx)
-        .await?
-    };
-
-    let mut feed_positions = Vec::new();
-    for row in positions {
-        feed_positions.push(FeedPosition {
-            id: row.get("id"),
-            item_type: row.get("type"),
-        });
-    }
-    let fetched_has_more = feed_positions.len() > query.limit as usize;
-    if fetched_has_more {
-        feed_positions.truncate(query.limit as usize);
-    }
-
-    let change_ids = feed_positions
-        .iter()
-        .filter(|p| p.item_type == "change")
-        .map(|p| p.id)
-        .collect::<Vec<_>>();
-    let comment_ids = feed_positions
-        .iter()
-        .filter(|p| p.item_type == "comment")
-        .map(|p| p.id)
-        .collect::<Vec<_>>();
-
-    let mut changes_by_id = HashMap::new();
-    if !change_ids.is_empty() {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, actor_user_id, channel, kind, changes, created_at
+    let positions: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT id, type
+        FROM (
+            SELECT id, 'change'::text AS type, created_at
             FROM fvoci.task_activity
-            WHERE workspace_id = $1 AND task_id = $2 AND id = ANY($3)
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(task_id)
-        .bind(&change_ids)
-        .fetch_all(&mut *tx)
-        .await?;
-        for row in rows {
-            changes_by_id.insert(
-                row.get::<Uuid, _>("id"),
-                TaskActivityRow {
-                    id: row.get("id"),
-                    actor_user_id: row.get("actor_user_id"),
-                    channel: row.get("channel"),
-                    kind: row.get("kind"),
-                    changes: row.get("changes"),
-                    created_at: row.get("created_at"),
-                },
-            );
-        }
-    }
-
-    let mut comments_by_id = HashMap::new();
-    if !comment_ids.is_empty() {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, workspace_id, document_id, task_id, parent_id, created_by, body,
-                   resolved_at, reactions, created_at, updated_at
+            WHERE workspace_id = $1 AND task_id = $2 AND $4
+            UNION ALL
+            SELECT id, 'comment'::text AS type, created_at
             FROM fvoci.comments
-            WHERE workspace_id = $1 AND task_id = $2 AND id = ANY($3)
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(task_id)
-        .bind(&comment_ids)
-        .fetch_all(&mut *tx)
-        .await?;
-        for row in rows {
-            let comment = CommentRow {
-                id: row.get("id"),
-                workspace_id: row.get("workspace_id"),
-                document_id: row.get("document_id"),
-                task_id: row.get("task_id"),
-                parent_id: row.get("parent_id"),
-                created_by: row.get("created_by"),
-                body: row.get("body"),
-                resolved_at: row.get("resolved_at"),
-                reactions: row.get("reactions"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-            };
-            comments_by_id.insert(comment.id, comment);
-        }
-    }
+            WHERE workspace_id = $1 AND task_id = $2 AND $5
+        ) AS feed
+        WHERE $6::timestamptz IS NULL
+           OR (created_at, id, type) < ($6::timestamptz, $7::uuid, $8::text)
+        ORDER BY created_at DESC, id DESC, type DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(i64::from(query.limit) + 1)
+    .bind(query.filter != ActivityFilter::Comments)
+    .bind(query.filter != ActivityFilter::Changes)
+    .bind(after.as_ref().map(|cursor| cursor.at))
+    .bind(after.as_ref().map(|cursor| cursor.id))
+    .bind(after.as_ref().map(|cursor| cursor.item_type.as_str()))
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_more = positions.len() > query.limit as usize;
+    let positions = &positions[..positions.len().min(query.limit as usize)];
+
+    let ids_of = |kind: &str| {
+        positions
+            .iter()
+            .filter(|(_, item_type)| item_type == kind)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+    };
+    let changes_by_id = load_changes(&mut tx, workspace_id, task_id, &ids_of("change")).await?;
+    let comments_by_id = load_comments(&mut tx, workspace_id, task_id, &ids_of("comment")).await?;
     let parent_ids = comments_by_id
         .values()
         .filter_map(|comment| comment.parent_id)
-        .collect::<HashSet<_>>();
-    let mut parents_by_id = HashMap::new();
-    if !parent_ids.is_empty() {
-        let ids = parent_ids.into_iter().collect::<Vec<_>>();
-        let rows = sqlx::query(
-            r#"
-            SELECT id, workspace_id, document_id, task_id, parent_id, created_by, body,
-                   resolved_at, reactions, created_at, updated_at
-            FROM fvoci.comments
-            WHERE workspace_id = $1 AND task_id = $2 AND id = ANY($3)
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(task_id)
-        .bind(&ids)
-        .fetch_all(&mut *tx)
-        .await?;
-        for row in rows {
-            let comment = CommentRow {
-                id: row.get("id"),
-                workspace_id: row.get("workspace_id"),
-                document_id: row.get("document_id"),
-                task_id: row.get("task_id"),
-                parent_id: row.get("parent_id"),
-                created_by: row.get("created_by"),
-                body: row.get("body"),
-                resolved_at: row.get("resolved_at"),
-                reactions: row.get("reactions"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-            };
-            parents_by_id.insert(comment.id, comment);
-        }
-    }
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let parents_by_id = load_comments(&mut tx, workspace_id, task_id, &parent_ids).await?;
 
     let mut people_ids = HashSet::new();
     for row in changes_by_id.values() {
-        if let Some(actor) = row.actor_user_id {
-            people_ids.insert(actor);
-        }
-        if let Some(changes) = row.changes.as_array() {
-            for change in changes {
-                if change.get("field").and_then(Value::as_str) == Some("assigneeIds") {
-                    for key in ["from", "to"] {
-                        if let Some(Value::Array(items)) = change.get(key) {
-                            for item in items.iter().take(50) {
-                                if let Some(id) = item.get("id").and_then(Value::as_str) {
-                                    if let Ok(uuid) = Uuid::parse_str(id) {
-                                        people_ids.insert(uuid);
-                                    }
-                                }
-                            }
-                        }
-                    }
+        people_ids.extend(row.actor_user_id);
+        for change in row.changes.as_array().into_iter().flatten() {
+            if change.get("field").and_then(Value::as_str) != Some("assigneeIds") {
+                continue;
+            }
+            for key in ["from", "to"] {
+                for item in change
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .take(50)
+                {
+                    people_ids.extend(
+                        item.get("id")
+                            .and_then(Value::as_str)
+                            .and_then(|raw| Uuid::parse_str(raw).ok()),
+                    );
                 }
             }
         }
     }
-    for comment in comments_by_id.values() {
+    for comment in comments_by_id.values().chain(parents_by_id.values()) {
         people_ids.insert(comment.created_by);
-        if let Some(parent_id) = comment.parent_id {
-            if let Some(parent) = parents_by_id.get(&parent_id) {
-                people_ids.insert(parent.created_by);
-            }
-        }
     }
     let people_ids = people_ids.into_iter().collect::<Vec<_>>();
     let people = load_activity_people(&mut tx, workspace_id, &people_ids).await?;
-    let mut parent_titles: HashMap<Uuid, Option<String>> = HashMap::new();
+    let mut parent_titles = ParentTitles {
+        project_id,
+        project_permission: permission,
+        titles: HashMap::new(),
+    };
 
-    let mut items = Vec::new();
-    let mut bytes = 2048usize;
-    let mut truncated_by_budget = false;
-    for position in &feed_positions {
-        let item = if position.item_type == "change" {
-            let Some(activity) = changes_by_id.get(&position.id) else {
+    let mut items = Vec::with_capacity(positions.len());
+    for (id, item_type) in positions {
+        let item = if item_type == "change" {
+            let Some(activity) = changes_by_id.get(id) else {
                 tx.rollback().await?;
                 return Err(sqlx::Error::RowNotFound);
             };
@@ -591,7 +433,7 @@ pub async fn list_task_activity(
                 &mut tx,
                 workspace_id,
                 actor_user_id,
-                activity.changes.clone(),
+                &activity.changes,
                 &people,
                 &mut parent_titles,
             )
@@ -605,87 +447,121 @@ pub async fn list_task_activity(
                 changes,
             })
         } else {
-            let Some(comment) = comments_by_id.get(&position.id) else {
+            let Some(comment) = comments_by_id.get(id) else {
                 tx.rollback().await?;
                 return Err(sqlx::Error::RowNotFound);
             };
-            let (reactions, other_reaction_count) = comment_output(comment, actor_user_id);
-            let comment_value = json!({
-                "id": comment.id,
-                "workspaceId": comment.workspace_id,
-                "documentId": comment.document_id,
-                "taskId": comment.task_id,
-                "parentId": comment.parent_id,
-                "createdBy": comment.created_by,
-                "body": comment.body,
-                "resolvedAt": comment.resolved_at,
-                "reactions": reactions,
-                "otherReactionCount": other_reaction_count,
-                "createdAt": comment.created_at,
-                "updatedAt": comment.updated_at,
-            });
-            let parent = comment.parent_id.and_then(|parent_id| {
-                parents_by_id
-                    .get(&parent_id)
-                    .map(|parent| TaskActivityCommentParentOutput {
-                        id: parent.id,
-                        body: parent.body.chars().take(200).collect(),
-                        actor: actor_output(Some(parent.created_by), &people),
-                    })
-            });
+            let parent = comment
+                .parent_id
+                .and_then(|parent_id| parents_by_id.get(&parent_id))
+                .map(|parent| TaskActivityCommentParentOutput {
+                    id: parent.id,
+                    body: parent.body.chars().take(200).collect(),
+                    actor: actor_output(Some(parent.created_by), &people),
+                });
             TaskActivityOutputItem::Comment(TaskActivityCommentOutput {
-                id: comment.id,
-                created_at: comment.created_at,
                 actor: actor_output(Some(comment.created_by), &people),
-                comment: comment_value,
+                comment: comment.clone(),
                 parent,
             })
         };
-        let encoded = activity_item_bytes(&item);
-        let item_bytes = encoded.len() + 1;
-        if items.len() > 1 && bytes + item_bytes > 1_048_576 {
-            truncated_by_budget = true;
-            break;
-        }
-        bytes += item_bytes;
         items.push(item);
     }
 
-    let next_cursor = if fetched_has_more || truncated_by_budget {
-        items.last().map(|item| {
-            let (id, created_at, item_type) = match item {
-                TaskActivityOutputItem::Change(change) => (change.id, change.created_at, "change"),
-                TaskActivityOutputItem::Comment(comment) => {
-                    (comment.id, comment.created_at, "comment")
-                }
-            };
-            encode_activity_cursor(id, created_at, item_type, &scope)
-        })
-    } else {
-        None
-    };
-
     tx.commit().await?;
-    Ok(Ok(TaskActivityListPage { items, next_cursor }))
+    Ok(Ok(TaskActivityListPage {
+        items,
+        has_more,
+        scope,
+    }))
 }
 
-fn activity_item_bytes(item: &TaskActivityOutputItem) -> Vec<u8> {
-    match item {
-        TaskActivityOutputItem::Change(change) => serde_json::to_vec(&json!({
-            "type": "change",
-            "id": change.id,
-            "createdAt": change.created_at,
-            "changes": change.changes,
-        }))
-        .expect("activity change bytes"),
-        TaskActivityOutputItem::Comment(comment) => serde_json::to_vec(&json!({
-            "type": "comment",
-            "id": comment.id,
-            "createdAt": comment.created_at,
-            "comment": comment.comment,
-        }))
-        .expect("activity comment bytes"),
+struct TaskActivityRow {
+    id: Uuid,
+    actor_user_id: Option<Uuid>,
+    channel: String,
+    kind: String,
+    changes: Value,
+    created_at: DateTime<Utc>,
+}
+
+async fn load_changes(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, TaskActivityRow>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
     }
+    let rows = sqlx::query(
+        r#"
+        SELECT id, actor_user_id, channel, kind, changes, created_at
+        FROM fvoci.task_activity
+        WHERE workspace_id = $1 AND task_id = $2 AND id = ANY($3)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let id: Uuid = row.get("id");
+            (
+                id,
+                TaskActivityRow {
+                    id,
+                    actor_user_id: row.get("actor_user_id"),
+                    channel: row.get("channel"),
+                    kind: row.get("kind"),
+                    changes: row.get("changes"),
+                    created_at: row.get("created_at"),
+                },
+            )
+        })
+        .collect())
+}
+
+async fn load_comments(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, CommentRow>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT id, workspace_id, document_id, task_id, parent_id, created_by, body,
+               resolved_at, reactions, created_at, updated_at
+        FROM fvoci.comments
+        WHERE workspace_id = $1 AND task_id = $2 AND id = ANY($3)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let comment = row_to_comment(row);
+            (comment.id, comment)
+        })
+        .collect())
+}
+
+/// Parent task titles resolved at read time, only when the reader can view
+/// the parent's project (direct, group or workspace-role access).
+struct ParentTitles {
+    project_id: Uuid,
+    project_permission: ProjectPermission,
+    titles: HashMap<Uuid, Option<String>>,
 }
 
 async fn load_activity_people(
@@ -735,43 +611,32 @@ async fn enrich_changes(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
-    changes: Value,
+    changes: &Value,
     people: &HashMap<Uuid, ActivityActorOutput>,
-    parent_titles: &mut HashMap<Uuid, Option<String>>,
+    parent_titles: &mut ParentTitles,
 ) -> Result<Vec<Value>, sqlx::Error> {
-    let Some(items) = changes.as_array() else {
-        return Ok(vec![]);
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for change in items {
-        let field = change.get("field").and_then(Value::as_str).unwrap_or("");
-        let from = visible_value(
-            tx,
-            workspace_id,
-            actor_user_id,
-            field,
-            change.get("from").cloned().unwrap_or(Value::Null),
-            people,
-            parent_titles,
-        )
-        .await?;
-        let to = visible_value(
-            tx,
-            workspace_id,
-            actor_user_id,
-            field,
-            change.get("to").cloned().unwrap_or(Value::Null),
-            people,
-            parent_titles,
-        )
-        .await?;
-        let next = change.clone();
-        if let Some(obj) = next.as_object() {
-            let mut map = obj.clone();
-            map.insert("from".to_string(), from);
-            map.insert("to".to_string(), to);
-            out.push(Value::Object(map));
+    let mut out = Vec::new();
+    for change in changes.as_array().into_iter().flatten() {
+        let Some(obj) = change.as_object() else {
+            continue;
+        };
+        let field = obj.get("field").and_then(Value::as_str).unwrap_or("");
+        let mut map = obj.clone();
+        for key in ["from", "to"] {
+            let value = obj.get(key).cloned().unwrap_or(Value::Null);
+            let visible = visible_value(
+                tx,
+                workspace_id,
+                actor_user_id,
+                field,
+                value,
+                people,
+                parent_titles,
+            )
+            .await?;
+            map.insert(key.to_string(), visible);
         }
+        out.push(Value::Object(map));
     }
     Ok(out)
 }
@@ -783,101 +648,67 @@ async fn visible_value(
     field: &str,
     value: Value,
     people: &HashMap<Uuid, ActivityActorOutput>,
-    parent_titles: &mut HashMap<Uuid, Option<String>>,
+    parent_titles: &mut ParentTitles,
 ) -> Result<Value, sqlx::Error> {
-    if value.is_null() {
-        return Ok(Value::Null);
-    }
     if let Some(items) = value.as_array() {
-        let total = items.len();
         let mapped = items
             .iter()
             .take(50)
             .map(|item| {
-                if field == "assigneeIds" {
-                    let id = item
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .and_then(|raw| Uuid::parse_str(raw).ok());
-                    json!({
-                        "id": item.get("id").cloned().unwrap_or(Value::Null),
-                        "label": id
-                            .and_then(|id| people.get(&id).map(|person| json!(person.name)))
-                            .unwrap_or(Value::Null),
-                    })
-                } else {
-                    item.clone()
+                if field != "assigneeIds" {
+                    return item.clone();
                 }
+                let label = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|raw| Uuid::parse_str(raw).ok())
+                    .and_then(|id| people.get(&id))
+                    .map(|person| json!(person.name))
+                    .unwrap_or(Value::Null);
+                json!({ "id": item.get("id").cloned().unwrap_or(Value::Null), "label": label })
             })
             .collect::<Vec<_>>();
-        return Ok(json!({ "items": mapped, "totalCount": total }));
+        return Ok(json!({ "items": mapped, "totalCount": items.len() }));
     }
-    if field == "parentId" {
-        let id = value
-            .get("id")
-            .and_then(Value::as_str)
-            .and_then(|raw| Uuid::parse_str(raw).ok());
-        if let Some(parent_id) = id {
-            if let std::collections::hash_map::Entry::Vacant(entry) = parent_titles.entry(parent_id)
-            {
-                let row: Option<ParentVisibilityRow> = sqlx::query_as(
-                    r#"
-                        SELECT t.project_id, t.deleted_at, p.visibility, pm.role, m.role
-                        FROM fvoci.tasks t
-                        INNER JOIN fvoci.projects p
-                          ON p.workspace_id = t.workspace_id AND p.id = t.project_id
-                        INNER JOIN fvoci.memberships m
-                          ON m.workspace_id = p.workspace_id AND m.user_id = $3
-                        LEFT JOIN fvoci.project_members pm
-                          ON pm.workspace_id = p.workspace_id
-                         AND pm.project_id = p.id
-                         AND pm.user_id = $3
-                        WHERE t.workspace_id = $1 AND t.id = $2
-                        "#,
-                )
-                .bind(workspace_id)
-                .bind(parent_id)
-                .bind(actor_user_id)
-                .fetch_optional(&mut **tx)
-                .await?;
-                let title = if let Some((
-                    _project_id,
-                    deleted_at,
-                    visibility,
-                    member_role,
-                    workspace_role,
-                )) = row
-                {
-                    if deleted_at.is_some() {
-                        None
-                    } else {
-                        let permission = effective_permission(
-                            WorkspaceRole::parse(&workspace_role).unwrap_or(WorkspaceRole::Guest),
-                            &visibility,
-                            member_role.as_deref().and_then(ProjectMemberRole::parse),
-                        );
-                        if permission.at_least(ProjectPermission::View) {
-                            sqlx::query_scalar(
-                                "SELECT title FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2",
-                            )
-                            .bind(workspace_id)
-                            .bind(parent_id)
-                            .fetch_optional(&mut **tx)
-                            .await?
-                        } else {
-                            None
-                        }
-                    }
+    if field != "parentId" {
+        return Ok(value);
+    }
+    let Some(parent_id) = value
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+    else {
+        return Ok(value);
+    };
+    if !parent_titles.titles.contains_key(&parent_id) {
+        let parent: Option<(Uuid, String)> = sqlx::query_as(
+            r#"
+            SELECT project_id, title
+            FROM fvoci.tasks
+            WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(parent_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let title = match parent {
+            Some((project_id, title)) => {
+                let permission = if project_id == parent_titles.project_id {
+                    Some(parent_titles.project_permission)
                 } else {
-                    None
+                    project_permission_by_id(tx, workspace_id, actor_user_id, project_id).await?
                 };
-                entry.insert(title);
+                permission
+                    .is_some_and(|permission| permission.at_least(ProjectPermission::View))
+                    .then_some(title)
             }
-            return Ok(json!({
-                "id": parent_id.to_string(),
-                "label": parent_titles.get(&parent_id).cloned().unwrap_or(None),
-            }));
-        }
+            None => None,
+        };
+        parent_titles.titles.insert(parent_id, title);
     }
-    Ok(value)
+    Ok(json!({
+        "id": parent_id.to_string(),
+        "label": parent_titles.titles.get(&parent_id).cloned().flatten(),
+    }))
 }

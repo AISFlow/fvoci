@@ -41,7 +41,9 @@ const FIELD_KEYS: Record<string, string> = {
   labelIds: "task.activity.field.labels",
 };
 
-function formatAt(iso: string, timeZone = "Asia/Seoul"): string {
+export const FALLBACK_TIME_ZONE = "Asia/Seoul";
+
+export function formatActivityTime(iso: string, timeZone: string): string {
   try {
     return new Intl.DateTimeFormat("ko", {
       timeZone,
@@ -130,10 +132,10 @@ function displayValue(field: string, value: ActivityValue): string {
 
 export function TaskActivityChangeItem({
   item,
-  timeZone = "Asia/Seoul",
+  timeZone,
 }: {
   item: ActivityChangeItem;
-  timeZone?: string;
+  timeZone: string;
 }) {
   return (
     <li className="flex gap-3 border-b border-border/60 pb-4 last:border-b-0 last:pb-0">
@@ -163,7 +165,7 @@ export function TaskActivityChangeItem({
           </ul>
         ) : null}
         <p className="text-caption tabular-nums text-muted-foreground">
-          <time dateTime={item.createdAt}>{formatAt(item.createdAt, timeZone)}</time>
+          <time dateTime={item.createdAt}>{formatActivityTime(item.createdAt, timeZone)}</time>
         </p>
       </div>
     </li>

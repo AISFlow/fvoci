@@ -115,7 +115,8 @@ test("member comments on a task, viewer is read-only, parent picker searches", a
   await expect(page.getByRole("heading", { name: "댓글 대상" })).toBeVisible();
 
   const panel = page.getByTestId("task-comments");
-  await expect(panel.getByRole("heading", { name: "댓글" })).toBeVisible();
+  // Task comments live in the activity feed (source comment-thread activity mode).
+  await expect(panel.getByRole("heading", { name: "활동" })).toBeVisible();
 
   const compose = panel.locator("[data-comment-compose] textarea");
   await compose.fill("태스크 댓글입니다");
@@ -158,7 +159,8 @@ test("member comments on a task, viewer is read-only, parent picker searches", a
   await page.goto(childPath);
   await expect(page.getByRole("heading", { name: "댓글 대상" })).toBeVisible();
   const viewerPanel = page.getByTestId("task-comments");
-  await expect(viewerPanel.getByText("태스크 댓글입니다")).toBeVisible();
+  // The reply repeats its parent as a preview, so the root body appears twice.
+  await expect(viewerPanel.getByText("태스크 댓글입니다").first()).toBeVisible();
   await expect(viewerPanel.locator("[data-comment-compose]")).toHaveCount(0);
   await expect(viewerPanel.getByRole("button", { name: "답글" })).toHaveCount(0);
   await expect(viewerPanel.getByRole("button", { name: "반응 👍" }).first()).toBeDisabled();

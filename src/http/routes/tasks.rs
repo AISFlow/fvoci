@@ -28,7 +28,9 @@ use crate::db::milestones::{
     create_milestone, list_project_milestones, purge_milestone, update_milestone,
 };
 use crate::db::projects::ProjectDbError;
-use crate::db::task_activity::{list_task_activity, TaskActivityDbError, TaskActivityOutputItem};
+use crate::db::task_activity::{
+    list_task_activity, TaskActivityDbError, TaskActivityListPage, TaskActivityOutputItem,
+};
 use crate::db::tasks::{
     add_task_dependency, create_task, get_task, list_project_dependencies, list_project_tasks,
     move_task, patch_task_meta, remove_task_dependency, restore_task, trash_task, CreateTaskInput,
@@ -36,9 +38,10 @@ use crate::db::tasks::{
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
+use crate::http::routes::comments::comment_to_output;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
-use crate::tasks::activity::{ActivityFilter, ActivityListQuery};
+use crate::tasks::activity::{encode_activity_cursor, ActivityFilter, ActivityListQuery};
 use crate::tasks::dependency::DependencyType;
 use crate::tasks::list_query::{parse_task_list_query, TaskListQueryError};
 use crate::tasks::patch::{
@@ -1155,13 +1158,9 @@ async fn list_task_activity_route(
     query: Result<Query<TaskActivityQueryParams>, QueryRejection>,
 ) -> Result<Json<ActivityListResponse>, TaskApiError> {
     let Query(query) = query.map_err(AppError::from)?;
-    let filter = match query.filter.as_deref().unwrap_or("all") {
-        "all" => ActivityFilter::All,
-        "comments" => ActivityFilter::Comments,
-        "changes" => ActivityFilter::Changes,
-        _ => return Err(AppError::from_code(ProblemCode::InvalidInput).into()),
+    let Some(filter) = ActivityFilter::parse(query.filter.as_deref().unwrap_or("all")) else {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     };
-    let limit = query.limit.unwrap_or(50);
     let (user, _user_id, session_id) = require_session(
         &state,
         &headers,
@@ -1179,27 +1178,69 @@ async fn list_task_activity_route(
         task_id,
         ActivityListQuery {
             filter,
-            limit,
+            limit: query.limit.unwrap_or(50),
             cursor: query.cursor,
         },
     )
     .await
     .map_err(internal)?;
     match result {
-        Ok(page) => Ok(Json(ActivityListResponse {
-            items: page.items.into_iter().map(activity_item_output).collect(),
-            next_cursor: page.next_cursor,
-        })),
-        Err(TaskActivityDbError::InvalidInput | TaskActivityDbError::InvalidCursor) => {
+        Ok(page) => activity_page_output(page, actor_user_id).map(Json),
+        Err(TaskActivityDbError::InvalidInput) => {
             Err(AppError::from_code(ProblemCode::InvalidInput).into())
         }
+        Err(TaskActivityDbError::InvalidCursor) => Err(TaskApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_cursor",
+            title: "invalid cursor".to_string(),
+        }),
         Err(TaskActivityDbError::NotFound) => {
             Err(AppError::from_code(ProblemCode::NotFound).into())
         }
     }
 }
 
-fn activity_item_output(item: TaskActivityOutputItem) -> ActivityItemOutput {
+/// Response size budget, as in the source: envelope headroom plus each
+/// serialized item and a separator. The first item is always kept whole.
+const ACTIVITY_RESPONSE_BUDGET_BYTES: usize = 1_048_576;
+const ACTIVITY_ENVELOPE_BYTES: usize = 2048;
+
+fn activity_page_output(
+    page: TaskActivityListPage,
+    viewer_id: Uuid,
+) -> Result<ActivityListResponse, TaskApiError> {
+    let total = page.items.len();
+    let mut items = Vec::with_capacity(total);
+    let mut last_position = None;
+    let mut bytes = ACTIVITY_ENVELOPE_BYTES;
+    for item in page.items {
+        let position = item.position();
+        let output = activity_item_output(item, viewer_id);
+        let item_bytes = serde_json::to_vec(&output)
+            .map_err(|err| {
+                tracing::error!("activity item serialization failed: {err}");
+                AppError::internal()
+            })?
+            .len()
+            + 1;
+        if !items.is_empty() && bytes + item_bytes > ACTIVITY_RESPONSE_BUDGET_BYTES {
+            break;
+        }
+        bytes += item_bytes;
+        items.push(output);
+        last_position = Some(position);
+    }
+    let next_cursor = if page.has_more || items.len() < total {
+        last_position.map(|(id, created_at, item_type)| {
+            encode_activity_cursor(id, created_at, item_type, &page.scope)
+        })
+    } else {
+        None
+    };
+    Ok(ActivityListResponse { items, next_cursor })
+}
+
+fn activity_item_output(item: TaskActivityOutputItem, viewer_id: Uuid) -> ActivityItemOutput {
     match item {
         TaskActivityOutputItem::Change(change) => ActivityItemOutput::Change {
             id: change.id,
@@ -1210,24 +1251,23 @@ fn activity_item_output(item: TaskActivityOutputItem) -> ActivityItemOutput {
             changes: change
                 .changes
                 .into_iter()
-                .filter_map(|value| {
+                .filter_map(|mut value| {
                     let field = value.get("field")?.as_str()?.to_string();
+                    let from = value.get_mut("from").map(serde_json::Value::take);
+                    let to = value.get_mut("to").map(serde_json::Value::take);
                     Some(ActivityChangeOutput {
                         field,
-                        from: value
-                            .get("from")
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null),
-                        to: value.get("to").cloned().unwrap_or(serde_json::Value::Null),
+                        from: from.unwrap_or_default(),
+                        to: to.unwrap_or_default(),
                     })
                 })
                 .collect(),
         },
         TaskActivityOutputItem::Comment(comment) => ActivityItemOutput::Comment {
-            id: comment.id,
-            created_at: comment.created_at,
+            id: comment.comment.id,
+            created_at: comment.comment.created_at,
             actor: comment.actor.map(activity_actor_output),
-            comment: Box::new(serde_json::from_value(comment.comment).expect("comment shape")),
+            comment: Box::new(comment_to_output(&comment.comment, viewer_id)),
             parent: comment.parent.map(|parent| ActivityCommentParentOutput {
                 id: parent.id,
                 body: parent.body,

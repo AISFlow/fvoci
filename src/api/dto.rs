@@ -444,6 +444,14 @@ pub struct PatchWorkspaceBody {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DeleteWorkspaceBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = false))]
+    pub confirm_slug: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct MemberRoleBody {
     pub role: String,
 }
@@ -850,6 +858,23 @@ pub struct CreateProjectBody {
     pub description: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub lead_user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CloneProjectBody {
+    pub key: String,
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
+    pub visibility: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub icon: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
     pub lead_user_id: Option<Uuid>,
 }
@@ -1455,10 +1480,10 @@ pub struct ActivityCommentParentOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(tag = "type")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum ActivityItemOutput {
-    #[serde(rename = "change")]
+    #[serde(rename = "change", rename_all = "camelCase")]
     Change {
         id: Uuid,
         created_at: DateTime<Utc>,
@@ -1467,7 +1492,7 @@ pub enum ActivityItemOutput {
         kind: String,
         changes: Vec<ActivityChangeOutput>,
     },
-    #[serde(rename = "comment")]
+    #[serde(rename = "comment", rename_all = "camelCase")]
     Comment {
         id: Uuid,
         created_at: DateTime<Utc>,
