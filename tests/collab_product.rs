@@ -2053,21 +2053,21 @@ async fn collab_memory_budget_uses_persisted_factor_not_floor_only() {
                 reservation > collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES,
                 "2 MiB persisted must exceed the 16 MiB floor via the 14× factor"
             );
-        let mut tight_cfg = test_collab_config(4, 200);
-        tight_cfg.memory_budget_bytes = 20 * 1024 * 1024;
-        let tight_budget = tight_cfg.memory_budget_bytes;
-        let (hub, _helper_capacity) =
-            new_test_collab_hub(tight_cfg, wiki.session.pool.clone(), 1).await;
-        let mut leases = DirectHubLeases::new();
-        let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
-        assert!(matches!(denied, Err(JoinError::CapacityRetry)));
-        assert_eq!(hub.available_room_slots(), 4);
-        assert!(
+            let mut tight_cfg = test_collab_config(4, 200);
+            tight_cfg.memory_budget_bytes = 20 * 1024 * 1024;
+            let tight_budget = tight_cfg.memory_budget_bytes;
+            let (hub, _helper_capacity) =
+                new_test_collab_hub(tight_cfg, wiki.session.pool.clone(), 1).await;
+            let mut leases = DirectHubLeases::new();
+            let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
+            assert!(matches!(denied, Err(JoinError::CapacityRetry)));
+            assert_eq!(hub.available_room_slots(), 4);
+            assert!(
             collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES < tight_budget,
             "20 MiB budget would admit the 16 MiB floor alone; denial must come from 14× persisted"
         );
-        hub.shutdown().await;
-        harness.cleanup().await;
+            hub.shutdown().await;
+            harness.cleanup().await;
         },
     )
     .await;
