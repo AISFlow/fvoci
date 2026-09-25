@@ -847,6 +847,23 @@ pub struct CreateProjectBody {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CloneProjectBody {
+    pub key: String,
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
+    pub visibility: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub icon: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub lead_user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct PatchProjectBody {
     #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     #[cfg_attr(feature = "api-schema", schema(nullable = false))]

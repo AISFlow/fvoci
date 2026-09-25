@@ -2,6 +2,71 @@ use std::env;
 use std::path::PathBuf;
 
 use collab_engine::limits::Limits;
+use sqlx::PgPool;
+
+/// Default hub room slots. Fits stock PostgreSQL (`max_connections` 100) with the derived app pool
+/// and reserve; the verified 64-room capacity probe sets `FVOCI_COLLAB_MAX_ROOMS=64` and needs a
+/// higher `max_connections` (compose uses 150).
+pub const DEFAULT_MAX_ROOMS: usize = 30;
+pub const MAX_MAX_ROOMS: usize = 512;
+/// Default `connect_app` pool size when collab is disabled.
+pub const APP_POOL_MAX_CONNECTIONS: u32 = 10;
+/// Headroom for migrations, admin tooling, and non-app sessions on the same instance.
+pub const PG_CONNECTION_RESERVE: u32 = 10;
+
+/// App pool connections for concurrent per-room auth/append transactions at steady state.
+pub fn derive_app_pool_max_connections(max_rooms: usize) -> u32 {
+    max_rooms.clamp(16, MAX_MAX_ROOMS) as u32
+}
+/// Default aggregate helper RSS budget (2 GiB). Tune with `FVOCI_COLLAB_MEMORY_BUDGET`.
+pub const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Primary helper headroom for offline revision capture while all room slots are live.
+pub const OFFLINE_REVISION_PRIMARY_HEADROOM: usize = 4;
+
+/// Process-wide primary helper cap: live rooms plus offline revision capture headroom.
+pub fn derive_primary_child_concurrency(max_rooms: usize) -> usize {
+    max_rooms.saturating_add(OFFLINE_REVISION_PRIMARY_HEADROOM)
+}
+
+/// Default `FVOCI_COLLAB_MAX_CHILDREN` when unset: primary cap plus validator pool headroom.
+pub fn derive_max_child_concurrency(max_rooms: usize) -> usize {
+    derive_primary_child_concurrency(max_rooms) + derive_validator_child_concurrency(max_rooms)
+}
+
+/// Ephemeral validator pool size (compaction and fallback admission paths).
+pub fn derive_validator_child_concurrency(max_rooms: usize) -> usize {
+    (max_rooms / 2).max(4)
+}
+
+/// PostgreSQL connections required for collab at steady state: room guards plus app pool and reserve.
+pub fn collab_pg_connections_required(max_rooms: usize) -> u64 {
+    max_rooms as u64
+        + u64::from(derive_app_pool_max_connections(max_rooms))
+        + u64::from(PG_CONNECTION_RESERVE)
+}
+
+pub fn collab_fits_postgres_max_connections(max_rooms: usize, pg_max_connections: i64) -> bool {
+    collab_pg_connections_required(max_rooms) <= pg_max_connections as u64
+}
+
+pub async fn assert_collab_fits_postgres(pool: &PgPool, max_rooms: usize) -> Result<(), String> {
+    let pg_max: i64 = sqlx::query_scalar("SELECT current_setting('max_connections')::bigint")
+        .fetch_one(pool)
+        .await
+        .map_err(|err| format!("read PostgreSQL max_connections: {err}"))?;
+    if collab_fits_postgres_max_connections(max_rooms, pg_max) {
+        Ok(())
+    } else {
+        Err(format!(
+            "FVOCI_COLLAB_MAX_ROOMS={max_rooms} needs at least {} PostgreSQL max_connections (rooms + app pool {} + reserve {}); server has {}",
+            collab_pg_connections_required(max_rooms),
+            derive_app_pool_max_connections(max_rooms),
+            PG_CONNECTION_RESERVE,
+            pg_max
+        ))
+    }
+}
 
 /// Product collab runtime configuration. Enabled only when `FVOCI_COLLAB_ENGINE`
 /// points at a built `collab-engine` helper binary.
@@ -10,6 +75,8 @@ pub struct CollabConfig {
     pub engine_bin: PathBuf,
     pub limits: Limits,
     pub max_rooms: usize,
+    pub max_child_concurrency: usize,
+    pub memory_budget_bytes: u64,
     pub max_collab_sockets: usize,
     pub max_collab_sockets_per_session: usize,
     pub max_connections_per_room: usize,
@@ -30,6 +97,12 @@ pub struct CollabConfig {
     pub rpc_timeout_ms: u64,
 }
 
+fn parse_max_rooms(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_MAX_ROOMS)
+        .clamp(1, MAX_MAX_ROOMS)
+}
+
 impl CollabConfig {
     pub fn from_env() -> Option<Self> {
         let raw = env::var("FVOCI_COLLAB_ENGINE").ok()?;
@@ -41,10 +114,17 @@ impl CollabConfig {
         if !engine_bin.is_file() {
             return None;
         }
-        let max_rooms = env::var("FVOCI_COLLAB_MAX_ROOMS")
+        let max_rooms = parse_max_rooms(env::var("FVOCI_COLLAB_MAX_ROOMS").ok().as_deref());
+        let max_child_concurrency = env::var("FVOCI_COLLAB_MAX_CHILDREN")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(4);
+            .unwrap_or_else(|| derive_max_child_concurrency(max_rooms))
+            .max(max_rooms);
+        let memory_budget_bytes = env::var("FVOCI_COLLAB_MEMORY_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
+            .max(collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES);
         let max_connections_per_room = env::var("FVOCI_COLLAB_MAX_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -121,7 +201,9 @@ impl CollabConfig {
         Some(Self {
             engine_bin,
             limits: Limits::default(),
-            max_rooms: max_rooms.clamp(1, 4),
+            max_rooms,
+            max_child_concurrency,
+            memory_budget_bytes,
             max_collab_sockets: max_collab_sockets.max(1),
             max_collab_sockets_per_session: max_collab_sockets_per_session.clamp(1, 8),
             max_connections_per_room: max_connections_per_room.max(1),
@@ -146,6 +228,15 @@ impl CollabConfig {
     pub fn is_available(&self) -> bool {
         self.engine_bin.is_file()
     }
+
+    /// Apply process-wide helper limits derived from this configuration.
+    pub fn apply_runtime_limits(&self) {
+        let primary_cap = derive_primary_child_concurrency(self.max_rooms);
+        let validator_cap = derive_validator_child_concurrency(self.max_rooms)
+            .min(self.max_child_concurrency.saturating_sub(primary_cap));
+        collab_engine::process::set_max_child_concurrency(primary_cap);
+        collab_engine::process::set_max_validator_child_concurrency(validator_cap.max(4));
+    }
 }
 
 pub fn collab_engine_path_for_tests() -> Option<PathBuf> {
@@ -167,4 +258,39 @@ pub fn require_collab_engine_for_tests() -> PathBuf {
     collab_engine_path_for_tests().expect(
         "FVOCI_COLLAB_ENGINE or target/debug/collab-engine required for collab product tests",
     )
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn derive_child_concurrency_includes_headroom() {
+        assert_eq!(derive_validator_child_concurrency(4), 4);
+        assert_eq!(derive_primary_child_concurrency(4), 8);
+        assert_eq!(derive_max_child_concurrency(4), 12);
+        assert_eq!(derive_max_child_concurrency(16), 28);
+        assert_eq!(derive_max_child_concurrency(64), 100);
+    }
+
+    #[test]
+    fn derive_app_pool_tracks_max_rooms() {
+        assert_eq!(derive_app_pool_max_connections(4), 16);
+        assert_eq!(derive_app_pool_max_connections(64), 64);
+    }
+
+    #[test]
+    fn default_max_rooms_fits_stock_postgres() {
+        assert!(collab_fits_postgres_max_connections(DEFAULT_MAX_ROOMS, 100));
+        assert!(!collab_fits_postgres_max_connections(64, 100));
+        assert!(collab_fits_postgres_max_connections(64, 150));
+    }
+
+    #[test]
+    fn max_rooms_env_clamps_to_ceiling() {
+        assert_eq!(parse_max_rooms(Some("9999")), MAX_MAX_ROOMS);
+        assert_eq!(parse_max_rooms(Some("0")), 1);
+        assert_eq!(parse_max_rooms(Some("not-a-number")), DEFAULT_MAX_ROOMS);
+        assert_eq!(parse_max_rooms(None), DEFAULT_MAX_ROOMS);
+    }
 }

@@ -5,6 +5,8 @@ import { api, ensureOk } from "@/lib/api";
 export type ProjectListItem = components["schemas"]["ProjectListItemOutput"];
 export type Project = components["schemas"]["ProjectOutput"];
 export type CreateProjectBody = components["schemas"]["CreateProjectBody"];
+export type CloneProjectBody = components["schemas"]["CloneProjectBody"];
+export type TreeNode = components["schemas"]["TreeNodeResponse"];
 export type ProjectMember = components["schemas"]["MemberResponse"];
 export type Workflow = components["schemas"]["WorkflowOutput"];
 export type WorkflowStatus = components["schemas"]["WorkflowStatusOutput"];
@@ -71,6 +73,20 @@ export function findProjectByKey(
 ): ProjectListItem | undefined {
   const canonical = key.toUpperCase();
   return items?.find((project) => project.key.toUpperCase() === canonical);
+}
+
+export function projectDocumentsQuery(workspaceId: string, projectId: string) {
+  return queryOptions({
+    queryKey: ["project-documents", workspaceId, projectId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents", {
+          params: { path: { workspace_id: workspaceId, project_id: projectId } },
+        }),
+      ),
+    enabled: Boolean(workspaceId) && Boolean(projectId),
+    retry: false,
+  });
 }
 
 export function backlogStatusId(statuses: readonly WorkflowStatus[]): string | null {
