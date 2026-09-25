@@ -381,6 +381,24 @@ pub async fn issue_session_or_challenge(
 }
 
 /// The pending challenge's owner, without consuming it.
+/// Counts one verify attempt for the account in the database (shared across
+/// processes and restarts). `Ok(None)` when allowed, otherwise the seconds
+/// until the window ends.
+pub async fn verify_attempt(
+    pool: &PgPool,
+    user_id: Uuid,
+    limit: u32,
+    window_seconds: u32,
+) -> Result<Option<u32>, sqlx::Error> {
+    let retry: i32 = sqlx::query_scalar("SELECT fvoci.app_mfa_verify_attempt($1, $2, $3)")
+        .bind(user_id)
+        .bind(limit as i32)
+        .bind(window_seconds as i32)
+        .fetch_one(pool)
+        .await?;
+    Ok((retry > 0).then_some(retry as u32))
+}
+
 pub async fn peek_challenge(
     pool: &PgPool,
     token_hash: &str,

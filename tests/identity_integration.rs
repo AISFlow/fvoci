@@ -711,7 +711,7 @@ async fn mfa_login_challenge_replay_and_recovery() {
 #[tokio::test]
 async fn mfa_verify_is_limited_per_account_across_tokens() {
     let h = Harness::start().await;
-    let (_user_id, email, cookie) = h.member("park").await;
+    let (user_id, email, cookie) = h.member("park").await;
     let (secret, _) = h.enable_mfa(&cookie, Some(PASSWORD)).await;
     h.advance_steps(1);
     let good = h.code_now(&secret);
@@ -729,6 +729,29 @@ async fn mfa_verify_is_limited_per_account_across_tokens() {
     assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limited.code(), "rate_limit_exceeded");
     assert!(limited.headers.get("retry-after").is_some());
+    // The count lives in the database (not the process-local limiter), so it
+    // holds across restarts and replicas.
+    let stored: i32 =
+        sqlx::query_scalar("SELECT verify_count FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(stored, 6);
+    // Once the window has passed, the account can verify again.
+    sqlx::query(
+        "UPDATE fvoci.user_mfa SET verify_window_start = now() - interval '6 minutes' WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    let res = h.login(&email, PASSWORD, peer(31)).await;
+    let token = res.json["mfaToken"].as_str().unwrap().to_string();
+    h.advance_steps(1);
+    let good = h.code_now(&secret);
+    let ok = h.verify(&token, &good, peer(31)).await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.json);
     h.finish().await;
 }
 

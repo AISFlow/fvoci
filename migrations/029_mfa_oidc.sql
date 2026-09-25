@@ -1,6 +1,6 @@
 -- TOTP MFA, OIDC identity links, workspace SSO (source packages/db schema
--- identity.ts user_mfa/identity_links, ops.ts workspace_oidc). 027 and 028 are
--- reserved by open branches (integrations, collections); versions may gap.
+-- identity.ts user_mfa/identity_links, ops.ts workspace_oidc). 028 is held by
+-- an open branch (collections); versions may gap.
 --
 -- The source keeps pending MFA challenges and OIDC flow state in Redis. Here
 -- they are single-use rows: hashed keys, TTL checked at consume, deleted by
@@ -20,6 +20,11 @@ CREATE TABLE fvoci.user_mfa (
     enabled_at timestamptz,
     recovery_hashes text[] NOT NULL DEFAULT '{}',
     last_used_step integer,
+    -- Per-account verify attempts in the current window (source: the shared
+    -- Redis limiter); kept in the database so the cap holds across restarts
+    -- and replicas.
+    verify_window_start timestamptz,
+    verify_count integer NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT user_mfa_secret_sealed_check CHECK (totp_secret LIKE 'enc:v2:%')
@@ -180,6 +185,44 @@ BEGIN
 END;
 $$;
 
+-- Counts one verify attempt for the account. Returns 0 while the attempt is
+-- within p_limit per p_window_seconds, otherwise the seconds until the window
+-- ends (the Retry-After). Runs under the system context because the caller has
+-- no session yet (user_mfa is owner-or-system under FORCE RLS). An account
+-- without an MFA row counts nothing and gets 0; verification then fails.
+CREATE FUNCTION fvoci.app_mfa_verify_attempt(p_user_id uuid, p_limit integer, p_window_seconds integer)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, fvoci, public
+AS $$
+DECLARE
+    v_prev text := current_setting('app.system_ctx', true);
+    v_count integer;
+    v_start timestamptz;
+BEGIN
+    IF p_limit < 1 OR p_window_seconds < 1 OR p_window_seconds > 86400 THEN
+        RAISE EXCEPTION 'invalid verify limit' USING ERRCODE = '22023';
+    END IF;
+    PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
+    UPDATE fvoci.user_mfa
+    SET verify_count = CASE
+            WHEN verify_window_start > now() - make_interval(secs => p_window_seconds)
+            THEN verify_count + 1 ELSE 1 END,
+        verify_window_start = CASE
+            WHEN verify_window_start > now() - make_interval(secs => p_window_seconds)
+            THEN verify_window_start ELSE now() END
+    WHERE user_id = p_user_id
+    RETURNING verify_count, verify_window_start INTO v_count, v_start;
+    PERFORM pg_catalog.set_config('app.system_ctx', COALESCE(v_prev, ''), true);
+    IF v_count IS NULL OR v_count <= p_limit THEN
+        RETURN 0;
+    END IF;
+    RETURN GREATEST(1, ceil(extract(epoch FROM
+        (v_start + make_interval(secs => p_window_seconds)) - now()))::integer);
+END;
+$$;
+
 CREATE FUNCTION fvoci.app_oidc_state_issue(p_hash text, p_payload text, p_expires_at timestamptz)
 RETURNS void
 LANGUAGE plpgsql
@@ -272,6 +315,7 @@ $$;
 REVOKE ALL ON FUNCTION fvoci.app_mfa_challenge_issue(text, uuid, integer, timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_mfa_challenge_peek(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_mfa_challenge_consume(text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fvoci.app_mfa_verify_attempt(uuid, integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_oidc_state_issue(text, text, timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_oidc_state_consume(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_auth_ephemeral_purge_expired(timestamptz, integer) FROM PUBLIC;

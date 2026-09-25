@@ -254,15 +254,17 @@ pub fn check_claims(claims: &Value, expected: &Expected<'_>) -> Result<(), JwtEr
         return Err(JwtError::Claim("azp"));
     }
     let exp = num(claims, "exp")?;
-    if exp + CLOCK_SKEW_SECS <= expected.now_secs {
+    if exp.saturating_add(CLOCK_SKEW_SECS) <= expected.now_secs {
         return Err(JwtError::Claim("exp"));
     }
     let iat = num(claims, "iat")?;
-    if iat > expected.now_secs + MAX_FUTURE_IAT_SECS {
+    if iat > expected.now_secs.saturating_add(MAX_FUTURE_IAT_SECS) {
         return Err(JwtError::Claim("iat"));
     }
-    if let Ok(nbf) = num(claims, "nbf") {
-        if nbf > expected.now_secs + CLOCK_SKEW_SECS {
+    // nbf is optional, but when present it must be a number.
+    if claims.get("nbf").is_some() {
+        let nbf = num(claims, "nbf")?;
+        if nbf > expected.now_secs.saturating_add(CLOCK_SKEW_SECS) {
             return Err(JwtError::Claim("nbf"));
         }
     }

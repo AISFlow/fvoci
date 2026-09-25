@@ -40,6 +40,7 @@ use crate::secret_box;
 /// Source `http-rate-limit.ts` LIMITS (5-minute window).
 const MFA_VERIFY_PER_IP: u32 = 30;
 const MFA_VERIFY_PER_USER: u32 = 5;
+const MFA_VERIFY_WINDOW_SECS: u32 = 300;
 const MFA_REAUTH_PER_USER: u32 = 5;
 const MFA_ENABLE_PER_USER: u32 = 5;
 /// A password-less account may set up MFA only from a session this fresh.
@@ -396,13 +397,15 @@ async fn verify(
         return Err(problem(ProblemCode::MfaInvalid));
     };
     // The limit is per account, not per token: whoever knows the password can
-    // mint new challenge tokens at will.
-    limit(
-        &state,
-        format!("mfa-verify-user:{user_id}"),
-        MFA_VERIFY_PER_USER,
-    )
-    .await?;
+    // mint new challenge tokens at will. It is counted in the database so it
+    // holds across restarts and replicas (source: shared Redis limiter).
+    if let Some(retry_after) =
+        mfa::verify_attempt(pool, user_id, MFA_VERIFY_PER_USER, MFA_VERIFY_WINDOW_SECS)
+            .await
+            .map_err(internal)?
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
     let row = mfa::find(pool, user_id).await.map_err(internal)?;
     let Some(row) = row.filter(|r| r.enabled_at.is_some()) else {
         return Err(problem(ProblemCode::MfaInvalid));

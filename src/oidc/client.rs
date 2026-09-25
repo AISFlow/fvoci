@@ -235,15 +235,16 @@ pub fn normalize_provider_email(raw: Option<String>) -> Option<String> {
         .filter(|email| email.bytes().all(|b| (b'!'..=b'~').contains(&b)))
 }
 
-/// `client_secret_basic` unless the provider only lists `client_secret_post`
-/// (openid-client default; Kakao is post-only).
+/// `client_secret_post`, as the source's openid-client uses by default for a
+/// client with a secret, unless the provider lists `client_secret_basic` but
+/// not `client_secret_post`.
 fn uses_post_auth(discovery: &Discovery) -> bool {
-    discovery
+    !discovery
         .token_endpoint_auth_methods_supported
         .as_ref()
         .is_some_and(|methods| {
-            !methods.iter().any(|m| m == "client_secret_basic")
-                && methods.iter().any(|m| m == "client_secret_post")
+            methods.iter().any(|m| m == "client_secret_basic")
+                && !methods.iter().any(|m| m == "client_secret_post")
         })
 }
 
@@ -399,12 +400,15 @@ mod tests {
 
     #[test]
     fn client_auth_method_selection() {
-        assert!(!uses_post_auth(&discovery(None)));
-        assert!(!uses_post_auth(&discovery(Some(vec![
+        assert!(uses_post_auth(&discovery(None)));
+        assert!(uses_post_auth(&discovery(Some(vec![
             "client_secret_basic",
             "client_secret_post"
         ]))));
         assert!(uses_post_auth(&discovery(Some(vec!["client_secret_post"]))));
+        assert!(!uses_post_auth(&discovery(Some(vec![
+            "client_secret_basic"
+        ]))));
     }
 
     #[test]

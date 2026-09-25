@@ -343,12 +343,15 @@ async fn token(
 ) -> Response {
     fake.token_hits.fetch_add(1, Ordering::SeqCst);
     let mut inner = fake.inner.lock().unwrap();
+    let post = form
+        .get("client_id")
+        .cloned()
+        .zip(form.get("client_secret").cloned());
+    // Like most providers, accept either method unless configured post-only.
     let credentials = if inner.post_auth_only {
-        form.get("client_id")
-            .cloned()
-            .zip(form.get("client_secret").cloned())
+        post
     } else {
-        basic_credentials(&headers)
+        basic_credentials(&headers).or(post)
     };
     if credentials != Some((inner.client_id.clone(), inner.client_secret.clone())) {
         return (

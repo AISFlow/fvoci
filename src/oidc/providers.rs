@@ -91,6 +91,26 @@ impl fmt::Debug for ResolvedProvider {
     }
 }
 
+/// Source: `OIDC_ALLOW_INSECURE` is honoured only for exactly `1`, and never
+/// on a production deployment. Here an https public origin counts as
+/// production, so plain-http loopback issuers stay a local/test option.
+fn insecure_loopback_allowed(public_origin: &str) -> bool {
+    let requested = std::env::var("OIDC_ALLOW_INSECURE").ok().as_deref() == Some("1");
+    if !requested {
+        return false;
+    }
+    if public_origin
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("https://")
+    {
+        tracing::warn!("OIDC_ALLOW_INSECURE=1 ignored: the public origin is https");
+        return false;
+    }
+    tracing::warn!("OIDC_ALLOW_INSECURE=1: plain-http loopback OIDC issuers are accepted");
+    true
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct OidcSettings {
     pub providers: Vec<ResolvedProvider>,
@@ -184,7 +204,7 @@ impl OidcSettings {
         }
         Ok(Self {
             providers,
-            allow_insecure_loopback: env_nonempty("OIDC_ALLOW_INSECURE").is_some(),
+            allow_insecure_loopback: insecure_loopback_allowed(public_origin),
             public_origin: public_origin.trim_end_matches('/').to_string(),
             cache: Default::default(),
         })

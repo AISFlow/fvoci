@@ -204,6 +204,8 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_mfa_challenge_peek(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_mfa_challenge_peek(text) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_mfa_challenge_consume(text, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_mfa_challenge_consume(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_mfa_verify_attempt(uuid, integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_mfa_verify_attempt(uuid, integer, integer) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_oidc_state_issue(text, text, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_oidc_state_issue(text, text, timestamptz) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_oidc_state_consume(text) FROM PUBLIC;
