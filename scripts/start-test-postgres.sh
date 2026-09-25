@@ -31,12 +31,15 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-100}"
+
 cid="$(docker run -d --rm \
   --name "$CONTAINER" \
   --label "fvoci.test-run=${RUN_ID}" \
   --env-file "$ENV_FILE" \
   -p 127.0.0.1:0:5432 \
-  "$IMAGE")"
+  "$IMAGE" \
+  postgres -c "max_connections=${PG_MAX_CONNECTIONS}")"
 
 deadline=$((SECONDS + 30))
 until docker exec "$cid" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; do

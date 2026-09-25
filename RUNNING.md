@@ -190,7 +190,25 @@ Per-child limits stay unchanged (AS 1 GiB, observed RSS kill 512 MiB, 8 s wall, 
 Helpers set `oom_score_adj=1000` so cgroup OOM prefers a helper over `fvoci-server`.
 The server raises soft `RLIMIT_NOFILE` to the hard limit at startup.
 
-Heavy load probe (not CI): `scripts/collab-capacity-probe.sh` (release helper, many rooms/peers).
+Heavy load probe (not in default CI; Linux + PostgreSQL via `scripts/start-test-postgres.sh`):
+
+```sh
+# Default: 200 rooms × 2 peers, 180s (~1 edit/s/room), release helper
+./scripts/collab-capacity-probe.sh
+
+# Shorter local smoke (still records PROBE_SUMMARY lines; duration floor is 180s):
+COLLAB_PROBE_ROOMS=20 ./scripts/collab-capacity-probe.sh
+
+# Advisor-scale run (10 minutes):
+COLLAB_PROBE_DURATION_SECS=600 ./scripts/collab-capacity-probe.sh
+```
+
+Environment: `COLLAB_PROBE_ROOMS`, `COLLAB_PROBE_PEERS`, `COLLAB_PROBE_DURATION_SECS` (minimum 180),
+`COLLAB_PROBE_OPEN_CONCURRENCY`, `FVOCI_COLLAB_MAX_ROOMS`, `FVOCI_COLLAB_ENGINE`,
+`FVOCI_TEST_PG_MAX_CONNECTIONS` (default 400 for the probe script; each live room holds one PG
+connection via `RoomGuard`, so docker Postgres must exceed room count plus headroom).
+The probe checks room-capacity **1013**, slot reuse after idle eviction, hostile-byte isolation, and prints
+`PROBE_SUMMARY` with child RSS, p95 apply→broadcast latency, and server thread/fd counts.
 
 `FVOCI_SHUTDOWN_DEADLINE_MS` sets the whole server shutdown deadline (default
 30000, positive milliseconds). SIGTERM/Ctrl+C stops collaboration admission
