@@ -17,4 +17,5 @@ pub struct AppState {
     pub upload: UploadLimits,
     pub collab: Option<Arc<CollabHub>>,
     pub meili: Option<MeiliConfig>,
+    pub mailer: std::sync::Arc<crate::mail::Mailer>,
 }

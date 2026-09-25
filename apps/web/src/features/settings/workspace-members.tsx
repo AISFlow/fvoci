@@ -41,12 +41,19 @@ async function copyText(value: string): Promise<void> {
   throw new Error("clipboard unavailable");
 }
 
-function InviteResult({ acceptUrl }: { acceptUrl: string }) {
+function InviteResult({
+  acceptUrl,
+  mailDelayed,
+}: {
+  acceptUrl: string;
+  mailDelayed?: boolean | null;
+}) {
   const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(null);
   return (
     <div className="flex flex-col gap-2">
       <p role="status" className="text-ui">
         {t("workspace.invite.created")}
+        {mailDelayed ? ` ${t("workspace.invite.mailDelayed")}` : ""}
       </p>
       <p className="text-ui wrap-anywhere">
         <a href={acceptUrl} className="underline underline-offset-2">
@@ -83,9 +90,12 @@ function InviteForm({
 }: {
   pending: boolean;
   roles: readonly WorkspaceRole[];
-  onInvite: (input: InviteFormValues) => Promise<{ acceptUrl: string }>;
+  onInvite: (input: InviteFormValues) => Promise<{ acceptUrl: string; mailDelayed?: boolean | null }>;
 }) {
-  const [result, setResult] = useState<{ acceptUrl: string } | null>(null);
+  const [result, setResult] = useState<{
+    acceptUrl: string;
+    mailDelayed?: boolean | null;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const form = useForm<InviteFormValues>({
     resolver: zodResolver(invitationCreateInput),
@@ -149,7 +159,13 @@ function InviteForm({
           {error}
         </p>
       ) : null}
-      {result ? <InviteResult key={result.acceptUrl} acceptUrl={result.acceptUrl} /> : null}
+      {result ? (
+        <InviteResult
+          key={result.acceptUrl}
+          acceptUrl={result.acceptUrl}
+          mailDelayed={result.mailDelayed}
+        />
+      ) : null}
     </form>
   );
 }

@@ -22,18 +22,19 @@ use crate::api::dto::{
     LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
     MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
     NotificationItemOutput, NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
-    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PatchCommentBody,
-    PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody, PatchProjectBody,
-    PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
-    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
-    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
-    ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
-    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
-    SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, SortDocumentBody, TaskChildOutput, TaskChildProgressOutput,
-    TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
-    TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse, WorkflowOutput,
-    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PasswordResetBody,
+    PasswordResetConfirmBody, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
+    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
+    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
+    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
+    PutAttachmentPartResponse, ResumeAttachmentUploadResponse, RevisionCreateResponse,
+    RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
+    RevisionRestoreResponse, SearchItemOutput, SearchListResponse, SearchSnippetPiece,
+    SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, SortDocumentBody,
+    TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
+    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -74,6 +75,8 @@ impl Modify for CookieSecurityAddon {
         logout,
         me_get,
         me_patch,
+        password_reset,
+        confirm_password_reset,
         list_my_workspaces,
         personal_workspace,
         create_workspace,
@@ -184,6 +187,8 @@ impl Modify for CookieSecurityAddon {
             SetupResponse,
             LoginBody,
             LoginResponse,
+            PasswordResetBody,
+            PasswordResetConfirmBody,
             SessionUserOutput,
             PatchMeBody,
             WorkspaceListResponse,
@@ -672,6 +677,34 @@ fn me_get() {}
     )
 )]
 fn me_patch() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/password-reset",
+    tag = "auth",
+    request_body = PasswordResetBody,
+    responses(
+        (status = 202, description = "Accepted", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn password_reset() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/password-reset/confirm",
+    tag = "auth",
+    request_body = PasswordResetConfirmBody,
+    responses(
+        (status = 200, description = "Password reset", body = OkResponse),
+        (status = 400, description = "Invalid or expired token", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn confirm_password_reset() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

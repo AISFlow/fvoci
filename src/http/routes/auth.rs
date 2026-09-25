@@ -10,8 +10,13 @@ use axum_extra::extract::CookieJar;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::api::dto::{LoginBody, LoginResponse, SessionUserOutput};
+use crate::api::dto::{
+    LoginBody, LoginResponse, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
+    SessionUserOutput,
+};
+use crate::auth::password::hash_password;
 use crate::auth::session::SessionUser;
+use crate::auth::token::new_token;
 use crate::db::identity::FamilyNamePatch;
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::cookie::{clear_session_cookie, set_session_cookie};
@@ -19,9 +24,10 @@ use crate::http::guard::check_origin;
 use crate::http::json_input::parse_patch_me;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
+use crate::mail::{equalize_magic_response_timing, MAGIC_PER_EMAIL, MAGIC_PER_IP};
 use crate::validate::{
     normalize_email, validate_family_name, validate_given_name, validate_locale,
-    validate_text_scale, validate_week_starts_on,
+    validate_password_length, validate_text_scale, validate_week_starts_on,
 };
 
 pub fn router() -> Router<AppState> {
@@ -29,6 +35,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(me).patch(patch_me))
+        .route("/api/v1/auth/password-reset", post(request_password_reset))
+        .route(
+            "/api/v1/auth/password-reset/confirm",
+            post(confirm_password_reset),
+        )
 }
 
 async fn login(
@@ -197,6 +208,100 @@ async fn require_session(
     )
     .await?;
     Ok(auth.user)
+}
+
+async fn request_password_reset(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<PasswordResetBody>, JsonRejection>,
+) -> Result<(StatusCode, Json<OkResponse>), AppError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let ip = peer_ip(peer.ip());
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(&format!("magic-ip:{ip}"), MAGIC_PER_IP)
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
+    let email = normalize_email(&body.email)?;
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(&format!("magic-email:{ip}:{email}"), MAGIC_PER_EMAIL)
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
+    let started = std::time::Instant::now();
+    if let Some((user_id, generation, suspended_at)) =
+        crate::db::identity::find_reset_user_by_email(&state.auth.db.pool, &email)
+            .await
+            .map_err(internal)?
+    {
+        if suspended_at.is_none() {
+            let issued = new_token();
+            let expires_at = crate::db::magic::magic_expires_at(chrono::Utc::now());
+            crate::db::magic::issue_password_reset_token(
+                &state.auth.db.pool,
+                user_id,
+                generation,
+                &issued.hash,
+                expires_at,
+            )
+            .await
+            .map_err(internal)?;
+            let origin = state.public_origin.trim_end_matches('/');
+            let url = format!("{origin}/reset-password?token={}", issued.token);
+            state.mailer.send_detached(
+                email,
+                crate::mail::templates::RESET_SUBJECT.to_string(),
+                crate::mail::templates::reset_text(&url),
+            );
+        }
+    }
+    equalize_magic_response_timing(started).await;
+    Ok((StatusCode::ACCEPTED, Json(OkResponse { ok: true })))
+}
+
+async fn confirm_password_reset(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<PasswordResetConfirmBody>, JsonRejection>,
+) -> Result<Json<OkResponse>, AppError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let ip = peer_ip(peer.ip());
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow(&format!("magic-ip:{ip}"), MAGIC_PER_IP)
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
+    validate_password_length(&body.new_password)?;
+    let payload = crate::db::magic::consume_magic_token(&state.auth.db.pool, &body.token)
+        .await
+        .map_err(internal)?;
+    let Some(payload) = payload else {
+        return Err(AppError::from_code(ProblemCode::MagicInvalid));
+    };
+    let password_hash = hash_password(&body.new_password, &state.auth.password_keys)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "password hash failed");
+            AppError::internal()
+        })?;
+    let ok =
+        crate::db::magic::complete_password_reset(&state.auth.db.pool, &payload, &password_hash)
+            .await
+            .map_err(internal)?;
+    if !ok {
+        return Err(AppError::from_code(ProblemCode::MagicInvalid));
+    }
+    Ok(Json(OkResponse { ok: true }))
 }
 
 fn internal(err: sqlx::Error) -> AppError {
