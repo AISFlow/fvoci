@@ -85,7 +85,7 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
   await expect(page.getByTestId("project-milestones")).toBeVisible();
   await page.getByTestId("project-milestone-name").fill("출시");
   await page.getByTestId("project-milestone-add").click();
-  await expect(page.getByText("출시", { exact: true })).toBeVisible();
+  await expect(page.locator('[data-testid^="project-milestone-name-"]')).toHaveValue("출시");
 
   const wsId = await workspaceId(page, admin.workspaceSlug);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatDisplayId } from "@/lib/href";
 import { lookupQuery } from "./lookup";
-import { taskParentListQuery } from "./queries";
+import { taskParentListQuery, taskQuery } from "./queries";
 import { eligibleParentCandidates } from "./task-edit-payload";
 import { parentSearchMode } from "./task-parent-query";
 
@@ -60,6 +60,21 @@ export function TaskParentSelect({
     ...lookupQuery(workspaceId, displayId),
     enabled: lookupEnabled && Boolean(workspaceId) && Boolean(displayId),
   });
+  const lookupTaskId = useMemo(() => {
+    if (mode.kind !== "display-id") return "";
+    return (
+      lookup.data?.items.find(
+        (item) =>
+          item.kind === "task" &&
+          item.id !== excludeTaskId &&
+          item.projectId === projectId,
+      )?.id ?? ""
+    );
+  }, [excludeTaskId, lookup.data, mode.kind, projectId]);
+  const resolvedTask = useQuery({
+    ...taskQuery(workspaceId, lookupTaskId),
+    enabled: lookupEnabled && Boolean(lookupTaskId),
+  });
 
   useEffect(() => {
     setOpen(false);
@@ -70,20 +85,15 @@ export function TaskParentSelect({
   const items = useMemo((): ParentCandidate[] => {
     if (mode.kind === "empty") return [];
     if (mode.kind === "display-id") {
-      return (lookup.data?.items ?? [])
-        .filter(
-          (item) =>
-            item.kind === "task" &&
-            item.id !== excludeTaskId &&
-            item.projectId === projectId,
-        )
-        .map((item) => ({
-          id: item.id,
-          type: "task",
-          number: 0,
-          title: item.title,
-          displayId: item.displayId,
-        }));
+      const task = resolvedTask.data;
+      if (!task || task.archivedAt) return [];
+      return eligibleParentCandidates(
+        { id: excludeTaskId, type: childType },
+        [{ id: task.id, type: task.type, number: task.number, title: task.title }],
+      ).map((item) => ({
+        ...item,
+        displayId: formatDisplayId(projectKey, item.number),
+      }));
     }
     const pages = list.data?.pages.flatMap((page) => page.items) ?? [];
     return eligibleParentCandidates({ id: excludeTaskId, type: childType }, pages);
@@ -91,9 +101,9 @@ export function TaskParentSelect({
     childType,
     excludeTaskId,
     list.data,
-    lookup.data,
     mode.kind,
-    projectId,
+    projectKey,
+    resolvedTask.data,
   ]);
 
   const label = value
@@ -102,8 +112,11 @@ export function TaskParentSelect({
       : (currentTitle ?? t("task.parent.current"))
     : t("task.parent.none");
   const listPending = listEnabled && list.isPending;
-  const lookupPending = lookupEnabled && lookup.isPending;
-  const listError = listEnabled ? list.error : lookupEnabled ? lookup.error : null;
+  const lookupPending =
+    lookupEnabled && (lookup.isPending || (Boolean(lookupTaskId) && resolvedTask.isPending));
+  const listError = listEnabled ? list.error : lookupEnabled ? lookup.error ?? resolvedTask.error : null;
+  const showEmpty =
+    items.length === 0 && !(mode.kind === "list" && list.hasNextPage);
 
   return (
     <div className="task-parent-select">
@@ -113,7 +126,6 @@ export function TaskParentSelect({
         className="task-parent-select__trigger"
         id="task-edit-parent"
         data-testid="task-edit-parent"
-        aria-label={t("task.parent.label")}
         aria-expanded={open}
         aria-haspopup="listbox"
         disabled={disabled || childType === "epic" || !workspaceId || !projectId}
@@ -124,6 +136,7 @@ export function TaskParentSelect({
       {open ? (
         <div className="task-parent-select__panel">
           <Input
+            autoFocus
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             aria-label={t("task.parent.search")}
@@ -144,7 +157,10 @@ export function TaskParentSelect({
                 size="sm"
                 onClick={() => {
                   if (mode.kind === "list") void list.refetch();
-                  else void lookup.refetch();
+                  else {
+                    void lookup.refetch();
+                    if (lookupTaskId) void resolvedTask.refetch();
+                  }
                 }}
               >
                 {t("task.parent.retry")}
@@ -155,10 +171,10 @@ export function TaskParentSelect({
               className="task-parent-select__list"
               role="listbox"
               aria-label={t("task.parent.label")}
-              aria-busy={list.isFetching || lookup.isFetching}
+              aria-busy={list.isFetching || lookup.isFetching || resolvedTask.isFetching}
             >
               {childType !== "subtask" ? (
-                <li>
+                <li role="presentation">
                   <button
                     type="button"
                     role="option"
@@ -178,7 +194,7 @@ export function TaskParentSelect({
               {items.map((item) => {
                 const text = `${item.displayId ?? formatDisplayId(projectKey, item.number)} ${item.title}`;
                 return (
-                  <li key={item.id}>
+                  <li key={item.id} role="presentation">
                     <button
                       type="button"
                       role="option"
@@ -196,8 +212,10 @@ export function TaskParentSelect({
                   </li>
                 );
               })}
-              {items.length === 0 ? (
-                <li className="task-home__note">{t("task.parent.empty")}</li>
+              {showEmpty ? (
+                <li role="presentation" className="task-home__note">
+                  {t("task.parent.empty")}
+                </li>
               ) : null}
             </ul>
           )}

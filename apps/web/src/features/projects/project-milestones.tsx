@@ -42,6 +42,29 @@ export function ProjectMilestonesSection({
     },
     onError: (err) => setError(err instanceof ProblemError ? err.title : t("error.network")),
   });
+  const rename = useMutation({
+    mutationFn: async (input: { milestoneId: string; name: string }) =>
+      ensureOk(
+        await api.PATCH(
+          "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones/{milestone_id}",
+          {
+            params: {
+              path: {
+                workspace_id: workspaceId,
+                project_id: projectId,
+                milestone_id: input.milestoneId,
+              },
+            },
+            body: { name: input.name },
+          },
+        ),
+      ),
+    onSuccess: async () => {
+      setError(null);
+      await refresh();
+    },
+    onError: (err) => setError(err instanceof ProblemError ? err.title : t("error.network")),
+  });
   const remove = useMutation({
     mutationFn: async (milestoneId: string) =>
       ensureOk(
@@ -77,7 +100,21 @@ export function ProjectMilestonesSection({
           <ul className="flex flex-col gap-1">
             {milestones.map((row) => (
               <li key={row.id} className="flex items-center justify-between gap-2">
-                <span data-testid={`project-milestone-${row.id}`}>{row.name}</span>
+                {canManage ? (
+                  <Input
+                    defaultValue={row.name}
+                    data-testid={`project-milestone-name-${row.id}`}
+                    aria-label={t("project.milestones")}
+                    disabled={rename.isPending}
+                    onBlur={(event) => {
+                      const next = event.currentTarget.value.trim();
+                      if (next === "" || next === row.name) return;
+                      void rename.mutateAsync({ milestoneId: row.id, name: next });
+                    }}
+                  />
+                ) : (
+                  <span data-testid={`project-milestone-${row.id}`}>{row.name}</span>
+                )}
                 {canManage ? (
                   <Button
                     type="button"

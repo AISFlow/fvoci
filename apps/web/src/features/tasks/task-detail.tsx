@@ -124,6 +124,7 @@ export function TaskDetailView({
       </section>
       {currentUserId ? (
         <CommentPanel
+          key={task.id}
           workspaceId={workspaceId}
           kind="task"
           targetId={task.id}
