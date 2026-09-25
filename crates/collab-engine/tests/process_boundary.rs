@@ -20,6 +20,8 @@ fn spawn(limits: Limits) -> EngineSession {
     EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -54,6 +56,8 @@ fn extract_killable_timeout_reaps_product_helper() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: Some(20_000),
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -231,6 +235,8 @@ fn zero_timeout_is_invalid_limits() {
     let report = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -319,6 +325,8 @@ fn limit_plus_one_live_child_is_immediate_resource_limit() {
     let over = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits: Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -366,6 +374,8 @@ fn write_times_out_when_child_stops_reading() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: Some(20_000),
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -405,6 +415,8 @@ fn abrupt_child_exit_is_crash_not_protocol() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: Some(7),
         test_close_stdout_hang_ms: None,
@@ -445,6 +457,8 @@ fn stdout_close_with_live_child_is_protocol() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: Some(20_000),
@@ -532,6 +546,8 @@ fn delivered_frame_survives_child_exit() {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits: Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,

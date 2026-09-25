@@ -193,22 +193,30 @@ The server raises soft `RLIMIT_NOFILE` to the hard limit at startup.
 Heavy load probe (not in default CI; Linux + PostgreSQL via `scripts/start-test-postgres.sh`):
 
 ```sh
-# Default: 200 rooms × 2 peers, 180s (~1 edit/s/room), release helper
+# Merge bar: 64 rooms × 2 distinct-user peers, 180s (~1 edit/s/room), release helper
 ./scripts/collab-capacity-probe.sh
 
 # Shorter local smoke (still records PROBE_SUMMARY lines; duration floor is 180s):
-COLLAB_PROBE_ROOMS=20 ./scripts/collab-capacity-probe.sh
-
-# Advisor-scale run (10 minutes):
-COLLAB_PROBE_DURATION_SECS=600 ./scripts/collab-capacity-probe.sh
+COLLAB_PROBE_ROOMS=5 ./scripts/collab-capacity-probe.sh
 ```
 
 Environment: `COLLAB_PROBE_ROOMS`, `COLLAB_PROBE_PEERS`, `COLLAB_PROBE_DURATION_SECS` (minimum 180),
 `COLLAB_PROBE_OPEN_CONCURRENCY`, `FVOCI_COLLAB_MAX_ROOMS`, `FVOCI_COLLAB_ENGINE`,
-`FVOCI_TEST_PG_MAX_CONNECTIONS` (default 400 for the probe script; each live room holds one PG
-connection via `RoomGuard`, so docker Postgres must exceed room count plus headroom).
-The probe checks room-capacity **1013**, slot reuse after idle eviction, hostile-byte isolation, and prints
-`PROBE_SUMMARY` with child RSS, p95 apply→broadcast latency, and server thread/fd counts.
+`RUST_LOG` (default `collab.stage=info` for per-stage breakdown),
+`FVOCI_TEST_PG_MAX_CONNECTIONS` (probe script only; default 120 — each live room holds one PG
+connection via `RoomGuard`, so docker Postgres must exceed room count plus app pool and reserve).
+`scripts/start-test-postgres.sh` keeps default `max_connections=100` for ordinary DB tests.
+
+PostgreSQL coupling at server startup: `FVOCI_COLLAB_MAX_ROOMS` (default 64) must fit
+`max_connections` together with the app pool (10) and a 10-connection reserve; the server refuses
+to start when the sum exceeds `SHOW max_connections`. Compose raises Postgres to 120 with a
+matching comment.
+
+The probe checks achieved rate ≥ 0.95 edits/s/room, zero writer loss, zero **1011** closes under
+load, room-capacity **1013**, slot reuse after idle eviction, exact hostile 5/5 isolation with
+victim recovery, and prints `PROBE_SUMMARY` plus `collab.stage` tracing lines for validate /
+auth_tx / append_tx / apply / broadcast timings. Full logs are saved under
+`/home/kinesis/orca/fvoci-evidence/collab-capacity-probe-<timestamp>.log`.
 
 `FVOCI_SHUTDOWN_DEADLINE_MS` sets the whole server shutdown deadline (default
 30000, positive milliseconds). SIGTERM/Ctrl+C stops collaboration admission

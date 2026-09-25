@@ -205,7 +205,19 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let public_origin =
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
 
-    let collab = CollabConfig::from_env().map(|cfg| Arc::new(CollabHub::new(cfg, pool.clone())));
+    let collab = match CollabConfig::from_env() {
+        Some(cfg) => {
+            if let Err(message) =
+                fvoci_server::collab::config::assert_collab_fits_postgres(&pool, cfg.max_rooms)
+                    .await
+            {
+                pool.close().await;
+                return Err(message.into());
+            }
+            Some(Arc::new(CollabHub::new(cfg, pool.clone())))
+        }
+        None => None,
+    };
     let extract_job = match ExtractJobSettings::from_env()? {
         Some(settings) => {
             tracing::info!(

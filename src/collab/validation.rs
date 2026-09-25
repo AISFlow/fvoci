@@ -1,12 +1,14 @@
 use std::path::Path;
+use std::time::Duration;
 
 use collab_engine::b64;
 use collab_engine::limits::{Limits, MAX_OUTPUT_BYTES};
 use collab_engine::outcome::{EngineStatus, LimitKind};
-use collab_engine::process::{EngineSession, SpawnRequest};
+use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
 use collab_engine::protocol::Request;
 
 const ADMISSION_TIMEOUT_MS: u64 = 4_000;
+const VALIDATOR_SLOT_WAIT: Duration = Duration::from_millis(ADMISSION_TIMEOUT_MS);
 
 /// Stricter wall clock for pre-commit admission; product recovery limits stay unchanged.
 pub fn admission_limits(limits: Limits) -> Limits {
@@ -20,6 +22,8 @@ pub fn admission_limits(limits: Limits) -> Limits {
 pub enum BundleValidation {
     Ok,
     Rejected,
+    /// Validator child pool saturated after bounded wait; retryable capacity pressure.
+    CapacityPressure,
     EngineUnavailable,
 }
 
@@ -68,16 +72,31 @@ pub(crate) fn classify_admission_snapshot(
     }
 }
 
-fn spawn_validator(engine_bin: &Path, limits: Limits) -> Option<EngineSession> {
-    EngineSession::spawn(SpawnRequest {
+fn spawn_validator(engine_bin: &Path, limits: Limits) -> Result<EngineSession, BundleValidation> {
+    match EngineSession::spawn(SpawnRequest {
         engine_bin: engine_bin.to_path_buf(),
         limits,
+        slot_kind: ChildSlotKind::Validator,
+        slot_wait: Some(VALIDATOR_SLOT_WAIT),
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
         test_exit_after_write: None,
-    })
-    .ok()
+    }) {
+        Ok(session) => Ok(session),
+        Err(report)
+            if matches!(
+                report.outcome,
+                EngineStatus::ResourceLimit {
+                    kind: LimitKind::Ops,
+                    ..
+                }
+            ) =>
+        {
+            Err(BundleValidation::CapacityPressure)
+        }
+        Err(_) => Err(BundleValidation::EngineUnavailable),
+    }
 }
 
 /// Validate the exact durable recovery bundle: committed snapshot + ordered tail + candidate.
@@ -94,8 +113,8 @@ pub fn validate_recovery_bundle_blocking(
     }
     let limits = admission_limits(product_limits);
     let mut session = match spawn_validator(engine_bin, limits) {
-        Some(s) => s,
-        None => return BundleValidation::EngineUnavailable,
+        Ok(s) => s,
+        Err(outcome) => return outcome,
     };
     let mut tail = committed_tail.to_vec();
     tail.push(candidate.to_vec());
@@ -151,8 +170,8 @@ pub fn validate_snapshot_only_blocking(
     }
     let limits = admission_limits(product_limits);
     let mut session = match spawn_validator(engine_bin, limits) {
-        Some(s) => s,
-        None => return false,
+        Ok(s) => s,
+        Err(_) => return false,
     };
     let load = session.call(&Request::Load {
         snapshot_b64: Some(snapshot.to_vec()),

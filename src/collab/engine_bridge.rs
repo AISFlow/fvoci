@@ -162,6 +162,8 @@ fn spawn_session(engine_bin: &Path, limits: Limits) -> Result<EngineSession, Eng
     EngineSession::spawn(SpawnRequest {
         engine_bin: engine_bin.to_path_buf(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,

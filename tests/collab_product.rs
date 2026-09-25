@@ -84,13 +84,13 @@ async fn fixture_password_hash() -> &'static str {
 static HELPER_CHILD_CAPACITY: LazyLock<Mutex<(usize, Arc<Semaphore>)>> =
     LazyLock::new(|| Mutex::new((0, Arc::new(Semaphore::new(1)))));
 
-fn helper_capacity_semaphore(cap: usize) -> Arc<Semaphore> {
-    let cap = cap.max(1);
+fn helper_capacity_semaphore(config: &CollabConfig) -> Arc<Semaphore> {
+    let cap = config.max_rooms.max(1);
     let mut guard = HELPER_CHILD_CAPACITY.lock().expect("helper capacity");
     if guard.0 != cap {
         guard.0 = cap;
         guard.1 = Arc::new(Semaphore::new(cap));
-        collab_engine::process::set_max_child_concurrency(cap);
+        config.apply_runtime_limits();
     }
     guard.1.clone()
 }
@@ -101,9 +101,9 @@ struct HelperChildCapacityHold {
 }
 
 impl HelperChildCapacityHold {
-    async fn reserve(room_slots: usize, cap: usize) -> Self {
-        let semaphore = helper_capacity_semaphore(cap);
-        let room_slots = room_slots.min(cap);
+    async fn reserve(room_slots: usize, config: &CollabConfig) -> Self {
+        let semaphore = helper_capacity_semaphore(config);
+        let room_slots = room_slots.min(config.max_rooms);
         let mut permits = Vec::with_capacity(room_slots);
         for _ in 0..room_slots {
             permits.push(
@@ -123,8 +123,7 @@ async fn new_test_collab_hub(
     pool: PgPool,
     reserved_helpers: usize,
 ) -> (CollabHub, HelperChildCapacityHold) {
-    let capacity =
-        HelperChildCapacityHold::reserve(reserved_helpers, config.max_child_concurrency).await;
+    let capacity = HelperChildCapacityHold::reserve(reserved_helpers, &config).await;
     (CollabHub::new(config, pool), capacity)
 }
 
@@ -588,7 +587,7 @@ async fn collab_app_state(
     let pool = pool::connect_app(app_url).await.expect("app pool");
     let (collab, helper_capacity) = if with_collab {
         let cfg = test_collab_config(4, 30_000);
-        let capacity = HelperChildCapacityHold::reserve(1, cfg.max_child_concurrency).await;
+        let capacity = HelperChildCapacityHold::reserve(1, &cfg).await;
         (
             Some(Arc::new(CollabHub::new(cfg, pool.clone()))),
             Some(capacity),
@@ -685,7 +684,7 @@ async fn start_product_test_server(app_url: &str, with_collab: bool) -> TestServ
 }
 
 async fn start_configured_test_server(app_url: &str, cfg: CollabConfig) -> TestServer {
-    let helper_capacity = HelperChildCapacityHold::reserve(1, cfg.max_child_concurrency).await;
+    let helper_capacity = HelperChildCapacityHold::reserve(1, &cfg).await;
     let state = collab_app_state_with_config(app_url, cfg).await;
     start_test_server(state, Some(helper_capacity)).await
 }
@@ -735,6 +734,8 @@ fn project_snapshot_json(snapshot: &[u8]) -> Value {
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin: engine_bin(),
         limits: collab_engine::Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,

@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -14,29 +14,60 @@ use crate::limits::{
 use crate::outcome::{EngineReport, EngineStatus, LimitKind, WorkerFailureReason};
 use crate::protocol::Request;
 
-static CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
-static MAX_CHILD_CONCURRENCY_RUNTIME: AtomicUsize =
+static PRIMARY_CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
+static VALIDATOR_CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
+static MAX_PRIMARY_CHILD_CONCURRENCY_RUNTIME: AtomicUsize =
+    AtomicUsize::new(DEFAULT_MAX_CHILD_CONCURRENCY);
+static MAX_VALIDATOR_CHILD_CONCURRENCY_RUNTIME: AtomicUsize =
     AtomicUsize::new(DEFAULT_MAX_CHILD_CONCURRENCY);
 static LIVE_CHILD_PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
 
-/// Configure the process-wide live-child cap. Last write wins.
+/// Configure the process-wide primary (per-room) live-child cap. Last write wins.
 pub fn set_max_child_concurrency(limit: usize) {
-    MAX_CHILD_CONCURRENCY_RUNTIME.store(limit.max(1), Ordering::Release);
+    MAX_PRIMARY_CHILD_CONCURRENCY_RUNTIME.store(limit.max(1), Ordering::Release);
 }
 
-fn max_child_concurrency_limit() -> usize {
-    MAX_CHILD_CONCURRENCY_RUNTIME
+fn max_primary_child_concurrency_limit() -> usize {
+    MAX_PRIMARY_CHILD_CONCURRENCY_RUNTIME
         .load(Ordering::Acquire)
         .max(1)
 }
 
-/// Current live-child cap for this process.
+/// Current primary live-child cap for this process.
 pub fn max_child_concurrency() -> usize {
-    max_child_concurrency_limit()
+    max_primary_child_concurrency_limit()
 }
 
-fn slots() -> &'static Mutex<usize> {
-    CHILD_SLOTS.get_or_init(|| Mutex::new(0))
+/// Configure the process-wide validator live-child cap. Last write wins.
+pub fn set_max_validator_child_concurrency(limit: usize) {
+    MAX_VALIDATOR_CHILD_CONCURRENCY_RUNTIME.store(limit.max(1), Ordering::Release);
+}
+
+fn max_validator_child_concurrency_limit() -> usize {
+    MAX_VALIDATOR_CHILD_CONCURRENCY_RUNTIME
+        .load(Ordering::Acquire)
+        .max(1)
+}
+
+/// Current validator live-child cap for this process.
+pub fn max_validator_child_concurrency() -> usize {
+    max_validator_child_concurrency_limit()
+}
+
+fn primary_slots() -> &'static Mutex<usize> {
+    PRIMARY_CHILD_SLOTS.get_or_init(|| Mutex::new(0))
+}
+
+fn validator_slots() -> &'static Mutex<usize> {
+    VALIDATOR_CHILD_SLOTS.get_or_init(|| Mutex::new(0))
+}
+
+fn wait_poll_timeout(deadline: Instant) -> Duration {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Duration::ZERO;
+    }
+    remaining.min(Duration::from_millis(RSS_POLL_MS))
 }
 
 fn live_child_pids() -> &'static Mutex<Vec<u32>> {
@@ -72,30 +103,77 @@ pub fn live_child_pids_for_tests() -> Vec<u32> {
         .unwrap_or_default()
 }
 
-struct SlotGuard;
+/// Which live-child pool a spawn consumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChildSlotKind {
+    #[default]
+    Primary,
+    Validator,
+}
+
+struct SlotGuard {
+    kind: ChildSlotKind,
+}
 
 impl SlotGuard {
-    fn try_acquire() -> Result<Self, EngineReport> {
-        let mut used = slots().lock().map_err(|_| {
+    fn try_acquire(kind: ChildSlotKind) -> Result<Self, EngineReport> {
+        let (mutex, cap, label) = match kind {
+            ChildSlotKind::Primary => (
+                primary_slots(),
+                max_primary_child_concurrency_limit(),
+                "primary collab children",
+            ),
+            ChildSlotKind::Validator => (
+                validator_slots(),
+                max_validator_child_concurrency_limit(),
+                "validator collab children",
+            ),
+        };
+        let mut used = mutex.lock().map_err(|_| {
             worker_fail(WorkerFailureReason::SlotPoison, "child slot mutex poisoned")
         })?;
-        let cap = max_child_concurrency_limit();
         if *used < cap {
             *used += 1;
-            return Ok(Self);
+            return Ok(Self { kind });
         }
         Err(EngineReport::new(EngineStatus::ResourceLimit {
             kind: LimitKind::Ops,
-            detail: format!(
-                "live collab children at cap {cap}; parent room map owns per-document uniqueness"
-            ),
+            detail: format!("live {label} at cap {cap}"),
         }))
+    }
+
+    fn acquire_with_wait(kind: ChildSlotKind, wait: Duration) -> Result<Self, EngineReport> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match Self::try_acquire(kind) {
+                Ok(guard) => return Ok(guard),
+                Err(report) => {
+                    if !matches!(
+                        report.outcome,
+                        EngineStatus::ResourceLimit {
+                            kind: LimitKind::Ops,
+                            ..
+                        }
+                    ) {
+                        return Err(report);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(report);
+                    }
+                    thread::sleep(wait_poll_timeout(deadline));
+                }
+            }
+        }
     }
 }
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
-        if let Ok(mut used) = slots().lock() {
+        let mutex = match self.kind {
+            ChildSlotKind::Primary => primary_slots(),
+            ChildSlotKind::Validator => validator_slots(),
+        };
+        if let Ok(mut used) = mutex.lock() {
             *used = used.saturating_sub(1);
         }
     }
@@ -105,6 +183,9 @@ impl Drop for SlotGuard {
 pub struct SpawnRequest {
     pub engine_bin: PathBuf,
     pub limits: Limits,
+    pub slot_kind: ChildSlotKind,
+    /// When set for [`ChildSlotKind::Validator`], block up to this duration for a slot.
+    pub slot_wait: Option<Duration>,
     pub test_hang_ms: Option<u64>,
     /// `--features test-hang` only: child exits with this code after one request frame.
     pub test_exit_after_read: Option<i32>,
@@ -190,7 +271,15 @@ impl EngineSession {
 
         #[cfg(target_os = "linux")]
         {
-            let slot = SlotGuard::try_acquire()?;
+            let slot = match (req.slot_kind, req.slot_wait) {
+                (ChildSlotKind::Primary, _) => SlotGuard::try_acquire(ChildSlotKind::Primary)?,
+                (ChildSlotKind::Validator, Some(wait)) => {
+                    SlotGuard::acquire_with_wait(ChildSlotKind::Validator, wait)?
+                }
+                (ChildSlotKind::Validator, None) => {
+                    SlotGuard::try_acquire(ChildSlotKind::Validator)?
+                }
+            };
             spawn_child(req, slot)
         }
     }
@@ -289,7 +378,21 @@ impl EngineSession {
             let _ = tx.send((result, stdin));
         });
         loop {
-            match rx.try_recv() {
+            if Instant::now() >= deadline {
+                let _ = live.child.kill();
+                let _ = live.child.wait();
+                let _ = writer.join();
+                #[cfg(feature = "test-hang")]
+                add_helpers_joined(1);
+                return Err(EngineReport::new(EngineStatus::ResourceLimit {
+                    kind: LimitKind::Time,
+                    detail: format!(
+                        "child pid {pid} exceeded wall timeout during send; killed and reaped"
+                    ),
+                })
+                .with_child_pid(pid));
+            }
+            match rx.recv_timeout(wait_poll_timeout(deadline)) {
                 Ok((result, stdin)) => {
                     live.stdin = Some(stdin);
                     let _ = writer.join();
@@ -305,21 +408,7 @@ impl EngineSession {
                         )),
                     };
                 }
-                Err(mpsc::TryRecvError::Empty) => {
-                    if Instant::now() >= deadline {
-                        let _ = live.child.kill();
-                        let _ = live.child.wait();
-                        let _ = writer.join();
-                        #[cfg(feature = "test-hang")]
-                        add_helpers_joined(1);
-                        return Err(EngineReport::new(EngineStatus::ResourceLimit {
-                            kind: LimitKind::Time,
-                            detail: format!(
-                                "child pid {pid} exceeded wall timeout during send; killed and reaped"
-                            ),
-                        })
-                        .with_child_pid(pid));
-                    }
+                Err(RecvTimeoutError::Timeout) => {
                     if let Some(rss) = child_rss_bytes(pid) {
                         if rss > rss_cap {
                             let _ = live.child.kill();
@@ -346,7 +435,7 @@ impl EngineSession {
                             add_helpers_joined(1);
                             return Err(classify_child_exit(status, pid, &stderr));
                         }
-                        Ok(None) => thread::sleep(Duration::from_millis(RSS_POLL_MS)),
+                        Ok(None) => {}
                         Err(err) => {
                             let _ = live.child.kill();
                             let _ = live.child.wait();
@@ -361,7 +450,7 @@ impl EngineSession {
                         }
                     }
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
+                Err(RecvTimeoutError::Disconnected) => {
                     let _ = writer.join();
                     #[cfg(feature = "test-hang")]
                     add_helpers_joined(1);
@@ -394,7 +483,19 @@ impl EngineSession {
         });
 
         let outcome = loop {
-            match rx.try_recv() {
+            if Instant::now() >= deadline {
+                let _ = live.child.kill();
+                let _ = live.child.wait();
+                let _ = reader.join();
+                #[cfg(feature = "test-hang")]
+                add_helpers_joined(1);
+                break Err(EngineReport::new(EngineStatus::ResourceLimit {
+                    kind: LimitKind::Time,
+                    detail: format!("child pid {pid} exceeded wall timeout; killed and reaped"),
+                })
+                .with_child_pid(pid));
+            }
+            match rx.recv_timeout(wait_poll_timeout(deadline)) {
                 Ok((result, stdout)) => {
                     live.stdout = Some(stdout);
                     let _ = reader.join();
@@ -420,7 +521,7 @@ impl EngineSession {
                         }
                     };
                 }
-                Err(mpsc::TryRecvError::Empty) => match live.child.try_wait() {
+                Err(RecvTimeoutError::Timeout) => match live.child.try_wait() {
                     Ok(Some(status)) => {
                         let _ = reader.join();
                         #[cfg(feature = "test-hang")]
@@ -428,20 +529,6 @@ impl EngineSession {
                         break delivered_frame_or_exit(live, &rx, status, pid);
                     }
                     Ok(None) => {
-                        if Instant::now() >= deadline {
-                            let _ = live.child.kill();
-                            let _ = live.child.wait();
-                            let _ = reader.join();
-                            #[cfg(feature = "test-hang")]
-                            add_helpers_joined(1);
-                            break Err(EngineReport::new(EngineStatus::ResourceLimit {
-                                kind: LimitKind::Time,
-                                detail: format!(
-                                    "child pid {pid} exceeded wall timeout; killed and reaped"
-                                ),
-                            })
-                            .with_child_pid(pid));
-                        }
                         if let Some(rss) = child_rss_bytes(pid) {
                             if rss > rss_cap {
                                 let _ = live.child.kill();
@@ -450,15 +537,14 @@ impl EngineSession {
                                 #[cfg(feature = "test-hang")]
                                 add_helpers_joined(1);
                                 break Err(EngineReport::new(EngineStatus::ResourceLimit {
-                                        kind: LimitKind::Memory,
-                                        detail: format!(
-                                            "child pid {pid} VmRSS {rss} exceeded observed cap {rss_cap}"
-                                        ),
-                                    })
-                                    .with_child_pid(pid));
+                                    kind: LimitKind::Memory,
+                                    detail: format!(
+                                        "child pid {pid} VmRSS {rss} exceeded observed cap {rss_cap}"
+                                    ),
+                                })
+                                .with_child_pid(pid));
                             }
                         }
-                        thread::sleep(Duration::from_millis(RSS_POLL_MS));
                     }
                     Err(err) => {
                         let _ = live.child.kill();
@@ -473,7 +559,7 @@ impl EngineSession {
                         .with_child_pid(pid));
                     }
                 },
-                Err(mpsc::TryRecvError::Disconnected) => {
+                Err(RecvTimeoutError::Disconnected) => {
                     let _ = reader.join();
                     #[cfg(feature = "test-hang")]
                     add_helpers_joined(1);
@@ -755,7 +841,7 @@ fn classify_pipe_close(
                     return worker_fail(WorkerFailureReason::Protocol, protocol_detail)
                         .with_child_pid(pid);
                 }
-                thread::sleep(Duration::from_millis(RSS_POLL_MS));
+                thread::sleep(wait_poll_timeout(deadline));
             }
             Err(err) => {
                 let _ = live.child.kill();

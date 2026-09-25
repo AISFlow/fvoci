@@ -1903,6 +1903,7 @@ impl RoomActor {
                     return;
                 }
 
+                let validate_started = std::time::Instant::now();
                 let validation = validate_recovery_bundle(
                     self.engine.engine_bin().to_path_buf(),
                     self.engine.limits(),
@@ -1911,6 +1912,16 @@ impl RoomActor {
                     payload.clone(),
                 )
                 .await;
+                tracing::info!(
+                    target: "collab.stage",
+                    stage = "validate",
+                    elapsed_us = validate_started.elapsed().as_micros() as u64,
+                    document_id = %self.document_id,
+                );
+                if validation == BundleValidation::CapacityPressure {
+                    self.reject_candidate_capacity_pressure(conn_id).await;
+                    return;
+                }
                 if validation == BundleValidation::EngineUnavailable {
                     self.reject_candidate_engine_unavailable(conn_id).await;
                     return;
@@ -1933,6 +1944,7 @@ impl RoomActor {
                     .get(&conn_id)
                     .map(|c| (c.session.session_id, c.session.user_id))
                     .unwrap_or_default();
+                let auth_started = std::time::Instant::now();
                 match self
                     .locking_session_auth_by_ids(actor_user_id, session_id, read_only)
                     .await
@@ -1947,6 +1959,12 @@ impl RoomActor {
                         return;
                     }
                 }
+                tracing::info!(
+                    target: "collab.stage",
+                    stage = "auth_tx",
+                    elapsed_us = auth_started.elapsed().as_micros() as u64,
+                    document_id = %self.document_id,
+                );
 
                 #[cfg(feature = "db-tests")]
                 pause_for_append_in_tx_reject_barrier(self.document_id).await;
@@ -1954,6 +1972,7 @@ impl RoomActor {
                 let op_id = Uuid::now_v7();
                 let expected_tail = self.committed.tail_seq;
                 let digest = payload_digest(&payload);
+                let append_started = std::time::Instant::now();
                 let append = append_collab_update(
                     &self.pool,
                     AppendCollabInput {
@@ -1969,6 +1988,12 @@ impl RoomActor {
                     },
                 )
                 .await;
+                tracing::info!(
+                    target: "collab.stage",
+                    stage = "append_tx",
+                    elapsed_us = append_started.elapsed().as_micros() as u64,
+                    document_id = %self.document_id,
+                );
 
                 let committed = match append {
                     Ok(Ok(result)) => result,
@@ -2021,7 +2046,14 @@ impl RoomActor {
                 self.fifo_seq += 1;
                 let op_prefix = self.fifo_seq;
 
+                let apply_started = std::time::Instant::now();
                 let primary_ok = self.integrate_committed_update(&payload).await.is_ok();
+                tracing::info!(
+                    target: "collab.stage",
+                    stage = "apply",
+                    elapsed_us = apply_started.elapsed().as_micros() as u64,
+                    document_id = %self.document_id,
+                );
                 if !primary_ok {
                     self.send_sync_status(conn_id, routing_key, true).await;
                     if let Some(c) = self.connections.get_mut(&conn_id) {
@@ -2031,7 +2063,14 @@ impl RoomActor {
                         .await;
                     return;
                 }
+                let broadcast_started = std::time::Instant::now();
                 self.broadcast_update(&sync.y_protocol).await;
+                tracing::info!(
+                    target: "collab.stage",
+                    stage = "broadcast",
+                    elapsed_us = broadcast_started.elapsed().as_micros() as u64,
+                    document_id = %self.document_id,
+                );
                 #[cfg(feature = "db-tests")]
                 pause_for_append_projection_barrier(self.document_id).await;
                 if let Some(c) = self.connections.get_mut(&conn_id) {
@@ -2070,6 +2109,17 @@ impl RoomActor {
                 .await,
             LockingAuth::Allow
         )
+    }
+
+    async fn reject_candidate_capacity_pressure(&mut self, conn_id: Uuid) {
+        if self.primary_dirty {
+            let _ = self.reload_primary_from_committed().await;
+        }
+        if let Some(c) = self.connections.get_mut(&conn_id) {
+            c.in_flight = false;
+        }
+        self.close_connection(conn_id, 1013, "try again later")
+            .await;
     }
 
     async fn reject_candidate_engine_unavailable(&mut self, conn_id: Uuid) {
