@@ -146,6 +146,11 @@ path = "tests/search_meili.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "search_index"
+path = "tests/search_index.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "outbox_integration"
 path = "tests/outbox_integration.rs"
 required-features = ["db-tests"]

@@ -226,10 +226,14 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             None
         }
     };
+    let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
+    if let Some(meili) = config.meili.clone() {
+        consumers.push(fvoci_server::search::index::search_index_consumer(meili));
+    }
     let outbox_dispatcher = spawn_outbox_dispatcher(
         OutboxDispatcherSettings::from_env(),
         pool.clone(),
-        Vec::new(),
+        consumers,
     );
     if outbox_dispatcher.is_some() {
         tracing::info!("outbox dispatcher started");

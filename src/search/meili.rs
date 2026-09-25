@@ -597,6 +597,16 @@ async fn delete_meili_by_filter_op(config: &MeiliConfig, filter: &str) -> Result
     .await
 }
 
+async fn delete_all_meili_documents_op(config: &MeiliConfig) -> Result<(), MeiliError> {
+    enqueue_and_wait(
+        config,
+        reqwest::Method::DELETE,
+        &config.index_path("/documents"),
+        None,
+    )
+    .await
+}
+
 fn string_or_null(value: &Value) -> Option<String> {
     value.as_str().map(str::to_string)
 }
@@ -1027,6 +1037,10 @@ pub async fn delete_meili_sources(config: &MeiliConfig, ids: &[String]) -> Resul
 
 pub async fn delete_meili_by_filter(config: &MeiliConfig, filter: &str) -> Result<(), MeiliError> {
     with_op_deadline(delete_meili_by_filter_op(config, filter)).await
+}
+
+pub async fn delete_all_meili_documents(config: &MeiliConfig) -> Result<(), MeiliError> {
+    with_op_deadline(delete_all_meili_documents_op(config)).await
 }
 
 pub async fn upsert_meili_sources(

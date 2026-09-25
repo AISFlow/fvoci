@@ -3,6 +3,8 @@ use uuid::Uuid;
 
 pub const MEMBERSHIP_LOCK_NAMESPACE: i32 = 1_907_006;
 pub const TREE_LOCK_NAMESPACE: i32 = 1_907_005;
+pub const SEARCH_INDEX_LOCK_NAMESPACE: i32 = 1_907_007;
+pub const SEARCH_REBUILD_LOCK_KEY: i64 = 1_907_008;
 
 pub async fn set_tenant(
     tx: &mut Transaction<'_, Postgres>,
