@@ -14,5 +14,7 @@ pub mod projects;
 pub mod revisions;
 pub mod search;
 pub mod setup;
+pub mod share;
+pub mod stars;
 pub mod tasks;
 pub mod workspaces;

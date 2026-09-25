@@ -6,6 +6,7 @@ import { TaskDetailForm } from "./task-detail-form";
 import type { TaskDetail, TaskListItem, LabelItem, MilestoneItem } from "./queries";
 import type { MemberOutput } from "@/lib/contracts";
 import { TaskActivityPanel } from "@/features/comments/task-activity-panel";
+import { StarToggle } from "@/features/share/star-toggle";
 import "@/features/projects/projects.css";
 
 export function TaskDetailView({
@@ -87,6 +88,9 @@ export function TaskDetailView({
         <span>{task.title}</span>
       </nav>
       <h1 className="task-detail__title">{task.title}</h1>
+      <div>
+        <StarToggle workspaceId={workspaceId} type="task" targetId={task.id} />
+      </div>
       <TaskDetailForm
         key={`${task.id}:${formEpoch ?? 0}`}
         slug={slug}

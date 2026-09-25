@@ -74,7 +74,7 @@ fn item_output(row: NotificationRow) -> NotificationItemOutput {
     }
 }
 
-fn allowed_content_kinds(auth: &RequestAuth) -> Option<Vec<ContentKind>> {
+pub(crate) fn allowed_content_kinds(auth: &RequestAuth) -> Option<Vec<ContentKind>> {
     let scopes = auth.token_scopes.as_deref()?;
     let mut kinds = Vec::new();
     if grants_api_token_scope(scopes, ApiTokenScope::DocumentsRead) {

@@ -86,6 +86,17 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.ics_tokens TO :"app_role";
 GRANT SELECT, INSERT ON fvoci.task_activity TO :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.task_activity FROM :"app_role";
 
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.stars TO :"app_role";
+-- share_links.token_hash is write-only for the app role: lookups go through
+-- fvoci.app_share_link_by_token_hash, and rows are never updated in place.
+GRANT INSERT, DELETE ON fvoci.share_links TO :"app_role";
+REVOKE SELECT, UPDATE ON fvoci.share_links FROM :"app_role";
+GRANT SELECT (
+    id, workspace_id, user_id, document_id, project_id, expires_at, created_at, updated_at
+) ON fvoci.share_links TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_share_link_by_token_hash(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_share_link_by_token_hash(text) TO :"app_role";
+
 REVOKE ALL ON fvoci.magic_tokens FROM :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) TO :"app_role";
