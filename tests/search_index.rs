@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use fvoci_server::db::attachment_extract::{finish_extract, ExtractClaim, FinishExtract};
 use fvoci_server::db::outbox::{fetch_cursor, fetch_failure_state, OutboxEvent};
+use fvoci_server::db::outbox::{is_processed, mark_processed};
 use fvoci_server::db::{migrate, pool};
 use fvoci_server::outbox::spawn_outbox_dispatcher;
 use fvoci_server::outbox::OutboxDispatcherSettings;
@@ -16,8 +17,9 @@ use fvoci_server::search::index::{
     SEARCH_INDEX_CONSUMER,
 };
 use fvoci_server::search::meili::{
-    delete_all_meili_documents, ensure_meili_index, search_meili, search_source_id, MeiliConfig,
-    MeiliSearchInput, MeiliSearchScope, SearchSourceKind,
+    begin_meili_write_batch, delete_all_meili_documents, ensure_meili_index,
+    finish_meili_write_batch, search_meili, search_source_id, MeiliConfig, MeiliSearchInput,
+    MeiliSearchScope, SearchSourceKind,
 };
 use rand::RngCore;
 use serde_json::{json, Value};
@@ -141,6 +143,7 @@ fn path_label(id: Uuid) -> String {
 }
 
 struct Fixture {
+    owner_id: Uuid,
     workspace_id: Uuid,
     wiki_id: Uuid,
     project_id: Uuid,
@@ -291,6 +294,7 @@ async fn seed(admin: &PgPool, token: &str) -> Fixture {
     .await
     .expect("attachment");
     Fixture {
+        owner_id: user_id,
         workspace_id,
         wiki_id,
         project_id,
@@ -1146,6 +1150,209 @@ async fn collab_body_refresh_skips_comments_and_chunks_until_title_or_trash() {
     assert!(
         !ids.contains(&comment_meili_id),
         "trashed parent left comment indexed: {ids:?}"
+    );
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn burst_of_events_converges_with_one_meili_wait() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxburst").await;
+
+    let n = 8usize;
+    let mut events = Vec::new();
+    for i in 0..n {
+        let doc_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.documents (
+                id, workspace_id, title, path, parent_id, sort_key, project_id, number,
+                status, schema_version, text, chosung, created_by, content_json, kind
+            ) VALUES (
+                $1, $2, $3, $4, NULL, 'V', NULL, $5, 'published', 1, $3, '', $6,
+                '{"type":"doc","content":[]}'::jsonb, 'wiki'
+            )
+            "#,
+        )
+        .bind(doc_id)
+        .bind(fixture.workspace_id)
+        .bind(format!("burst-{i}"))
+        .bind(path_label(doc_id))
+        .bind((i + 2) as i32)
+        .bind(fixture.owner_id)
+        .execute(&admin)
+        .await
+        .expect("doc");
+        events.push(
+            insert_event(
+                &admin,
+                fixture.workspace_id,
+                "document.created",
+                "document",
+                doc_id,
+            )
+            .await,
+        );
+    }
+
+    let started = std::time::Instant::now();
+    begin_meili_write_batch().await;
+    for event in &events {
+        process_search_index_event(&app, &meili, event)
+            .await
+            .expect("index");
+    }
+    finish_meili_write_batch(&meili).await.expect("flush");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "burst took {:?}; expected one Meili wait chain",
+        elapsed
+    );
+
+    for event in &events {
+        mark_processed(&app, SEARCH_INDEX_CONSUMER, event.id)
+            .await
+            .expect("mark");
+    }
+    let hits = search_hits(&meili, fixture.workspace_id, fixture.project_id, "burst-").await;
+    assert_eq!(hits.len(), n);
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn failed_meili_flush_never_marks_events_processed() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let good = test_meili();
+    ensure_meili_index(&good).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxfail").await;
+    let event = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.created",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+
+    let bad = MeiliConfig::new(
+        "http://127.0.0.1:57998".into(),
+        "test-key-at-least-16".into(),
+        good.index_uid.clone(),
+    );
+    begin_meili_write_batch().await;
+    let err = process_search_index_event(&app, &bad, &event).await;
+    assert!(err.is_err(), "unreachable meili should fail enqueue");
+    let _ = finish_meili_write_batch(&bad).await;
+
+    assert!(
+        !is_processed(&app, SEARCH_INDEX_CONSUMER, event.id)
+            .await
+            .expect("processed check"),
+        "failed delivery must not mark processed"
+    );
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn throughput_probe() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    let t0 = std::time::Instant::now();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let ensure_ms = t0.elapsed().as_millis();
+    let fixture = seed(&admin, "qvoxprobe").await;
+    let event = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.created",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+
+    let t1 = std::time::Instant::now();
+    process_search_index_event(&app, &meili, &event)
+        .await
+        .expect("single");
+    let single_ms = t1.elapsed().as_millis();
+
+    let mut batch_events = Vec::new();
+    for i in 0..5 {
+        let doc_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.documents (
+                id, workspace_id, title, path, parent_id, sort_key, project_id, number,
+                status, schema_version, text, chosung, created_by, content_json, kind
+            ) VALUES (
+                $1, $2, $3, $4, NULL, 'V', NULL, $5, 'published', 1, $3, '', $6,
+                '{"type":"doc","content":[]}'::jsonb, 'wiki'
+            )
+            "#,
+        )
+        .bind(doc_id)
+        .bind(fixture.workspace_id)
+        .bind(format!("probe-{i}"))
+        .bind(path_label(doc_id))
+        .bind(i + 10)
+        .bind(fixture.owner_id)
+        .execute(&admin)
+        .await
+        .expect("doc");
+        batch_events.push(
+            insert_event(
+                &admin,
+                fixture.workspace_id,
+                "document.created",
+                "document",
+                doc_id,
+            )
+            .await,
+        );
+    }
+    let t2 = std::time::Instant::now();
+    begin_meili_write_batch().await;
+    for event in &batch_events {
+        process_search_index_event(&app, &meili, event)
+            .await
+            .expect("batch index");
+    }
+    finish_meili_write_batch(&meili).await.expect("flush");
+    let batch_ms = t2.elapsed().as_millis();
+
+    println!(
+        "THROUGHPUT_PROBE ensure_ms={} single_event_ms={} batch5_ms={}",
+        ensure_ms, single_ms, batch_ms
     );
 
     app.close().await;

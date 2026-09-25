@@ -52,6 +52,14 @@ impl OutboxConsumer for SearchIndexConsumer {
         DeliveryMode::External
     }
 
+    fn external_batch_meili_writes(&self) -> bool {
+        true
+    }
+
+    fn meili_batch_flush_config(&self) -> Option<MeiliConfig> {
+        Some(self.meili.clone())
+    }
+
     fn deliver<'a>(
         &'a self,
         pool: &'a PgPool,

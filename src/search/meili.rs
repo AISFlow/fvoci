@@ -27,7 +27,8 @@ pub const MEILI_MAX_TOTAL_HITS: u32 = 1000;
 pub const MEILI_OP_TIMEOUT_MS: u64 = 30_000;
 const MEILI_MAX_RESPONSE_BYTES: usize = 1_048_576;
 const MEILI_UPSERT_MAX_BYTES: usize = 8 * 1024 * 1024;
-const TASK_POLL_MS: u64 = 25;
+const TASK_POLL_MIN_MS: u64 = 5;
+const TASK_POLL_MAX_MS: u64 = 100;
 pub const ATTACHMENT_EMBEDDER: &str = "attachments";
 /// Source `@fvoci/contracts` `EMBEDDING_DIMENSIONS`. Required by index settings.
 pub const EMBEDDING_DIMENSIONS: u32 = 1536;
@@ -46,6 +47,46 @@ static SOURCE_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static ENSURE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Deferred Meili task waits: CE runs one global queue, so waiting only on the
+/// last enqueued task in a batch preserves ordering while avoiding N× latency.
+#[derive(Debug, Default)]
+struct MeiliWriteBatch {
+    pending: Vec<u64>,
+}
+
+impl MeiliWriteBatch {
+    fn record(&mut self, task_uid: u64) {
+        self.pending.push(task_uid);
+    }
+
+    async fn flush(&mut self, config: &MeiliConfig) -> Result<(), MeiliError> {
+        if let Some(&last) = self.pending.last() {
+            wait_meili_task(config, last).await?;
+        }
+        self.pending.clear();
+        Ok(())
+    }
+}
+
+static MEILI_WRITE_BATCH: LazyLock<tokio::sync::Mutex<Option<MeiliWriteBatch>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(None));
+
+pub async fn begin_meili_write_batch() {
+    *MEILI_WRITE_BATCH.lock().await = Some(MeiliWriteBatch::default());
+}
+
+pub async fn finish_meili_write_batch(config: &MeiliConfig) -> Result<(), MeiliError> {
+    let batch = MEILI_WRITE_BATCH.lock().await.take();
+    if let Some(mut batch) = batch {
+        batch.flush(config).await?;
+    }
+    Ok(())
+}
+
+async fn meili_write_batch_active() -> bool {
+    MEILI_WRITE_BATCH.lock().await.is_some()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeiliError {
@@ -443,6 +484,7 @@ async fn wait_meili_task_inner(
     tolerate_index_exists: bool,
 ) -> Result<(), MeiliError> {
     let deadline = Instant::now() + Duration::from_millis(MEILI_OP_TIMEOUT_MS);
+    let mut poll_ms = TASK_POLL_MIN_MS;
     loop {
         if Instant::now() >= deadline {
             return Err(MeiliError::Timeout);
@@ -473,8 +515,25 @@ async fn wait_meili_task_inner(
                 tracing::warn!(task_uid, code, "meili task {status}");
                 return Err(MeiliError::TaskFailed);
             }
-            _ => tokio::time::sleep(Duration::from_millis(TASK_POLL_MS)).await,
+            _ => {
+                tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+                poll_ms = (poll_ms * 2).min(TASK_POLL_MAX_MS);
+            }
         }
+    }
+}
+
+async fn record_meili_task(config: &MeiliConfig, task_uid: u64) -> Result<(), MeiliError> {
+    if meili_write_batch_active().await {
+        MEILI_WRITE_BATCH
+            .lock()
+            .await
+            .as_mut()
+            .expect("meili write batch")
+            .record(task_uid);
+        Ok(())
+    } else {
+        wait_meili_task(config, task_uid).await
     }
 }
 
@@ -488,7 +547,7 @@ async fn enqueue_and_wait(
     if got.status != 200 && got.status != 201 && got.status != 202 {
         return Err(MeiliError::Http(got.status));
     }
-    wait_meili_task(config, task_uid_of(&got.json)?).await
+    record_meili_task(config, task_uid_of(&got.json)?).await
 }
 
 async fn create_index_if_missing(config: &MeiliConfig) -> Result<(), MeiliError> {
