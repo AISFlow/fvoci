@@ -85,10 +85,9 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
 
   await logout(page);
   await login(page, member.email, member.password);
-  await page.goto(`/w/${owner.workspaceSlug}/wiki`);
   // Both notifications (assignment, group mention) are delivered by the
-  // outbox relay; wait until both exist before loading the inbox, which does
-  // not refetch on its own.
+  // outbox relay; wait until both exist before loading any page: the badge and
+  // inbox query once on load and the badge refetches only every 30 s.
   await expect
     .poll(
       async () => {
@@ -102,6 +101,7 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
       { timeout: 15_000 },
     )
     .toBe(true);
+  await page.goto(`/w/${owner.workspaceSlug}/wiki`);
   await expect(
     page.getByRole("button", { name: /안 읽은 알림 \d+건/ }),
   ).toBeVisible({ timeout: 15_000 });
