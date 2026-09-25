@@ -8,6 +8,8 @@ pub mod context;
 pub mod documents;
 pub mod group_grants;
 pub mod groups;
+pub mod holidays;
+pub mod ics;
 pub mod identity;
 pub mod invitations;
 pub mod labels;

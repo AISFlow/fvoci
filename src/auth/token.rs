@@ -14,6 +14,17 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(digest)
 }
 
+pub fn token_hashes_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.as_bytes().iter().zip(right.as_bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 pub fn new_token() -> SessionToken {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -41,5 +52,12 @@ mod tests {
         assert_eq!(first.token.len(), 43);
         assert_ne!(first.token, second.token);
         assert_eq!(first.hash.len(), 64);
+    }
+
+    #[test]
+    fn token_hashes_eq_is_length_checked() {
+        assert!(token_hashes_eq("aa", "aa"));
+        assert!(!token_hashes_eq("aa", "ab"));
+        assert!(!token_hashes_eq("aa", "aaa"));
     }
 }
