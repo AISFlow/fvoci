@@ -38,20 +38,7 @@ export function taskQuery(workspaceId: string, taskId: string) {
           params: { path: { workspace_id: workspaceId, task_id: taskId } },
         }),
       ),
-    retry: false,
-  });
-}
-
-export function projectLabelsQuery(workspaceId: string, projectId: string) {
-  return queryOptions({
-    queryKey: ["labels", workspaceId, projectId] as const,
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels", {
-          params: { path: { workspace_id: workspaceId, project_id: projectId } },
-        }),
-      ),
-    enabled: Boolean(workspaceId) && Boolean(projectId),
+    enabled: Boolean(workspaceId) && Boolean(taskId),
     retry: false,
   });
 }
