@@ -1045,7 +1045,9 @@ async fn auth_and_join(
                 return;
             }
             Ok(Some(Ok(Message::Ping(_)))) | Ok(Some(Ok(Message::Pong(_)))) => {}
-            Ok(Some(Ok(Message::Close(_)))) => panic!("websocket closed before auth"),
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                panic!("websocket closed before auth: {frame:?}")
+            }
             Ok(Some(Ok(_))) => {}
         }
     }
