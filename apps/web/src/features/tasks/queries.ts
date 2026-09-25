@@ -9,6 +9,9 @@ export type CreateTaskBody = components["schemas"]["CreateTaskBody"];
 export type TaskListResponse = components["schemas"]["TaskListResponse"];
 export type LabelItem = components["schemas"]["LabelOutput"];
 export type LabelListResponse = components["schemas"]["LabelListResponse"];
+export type MilestoneItem = components["schemas"]["MilestoneOutput"];
+export type MilestoneListResponse = components["schemas"]["MilestoneListResponse"];
+export type TaskDependency = components["schemas"]["TaskDependencyOutput"];
 
 export function taskListQuery(workspaceId: string, projectId: string) {
   return infiniteQueryOptions({
@@ -49,6 +52,20 @@ export function projectLabelsQuery(workspaceId: string, projectId: string) {
     queryFn: async () =>
       ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels", {
+          params: { path: { workspace_id: workspaceId, project_id: projectId } },
+        }),
+      ),
+    enabled: Boolean(workspaceId) && Boolean(projectId),
+    retry: false,
+  });
+}
+
+export function projectMilestonesQuery(workspaceId: string, projectId: string) {
+  return queryOptions({
+    queryKey: ["milestones", workspaceId, projectId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones", {
           params: { path: { workspace_id: workspaceId, project_id: projectId } },
         }),
       ),

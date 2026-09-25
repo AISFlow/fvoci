@@ -36,6 +36,11 @@ pub enum ProjectDbError {
     WorkflowHasNoStatuses,
     AssigneeIsNotAMember,
     LabelNotFound,
+    MilestoneNotFound,
+    DependencyNotFound,
+    DependencyCycle,
+    DependencyContradiction,
+    TaskCannotBlockItself,
     InvalidInput,
 }
 

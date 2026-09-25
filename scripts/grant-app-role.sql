@@ -73,6 +73,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.tasks TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.labels TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_assignees TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_labels TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.milestones TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_dependencies TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.invitations TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.revisions TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.comments TO :"app_role";

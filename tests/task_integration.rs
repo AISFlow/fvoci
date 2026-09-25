@@ -556,7 +556,7 @@ async fn task_create_rejects_explicit_null_optional_fields() {
 }
 
 #[tokio::test]
-async fn task_create_rejects_unsupported_milestone_and_recurrence_blob() {
+async fn task_create_rejects_unknown_milestone_and_recurrence_blob() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
@@ -573,8 +573,8 @@ async fn task_create_rejects_unsupported_milestone_and_recurrence_blob() {
         Some(&cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(problem["code"], "invalid_input");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(problem["code"], "not_found");
 
     let (status, problem) = json_request(
         app,
@@ -1714,8 +1714,8 @@ async fn task_patch_rejects_empty_body_and_unsupported_relation_fields() {
         &cookie,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(problem["code"], "invalid_input");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(problem["code"], "not_found");
 
     admin.close().await;
     harness.cleanup().await;

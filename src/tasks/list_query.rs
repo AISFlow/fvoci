@@ -8,7 +8,7 @@ const TITLE_MAX: usize = 1_000;
 const CURSOR_MAX: usize = 1_024;
 const TASK_TYPES: &[&str] = &["task", "bug", "story", "epic", "subtask"];
 const PRIORITIES: &[&str] = &["none", "low", "medium", "high", "urgent"];
-const UNSUPPORTED_FILTER_KEYS: &[&str] = &["milestoneId", "custom", "dueBefore"];
+const UNSUPPORTED_FILTER_KEYS: &[&str] = &["custom", "dueBefore"];
 
 #[derive(Debug, Clone)]
 pub struct ParsedTaskListQuery {
@@ -36,6 +36,7 @@ pub struct ViewFilters {
     pub title: Option<String>,
     pub assignee_id: Option<AssigneeFilter>,
     pub label_id: Option<Uuid>,
+    pub milestone_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +182,7 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
             "title",
             "assigneeId",
             "labelId",
+            "milestoneId",
         ],
     )?;
     for key in UNSUPPORTED_FILTER_KEYS {
@@ -217,6 +219,10 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
         None => None,
         Some(value) => Some(parse_uuid(value, "labelId")?),
     };
+    let milestone_id = match object.get("milestoneId") {
+        None => None,
+        Some(value) => Some(parse_uuid(value, "milestoneId")?),
+    };
 
     Ok(ViewFilters {
         task_type,
@@ -226,6 +232,7 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
         title,
         assignee_id,
         label_id,
+        milestone_id,
     })
 }
 
@@ -353,6 +360,7 @@ pub fn filter_fingerprint(
                 "title": query.view.filters.title,
                 "assigneeId": assignee_id,
                 "labelId": query.view.filters.label_id.map(|id| id.to_string()),
+                "milestoneId": query.view.filters.milestone_id.map(|id| id.to_string()),
             },
             "sort": query.view.sort.iter().map(|sort| {
                 serde_json::json!({
@@ -548,7 +556,7 @@ mod tests {
     #[test]
     fn rejects_unknown_filter_keys() {
         let err = parse_task_list_query(
-            Some(r#"{"filters":{"milestoneId":"00000000-0000-0000-0000-000000000000"}}"#),
+            Some(r#"{"filters":{"dueBefore":"2026-01-01"}}"#),
             None,
             None,
             None,
@@ -594,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_includes_assignee_and_label() {
+    fn fingerprint_includes_assignee_label_and_milestone() {
         let workspace = Uuid::nil();
         let project = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let base = parse_task_list_query(Some("{}"), None, None, None, None, None).unwrap();
@@ -610,6 +618,19 @@ mod tests {
         assert_ne!(
             filter_fingerprint(workspace, project, &base),
             filter_fingerprint(workspace, project, &filtered)
+        );
+        let with_milestone = parse_task_list_query(
+            Some(r#"{"filters":{"milestoneId":"550e8400-e29b-41d4-a716-446655440000"}}"#),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            filter_fingerprint(workspace, project, &base),
+            filter_fingerprint(workspace, project, &with_milestone)
         );
     }
 
