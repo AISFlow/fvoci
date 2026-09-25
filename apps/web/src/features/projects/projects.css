@@ -145,6 +145,59 @@ dialog.project-dialog::backdrop {
   color: var(--muted-foreground);
 }
 
+.task-parent-select {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.task-parent-select__trigger {
+  width: 100%;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-parent-select__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  background: var(--background);
+}
+
+.task-parent-select__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 16rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.task-parent-select__option {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.45rem 0.6rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-parent-select__option:hover,
+.task-parent-select__option[aria-selected="true"] {
+  background: var(--accent, #eee);
+}
+
 .project-form select,
 .task-form select,
 .project-form textarea {

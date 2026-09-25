@@ -466,7 +466,8 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
       {me.data ? (
         <CommentPanel
           workspaceId={workspaceId}
-          documentId={documentId}
+          kind="document"
+          targetId={documentId}
           currentUserId={me.data.userId}
           readOnly={readOnly}
         />
