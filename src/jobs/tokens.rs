@@ -56,6 +56,13 @@ pub async fn run_magic_token_gc(
         .bind(TOKEN_GC_BATCH as i32)
         .fetch_one(&mut *tx)
         .await?;
+    // Expired MFA challenges and OIDC flow state (source Redis TTL).
+    let ephemeral: i32 =
+        sqlx::query_scalar("SELECT fvoci.app_auth_ephemeral_purge_expired($1, $2)")
+            .bind(now)
+            .bind(TOKEN_GC_BATCH as i32)
+            .fetch_one(&mut *tx)
+            .await?;
     tx.commit().await?;
-    Ok(deleted.max(0) as u32)
+    Ok(deleted.max(0) as u32 + ephemeral.max(0) as u32)
 }

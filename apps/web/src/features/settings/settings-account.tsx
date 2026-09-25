@@ -1,14 +1,16 @@
 // Adapted from fvoci/FVOCI apps/web/src/features/settings/settings-account.tsx
-// Locale/timezone/week-start/text-scale/theme, MFA and OIDC link/unlink are
-// not ported; the sections below are wired to the Rust account endpoints.
+// Locale/timezone/week-start/text-scale/theme are not ported; the sections
+// below are wired to the Rust account endpoints.
 import { t } from "@fvoci/i18n";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { ConfirmActionButton } from "@/components/confirm-action";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { problemMessage } from "@/lib/api";
+import { ProblemError, problemMessage } from "@/lib/api";
+import { oidcErrorMessage, oidcLinkAction } from "@/lib/oidc";
 import type {
   IdentityOutput,
   PasswordChangeInput,
@@ -337,16 +339,42 @@ export function PasswordSection({
   );
 }
 
-// Source "social accounts" block. The Rust server configures no OIDC
-// providers yet, so this renders the empty state and never a link button.
-function LoginMethodsSection({
+// Source "social accounts" block: link is a plain form POST (the server answers
+// 303 to the IdP and the callback returns to `?linked=1` or `?error=`), unlink
+// is an API call that refuses the last login method.
+export function LoginMethodsSection({
   providers,
   identities,
+  onUnlink,
 }: {
   providers: ProviderOutput[];
   identities: IdentityOutput[];
+  onUnlink: (provider: string) => Promise<void>;
 }) {
+  const [unlinkPending, setUnlinkPending] = useState<string | null>(null);
+  const [unlinkError, setUnlinkError] = useState<string | null>(null);
   const linkedByProvider = new Map(identities.map((i) => [i.provider, i]));
+
+  async function handleUnlink(provider: string) {
+    setUnlinkError(null);
+    setUnlinkPending(provider);
+    try {
+      await onUnlink(provider);
+    } catch (err) {
+      setUnlinkError(
+        err instanceof ProblemError
+          ? err.code === "oidc_last_method"
+            ? oidcErrorMessage(err.code)
+            : err.titleKnown
+              ? err.title
+              : t("error.unlink")
+          : t("error.network"),
+      );
+    } finally {
+      setUnlinkPending(null);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-2">
       <p className="text-ui font-medium">{t("auth.account.social.title")}</p>
@@ -356,17 +384,41 @@ function LoginMethodsSection({
       {providers.map((p) => {
         const linked = linkedByProvider.get(p.provider);
         return (
-          <p key={p.provider} className="text-ui">
-            {p.label}
+          <div key={p.provider} className="flex items-center justify-between gap-2 text-ui">
+            <span>
+              {p.label}
+              {linked ? (
+                <span className="text-muted-foreground">
+                  {" "}
+                  — {linked.email ?? t("common.connected")}
+                </span>
+              ) : null}
+            </span>
             {linked ? (
-              <span className="text-muted-foreground">
-                {" "}
-                — {linked.email ?? t("common.connected")}
-              </span>
-            ) : null}
-          </p>
+              <ConfirmActionButton
+                title={t("auth.account.unlink.confirm.title")}
+                description={t("auth.account.unlink.confirm.body", { label: p.label })}
+                actionLabel={t("common.unlink")}
+                disabled={unlinkPending === p.provider}
+                onConfirm={() => handleUnlink(p.provider)}
+              >
+                {t("common.unlink")}
+              </ConfirmActionButton>
+            ) : (
+              <form method="post" action={oidcLinkAction(p.provider)}>
+                <Button type="submit" variant="outline" size="sm">
+                  {t("common.link")}
+                </Button>
+              </form>
+            )}
+          </div>
         );
       })}
+      {unlinkError ? (
+        <p role="alert" className="text-ui text-destructive">
+          {unlinkError}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -444,12 +496,16 @@ interface AccountSettingsViewProps {
   providers: ProviderOutput[];
   magicLink: boolean;
   successNotice?: string | null;
+  errorNotice?: string | null;
   onSaveName: (input: ProfileNameInput) => Promise<void>;
   onSendVerification: (email: string) => Promise<void>;
   onChangeEmail: (newEmail: string) => Promise<void>;
   onChangePassword: (input: PasswordChangeInput) => Promise<void>;
   onWithdraw: (input: WithdrawInput) => Promise<void>;
   onExport: () => Promise<void>;
+  onUnlink: (provider: string) => Promise<void>;
+  /** MFA section (`MfaSection`), filled by the page that owns the status query. */
+  mfa?: ReactNode;
 }
 
 export function AccountSettingsView({
@@ -458,12 +514,15 @@ export function AccountSettingsView({
   providers,
   magicLink,
   successNotice,
+  errorNotice,
   onSaveName,
   onSendVerification,
   onChangeEmail,
   onChangePassword,
   onWithdraw,
   onExport,
+  onUnlink,
+  mfa,
 }: AccountSettingsViewProps) {
   const [exportPending, setExportPending] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -490,6 +549,11 @@ export function AccountSettingsView({
               {successNotice}
             </p>
           ) : null}
+          {errorNotice ? (
+            <p role="alert" className="text-ui text-destructive">
+              {errorNotice}
+            </p>
+          ) : null}
           <EmailVerificationRow
             email={me.email}
             verified={me.emailVerifiedAt !== null}
@@ -499,7 +563,8 @@ export function AccountSettingsView({
           <EmailChangeForm magicLink={magicLink} onChangeEmail={onChangeEmail} />
           <ProfileNameForm me={me} onSaveName={onSaveName} />
           <PasswordSection hasPassword={me.hasPassword} onChangePassword={onChangePassword} />
-          <LoginMethodsSection providers={providers} identities={identities} />
+          {mfa}
+          <LoginMethodsSection providers={providers} identities={identities} onUnlink={onUnlink} />
         </div>
       </section>
       <section className="settings-section">

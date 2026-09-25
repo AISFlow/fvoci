@@ -39,6 +39,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/028_collections_views.sql"),
         28,
     ),
+    (include_str!("../../migrations/029_mfa_oidc.sql"), 29),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -319,7 +320,8 @@ pub async fn assert_app_role(pool: &PgPool) -> Result<(), String> {
                   'notifications', 'notification_prefs', 'workspace_holidays', 'ics_tokens',
                   'magic_tokens', 'task_activity', 'webhooks', 'webhook_deliveries',
                   'github_installations', 'github_install_states', 'github_issue_links',
-                  'github_deliveries'
+                  'github_deliveries', 'user_mfa', 'identity_links', 'workspace_oidc',
+                  'mfa_challenges', 'oidc_states'
               )
               AND pg_get_userbyid(c.relowner) = current_user
         )
@@ -476,6 +478,10 @@ mod tests {
         (
             28,
             "99627ccc208879f385340ee888f25cfd7e85f2a57b692a9cfc8cfb2280f7216d",
+        ),
+        (
+            29,
+            "fa1870fbfc05a77fe6efbe9adaa59f22b275b5faef7fb09712f214374a3df531",
         ),
     ];
 

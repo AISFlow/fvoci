@@ -122,6 +122,8 @@ jobs:
             specs: e2e/admin-console-flow.spec.ts
           - flow: collections-flow
             specs: e2e/collections-flow.spec.ts
+          - flow: mfa-flow
+            specs: e2e/mfa-flow.spec.ts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

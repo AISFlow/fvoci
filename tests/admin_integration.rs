@@ -870,7 +870,10 @@ async fn instance_settings_validate_persist_audit_and_project_publicly() {
     assert_eq!(initial.json["values"]["share"]["enabled"], true);
     assert_eq!(initial.json["values"]["branding"]["name"], "FVOCI");
     assert_eq!(initial.json["overridden"], json!([]));
-    assert_eq!(initial.json["eeFeatures"], json!(["audit", "branding"]));
+    assert_eq!(
+        initial.json["eeFeatures"],
+        json!(["audit", "branding", "workspaceSso"])
+    );
     let revision0 = initial.json["version"].as_i64().unwrap();
 
     let invalid = [

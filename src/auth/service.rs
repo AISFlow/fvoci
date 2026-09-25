@@ -6,10 +6,11 @@ use crate::auth::session::SessionUser;
 use crate::auth::token::hash_token;
 use crate::auth::token::{new_token, SESSION_TTL_SECS};
 use crate::db::identity::{
-    authenticate_password, count_users, find_live_session, issue_session, live_to_session_user,
+    authenticate_password, count_users, find_live_session, live_to_session_user,
     maybe_slide_session, new_setup_input, revoke_session, setup_first_owner, update_profile,
     ProfilePatch, SetupFirstOwnerResult, SetupSessionParams,
 };
+use crate::db::mfa::{issue_session_or_challenge, IssueOptions, Issued};
 use crate::db::Db;
 
 pub struct AuthService {
@@ -68,19 +69,23 @@ impl AuthService {
         }
     }
 
-    pub async fn login(
-        &self,
-        email: &str,
-        password: &str,
-    ) -> Result<Option<(Uuid, String)>, sqlx::Error> {
+    /// Source `loginOrChallenge`: MFA is looked up only after the password
+    /// verified, so failures look the same with or without MFA.
+    pub async fn login(&self, email: &str, password: &str) -> Result<Option<Issued>, sqlx::Error> {
         let user_id =
             authenticate_password(&self.db.pool, email, password, &self.password_keys).await?;
-        if let Some(user_id) = user_id {
-            if let Some(token) = issue_session(&self.db.pool, user_id).await? {
-                return Ok(Some((user_id, token)));
+        match user_id {
+            Some(user_id) => {
+                issue_session_or_challenge(
+                    &self.db.pool,
+                    user_id,
+                    "password",
+                    IssueOptions::default(),
+                )
+                .await
             }
+            None => Ok(None),
         }
-        Ok(None)
     }
 
     pub async fn session_user(&self, token: &str) -> Result<Option<SessionUser>, sqlx::Error> {
