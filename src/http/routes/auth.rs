@@ -27,7 +27,7 @@ use crate::http::state::AppState;
 use crate::mail::{equalize_magic_response_timing, MAGIC_PER_EMAIL, MAGIC_PER_IP};
 use crate::validate::{
     normalize_email, validate_family_name, validate_given_name, validate_locale,
-    validate_password_length, validate_text_scale, validate_week_starts_on,
+    validate_text_scale, validate_week_starts_on,
 };
 
 pub fn router() -> Router<AppState> {
@@ -281,7 +281,7 @@ async fn confirm_password_reset(
     {
         return Err(AppError::rate_limited(retry_after));
     }
-    validate_password_length(&body.new_password)?;
+    crate::validate::validate_password_setting(&state.auth.db.pool, &body.new_password).await?;
     let payload = crate::db::magic::consume_magic_token(&state.auth.db.pool, &body.token)
         .await
         .map_err(internal)?;

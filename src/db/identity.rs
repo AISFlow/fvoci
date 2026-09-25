@@ -10,7 +10,7 @@ use crate::db::quota::acquire_admission_lock;
 
 const SESSION_SLIDE_THRESHOLD_SECS: i64 = 15 * 24 * 60 * 60;
 
-const INSTANCE_ADMIN_LOCK_KEY: i64 = 847_291_003_551;
+pub(crate) const INSTANCE_ADMIN_LOCK_KEY: i64 = 847_291_003_551;
 
 pub(crate) struct EventAppend {
     pub id: Uuid,

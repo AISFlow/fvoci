@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { isTiptapDoc } from "@fvoci/editor/json";
 import { mdToTiptapJson } from "@fvoci/editor/markdown/parse";
 import { tiptapDocToMd } from "@fvoci/editor/md";
+import { tiptapDocToSafeHtml } from "@fvoci/editor/html";
 import { tiptapJsonToYUpdate } from "@fvoci/editor/collab-tiptap";
 import { markdownToDocx } from "@fvoci/editor/export/docx";
 import { tiptapDocToPdf } from "@fvoci/editor/export/pdf";
@@ -66,6 +67,11 @@ async function main() {
 		if (op === "md_to_tiptap") {
 			const contentJson = mdToTiptapJson(req.markdown ?? "");
 			return respond(true, { contentJson });
+		}
+		if (op === "md_to_safe_html") {
+			// Legal documents: source tiptapDocToSafeHtml(mdToTiptapJson(md)).
+			const html = tiptapDocToSafeHtml(mdToTiptapJson(req.markdown ?? ""));
+			return respond(true, { html });
 		}
 		if (op === "tiptap_to_yjs_update") {
 			if (!isTiptapDoc(req.contentJson)) {

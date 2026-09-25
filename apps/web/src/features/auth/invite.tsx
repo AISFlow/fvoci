@@ -56,6 +56,11 @@ export function InviteAcceptForm({
     defaultValues: { email: "", familyName: "", givenName: "", password: "" },
   });
   const errors = form.formState.errors;
+  const [consentChecked, setConsentChecked] = useState<Record<string, boolean>>({});
+  const consentItems = invitation.requiredLegal.map((d) => ({ kind: d.kind, version: d.version }));
+  const allConsented = invitation.requiredLegal.every(
+    (d) => consentChecked[`${d.kind}:${d.version}`] === true,
+  );
 
   return (
     <AuthLayout brandingName={brandingName}>
@@ -66,6 +71,40 @@ export function InviteAcceptForm({
           role: roleLabel(invitation.role),
         })}
       >
+        {invitation.requiredLegal.length > 0 ? (
+          <div className="auth-shell__stack border-b border-border pb-5">
+            <p className="text-ui font-medium text-foreground">{t("auth.invite.consents")}</p>
+            {invitation.requiredLegal.map((doc) => {
+              const key = `${doc.kind}:${doc.version}`;
+              return (
+                <div key={key} className="flex min-h-11 items-start gap-3 text-ui">
+                  <input
+                    id={`invite-consent-${key}`}
+                    type="checkbox"
+                    className="mt-1 size-5"
+                    checked={consentChecked[key] ?? false}
+                    onChange={(event) =>
+                      setConsentChecked((c) => ({ ...c, [key]: event.target.checked }))
+                    }
+                  />
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <label htmlFor={`invite-consent-${key}`} className="text-foreground">
+                      {doc.title}
+                    </label>
+                    <a
+                      href={`/legal/${doc.kind}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="auth-shell__link w-fit text-dense"
+                    >
+                      {t("common.view")}
+                    </a>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
         <form
           onSubmit={form.handleSubmit(async (values) => {
             setServerError(null);
@@ -91,7 +130,10 @@ export function InviteAcceptForm({
               return;
             }
             try {
-              await onSubmit(parsed.data);
+              await onSubmit({
+                ...parsed.data,
+                ...(consentItems.length > 0 ? { consents: consentItems } : {}),
+              });
             } catch (err) {
               setServerError(problemMessage(err, "error.auth.invite"));
             }
@@ -156,7 +198,7 @@ export function InviteAcceptForm({
           <Button
             type="submit"
             size="lg"
-            disabled={form.formState.isSubmitting}
+            disabled={!allConsented || form.formState.isSubmitting}
             className={authPrimaryButtonClass}
           >
             {form.formState.isSubmitting

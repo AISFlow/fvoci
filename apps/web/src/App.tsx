@@ -16,6 +16,11 @@ import { NotificationsPage } from "@/pages/NotificationsPage";
 import { InvitePage } from "@/pages/InvitePage";
 import { AttachmentViewPage } from "@/pages/AttachmentViewPage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
+import { AdminPage } from "@/pages/AdminPage";
+import { AdminAuditPage } from "@/pages/AdminAuditPage";
+import { AdminLegalPage } from "@/pages/AdminLegalPage";
+import { ConsentPage } from "@/pages/ConsentPage";
+import { LegalPage } from "@/pages/LegalPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -53,6 +58,32 @@ export function App() {
             element={
               <SetupGuard>
                 <ResetPasswordPage />
+              </SetupGuard>
+            }
+          />
+          <Route path="/consent" element={<ConsentPage />} />
+          <Route path="/legal/:kind" element={<LegalPage />} />
+          <Route
+            path="/settings/admin"
+            element={
+              <SetupGuard>
+                <AdminPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/settings/audit"
+            element={
+              <SetupGuard>
+                <AdminAuditPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/settings/legal"
+            element={
+              <SetupGuard>
+                <AdminLegalPage />
               </SetupGuard>
             }
           />

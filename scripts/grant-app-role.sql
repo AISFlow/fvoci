@@ -137,3 +137,17 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_gc_processed(text, integer, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_gc_processed(text, integer, integer) TO :"app_role";
+
+GRANT SELECT, INSERT ON fvoci.legal_documents TO :"app_role";
+REVOKE UPDATE, DELETE ON fvoci.legal_documents FROM :"app_role";
+GRANT SELECT, INSERT ON fvoci.user_consents TO :"app_role";
+REVOKE UPDATE, DELETE ON fvoci.user_consents FROM :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.instance_settings TO :"app_role";
+GRANT SELECT, UPDATE ON fvoci.instance_settings_meta TO :"app_role";
+REVOKE INSERT, DELETE ON fvoci.instance_settings_meta FROM :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_session_consent_pending(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_session_consent_pending(text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_admin_set_instance_admin(uuid, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_admin_set_instance_admin(uuid, boolean) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_admin_set_suspended(uuid, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_admin_set_suspended(uuid, boolean) TO :"app_role";

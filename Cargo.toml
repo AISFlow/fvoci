@@ -233,3 +233,8 @@ required-features = ["db-tests"]
 name = "background_jobs"
 path = "tests/background_jobs.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "admin_integration"
+path = "tests/admin_integration.rs"
+required-features = ["db-tests"]

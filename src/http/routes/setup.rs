@@ -9,7 +9,6 @@ use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::validate::{
     normalize_email, normalize_slug, utf16_len, validate_family_name, validate_given_name,
-    validate_password_length,
 };
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, State};
@@ -29,7 +28,11 @@ async fn setup_status(
     Ok(Json(SetupStatusResponse {
         needed,
         branding: BrandingOutput {
-            name: state.branding_name.clone(),
+            name: crate::settings::current_values(&state.auth.db.pool, &state.branding_name)
+                .await
+                .map_err(internal)?
+                .branding
+                .name,
         },
         mail_enabled: state.mailer.enabled(),
     }))
@@ -52,7 +55,7 @@ async fn setup_run(
         return Err(AppError::rate_limited(retry_after));
     }
 
-    validate_password_length(&body.password)?;
+    crate::validate::validate_password_setting(&state.auth.db.pool, &body.password).await?;
 
     let email = normalize_email(&body.email)?;
     let workspace_slug = normalize_slug(&body.workspace_slug)?;

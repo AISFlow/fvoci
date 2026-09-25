@@ -16,5 +16,6 @@ pub mod notifications;
 pub mod outbox;
 pub mod projects;
 pub mod search;
+pub mod settings;
 pub mod tasks;
 pub mod validate;
