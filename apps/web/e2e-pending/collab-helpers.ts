@@ -757,7 +757,7 @@ export async function applyBoldToSelection(page: Page): Promise<void> {
 }
 
 export async function applyLinkToSelection(page: Page, href: string): Promise<void> {
-  await page.getByRole("button", { name: "링크" }).click();
+  await page.getByRole("button", { name: "링크", exact: true }).click();
   await page.getByLabel("URL").fill(href);
   await page.getByRole("button", { name: "적용" }).click();
 }
