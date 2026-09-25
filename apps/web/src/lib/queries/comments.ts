@@ -33,7 +33,3 @@ export function commentsQuery(
     enabled: Boolean(workspaceId) && Boolean(targetId),
   });
 }
-
-export function documentCommentsQuery(workspaceId: string, documentId: string) {
-  return commentsQuery(workspaceId, "document", documentId);
-}

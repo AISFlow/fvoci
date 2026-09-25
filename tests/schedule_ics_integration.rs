@@ -285,6 +285,34 @@ async fn ics_feed_token_visibility_caldav_and_pat_scopes() {
         json!({}),
     )
     .await;
+    let unassigned = create_task(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        public_proj["id"].as_str().unwrap(),
+        "담당없음",
+        json!({"dueDate": "2026-08-28"}),
+    )
+    .await;
+    // The feed holds the owner's assigned tasks (source listIcsFeed). The member
+    // is also assigned to the private task, which they still cannot see.
+    for (task, assignees) in [
+        (&visible, json!([owner_id, member.user_id])),
+        (&secret, json!([owner_id, member.user_id])),
+    ] {
+        let (status, body) = json_request(
+            app.clone(),
+            "PATCH",
+            &format!(
+                "/api/v1/workspaces/{workspace_id}/tasks/{}",
+                task["id"].as_str().unwrap()
+            ),
+            Some(json!({"assigneeIds": assignees})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
 
     let (status, token_body) = json_request(
         app.clone(),
@@ -327,6 +355,10 @@ async fn ics_feed_token_visibility_caldav_and_pat_scopes() {
     assert!(ics.contains("DTSTART;VALUE=DATE:20260826"));
     assert!(ics.contains(&format!("UID:{}@fvoci", secret["id"].as_str().unwrap())));
     assert!(!ics.contains("날짜없음"));
+    assert!(
+        !ics.contains(&format!("UID:{}@fvoci", unassigned["id"].as_str().unwrap())),
+        "a visible task not assigned to the feed owner is not exported"
+    );
 
     let (status, _, empty) = raw_request(app.clone(), "HEAD", owner_path, None).await;
     assert_eq!(status, StatusCode::OK);

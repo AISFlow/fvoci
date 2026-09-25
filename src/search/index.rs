@@ -226,6 +226,49 @@ async fn upsert_pages(
     }
 }
 
+pub async fn refresh_document_body_only(
+    pool: &PgPool,
+    meili: &MeiliConfig,
+    resource: SearchResourceRef,
+) -> Result<(), SearchIndexError> {
+    ensure_meili_index(meili).await?;
+    with_workspace_lock(pool, resource.workspace_id, || async {
+        let current = load_sources(
+            pool,
+            resource.workspace_id,
+            SearchSourceKind::Document,
+            resource.id,
+        )
+        .await?;
+        if current.is_empty() {
+            delete_absent(meili, resource).await?;
+            return Ok(());
+        }
+        let docs: Vec<SearchSource> = current.iter().map(to_meili).collect();
+        upsert_meili_sources(meili, &docs).await?;
+        Ok(())
+    })
+    .await
+}
+
+fn document_body_only(event: &OutboxEvent) -> bool {
+    if event.verb == "document.collab_update_appended"
+        || event.verb == "document.collab_snapshot_compacted"
+    {
+        return true;
+    }
+    if event.verb == "document.updated" {
+        if event.payload.get("collab").and_then(|v| v.as_bool()) == Some(true) {
+            return true;
+        }
+        // Title/project/visibility changes must refresh comments and attachment chunks.
+        return event.payload.get("title").is_none()
+            && event.payload.get("icon").is_none()
+            && event.payload.get("status").is_none();
+    }
+    false
+}
+
 pub async fn refresh_search_resource(
     pool: &PgPool,
     meili: &MeiliConfig,
@@ -335,7 +378,11 @@ pub async fn process_search_index_event(
         }
     }
     if let Some(resource) = resource_from_event(event) {
-        refresh_search_resource(pool, meili, resource, moved_across_project(event)).await?;
+        if resource.kind == SearchSourceKind::Document && document_body_only(event) {
+            refresh_document_body_only(pool, meili, resource).await?;
+        } else {
+            refresh_search_resource(pool, meili, resource, moved_across_project(event)).await?;
+        }
     }
     Ok(())
 }

@@ -16,6 +16,28 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn drain_notifications(pool: &PgPool) {
+    // The relay reads only settled events (xact < snapshot xmin), and xmin is
+    // cluster-wide: a transaction in another test's database can hold it below
+    // an event this test just committed. Wait (bounded, read-only) until every
+    // transaction older than now has ended, then drain.
+    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(pool)
+        .await
+        .expect("current xid");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let settled: bool =
+            sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8")
+                .bind(&horizon)
+                .fetch_one(pool)
+                .await
+                .expect("snapshot xmin");
+        if settled {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "events never settled");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     ensure_consumer(pool, NOTIFICATIONS_CONSUMER)
         .await
         .expect("ensure notifications consumer");

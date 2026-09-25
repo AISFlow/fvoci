@@ -314,6 +314,54 @@ async fn public_role_cannot_execute_claim_function() {
 }
 
 #[tokio::test]
+async fn partial_extract_writes_attachment_text_chunks() {
+    let harness = TestDb::bootstrap().await;
+    let app = app_pool(&harness.app_url).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (workspace_id, user_id, document_id) = seed_workspace(&admin).await;
+    let attachment_id =
+        insert_pending_attachment(&admin, workspace_id, document_id, user_id, "partial.hwp").await;
+    let claim = claim_extract(&app).await.unwrap().expect("claim");
+    finish_extract(
+        &app,
+        &claim,
+        &FinishExtract {
+            status: "partial".into(),
+            text: "partial extract body".into(),
+            warnings: vec!["truncated".into()],
+            rhwp_rev: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let rows: Vec<(i32, String, String)> = sqlx::query_as(
+        r#"
+        SELECT chunk_no, status, text
+        FROM fvoci.attachment_text
+        WHERE workspace_id = $1 AND attachment_id = $2
+        ORDER BY chunk_no
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(attachment_id)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].1, "partial");
+    assert_eq!(rows[0].2, "partial extract body");
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn system_ctx_cannot_read_other_tenant_extract_text() {
     let harness = TestDb::bootstrap().await;
     let app = app_pool(&harness.app_url).await;

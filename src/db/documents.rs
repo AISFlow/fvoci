@@ -4,6 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{lock_tree, set_tenant};
+use crate::db::group_grants::group_document_grant_roles_select_sql;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::workspace::WorkspaceRole;
@@ -238,18 +239,12 @@ async fn wiki_group_permission(
     document_id: Uuid,
     user_id: Uuid,
 ) -> Result<ProjectPermission, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String,)>(
+    let rows = sqlx::query_as::<_, (String,)>(&format!(
         r#"
-        SELECT dm.role
-        FROM fvoci.document_members dm
-        INNER JOIN fvoci.group_members gm
-            ON gm.workspace_id = dm.workspace_id AND gm.group_id = dm.group_id
-        WHERE dm.workspace_id = $1
-          AND dm.document_id = $2
-          AND gm.user_id = $3
-          AND dm.group_id IS NOT NULL
+        {}
         "#,
-    )
+        group_document_grant_roles_select_sql(1, 2, 3)
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(user_id)

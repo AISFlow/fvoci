@@ -52,6 +52,16 @@ test("owner adds a holiday and copies an ICS feed that lists dated tasks", async
   );
   expect(createdTask.status()).toBe(201);
   const taskId = ((await createdTask.json()) as { id: string }).id;
+  // The feed exports the owner's assigned tasks, as in the source.
+  const me = (await (await page.request.get("/api/v1/auth/me")).json()) as { userId: string };
+  const assigned = await page.request.patch(`/api/v1/workspaces/${wsId}/tasks/${taskId}`, {
+    data: { assigneeIds: [me.userId] },
+  });
+  expect(assigned.ok(), await assigned.text()).toBe(true);
+  const other = await page.request.post(`/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`, {
+    data: { title: "담당 없는 일정", dueDate: "2026-08-27" },
+  });
+  expect(other.status()).toBe(201);
 
   await page.goto(`/w/${owner.workspaceSlug}/settings`);
   await page.locator("summary").filter({ hasText: /달력 구독/ }).click();
@@ -78,6 +88,7 @@ test("owner adds a holiday and copies an ICS feed that lists dated tasks", async
   expect(ics).toContain(`UID:${taskId}@fvoci`);
   expect(ics).toContain("SUMMARY:공개 일정");
   expect(ics).toContain("DTSTART;VALUE=DATE:20260826");
+  expect(ics).not.toContain("담당 없는 일정");
 
   const holidays = await page.request.get(`/api/v1/workspaces/${wsId}/holidays`);
   expect(holidays.ok()).toBe(true);
