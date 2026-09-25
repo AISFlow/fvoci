@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::db::outbox::{
     advance_cursor, claim_retries, clear_failure, fetch_event_by_id, fetch_failure_state,
-    is_processed, lease_consumer, mark_processed, read_events, record_failure, release_consumer,
-    xid_epoch_mismatch, OutboxEvent, OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_MS,
+    is_outbox_xid_epoch_mismatch, is_processed, lease_consumer, mark_processed, read_events,
+    record_failure, release_consumer, OutboxEvent, OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_MS,
     OUTBOX_LEASE_SECS, OUTBOX_MAX_ATTEMPTS,
 };
 
@@ -42,10 +42,11 @@ pub trait OutboxConsumer: Send + Sync {
 
     /// Deliver one event. For `PgOnly`, implementations must apply their effect
     /// and advance the cursor in the same transaction via `advance_cursor_tx`.
-    /// `advance_cursor_tx` is idempotent when the cursor is already at or past
-    /// the event and clears that event's failure row in the same transaction.
-    /// `External` implementations must be idempotent: a duplicate delivery after
-    /// a crash or overlapping lease must converge to the same side effect.
+    /// Retrying an event at or below the cursor is allowed only after a
+    /// dead-letter skip was requeued; `advance_cursor_tx` then returns true and
+    /// deletes that failure row. `External` implementations must be idempotent:
+    /// a duplicate delivery after a crash or overlapping lease must converge to
+    /// the same side effect.
     fn deliver<'a>(
         &'a self,
         pool: &'a PgPool,
@@ -197,22 +198,26 @@ async fn process_consumer_cycle(
         return Ok(false);
     }
 
-    if xid_epoch_mismatch(pool, consumer.name()).await? {
-        error!(
-            consumer = consumer.name(),
-            "outbox xid epoch mismatch; refuse to advance; run fvoci-migrate --recover-outbox"
-        );
-        return Ok(false);
-    }
-
     if cancel.is_cancelled() {
         let _ = release_consumer(pool, consumer.name(), owner).await?;
         return Ok(true);
     }
 
-    let mut worked = process_retries(settings, pool, consumer, owner, cancel).await?;
+    // Fail closed on restore xid epoch before the retry sweep. `read` evaluates
+    // snapshot and comparison in one statement; a separate xmax helper raced.
+    let events = match read_events(pool, consumer.name(), settings.batch_limit).await {
+        Ok(events) => events,
+        Err(err) if is_outbox_xid_epoch_mismatch(&err) => {
+            error!(
+                consumer = consumer.name(),
+                "outbox xid epoch mismatch; refuse to advance; run fvoci-migrate --recover-outbox"
+            );
+            return Ok(false);
+        }
+        Err(err) => return Err(err),
+    };
 
-    let events = read_events(pool, consumer.name(), settings.batch_limit).await?;
+    let mut worked = process_retries(settings, pool, consumer, owner, cancel).await?;
 
     for event in events {
         if cancel.is_cancelled() {
@@ -346,6 +351,7 @@ async fn handle_failure(
     let attempts = record_failure(
         pool,
         consumer.name(),
+        owner,
         event.id,
         error,
         settings.backoff_ms(),

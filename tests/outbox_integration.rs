@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use fvoci_server::db::outbox::{
     advance_cursor, advance_cursor_tx, claim_retries, ensure_consumer, fetch_cursor,
-    fetch_failure_state, insert_test_event, lease_consumer, read_events, record_failure,
-    release_consumer, requeue, xid_epoch_mismatch, OUTBOX_MAX_ATTEMPTS,
+    fetch_failure_state, insert_test_event, is_outbox_xid_epoch_mismatch, lease_consumer,
+    read_events, record_failure, release_consumer, requeue, OUTBOX_MAX_ATTEMPTS,
 };
 use fvoci_server::db::outbox_recover::{recover_outbox, RecoverOutboxOptions};
 use fvoci_server::db::{migrate, pool};
@@ -205,11 +205,11 @@ impl OutboxConsumer for PgOnlyTestConsumer {
     ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
         Box::pin(async move {
             let mut tx = pool.begin().await?;
+            // Non-idempotent: a second apply must error, not hide behind ON CONFLICT.
             sqlx::query(
                 r#"
                 INSERT INTO fvoci.outbox_test_deliveries (consumer, event_id, verb)
                 VALUES ($1, $2, $3)
-                ON CONFLICT DO NOTHING
                 "#,
             )
             .bind(self.name())
@@ -705,6 +705,7 @@ async fn dead_letter_after_max_failures_and_sweep_retry() {
         let attempts = record_failure(
             &app,
             consumer_name,
+            owner,
             event_id,
             "boom",
             1,
@@ -856,7 +857,6 @@ impl OutboxConsumer for SelectiveFailPgOnly {
                 r#"
                 INSERT INTO fvoci.outbox_test_deliveries (consumer, event_id, verb)
                 VALUES ($1, $2, $3)
-                ON CONFLICT DO NOTHING
                 "#,
             )
             .bind(self.name())
@@ -1218,28 +1218,49 @@ async fn pg_only_already_applied_failure_is_idempotent() {
     })
     .await;
 
-    record_failure(
+    let stale_owner = Uuid::now_v7();
+    let attempts = record_failure(
         &app,
         "r6",
+        stale_owner,
         a,
         "advance rejected in pg-only tx",
         50,
         OUTBOX_MAX_ATTEMPTS,
     )
     .await
-    .expect("stale failure");
+    .expect("stale failure refused");
+    assert_eq!(attempts, 0);
+    assert!(
+        fetch_failure_state(&app, "r6", a)
+            .await
+            .expect("state")
+            .is_none(),
+        "record_failure must not insert a row at or below the cursor"
+    );
 
+    let b = insert_test_event(&app, "B", json!({})).await.expect("B");
     wait_until(DISPATCHER_WAIT, || {
-        let pool = app.clone();
-        Box::pin(async move {
-            fetch_failure_state(&pool, "r6", a)
-                .await
-                .expect("state")
-                .is_none()
-        })
+        let pool = admin.clone();
+        Box::pin(async move { delivery_count(&pool, "r6").await == 2 })
     })
     .await;
-    assert_eq!(delivery_count(&admin, "r6").await, 1);
+    let delivered_a: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fvoci.outbox_test_deliveries WHERE consumer = 'r6' AND event_id = $1",
+    )
+    .bind(a)
+    .fetch_one(&admin)
+    .await
+    .expect("delivered a");
+    assert_eq!(delivered_a, 1);
+    let delivered_b: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fvoci.outbox_test_deliveries WHERE consumer = 'r6' AND event_id = $1",
+    )
+    .bind(b)
+    .fetch_one(&admin)
+    .await
+    .expect("delivered b");
+    assert_eq!(delivered_b, 1);
     assert!(fetch_failure_state(&app, "r6", a)
         .await
         .expect("gone")
@@ -1247,6 +1268,43 @@ async fn pg_only_already_applied_failure_is_idempotent() {
 
     dispatcher.request_shutdown();
     dispatcher.join().await.expect("join");
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn cursor_waiting_on_an_older_running_transaction_is_not_an_epoch_mismatch() {
+    // After --recover-outbox the cursor sits at the recovery xid; any transaction
+    // older than it that is still open (in any database) keeps xmin below it.
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    ensure_consumer(&app, "search-index").await.expect("ensure");
+
+    let mut older = admin.begin().await.expect("older tx");
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&mut *older)
+        .await
+        .expect("assign older xid");
+    sqlx::query(
+        "UPDATE fvoci.outbox_consumers SET last_xact = pg_current_xact_id(), last_seq = 0 \
+         WHERE consumer = 'search-index'",
+    )
+    .execute(&admin)
+    .await
+    .expect("cursor at a newer committed xid");
+
+    assert!(read_events(&app, "search-index", 10)
+        .await
+        .expect("read while waiting")
+        .is_empty());
+
+    older.rollback().await.expect("rollback older");
     app.close().await;
     admin.close().await;
     harness.cleanup().await;
@@ -1296,16 +1354,10 @@ async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
         .await
         .expect("stale cursor");
 
-    assert!(xid_epoch_mismatch(&app, "search-index")
-        .await
-        .expect("mismatch"));
     let read_err = read_events(&app, "search-index", 10)
         .await
         .expect_err("read must fail closed");
-    assert!(
-        read_err.to_string().contains("recover-outbox"),
-        "{read_err}"
-    );
+    assert!(is_outbox_xid_epoch_mismatch(&read_err), "{read_err}");
     assert!(lease_consumer(&app, "search-index", owner, 30)
         .await
         .expect("lease after mismatch"));
@@ -1362,9 +1414,6 @@ async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
     let app = pool::connect_app(&harness.app_url)
         .await
         .expect("app after recover");
-    assert!(!xid_epoch_mismatch(&app, "search-index")
-        .await
-        .expect("aligned"));
     let visible = read_events(&app, "search-index", 100)
         .await
         .expect("read after recover");
@@ -1388,4 +1437,170 @@ async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
     app.close().await;
     admin.close().await;
     harness.cleanup().await;
+}
+
+struct CountingPgOnly {
+    name: String,
+}
+
+impl OutboxConsumer for CountingPgOnly {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::PgOnly
+    }
+    fn deliver<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut tx = pool.begin().await?;
+            sqlx::query("INSERT INTO fvoci.r8_effects (event_id) VALUES ($1)")
+                .bind(event.id)
+                .execute(&mut *tx)
+                .await?;
+            if !advance_cursor_tx(&mut tx, self.name(), lease_owner, &event.xact, event.seq).await?
+            {
+                tx.rollback().await?;
+                return Err(OutboxProcessError::Delivery(
+                    "advance rejected in pg-only tx".into(),
+                ));
+            }
+            tx.commit().await?;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn r8_stale_owner_failure_row_does_not_double_apply_pg_only_effect() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    sqlx::query("CREATE TABLE fvoci.r8_effects (event_id uuid NOT NULL)")
+        .execute(&admin)
+        .await
+        .expect("effects table");
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT ON fvoci.r8_effects TO \"{}\"",
+        harness.role_name.replace('"', "\"\"")
+    ))
+    .execute(&admin)
+    .await
+    .expect("grant effects");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let e = insert_test_event(&app, "E", json!({})).await.expect("E");
+    ensure_consumer(&app, "r8").await.expect("ensure");
+    wait_until_readable(&app, "r8", e).await;
+    let consumer = Arc::new(CountingPgOnly { name: "r8".into() });
+
+    let a = Uuid::now_v7();
+    assert!(lease_consumer(&app, "r8", a, 1).await.expect("lease a"));
+    let event = read_events(&app, "r8", 10)
+        .await
+        .expect("read")
+        .into_iter()
+        .next()
+        .expect("E");
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let b = Uuid::now_v7();
+    assert!(lease_consumer(&app, "r8", b, 30).await.expect("lease b"));
+    consumer
+        .deliver(&app, b, &event)
+        .await
+        .expect("B applies E");
+    assert!(consumer.deliver(&app, a, &event).await.is_err());
+    let attempts = record_failure(
+        &app,
+        "r8",
+        a,
+        event.id,
+        "advance rejected in pg-only tx",
+        50,
+        OUTBOX_MAX_ATTEMPTS,
+    )
+    .await
+    .expect("stale failure");
+    assert_eq!(attempts, 0);
+    assert!(fetch_failure_state(&app, "r8", e)
+        .await
+        .expect("no stale row")
+        .is_none());
+    assert!(release_consumer(&app, "r8", b).await.expect("release b"));
+
+    let sentinel = insert_test_event(&app, "sentinel", json!({}))
+        .await
+        .expect("sentinel");
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        let sentinel_id = sentinel;
+        Box::pin(async move {
+            let n: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM fvoci.r8_effects WHERE event_id = $1")
+                    .bind(sentinel_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(0);
+            n == 1
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    let applied_e: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.r8_effects WHERE event_id = $1")
+            .bind(e)
+            .fetch_one(&admin)
+            .await
+            .expect("count E");
+    assert_eq!(applied_e, 1, "PgOnly effect applied {applied_e} times");
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn r9_epoch_guard_has_no_false_positive_under_concurrent_writes() {
+    let harness = TestDb::bootstrap().await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    ensure_consumer(&app, "r9").await.expect("ensure");
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut writers = Vec::new();
+    for _ in 0..6 {
+        let pool = app.clone();
+        let stop = stop.clone();
+        writers.push(tokio::spawn(async move {
+            while !stop.load(Ordering::SeqCst) {
+                let _ = insert_test_event(&pool, "w", json!({})).await;
+            }
+        }));
+    }
+    let mut mismatch = 0usize;
+    let mut read_err = 0usize;
+    const ITERATIONS: usize = 256;
+    for _ in 0..ITERATIONS {
+        match read_events(&app, "r9", 1).await {
+            Ok(_) => {}
+            Err(err) if is_outbox_xid_epoch_mismatch(&err) => mismatch += 1,
+            Err(_) => read_err += 1,
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    for writer in writers {
+        let _ = writer.await;
+    }
+    app.close().await;
+    harness.cleanup().await;
+    assert_eq!(
+        (mismatch, read_err),
+        (0, 0),
+        "R9 iterations={ITERATIONS} xid_mismatch_true={mismatch} read_errors={read_err}"
+    );
 }

@@ -17,6 +17,7 @@ CREATE TABLE fvoci.outbox_failures (
     last_error text NOT NULL,
     next_attempt_at timestamptz NOT NULL,
     dead_at timestamptz,
+    skipped_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (consumer, event_id),
@@ -150,7 +151,15 @@ BEGIN
         RETURN;
     END IF;
 
-    IF v_last_xact >= v_xmin
+    -- Only xids from the future (at or past xmax) mean another cluster's epoch;
+    -- a cursor at or above xmin is still waiting on running transactions.
+    -- Snapshot and comparison must share one statement (READ COMMITTED).
+    IF EXISTS (
+            SELECT 1
+            FROM fvoci.outbox_consumers AS c
+            WHERE c.consumer = p_consumer
+              AND c.last_xact >= pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())
+       )
        OR EXISTS (
             SELECT 1
             FROM fvoci.events AS e
@@ -201,18 +210,15 @@ DECLARE
     advanced boolean;
     already_applied boolean;
     v_xmin xid8;
-    v_xmax xid8;
     v_prev text;
     v_event_id uuid;
 BEGIN
     v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
     PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
     SELECT pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()) INTO v_xmin;
-    SELECT pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot()) INTO v_xmax;
 
-    IF p_xact >= v_xmin
-       OR EXISTS (SELECT 1 FROM fvoci.events AS e WHERE e.xact >= v_xmax)
-    THEN
+    -- read() already fails closed on events >= xmax; refuse still-running xids.
+    IF p_xact >= v_xmin THEN
         PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
         RETURN false;
     END IF;
@@ -227,19 +233,26 @@ BEGIN
         RETURN false;
     END IF;
 
+    -- Retry at or below the cursor is only a dead-letter skip that was requeued.
     SELECT true
     INTO already_applied
     FROM fvoci.outbox_consumers AS c
+    INNER JOIN fvoci.outbox_failures AS f
+        ON f.consumer = c.consumer
+       AND f.event_id = v_event_id
     WHERE c.consumer = p_consumer
       AND c.lease_owner = p_owner
       AND c.lease_until > pg_catalog.now()
-      AND c.last_xact < v_xmin
-      AND (p_xact, p_seq) <= (c.last_xact, c.last_seq);
+      AND (p_xact, p_seq) <= (c.last_xact, c.last_seq)
+      AND f.skipped_at IS NOT NULL
+      AND f.dead_at IS NULL;
 
     IF already_applied THEN
         DELETE FROM fvoci.outbox_failures AS f
         WHERE f.consumer = p_consumer
-          AND f.event_id = v_event_id;
+          AND f.event_id = v_event_id
+          AND f.skipped_at IS NOT NULL
+          AND f.dead_at IS NULL;
         PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
         RETURN true;
     END IF;
@@ -256,6 +269,16 @@ BEGIN
       AND (p_xact, p_seq) > (c.last_xact, c.last_seq)
     RETURNING true INTO advanced;
 
+    IF COALESCE(advanced, false) THEN
+        UPDATE fvoci.outbox_failures AS f
+        SET
+            skipped_at = COALESCE(f.skipped_at, pg_catalog.now()),
+            updated_at = pg_catalog.now()
+        WHERE f.consumer = p_consumer
+          AND f.event_id = v_event_id
+          AND f.dead_at IS NOT NULL;
+    END IF;
+
     PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
     RETURN COALESCE(advanced, false);
 END;
@@ -263,6 +286,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION fvoci.app_outbox_record_failure(
     p_consumer text,
+    p_owner uuid,
     p_event_id uuid,
     p_error text,
     p_backoff_ms integer DEFAULT 1000,
@@ -278,9 +302,26 @@ DECLARE
     v_base_ms integer;
     v_max_attempts integer;
     v_dead timestamptz;
+    v_prev text;
+    v_leased boolean;
+    v_at_or_below boolean;
 BEGIN
+    v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
+    PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
     v_base_ms := GREATEST(p_backoff_ms, 1);
     v_max_attempts := GREATEST(p_max_attempts, 1);
+
+    SELECT true
+    INTO v_leased
+    FROM fvoci.outbox_consumers AS c
+    WHERE c.consumer = p_consumer
+      AND c.lease_owner = p_owner
+      AND c.lease_until > pg_catalog.now();
+
+    IF NOT COALESCE(v_leased, false) THEN
+        PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
+        RETURN 0;
+    END IF;
 
     SELECT f.attempts, f.dead_at
     INTO v_attempts, v_dead
@@ -288,7 +329,23 @@ BEGIN
     WHERE f.consumer = p_consumer AND f.event_id = p_event_id;
 
     IF v_dead IS NOT NULL THEN
+        PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
         RETURN v_attempts;
+    END IF;
+
+    -- Do not create a live failure for an event the cursor has already passed.
+    IF v_attempts IS NULL THEN
+        SELECT true
+        INTO v_at_or_below
+        FROM fvoci.outbox_consumers AS c
+        INNER JOIN fvoci.events AS e ON e.id = p_event_id
+        WHERE c.consumer = p_consumer
+          AND (e.xact, e.seq) <= (c.last_xact, c.last_seq);
+
+        IF COALESCE(v_at_or_below, false) THEN
+            PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
+            RETURN 0;
+        END IF;
     END IF;
 
     INSERT INTO fvoci.outbox_failures AS f (
@@ -325,6 +382,7 @@ BEGIN
         updated_at = pg_catalog.now()
     RETURNING attempts INTO v_attempts;
 
+    PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
     RETURN v_attempts;
 END;
 $$;
@@ -424,6 +482,7 @@ BEGIN
     INNER JOIN fvoci.events AS e ON e.id = f.event_id
     WHERE f.consumer = p_consumer
       AND f.dead_at IS NULL
+      AND f.skipped_at IS NOT NULL
       AND f.next_attempt_at <= pg_catalog.now()
       AND (e.xact, e.seq) <= (c.last_xact, c.last_seq)
     ORDER BY f.next_attempt_at, f.event_id
@@ -473,47 +532,15 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION fvoci.app_outbox_xid_mismatch(p_consumer text)
-RETURNS boolean
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
-AS $$
-DECLARE
-    v_xmin xid8;
-    v_xmax xid8;
-    v_last xid8;
-    v_prev text;
-    mismatched boolean;
-BEGIN
-    v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
-    PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
-    SELECT pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()) INTO v_xmin;
-    SELECT pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot()) INTO v_xmax;
-
-    SELECT c.last_xact
-    INTO v_last
-    FROM fvoci.outbox_consumers AS c
-    WHERE c.consumer = p_consumer;
-
-    mismatched := COALESCE(v_last >= v_xmin, false)
-        OR EXISTS (SELECT 1 FROM fvoci.events AS e WHERE e.xact >= v_xmax);
-
-    PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
-    RETURN mismatched;
-END;
-$$;
-
 REVOKE ALL ON FUNCTION fvoci.app_outbox_ensure_consumer(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_lease(text, uuid, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_release(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_read(text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_advance(text, uuid, xid8, bigint) FROM PUBLIC;
-REVOKE ALL ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, text, integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, uuid, text, integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_clear_failure(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_failure_state(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_requeue(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_claim_retries(text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION fvoci.app_outbox_xid_mismatch(text) FROM PUBLIC;
