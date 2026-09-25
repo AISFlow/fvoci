@@ -74,11 +74,6 @@ interface DocumentViewProps {
   project?: ProjectDocumentContext;
 }
 
-const projectUploadsUnsupported = {
-  upload: () => Promise.reject(new Error(t("doc.attachment.projectUnsupported"))),
-  downloadUrl: () => "",
-};
-
 export function DocumentView({ workspaceId, slug, documentId, project }: DocumentViewProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -122,8 +117,10 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
     setStatus(metaQuery.data.status);
   }, [metaQuery.data]);
 
+  // Project document uploads are not ported yet: no bridge, so the editor
+  // ignores file drops/pastes instead of inserting a failing attachment block.
   const attachmentBridge = useMemo(
-    () => (project ? projectUploadsUnsupported : createAttachmentBridge(workspaceId, documentId)),
+    () => (project ? null : createAttachmentBridge(workspaceId, documentId)),
     [workspaceId, documentId, project],
   );
   const collabUser = useMemo(() => {
@@ -578,6 +575,9 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
           </p>
         ) : null}
         {!ready && collabSession?.status !== "unauthorized" ? <QueryLoading /> : null}
+        {project && !readOnly ? (
+          <p className="document-page__body-note">{t("doc.attachment.projectUnsupported")}</p>
+        ) : null}
         {ready && collabSession && collabUser ? (
           <AttachmentBlockContext.Provider value={attachmentBridge}>
             <FvociEditor

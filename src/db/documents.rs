@@ -148,13 +148,27 @@ type DocumentRow = (
 );
 
 /// Days a trashed document (or project) stays restorable before the maintenance
-/// sweep purges it (source `TRASH_GC_AFTER_MS`, 30 days).
-pub const TRASH_RETENTION_DAYS: i64 = 30;
+/// sweep purges it (source `TRASH_GC_AFTER_MS`, 30 days). Every retention check
+/// runs in SQL against the database clock (`now()`), so restore, the trash
+/// lists and the purge never disagree because of app/job host clock skew.
+pub const TRASH_RETENTION_DAYS: i32 = 30;
 
-/// Trash rows at or before this instant are expired: the purge sweep may already
-/// have deleted their attachment objects, so restore treats them as gone.
-pub fn trash_retention_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
-    now - chrono::Duration::days(TRASH_RETENTION_DAYS)
+/// Extra days the purge waits past the retention, so it never touches a row
+/// that restore could still accept.
+pub const TRASH_PURGE_MARGIN_DAYS: i32 = 1;
+
+/// Trash rows stamped at or before `now() - TRASH_RETENTION_DAYS` are expired:
+/// the purge may already have deleted their attachment objects, so restore
+/// treats them as gone.
+pub(crate) async fn trash_expired(
+    tx: &mut Transaction<'_, Postgres>,
+    deleted_at: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT $1::timestamptz <= now() - make_interval(days => $2)")
+        .bind(deleted_at)
+        .bind(TRASH_RETENTION_DAYS)
+        .fetch_one(&mut **tx)
+        .await
 }
 
 pub fn empty_document_json() -> Value {
@@ -280,10 +294,17 @@ impl DocumentPermission {
     }
 }
 
+/// Locks the document row and checks it is live (and its project not archived).
+/// `expected_project_id` is the affiliation the caller authorized against, read
+/// before this lock: a project caller has already locked that project, and a
+/// wiki caller (`None`) never locks a project after the document row, so a
+/// concurrent wiki -> project move is refused instead of inverting the
+/// project -> document lock order used by collab and project writes.
 pub(crate) async fn assert_document_writable(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_id: Uuid,
+    expected_project_id: Option<Uuid>,
 ) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
     let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
         r#"
@@ -300,7 +321,7 @@ pub(crate) async fn assert_document_writable(
     let Some((project_id, deleted_at)) = row else {
         return Ok(Err(DocumentDbError::NotFound));
     };
-    if deleted_at.is_some() {
+    if deleted_at.is_some() || project_id != expected_project_id {
         return Ok(Err(DocumentDbError::NotFound));
     }
     if let Some(project_id) = project_id {
@@ -1794,12 +1815,13 @@ pub async fn list_trashed_wiki_documents(
         r#"
         SELECT id, title, deleted_at, project_id
         FROM fvoci.documents
-        WHERE workspace_id = $1 AND deleted_at IS NOT NULL AND deleted_at > $2
+        WHERE workspace_id = $1 AND deleted_at IS NOT NULL
+          AND deleted_at > now() - make_interval(days => $2)
         ORDER BY deleted_at DESC, id DESC
         "#,
     )
     .bind(workspace_id)
-    .bind(trash_retention_cutoff(Utc::now()))
+    .bind(TRASH_RETENTION_DAYS)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -1876,7 +1898,10 @@ pub async fn restore_wiki_document(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     };
-    let expired = deleted_at.is_some_and(|at| at <= trash_retention_cutoff(Utc::now()));
+    let expired = match deleted_at {
+        Some(at) => trash_expired(&mut tx, at).await?,
+        None => false,
+    };
     if deleted_at.is_none() || project_id.is_some() || expired {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));

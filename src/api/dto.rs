@@ -962,6 +962,9 @@ pub struct ProjectListItemOutput {
     pub task_count: i64,
     pub open_task_count: i64,
     pub can_edit: bool,
+    /// Project `manage` permission (lead or workspace admin): archive,
+    /// unarchive and delete.
+    pub can_manage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

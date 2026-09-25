@@ -56,6 +56,11 @@ test("project document: edit, trash, restore; project delete and admin restore",
   });
   expect(projectRes.status()).toBe(201);
   const project = await projectRes.json();
+  const listRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
+  const listed = (await listRes.json()).items.find(
+    (item: { id: string }) => item.id === project.id,
+  );
+  expect(listed).toMatchObject({ canEdit: true, canManage: true });
   const docRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/documents`,
     { data: { parentId: project.rootDocumentId, title: "프로젝트 기획서" } },
@@ -68,6 +73,8 @@ test("project document: edit, trash, restore; project delete and admin restore",
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
   const editor = page.locator(".fvoci-editor .ProseMirror");
   await expect(editor).toBeVisible();
+  // Attachment uploads are not supported here yet: a notice outside the editor.
+  await expect(page.getByText("프로젝트 문서의 첨부 업로드는 아직 지원하지 않습니다.")).toBeVisible();
   await editor.click();
   await page.keyboard.type("기획 본문");
   await page.getByRole("button", { name: "저장", exact: true }).click();

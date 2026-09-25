@@ -249,6 +249,7 @@ async fn list_projects_route(
                         task_count: 0,
                         open_task_count: 0,
                         can_edit: false,
+                        can_manage: false,
                     })
                     .collect(),
             })),
@@ -278,6 +279,7 @@ async fn list_projects_route(
                     task_count: item.task_count,
                     open_task_count: item.open_task_count,
                     can_edit: item.can_edit,
+                    can_manage: item.can_manage,
                 })
                 .collect(),
         })),

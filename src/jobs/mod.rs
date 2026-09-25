@@ -34,7 +34,10 @@ pub use claim::{
     JobClaim, JOB_KEY_DAILY, JOB_KEY_DIGEST, JOB_KEY_ICS, JOB_KEY_MAGIC, JOB_KEY_NOTIFICATIONS,
     JOB_KEY_PROCESSED, JOB_KEY_UPLOADS, JOB_KEY_WORKSPACE, JOB_LOCK_NAMESPACE,
 };
-pub use documents::{run_document_trash_purge, DocumentPurgeStats, DOCUMENT_PURGE_BATCH};
+pub use documents::{
+    run_document_trash_purge, run_document_trash_purge_with, DocumentPurgeLimits,
+    DocumentPurgeStats, DOCUMENT_PURGE_BATCH, DOCUMENT_PURGE_TIME_BUDGET,
+};
 pub use retention::{
     run_integration_gc, run_notification_gc, run_processed_gc, GC_DELETE_BATCH, GC_DELETE_ROUNDS,
     NOTIFICATION_ARCHIVED_RETENTION_DAYS, NOTIFICATION_READ_RETENTION_DAYS,
@@ -299,13 +302,14 @@ async fn run_daily_jobs(
 
     // Source `purgeTrashedDocuments`: 30-day document trash retention.
     if !cancel.is_cancelled() {
-        match run_document_trash_purge(pool, storage, now, cancel).await {
+        match run_document_trash_purge(pool, storage, cancel).await {
             Ok(documents) => {
                 info!(
                     purged = documents.purged,
                     storage_deleted = documents.storage_deleted,
                     skipped = documents.skipped,
                     failed = documents.failed,
+                    deferred = documents.deferred,
                     "maintenance.document_purge"
                 );
                 stats.documents = documents;

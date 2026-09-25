@@ -126,7 +126,7 @@ export function ProjectHomePage() {
           onCreateDocument={() => {
             void createDocument.mutate();
           }}
-          canManage={projectItem?.canEdit ?? false}
+          canManage={projectItem?.canManage ?? false}
           lifecyclePending={lifecycle.isPending}
           lifecycleError={lifecycleError}
           onLifecycle={(action) => lifecycle.mutate(action)}

@@ -69,6 +69,7 @@ pub struct ProjectListItem {
     pub task_count: i64,
     pub open_task_count: i64,
     pub can_edit: bool,
+    pub can_manage: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1173,9 +1174,9 @@ pub async fn list_projects(
             created_at: row.9,
             updated_at: row.10,
         };
-        let can_edit = project_permission(&mut tx, workspace_id, actor_user_id, &locked)
-            .await?
-            .at_least(ProjectPermission::Edit);
+        let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+        let can_edit = permission.at_least(ProjectPermission::Edit);
+        let can_manage = permission.at_least(ProjectPermission::Manage);
 
         items.push(ProjectListItem {
             project: ProjectRow {
@@ -1195,6 +1196,7 @@ pub async fn list_projects(
             task_count: counts.0,
             open_task_count: counts.1,
             can_edit,
+            can_manage,
         });
     }
     tx.commit().await?;
@@ -2037,7 +2039,7 @@ pub async fn restore_project(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
-    if stamp <= crate::db::documents::trash_retention_cutoff(Utc::now()) {
+    if crate::db::documents::trash_expired(&mut tx, stamp).await? {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
@@ -2200,12 +2202,13 @@ pub async fn list_deleted_projects(
         SELECT id, key, name, description, icon, visibility, root_document_id, status,
                created_by, created_at, updated_at
         FROM fvoci.projects
-        WHERE workspace_id = $1 AND deleted_at IS NOT NULL AND deleted_at > $2
+        WHERE workspace_id = $1 AND deleted_at IS NOT NULL
+          AND deleted_at > now() - make_interval(days => $2)
         ORDER BY deleted_at DESC, id DESC
         "#,
     )
     .bind(workspace_id)
-    .bind(crate::db::documents::trash_retention_cutoff(Utc::now()))
+    .bind(crate::db::documents::TRASH_RETENTION_DAYS)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;

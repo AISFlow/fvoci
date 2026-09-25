@@ -21300,11 +21300,16 @@
           "updatedAt",
           "taskCount",
           "openTaskCount",
-          "canEdit"
+          "canEdit",
+          "canManage"
         ],
         "properties": {
           "canEdit": {
             "type": "boolean"
+          },
+          "canManage": {
+            "type": "boolean",
+            "description": "Project `manage` permission (lead or workspace admin): archive,\nunarchive and delete."
           },
           "createdAt": {
             "type": "string",

@@ -10,7 +10,7 @@ use crate::db::documents::{
     assert_document_writable, between, depth_of, empty_document_json, fetch_document_row,
     format_display_id, is_descendant, list_live_siblings_in, lock_document_rows, move_subtree,
     record_document_event_and_audit, resolve_reorder_sort_key, row_to_meta, subtree_ids,
-    trash_document_row, trash_retention_cutoff, CreateDocumentInput, DocumentDbError, DocumentMeta,
+    trash_document_row, trash_expired, CreateDocumentInput, DocumentDbError, DocumentMeta,
     TrashChildrenMode, TreeNode, UpdateDocumentMetaInput, DOCUMENT_SCHEMA_VERSION, MAX_TREE_DEPTH,
 };
 use crate::db::documents::{
@@ -478,7 +478,7 @@ pub async fn update_project_document_meta(
             return Ok(Err(err));
         }
     }
-    match assert_document_writable(&mut tx, workspace_id, document_id).await? {
+    match assert_document_writable(&mut tx, workspace_id, document_id, Some(project_id)).await? {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
@@ -966,7 +966,7 @@ pub async fn restore_project_document(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     };
-    if doc_project_id != Some(project_id) || deleted_at <= trash_retention_cutoff(Utc::now()) {
+    if doc_project_id != Some(project_id) || trash_expired(&mut tx, deleted_at).await? {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }

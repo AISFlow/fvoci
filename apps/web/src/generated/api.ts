@@ -3954,6 +3954,11 @@ export interface components {
         };
         ProjectListItemOutput: {
             canEdit: boolean;
+            /**
+             * @description Project `manage` permission (lead or workspace admin): archive,
+             *     unarchive and delete.
+             */
+            canManage: boolean;
             /** Format: date-time */
             createdAt: string;
             createdBy: string;
