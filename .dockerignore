@@ -18,3 +18,5 @@ scripts/backup.sh
 scripts/restore.sh
 scripts/backup-restore-smoke.sh
 compat/target
+scripts/document-convert/node_modules
+.cargo-target

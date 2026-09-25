@@ -15,13 +15,13 @@ use fvoci_server::db::magic::issue_password_reset_token;
 use fvoci_server::db::outbox::mark_processed;
 use fvoci_server::jobs::{
     run_daily_sweep, run_ics_token_gc, run_magic_token_gc, run_notification_gc, run_processed_gc,
-    run_stale_upload_sweep, run_workspace_purge, spawn_maintenance, JobClaim, MaintenanceSettings,
-    JOB_KEY_DAILY, JOB_KEY_UPLOADS,
+    run_stale_upload_gc, run_stale_upload_sweep, run_workspace_purge, spawn_maintenance, JobClaim,
+    MaintenanceSettings, JOB_KEY_DAILY, JOB_KEY_UPLOADS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{admin_pool, app_pool, json_request, setup_session, TestDb};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -830,7 +830,7 @@ async fn scheduler_runs_stale_upload_gc_under_its_own_claim() {
         .unwrap()
         .expect("claim");
     let ttl = Duration::from_secs(24 * 60 * 60);
-    let skipped = run_stale_upload_sweep(&pool, &storage, ttl, &CancellationToken::new())
+    let skipped = run_stale_upload_sweep(&pool, &storage, ttl, None, &CancellationToken::new())
         .await
         .unwrap();
     assert!(skipped.is_none());
@@ -870,11 +870,117 @@ async fn scheduler_runs_stale_upload_gc_under_its_own_claim() {
         .expect("join ok");
 
     // Idempotent once drained.
-    let again = run_stale_upload_sweep(&pool, &storage, ttl, &CancellationToken::new())
+    let again = run_stale_upload_sweep(&pool, &storage, ttl, None, &CancellationToken::new())
         .await
         .unwrap()
         .expect("claim free after shutdown");
     assert_eq!(again.purged, 0);
+
+    let _ = std::fs::remove_dir_all(&root);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// Review D4: a row that is skipped on every run (its session lock is held)
+/// must not keep later rows, in any workspace, out of reach. Each run resumes
+/// after the previous batch in global `(created_at, id)` order and wraps.
+#[tokio::test]
+async fn upload_gc_cursor_does_not_starve_rows_behind_a_stuck_one() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let (root, storage) = temp_storage();
+    let other_ws = create_team_workspace(app.clone(), &cookie, "Other", "gc-other").await;
+    let mut documents = Vec::new();
+    for ws in [workspace_id, other_ws] {
+        let (status, doc) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/documents"),
+            Some(json!({"title": "gc cursor", "parentId": null})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED, "{doc:?}");
+        documents.push(Uuid::parse_str(doc["id"].as_str().unwrap()).unwrap());
+    }
+    // Oldest row A (stuck), then B and C in the other workspace.
+    let mut ids = Vec::new();
+    for (ws, doc, hours) in [
+        (workspace_id, documents[0], 30),
+        (other_ws, documents[1], 28),
+        (other_ws, documents[1], 26),
+    ] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.attachments (
+                id, workspace_id, document_id, uploader_id, status, name, reserved_size_bytes,
+                storage_key, created_at
+            ) VALUES ($1, $2, $3, $4, 'uploading', 'stale.bin', 4, $5,
+                      now() - make_interval(hours => $6))
+            "#,
+        )
+        .bind(id)
+        .bind(ws)
+        .bind(doc)
+        .bind(owner_id)
+        .bind(Uuid::now_v7().to_string())
+        .bind(hours)
+        .execute(&admin)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    // Another session holds A's upload session lock for the whole test.
+    let mut holder = sqlx::PgConnection::connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+        .bind(fvoci_server::attachments::ATTACHMENT_LOCK_NAMESPACE)
+        .bind(fvoci_server::db::context::lock_key_from_uuid(ids[0]))
+        .execute(&mut holder)
+        .await
+        .unwrap();
+
+    let cutoff = Utc::now() - ChronoDuration::hours(24);
+    let cancel = CancellationToken::new();
+    let run = |after| {
+        let pool = pool.clone();
+        let storage = storage.clone();
+        let cancel = cancel.clone();
+        async move {
+            run_stale_upload_gc(&pool, &storage, cutoff, after, 1, &cancel)
+                .await
+                .unwrap()
+        }
+    };
+
+    // Without a cursor every run would pick the stuck row again.
+    let first = run(None).await;
+    assert_eq!((first.claimed, first.purged), (1, 0));
+    assert_eq!(first.resume_after.map(|c| c.1), Some(ids[0]));
+    let second = run(first.resume_after).await;
+    assert_eq!(second.purged, 1);
+    assert!(!attachment_exists(&admin, ids[1]).await);
+    let third = run(second.resume_after).await;
+    assert_eq!(third.purged, 1);
+    assert!(!attachment_exists(&admin, ids[2]).await);
+    // Past the end: nothing left, and the cursor wraps to the start.
+    let fourth = run(third.resume_after).await;
+    assert_eq!(fourth.claimed, 0);
+    assert_eq!(fourth.resume_after, None);
+    let wrapped = run(fourth.resume_after).await;
+    assert_eq!((wrapped.claimed, wrapped.purged), (1, 0));
+    assert!(attachment_exists(&admin, ids[0]).await);
+
+    // Once the lock is gone the stuck row is purged too.
+    holder.close().await.unwrap();
+    let freed = run(None).await;
+    assert_eq!(freed.purged, 1);
+    assert!(!attachment_exists(&admin, ids[0]).await);
 
     let _ = std::fs::remove_dir_all(&root);
     admin.close().await;

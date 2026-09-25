@@ -438,6 +438,59 @@ pub async fn create_wiki_document(
     input: CreateDocumentInput<'_>,
     client_ip: Option<&str>,
 ) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    let created = create_wiki_document_inner(
+        pool,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+        None,
+    )
+    .await?;
+    Ok(created.map(|meta| meta.expect("unfenced create always returns the document")))
+}
+
+/// Lease of the import job a document is created for.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportFence {
+    pub job_id: Uuid,
+    pub lease_token: Uuid,
+}
+
+/// Async import variant: the creator must still be a workspace admin at
+/// execution time, and the document id is appended to the job's
+/// `created_refs` in the same transaction (source `importTx`). `Ok(Ok(None))`
+/// means the job's fence was lost and nothing was created.
+pub async fn create_wiki_document_for_import(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    fence: ImportFence,
+) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
+    create_wiki_document_inner(
+        pool,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        input,
+        None,
+        Some(fence),
+    )
+    .await
+}
+
+async fn create_wiki_document_inner(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateDocumentInput<'_>,
+    client_ip: Option<&str>,
+    fence: Option<ImportFence>,
+) -> Result<Result<Option<DocumentMeta>, DocumentDbError>, sqlx::Error> {
     let document_id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -453,6 +506,10 @@ pub async fn create_wiki_document(
     }
     let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
     if !wiki_can_edit(role) {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    if fence.is_some() && !role.is_some_and(|r| r.at_least(WorkspaceRole::Admin)) {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::Forbidden));
     }
@@ -580,10 +637,25 @@ pub async fn create_wiki_document(
     )
     .await?;
 
+    if let Some(fence) = fence {
+        if !crate::db::import_jobs::append_import_document_ref(
+            &mut tx,
+            workspace_id,
+            fence.job_id,
+            fence.lease_token,
+            document_id,
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return Ok(Ok(None));
+        }
+    }
+
     let row = fetch_document_row(&mut tx, workspace_id, document_id).await?;
     tx.commit().await?;
     match row {
-        Some(row) => Ok(Ok(row_to_meta(row, true))),
+        Some(row) => Ok(Ok(Some(row_to_meta(row, true)))),
         None => Ok(Err(DocumentDbError::NotFound)),
     }
 }

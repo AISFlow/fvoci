@@ -115,6 +115,10 @@ pub enum StorageError {
     /// The part body ended before, or ran past, its declared length.
     #[error("part body does not match its declared length")]
     LengthMismatch,
+    /// The client's request body failed mid-stream (disconnect or reset).
+    /// Nothing is stored; this is the client's failure, not the server's.
+    #[error("client request body failed")]
+    ClientBody,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 }
@@ -211,9 +215,7 @@ impl LocalStorage {
         while let Some(chunk) = stream.next().await {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
-                Err(err) => {
-                    return Err(StorageError::Io(io::Error::other(err)));
-                }
+                Err(_) => return Err(StorageError::ClientBody),
             };
             size_bytes += chunk.len() as u64;
             if size_bytes > max_bytes {
@@ -721,7 +723,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, StorageError::Io(_)));
+        assert!(matches!(err, StorageError::ClientBody), "{err:?}");
         assert!(writing_names(&storage.parts_dir(&key)).await.is_empty());
         assert!(storage.list_parts(&key).await.unwrap().is_empty());
     }

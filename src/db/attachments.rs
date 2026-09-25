@@ -1132,10 +1132,16 @@ impl std::fmt::Display for AttachmentDbError {
 pub struct StaleUpload {
     pub id: Uuid,
     pub workspace_id: Uuid,
+    pub created_at: chrono::DateTime<Utc>,
 }
 
+/// Position in the global `(created_at, id)` order of stale uploads.
+pub type StaleUploadCursor = (chrono::DateTime<Utc>, Uuid);
+
 /// At most `limit` incomplete uploads created before `cutoff`, across every
-/// workspace.
+/// workspace, in global `(created_at, id)` order strictly after `after`.
+/// Resuming from the previous batch's last row means rows that are skipped or
+/// fail on every run cannot keep later rows (in any workspace) out of reach.
 ///
 /// `fvoci.attachments` RLS has no system-context bypass, so this enumerates
 /// workspaces under the system context (which `fvoci.workspaces` allows) and
@@ -1144,6 +1150,7 @@ pub struct StaleUpload {
 pub async fn list_stale_uploading(
     pool: &PgPool,
     cutoff: chrono::DateTime<Utc>,
+    after: Option<StaleUploadCursor>,
     limit: i64,
 ) -> Result<Vec<StaleUpload>, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -1153,32 +1160,43 @@ pub async fn list_stale_uploading(
             .fetch_all(&mut *tx)
             .await?;
     restore_system(&mut tx, &previous).await?;
+    let (after_at, after_id) = match after {
+        Some((at, id)) => (Some(at), Some(id)),
+        None => (None, None),
+    };
     let mut stale = Vec::new();
     for workspace_id in workspace_ids {
-        let remaining = limit - stale.len() as i64;
-        if remaining <= 0 {
-            break;
-        }
         set_tenant(&mut tx, workspace_id).await?;
-        let ids: Vec<Uuid> = sqlx::query_scalar(
+        // Each workspace contributes at most `limit` rows; the global merge
+        // below keeps the oldest `limit` of them.
+        let rows: Vec<(Uuid, chrono::DateTime<Utc>)> = sqlx::query_as(
             r#"
-            SELECT id
+            SELECT id, created_at
             FROM fvoci.attachments
             WHERE workspace_id = $1
               AND status IN ('uploading', 'assembling')
               AND created_at < $2
+              AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4::uuid))
             ORDER BY created_at ASC, id ASC
-            LIMIT $3
+            LIMIT $5
             "#,
         )
         .bind(workspace_id)
         .bind(cutoff)
-        .bind(remaining)
+        .bind(after_at)
+        .bind(after_id)
+        .bind(limit)
         .fetch_all(&mut *tx)
         .await?;
-        stale.extend(ids.into_iter().map(|id| StaleUpload { id, workspace_id }));
+        stale.extend(rows.into_iter().map(|(id, created_at)| StaleUpload {
+            id,
+            workspace_id,
+            created_at,
+        }));
     }
     tx.commit().await?;
+    stale.sort_by_key(|row| (row.created_at, row.id));
+    stale.truncate(usize::try_from(limit).unwrap_or(0));
     Ok(stale)
 }
 

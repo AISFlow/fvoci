@@ -6,6 +6,7 @@ pub mod comments;
 pub mod documents;
 pub mod groups;
 pub mod ics;
+pub mod import;
 pub mod invitations;
 pub mod lookup;
 pub mod notifications;
