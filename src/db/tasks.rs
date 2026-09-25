@@ -14,7 +14,9 @@ use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::labels::{assignee_filter_member_exists, project_label_exists};
 use crate::db::milestones::project_milestone_exists;
 use crate::db::projects::{lock_project, project_permission, ProjectDbError};
+use crate::db::task_activity::{record_task_activity, task_activity_snapshot};
 use crate::projects::ProjectPermission;
+use crate::tasks::activity::{patch_activity_fields, ActivitySnapshot};
 use crate::tasks::dependency::{
     finish_date, required_dates_present, schedule_ends, violates_inequality, DependencyType,
     ScheduleEnds,
@@ -158,7 +160,7 @@ fn uuid_strings(ids: &[Uuid]) -> Vec<String> {
     ids.iter().map(ToString::to_string).collect()
 }
 
-async fn list_task_assignee_ids(
+pub(crate) async fn list_task_assignee_ids(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     task_id: Uuid,
@@ -178,7 +180,7 @@ async fn list_task_assignee_ids(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
-async fn list_task_label_ids(
+pub(crate) async fn list_task_label_ids(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     task_id: Uuid,
@@ -746,27 +748,27 @@ async fn load_status_info(
 }
 
 #[derive(Debug, Clone)]
-struct TaskRowRecord {
-    id: Uuid,
-    project_id: Uuid,
-    number: i32,
-    title: String,
-    task_type: String,
-    priority: String,
-    status_id: Uuid,
-    start_date: Option<NaiveDate>,
-    due_date: Option<NaiveDate>,
-    due_at: Option<DateTime<Utc>>,
-    estimate: Option<String>,
-    parent_id: Option<Uuid>,
-    milestone_id: Option<Uuid>,
-    sort_key: String,
-    schema_version: i32,
-    version: i32,
-    archived_at: Option<DateTime<Utc>>,
-    created_by: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+pub(crate) struct TaskRowRecord {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub number: i32,
+    pub title: String,
+    pub task_type: String,
+    pub priority: String,
+    pub status_id: Uuid,
+    pub start_date: Option<NaiveDate>,
+    pub due_date: Option<NaiveDate>,
+    pub due_at: Option<DateTime<Utc>>,
+    pub estimate: Option<String>,
+    pub parent_id: Option<Uuid>,
+    pub milestone_id: Option<Uuid>,
+    pub sort_key: String,
+    pub schema_version: i32,
+    pub version: i32,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub created_by: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 fn map_task_row(row: &sqlx::postgres::PgRow) -> Result<TaskRowRecord, sqlx::Error> {
@@ -821,7 +823,7 @@ fn row_to_meta(workspace_id: Uuid, row: TaskRowRecord, recurrence: Option<Value>
     }
 }
 
-async fn load_task_recurrence(
+pub(crate) async fn load_task_recurrence(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     task_id: Uuid,
@@ -917,6 +919,7 @@ async fn load_task_child_progress(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_task(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -925,6 +928,7 @@ pub async fn create_task(
     session_id: Uuid,
     input: CreateTaskInput<'_>,
     client_ip: Option<&str>,
+    channel: &str,
 ) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
     let task_id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
@@ -1108,6 +1112,16 @@ pub async fn create_task(
             }),
             client_ip,
         },
+    )
+    .await?;
+    record_task_activity(
+        &mut tx,
+        workspace_id,
+        task_id,
+        actor_user_id,
+        channel,
+        None,
+        &ActivitySnapshot::new(),
     )
     .await?;
 
@@ -1934,6 +1948,16 @@ async fn spawn_recurring_next_task(
         },
     )
     .await?;
+    record_task_activity(
+        tx,
+        workspace_id,
+        next_id,
+        actor_user_id,
+        "system",
+        None,
+        &ActivitySnapshot::new(),
+    )
+    .await?;
     Ok(Ok(()))
 }
 
@@ -2056,6 +2080,7 @@ fn patch_only_unarchives(input: &crate::tasks::patch::PatchTaskMetaInput) -> boo
         && input.label_ids.is_none()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn patch_task_meta(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2064,6 +2089,7 @@ pub async fn patch_task_meta(
     session_id: Uuid,
     input: crate::tasks::patch::PatchTaskMetaInput,
     client_ip: Option<&str>,
+    channel: &str,
 ) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
     let restores_archived = patch_only_unarchives(&input);
     let mut tx = pool.begin().await?;
@@ -2106,6 +2132,22 @@ pub async fn patch_task_meta(
             return Ok(Err(ProjectDbError::VersionConflict));
         }
     }
+
+    let activity_fields = patch_activity_fields(&input);
+    let before_activity = if activity_fields.is_empty() {
+        None
+    } else {
+        Some(
+            task_activity_snapshot(
+                &mut tx,
+                workspace_id,
+                &task.record,
+                task.recurrence.as_ref(),
+                &activity_fields,
+            )
+            .await?,
+        )
+    };
 
     let next_type = input.task_type.as_deref().unwrap_or(&task.record.task_type);
     let next_parent = match input.parent_id {
@@ -2477,10 +2519,32 @@ pub async fn patch_task_meta(
         }
     }
 
+    if let Some(before_activity) = before_activity {
+        let after_activity = task_activity_snapshot(
+            &mut tx,
+            workspace_id,
+            &row,
+            recurrence.as_ref(),
+            &activity_fields,
+        )
+        .await?;
+        record_task_activity(
+            &mut tx,
+            workspace_id,
+            task_id,
+            actor_user_id,
+            channel,
+            Some(&before_activity),
+            &after_activity,
+        )
+        .await?;
+    }
+
     tx.commit().await?;
     Ok(Ok(row_to_meta(workspace_id, row, recurrence)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn move_task(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2489,6 +2553,7 @@ pub async fn move_task(
     session_id: Uuid,
     input: crate::tasks::patch::MoveTaskInput,
     client_ip: Option<&str>,
+    channel: &str,
 ) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
     if input.before_id.is_some() && input.after_id.is_some() {
         return Ok(Err(ProjectDbError::InvalidMoveAnchors));
@@ -2517,6 +2582,15 @@ pub async fn move_task(
             return Ok(Err(ProjectDbError::VersionConflict));
         }
     }
+    let activity_fields = ["statusId", "recurrence"];
+    let before_activity = task_activity_snapshot(
+        &mut tx,
+        workspace_id,
+        &task.record,
+        task.recurrence.as_ref(),
+        &activity_fields,
+    )
+    .await?;
     let from_status_id = task.record.status_id;
     let result = transition_task_status(
         &mut tx,
@@ -2577,6 +2651,24 @@ pub async fn move_task(
     };
     let row = map_task_row(&row)?;
     let recurrence = load_task_recurrence(&mut tx, workspace_id, task_id).await?;
+    let after_activity = task_activity_snapshot(
+        &mut tx,
+        workspace_id,
+        &row,
+        recurrence.as_ref(),
+        &activity_fields,
+    )
+    .await?;
+    record_task_activity(
+        &mut tx,
+        workspace_id,
+        task_id,
+        actor_user_id,
+        channel,
+        Some(&before_activity),
+        &after_activity,
+    )
+    .await?;
     tx.commit().await?;
     Ok(Ok(row_to_meta(workspace_id, row, recurrence)))
 }

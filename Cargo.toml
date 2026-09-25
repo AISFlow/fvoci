@@ -120,6 +120,11 @@ path = "tests/task_milestones_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "task_activity_integration"
+path = "tests/task_activity_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "comment_integration"
 path = "tests/comment_integration.rs"
 required-features = ["db-tests"]

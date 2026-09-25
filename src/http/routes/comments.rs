@@ -68,7 +68,10 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-fn comment_to_output(comment: &crate::db::comments::CommentRow, viewer_id: Uuid) -> CommentOutput {
+pub(crate) fn comment_to_output(
+    comment: &crate::db::comments::CommentRow,
+    viewer_id: Uuid,
+) -> CommentOutput {
     let (reactions, other_reaction_count) = comment_output(comment, viewer_id);
     CommentOutput {
         id: comment.id,

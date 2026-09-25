@@ -188,7 +188,7 @@ fn decode_cursor(raw: &str, scope: &str) -> Result<Uuid, CommentDbError> {
     Ok(payload.id)
 }
 
-fn row_to_comment(row: &sqlx::postgres::PgRow) -> CommentRow {
+pub(crate) fn row_to_comment(row: &sqlx::postgres::PgRow) -> CommentRow {
     CommentRow {
         id: row.get("id"),
         workspace_id: row.get("workspace_id"),

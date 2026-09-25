@@ -386,6 +386,35 @@ pub(crate) async fn project_permission(
     ))
 }
 
+/// Effective permission on a live project by id, without taking the project
+/// lock (read-only display checks, e.g. an activity entry's parent title).
+pub(crate) async fn project_permission_by_id(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<ProjectPermission>, sqlx::Error> {
+    let visibility: Option<String> = sqlx::query_scalar(
+        "SELECT visibility FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(visibility) = visibility else {
+        return Ok(None);
+    };
+    let workspace_role = membership_role(tx, workspace_id, actor_user_id)
+        .await?
+        .unwrap_or(WorkspaceRole::Guest);
+    let member_role = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
+    Ok(Some(effective_permission(
+        workspace_role,
+        &visibility,
+        member_role,
+    )))
+}
+
 async fn record_project_event_and_audit(
     tx: &mut Transaction<'_, Postgres>,
     change: ProjectChangeRecord<'_>,

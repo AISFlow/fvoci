@@ -8,6 +8,7 @@ export async function invalidateTaskCaches(
 ): Promise<void> {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ["task", workspaceId, taskId] }),
+    queryClient.invalidateQueries({ queryKey: ["task-activity", workspaceId, taskId] }),
     queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId, projectId] }),
     queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] }),
   ]);
