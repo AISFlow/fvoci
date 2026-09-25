@@ -586,3 +586,100 @@ async fn labels_force_rls_and_pat_scopes() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Membership locks precede the project row lock on every write: an assignee PATCH
+/// waits on the assignee's lock before taking the project row, so a concurrent
+/// write by the assignee (membership lock, then project row) cannot deadlock.
+#[tokio::test]
+async fn assignee_patch_and_assignee_write_do_not_deadlock() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let b = add_workspace_user(&admin, workspace_id, "member", "bee").await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "DLK", "workspace").await;
+    let project_id: Uuid = project["id"].as_str().unwrap().parse().unwrap();
+    let (_, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "t"})),
+        Some(&cookie),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let task_id_for_get = task_id.clone();
+
+    // First step of any write by B: B's membership lock.
+    let mut b_tx = admin.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(fvoci_server::db::context::MEMBERSHIP_LOCK_NAMESPACE)
+        .bind(fvoci_server::db::context::lock_key_from_uuid(b.user_id))
+        .execute(&mut *b_tx)
+        .await
+        .unwrap();
+
+    let patch = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let b_id = b.user_id.to_string();
+        async move {
+            json_request(
+                app,
+                "PATCH",
+                &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}"),
+                Some(json!({"assigneeIds": [b_id]})),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+
+    // Read-only, bounded: the PATCH is waiting on B's advisory lock.
+    let mut waiting = false;
+    for _ in 0..400 {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'",
+        )
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        if n > 0 {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        waiting,
+        "PATCH never waited on the assignee's membership lock"
+    );
+
+    // Second step of B's write: the project row lock (as lock_project takes it).
+    sqlx::query(
+        "SELECT 1 FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 FOR NO KEY UPDATE",
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .execute(&mut *b_tx)
+    .await
+    .expect("B locks the project row without a deadlock");
+    b_tx.commit().await.unwrap();
+
+    let (status, body) = patch.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, detail) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id_for_get}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(
+        detail["assigneeIds"],
+        json!([b.user_id.to_string()]),
+        "{detail}"
+    );
+    harness.cleanup().await;
+}

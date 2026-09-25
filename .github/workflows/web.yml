@@ -35,6 +35,8 @@ jobs:
             specs: e2e/task-edit-flow.spec.ts
           - flow: task-assign-labels-flow
             specs: e2e/task-assign-labels-flow.spec.ts
+          - flow: workspace-groups-flow
+            specs: e2e/workspace-groups-flow.spec.ts
           - flow: wiki-lifecycle-flow
             specs: e2e/workspace-wiki-lifecycle.spec.ts
           - flow: comments-flow

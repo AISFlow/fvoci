@@ -55,3 +55,17 @@ export function projectLabelsQuery(workspaceId: string, projectId: string) {
     retry: false,
   });
 }
+
+export function projectLabelsQuery(workspaceId: string, projectId: string) {
+  return queryOptions({
+    queryKey: ["labels", workspaceId, projectId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels", {
+          params: { path: { workspace_id: workspaceId, project_id: projectId } },
+        }),
+      ),
+    enabled: Boolean(workspaceId) && Boolean(projectId),
+    retry: false,
+  });
+}
