@@ -2,9 +2,10 @@ use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
 use crate::db::documents::membership_role;
+use crate::db::projects::project_member_role;
 use crate::db::workspace::WorkspaceRole;
 use crate::display_id::{format_display_id, parse_display_id, ParsedDisplayId};
-use crate::projects::{effective_permission, ProjectMemberRole, ProjectPermission};
+use crate::projects::{effective_permission, ProjectPermission};
 use sqlx::{PgPool, Postgres, Transaction};
 
 #[derive(Debug, Clone)]
@@ -67,7 +68,15 @@ pub async fn lookup_display_id(
             tx.rollback().await?;
             return Ok(Ok(Vec::new()));
         };
-        if !acl.include_wiki {
+        let permission = crate::db::documents::document_permission(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            id,
+            true,
+        )
+        .await?;
+        if !permission.at_least(ProjectPermission::View) {
             tx.rollback().await?;
             return Ok(Ok(Vec::new()));
         }
@@ -100,18 +109,7 @@ pub async fn lookup_display_id(
         tx.rollback().await?;
         return Ok(Ok(Vec::new()));
     }
-    let member_role: Option<(String,)> = sqlx::query_as(
-        r#"
-        SELECT role FROM fvoci.project_members
-        WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(actor_user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let member_role = member_role.and_then(|(role,)| ProjectMemberRole::parse(&role));
+    let member_role = project_member_role(&mut tx, workspace_id, project_id, actor_user_id).await?;
     let permission = effective_permission(role, &visibility, member_role);
     if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
@@ -170,7 +168,6 @@ pub async fn lookup_display_id(
 #[derive(Debug, Clone)]
 struct SearchAcl {
     project_ids: Vec<Uuid>,
-    include_wiki: bool,
 }
 
 fn restrict_search_acl(acl: SearchAcl, project_filter: Option<Uuid>) -> SearchAcl {
@@ -178,11 +175,9 @@ fn restrict_search_acl(acl: SearchAcl, project_filter: Option<Uuid>) -> SearchAc
         None => acl,
         Some(project_id) if acl.project_ids.contains(&project_id) => SearchAcl {
             project_ids: vec![project_id],
-            include_wiki: false,
         },
         Some(_) => SearchAcl {
             project_ids: Vec::new(),
-            include_wiki: false,
         },
     }
 }
@@ -194,21 +189,27 @@ async fn search_project_acl(
     role: WorkspaceRole,
 ) -> Result<SearchAcl, sqlx::Error> {
     if role == WorkspaceRole::Guest {
-        let rows = sqlx::query_as::<_, (Uuid,)>(
+        let rows = sqlx::query_as::<_, (Uuid, String)>(
             r#"
-            SELECT project_id
-            FROM fvoci.project_members
-            WHERE workspace_id = $1 AND user_id = $2
+            SELECT p.id, p.visibility
+            FROM fvoci.projects p
+            WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
+            ORDER BY p.key COLLATE "C"
             "#,
         )
         .bind(workspace_id)
-        .bind(actor_user_id)
         .fetch_all(&mut **tx)
         .await?;
-        return Ok(SearchAcl {
-            project_ids: rows.into_iter().map(|(id,)| id).collect(),
-            include_wiki: false,
-        });
+        let mut project_ids = Vec::new();
+        for (project_id, vis) in rows {
+            let member_role =
+                project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
+            let permission = effective_permission(role, &vis, member_role);
+            if permission.at_least(ProjectPermission::View) {
+                project_ids.push(project_id);
+            }
+        }
+        return Ok(SearchAcl { project_ids });
     }
     let rows = sqlx::query_as::<_, (Uuid, String)>(
         r#"
@@ -223,27 +224,13 @@ async fn search_project_acl(
     .await?;
     let mut project_ids = Vec::new();
     for (project_id, visibility) in rows {
-        let member_role: Option<(String,)> = sqlx::query_as(
-            r#"
-            SELECT role FROM fvoci.project_members
-            WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(actor_user_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        let member_role = member_role.and_then(|(role,)| ProjectMemberRole::parse(&role));
+        let member_role = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
         let permission = effective_permission(role, &visibility, member_role);
         if permission.at_least(ProjectPermission::View) {
             project_ids.push(project_id);
         }
     }
-    Ok(SearchAcl {
-        project_ids,
-        include_wiki: true,
-    })
+    Ok(SearchAcl { project_ids })
 }
 
 async fn workspace_is_live(

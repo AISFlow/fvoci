@@ -6,6 +6,7 @@ pub mod collab_delivery;
 pub mod comments;
 pub mod context;
 pub mod documents;
+pub mod groups;
 pub mod identity;
 pub mod invitations;
 pub mod labels;

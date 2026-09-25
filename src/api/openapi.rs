@@ -12,14 +12,16 @@ use crate::api::dto::{
     AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
     CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
-    CreateDocumentBody, CreateLabelBody, CreateProjectBody, CreateTaskBody, CreateWorkspaceBody,
-    DocumentMetaResponse, ExpectedDatesBody, InvitationAcceptBody, InvitationConsentItem,
-    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    CreateDocumentBody, CreateGroupBody, CreateLabelBody, CreateProjectBody, CreateTaskBody,
+    CreateWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody, GroupListResponse,
+    GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput, InvitationAcceptBody,
+    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
     InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
     LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
     MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse, PatchCommentBody,
     PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchProjectBody, PatchTaskBody,
-    PatchWorkspaceBody, ProblemResponse, ProjectListResponse, ProjectMembersResponse,
+    PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody, ProjectGroupGrantListResponse,
+    ProjectGroupGrantOutput, ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse,
     ProjectOutput, PutAttachmentPartResponse, ResumeAttachmentUploadResponse,
     RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse,
     RevisionRestoreBody, RevisionRestoreResponse, SearchItemOutput, SearchListResponse,
@@ -92,6 +94,18 @@ impl Modify for CookieSecurityAddon {
         add_project_member,
         patch_project_member,
         delete_project_member,
+        list_groups,
+        create_group,
+        purge_group,
+        list_group_members,
+        add_group_member,
+        remove_group_member,
+        list_project_group_grants,
+        add_project_group_grant,
+        remove_project_group_grant,
+        list_document_group_grants,
+        add_document_group_grant,
+        remove_document_group_grant,
         get_project_workflow,
         lookup_display_id,
         workspace_search,
@@ -166,6 +180,16 @@ impl Modify for CookieSecurityAddon {
             ProjectListResponse,
             ProjectMembersResponse,
             AddProjectMemberBody,
+            CreateGroupBody,
+            GroupOutput,
+            GroupListResponse,
+            GroupMemberBody,
+            GroupMemberOutput,
+            GroupMemberListResponse,
+            ProjectGroupGrantBody,
+            ProjectGroupRevokeBody,
+            ProjectGroupGrantOutput,
+            ProjectGroupGrantListResponse,
             WorkflowOutput,
             CreateTaskBody,
             PatchTaskBody,
@@ -888,6 +912,235 @@ fn patch_project_member() {}
     )
 )]
 fn delete_project_member() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/groups",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace groups", body = GroupListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_groups() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/groups",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = CreateGroupBody,
+    responses(
+        (status = 201, description = "Created group", body = GroupOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_group() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/groups/{group_id}",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("group_id" = String, description = "Group id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted group", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Last private-project lead", body = ProblemResponse),
+    )
+)]
+fn purge_group() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/groups/{group_id}/members",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("group_id" = String, description = "Group id"),
+    ),
+    responses(
+        (status = 200, description = "Group members", body = GroupMemberListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_group_members() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/groups/{group_id}/members",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("group_id" = String, description = "Group id"),
+    ),
+    request_body = GroupMemberBody,
+    responses(
+        (status = 201, description = "Added group member", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Already a member", body = ProblemResponse),
+    )
+)]
+fn add_group_member() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/groups/{group_id}/members",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("group_id" = String, description = "Group id"),
+    ),
+    request_body = GroupMemberBody,
+    responses(
+        (status = 200, description = "Removed group member", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn remove_group_member() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups",
+    tag = "projects",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project group grants", body = ProjectGroupGrantListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_group_grants() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups",
+    tag = "projects",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = ProjectGroupGrantBody,
+    responses(
+        (status = 201, description = "Granted project group", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Already granted", body = ProblemResponse),
+    )
+)]
+fn add_project_group_grant() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups",
+    tag = "projects",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = ProjectGroupRevokeBody,
+    responses(
+        (status = 200, description = "Revoked project group", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Last private-project lead", body = ProblemResponse),
+    )
+)]
+fn remove_project_group_grant() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/groups",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Wiki document group grants", body = ProjectGroupGrantListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_document_group_grants() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/groups",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = ProjectGroupGrantBody,
+    responses(
+        (status = 201, description = "Granted wiki document group", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Already granted", body = ProblemResponse),
+    )
+)]
+fn add_document_group_grant() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/groups",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = ProjectGroupRevokeBody,
+    responses(
+        (status = 200, description = "Revoked wiki document group", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn remove_document_group_grant() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

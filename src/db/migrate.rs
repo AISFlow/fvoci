@@ -20,6 +20,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
     (include_str!("../../migrations/013_outbox.sql"), 13),
     (include_str!("../../migrations/014_search_index.sql"), 14),
     (include_str!("../../migrations/015_task_labels.sql"), 15),
+    (include_str!("../../migrations/016_groups.sql"), 16),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -395,6 +396,10 @@ mod tests {
         (
             15,
             "8b6a424957ef8a5a67804ea8b3f3d9990bbff43c91ab4dad10f2b682e864ce35",
+        ),
+        (
+            16,
+            "68dcd7c2f0edd54ee4ba4638dda9edbceef4e58b6174e537fb92c9abfe006ff5",
         ),
     ];
 

@@ -64,6 +64,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.attachment_text TO :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.projects TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.project_members TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.groups TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.group_members TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_members TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.workflows TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.statuses TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.tasks TO :"app_role";

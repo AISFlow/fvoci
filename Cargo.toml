@@ -161,6 +161,11 @@ path = "tests/api_token_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "group_integration"
+path = "tests/group_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "search_index"
 path = "tests/search_index.rs"
 required-features = ["db-tests"]

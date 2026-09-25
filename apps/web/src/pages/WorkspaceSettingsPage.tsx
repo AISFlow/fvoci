@@ -2,6 +2,7 @@ import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate } from "react-router-dom";
 import { useState } from "react";
+import { WorkspaceGroupsSection } from "@/features/settings/workspace-groups";
 import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity";
 import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
 import { WorkspaceTokensSection } from "@/features/settings/workspace-tokens";
@@ -90,6 +91,9 @@ export function WorkspaceSettingsPage() {
             currentUserId={me.data?.userId ?? null}
             currentUserRole={workspace.role}
           />
+        ) : null}
+        {roleAtLeast(workspace.role, "member") ? (
+          <WorkspaceGroupsSection workspaceId={workspace.id} canManage={canManage} />
         ) : null}
         {canManage ? <WorkspaceTokensSection workspaceId={workspace.id} /> : null}
       </div>

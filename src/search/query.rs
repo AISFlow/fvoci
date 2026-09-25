@@ -371,13 +371,38 @@ async fn load_search_acl(
             project_ids.push(locked.id);
         }
     }
-    // Guests have no document_members/groups yet; wiki ids stay empty.
+    let wiki_document_ids = if role == WorkspaceRole::Guest {
+        sqlx::query_as::<_, (Uuid,)>(
+            r#"
+            SELECT DISTINCT dm.document_id
+            FROM fvoci.document_members dm
+            INNER JOIN fvoci.group_members gm
+                ON gm.workspace_id = dm.workspace_id AND gm.group_id = dm.group_id
+            INNER JOIN fvoci.documents d
+                ON d.workspace_id = dm.workspace_id AND d.id = dm.document_id
+            WHERE dm.workspace_id = $1
+              AND gm.user_id = $2
+              AND dm.group_id IS NOT NULL
+              AND d.project_id IS NULL
+              AND d.deleted_at IS NULL
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(actor_user_id)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .map(|(id,)| id)
+        .collect()
+    } else {
+        Vec::new()
+    };
     let include_wiki = role != WorkspaceRole::Guest;
     Ok(restrict_search_acl(
         SearchAcl {
             project_ids,
             include_wiki,
-            wiki_document_ids: Vec::new(),
+            wiki_document_ids,
         },
         project_filter,
     ))
@@ -922,18 +947,18 @@ async fn visible_after_hydrate(
             let Some(document_id) = document_id else {
                 return Ok(false);
             };
-            if acl.include_wiki {
-                let permission = document_permission(
-                    tx,
-                    input.workspace_id,
-                    input.actor_user_id,
-                    document_id,
-                    true,
-                )
-                .await?;
-                return Ok(permission.at_least(ProjectPermission::View));
+            if !acl.include_wiki && !acl.wiki_document_ids.contains(&document_id) {
+                return Ok(false);
             }
-            Ok(acl.wiki_document_ids.contains(&document_id))
+            let permission = document_permission(
+                tx,
+                input.workspace_id,
+                input.actor_user_id,
+                document_id,
+                true,
+            )
+            .await?;
+            Ok(permission.at_least(ProjectPermission::View))
         }
     }
 }

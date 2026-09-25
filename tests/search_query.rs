@@ -700,3 +700,87 @@ async fn search_workspace_query_contract_and_leak_matrix() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn search_guest_wiki_group_grant_is_hydrated() {
+    let harness = TestDb::bootstrap().await;
+    let (_, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let meili = test_meili_config();
+    ensure_meili_index(&meili)
+        .await
+        .unwrap_or_else(|e| panic!("ensure index: {e}"));
+    let app = search_router(search_state(&harness.app_url, Some(meili.clone())).await);
+    let admin = admin_pool(&harness).await;
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "wiki-grant").await;
+
+    let token = format!("gwiki{}", Uuid::now_v7().simple());
+    let wiki_id = Uuid::now_v7();
+    insert_wiki_document(
+        &admin,
+        workspace_id,
+        wiki_id,
+        owner_id,
+        301,
+        &format!("{token} granted"),
+        "guest wiki body",
+    )
+    .await;
+    upsert_meili_sources(
+        &meili,
+        &[document_source(
+            workspace_id,
+            None,
+            wiki_id,
+            &format!("{token} granted"),
+            "guest wiki body",
+        )],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("upsert_meili_sources: {e}"));
+
+    let (status, before) = search(app.clone(), &guest.cookie, workspace_id, &token, "").await;
+    assert_eq!(status, StatusCode::OK, "{before:?}");
+    assert!(
+        !contains_id(&before, wiki_id),
+        "guest saw wiki without grant: {before:?}"
+    );
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "검색뷰어"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let group_id = created["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": guest.user_id.to_string()})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{wiki_id}/groups"),
+        Some(json!({"groupId": group_id, "role": "viewer"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, after) = search(app, &guest.cookie, workspace_id, &token, "").await;
+    assert_eq!(status, StatusCode::OK, "{after:?}");
+    assert!(
+        contains_id(&after, wiki_id),
+        "guest wiki group grant missing from search: {after:?}"
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}

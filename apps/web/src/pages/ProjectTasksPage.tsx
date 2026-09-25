@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
+import { ProjectGroupsSection } from "@/features/projects/project-groups";
 import {
   backlogStatusId,
   findProjectByKey,
@@ -159,6 +160,9 @@ export function ProjectTasksPage() {
               }
             }}
           />
+          {workspace ? (
+            <ProjectGroupsSection workspaceId={workspace.id} projectId={project.id} />
+          ) : null}
         </div>
       ) : null}
     </WorkspaceShell>
