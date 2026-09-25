@@ -1876,3 +1876,88 @@ async fn throughput_probe() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// A batch cancelled by the lease-bound timeout must not leave the workspace
+/// index lock held on an idle pooled connection.
+#[tokio::test]
+async fn cancelled_batch_releases_the_workspace_index_lock() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxcancel").await;
+    let event = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.created",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+
+    let ns = fvoci_server::db::context::SEARCH_INDEX_LOCK_NAMESPACE;
+    let key = fvoci_server::db::context::lock_key_from_uuid(fixture.workspace_id);
+    // Stand-in for a long rebuild holding the workspace lock.
+    let mut holder = admin.acquire().await.expect("holder");
+    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+        .bind(ns)
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .expect("hold lock");
+
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(2),
+            batch_limit: 10,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![search_index_consumer(meili.clone())],
+    )
+    .expect("dispatcher");
+    // The batch waits on the lock, times out (lease minus margin) and records a failure.
+    wait_until(Duration::from_secs(15), "batch timed out", || {
+        let pool = app.clone();
+        let id = event.id;
+        Box::pin(async move {
+            fetch_failure_state(&pool, SEARCH_INDEX_CONSUMER, id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+        .bind(ns)
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .expect("release");
+    drop(holder);
+    let others: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid \
+         WHERE l.locktype = 'advisory' AND l.granted AND a.datname = current_database() \
+           AND l.classid = $1::oid AND l.objid = $2::oid AND l.objsubid = 2",
+    )
+    .bind(ns as i64)
+    .bind((key as u32) as i64)
+    .fetch_one(&admin)
+    .await
+    .expect("lock holders");
+    assert_eq!(others, 0, "a cancelled batch left the workspace lock held");
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}

@@ -531,18 +531,18 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, SearchIndexError>>,
 {
-    let mut lock_conn = pool.acquire().await?;
-    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+    // Transaction-scoped lock: if this future is cancelled (e.g. the batch
+    // timeout), the dropped transaction rolls back before the connection is
+    // reused, which releases the lock. A session lock would stay held on an idle
+    // pooled connection and stall this workspace's indexing.
+    let mut lock_tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
         .bind(SEARCH_INDEX_LOCK_NAMESPACE)
         .bind(lock_key_from_uuid(workspace_id))
-        .execute(&mut *lock_conn)
+        .execute(&mut *lock_tx)
         .await?;
     let result = f().await;
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-        .bind(SEARCH_INDEX_LOCK_NAMESPACE)
-        .bind(lock_key_from_uuid(workspace_id))
-        .execute(&mut *lock_conn)
-        .await;
+    lock_tx.rollback().await?;
     result
 }
 
