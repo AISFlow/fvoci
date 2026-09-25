@@ -140,6 +140,7 @@ squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있�
 - 제한기는 프로세스 로컬·직접 socket IP 기준이며 신뢰 프록시·분산 제한은 없다.
 - 첨부 중단 업로드·임시 파일·협업 receipt/이벤트/감사 누적의 보존·정리 정책은 원본 대조 후 관련
   slice에서 닫는다. 응답 유실을 실패로 간주해 성공한 저장을 지우지 않는다.
+- 컨테이너 AppArmor docker-default 환경(예: GitHub runner)은 helper의 `oom_score_adj=1000` 쓰기를 거부한다. helper는 그대로 시작하고 서버가 1회 경고를 남기며, 이때 cgroup OOM이 서버 대신 helper를 고른다는 보장은 없다(컨테이너 mem_limit·helper별 AS/RSS 한도가 상한). #46
 - 검색 색인 소비자는 Meili 단건 쓰기마다 작업 완료를 기다려(측정 1.7–2.6 s) 직렬 처리량이 약 0.5 event/s다. 항상
   수렴하지만 부하 시 색인이 지연된다. 배치/비동기 대기 개선이 후속이다.
 - 초대·ICS 토큰이 URL 경로에 있어 `RUST_LOG=debug`/`tower_http=debug`에서 요청 URI 로그로 남을 수 있다(기본 info는
