@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -66,6 +65,7 @@ pub enum MeiliError {
     Http(u16),
     TaskFailed,
     Timeout,
+    Unavailable,
     Config,
     Io,
     Protocol,
@@ -82,6 +82,7 @@ impl std::fmt::Display for MeiliError {
             Self::Http(status) => write!(f, "meili HTTP {status}"),
             Self::TaskFailed => write!(f, "meili task failed"),
             Self::Timeout => write!(f, "meili operation timed out"),
+            Self::Unavailable => write!(f, "meili unavailable (connection failed)"),
             Self::Config => write!(f, "meili config"),
             Self::Io => write!(f, "meili key file"),
             Self::Protocol => write!(f, "meili protocol"),
@@ -93,8 +94,10 @@ impl std::error::Error for MeiliError {}
 
 impl From<reqwest::Error> for MeiliError {
     fn from(err: reqwest::Error) -> Self {
-        if err.is_timeout() || err.is_connect() {
+        if err.is_timeout() {
             Self::Timeout
+        } else if err.is_connect() {
+            Self::Unavailable
         } else {
             Self::Protocol
         }
@@ -460,6 +463,13 @@ async fn wait_meili_task_inner(
                 if tolerate_index_exists && task_error_is_index_already_exists(&got.json) {
                     return Ok(());
                 }
+                let code = got
+                    .json
+                    .get("error")
+                    .and_then(|e| e.get("code"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                tracing::warn!(task_uid, code, "meili task {status}");
                 return Err(MeiliError::TaskFailed);
             }
             _ => tokio::time::sleep(Duration::from_millis(TASK_POLL_MS)).await,
@@ -500,7 +510,7 @@ async fn create_index_if_missing(config: &MeiliConfig) -> Result<(), MeiliError>
     }
 }
 
-pub async fn ensure_meili_index(config: &MeiliConfig) -> Result<(), MeiliError> {
+async fn ensure_meili_index_op(config: &MeiliConfig) -> Result<(), MeiliError> {
     let key = config.ensure_key();
     {
         let done = ENSURE.lock().await;
@@ -521,7 +531,7 @@ pub async fn ensure_meili_index(config: &MeiliConfig) -> Result<(), MeiliError> 
     Ok(())
 }
 
-pub async fn upsert_meili_sources(
+async fn upsert_meili_sources_op(
     config: &MeiliConfig,
     docs: &[SearchSource],
 ) -> Result<(), MeiliError> {
@@ -564,7 +574,7 @@ pub async fn upsert_meili_sources(
     Ok(())
 }
 
-pub async fn delete_meili_sources(config: &MeiliConfig, ids: &[String]) -> Result<(), MeiliError> {
+async fn delete_meili_sources_op(config: &MeiliConfig, ids: &[String]) -> Result<(), MeiliError> {
     if ids.is_empty() {
         return Ok(());
     }
@@ -577,7 +587,7 @@ pub async fn delete_meili_sources(config: &MeiliConfig, ids: &[String]) -> Resul
     .await
 }
 
-pub async fn delete_meili_by_filter(config: &MeiliConfig, filter: &str) -> Result<(), MeiliError> {
+async fn delete_meili_by_filter_op(config: &MeiliConfig, filter: &str) -> Result<(), MeiliError> {
     enqueue_and_wait(
         config,
         reqwest::Method::POST,
@@ -695,7 +705,7 @@ const RETRIEVE: &[&str] = &[
     "chunkNo",
 ];
 
-pub async fn search_meili(
+async fn search_meili_op(
     config: &MeiliConfig,
     input: &MeiliSearchInput,
 ) -> Result<MeiliSearchPage, MeiliError> {
@@ -759,38 +769,82 @@ pub async fn search_meili(
 }
 
 fn write_key_file(path: &Path, key: &str) -> Result<(), MeiliError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, key.trim().as_bytes())?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-    if let Err(error) = std::os::unix::fs::chown(&tmp, Some(KEY_FILE_UID), Some(KEY_FILE_UID)) {
-        if fs::metadata(&tmp)?.uid() != KEY_FILE_UID {
-            return Err(error.into());
-        }
+    let _ = fs::remove_file(&tmp);
+    let written = (|| -> Result<(), MeiliError> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(key.trim().as_bytes())?;
+        file.sync_all()?;
+        // When run as root, hand the file to the image's service account; as any
+        // other user the file already belongs to the process that will read it.
+        // A wrong owner surfaces later as an unreadable FVOCI_MEILI_KEY_FILE.
+        let _ = std::os::unix::fs::chown(&tmp, Some(KEY_FILE_UID), Some(KEY_FILE_UID));
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(&tmp, path)?;
-    Ok(())
+    written
 }
 
-async fn key_can_call_meili(url: &str, key: &str, index_uid: &str) -> bool {
+/// A reusable server key must work on its own index and must NOT be able to
+/// manage keys (a master or admin key in the file would otherwise be kept).
+async fn key_is_scoped_for_index(url: &str, key: &str, index_uid: &str) -> bool {
     let config = MeiliConfig::new(url.to_string(), key.to_string(), index_uid.to_string());
-    match meili_request(
+    let own = meili_request(
         &config,
         reqwest::Method::GET,
         &format!("/indexes/{index_uid}"),
         None,
     )
-    .await
-    {
-        // 404: key is valid before the index exists. `version` is a global action
-        // and cannot be granted on an index-scoped key.
-        Ok(got) => got.status == 200 || got.status == 404,
-        Err(_) => false,
+    .await;
+    // 404: key is valid before the index exists.
+    let works = matches!(own, Ok(ref got) if got.status == 200 || got.status == 404);
+    if !works {
+        return false;
     }
+    matches!(
+        meili_request(&config, reqwest::Method::GET, "/keys", None).await,
+        Ok(got) if got.status == 403
+    )
+}
+
+const SCOPED_KEY_ACTIONS: &[&str] = &[
+    "search",
+    "documents.*",
+    "indexes.get",
+    "indexes.create",
+    "settings.get",
+    "settings.update",
+    "tasks.get",
+];
+
+fn listed_key_is_scoped(row: &Value, index_uid: &str) -> bool {
+    let indexes_ok = row
+        .get("indexes")
+        .and_then(Value::as_array)
+        .is_some_and(|indexes| indexes.len() == 1 && indexes[0].as_str() == Some(index_uid));
+    let actions_ok = row
+        .get("actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| {
+            actions
+                .iter()
+                .all(|a| a.as_str().is_some_and(|a| SCOPED_KEY_ACTIONS.contains(&a)))
+        });
+    indexes_ok && actions_ok
 }
 
 /// Create or reuse a scoped API key limited to `index_uid` and write it to `dest`.
@@ -804,7 +858,7 @@ pub async fn ensure_scoped_meili_key(
     if dest.is_file() {
         if let Ok(existing) = fs::read_to_string(dest) {
             let existing = existing.trim();
-            if existing.len() >= 16 && key_can_call_meili(url, existing, index_uid).await {
+            if existing.len() >= 16 && key_is_scoped_for_index(url, existing, index_uid).await {
                 return Ok(());
             }
         }
@@ -814,18 +868,14 @@ pub async fn ensure_scoped_meili_key(
         master_key.to_string(),
         index_uid.to_string(),
     );
-    let listed = meili_request(&master, reqwest::Method::GET, "/keys", None).await?;
+    let listed = meili_request(&master, reqwest::Method::GET, "/keys?limit=1000", None).await?;
     if listed.status != 200 {
         return Err(MeiliError::Http(listed.status));
     }
     if let Some(results) = listed.json.get("results").and_then(Value::as_array) {
         for row in results {
             let name = row.get("name").and_then(Value::as_str).unwrap_or("");
-            let indexes = row.get("indexes").and_then(Value::as_array);
-            let matches_index = indexes.is_some_and(|indexes| {
-                indexes.iter().any(|v| v.as_str() == Some(index_uid))
-                    || indexes.iter().any(|v| v.as_str() == Some("*"))
-            });
+            let matches_index = listed_key_is_scoped(row, index_uid);
             if name == SCOPED_KEY_NAME && matches_index {
                 if let Some(key) = row.get("key").and_then(Value::as_str) {
                     if key.len() >= 16 {
@@ -839,16 +889,7 @@ pub async fn ensure_scoped_meili_key(
     let body = json!({
         "name": SCOPED_KEY_NAME,
         "description": "FVOCI index-scoped API key",
-        "actions": [
-            "search",
-            "documents.*",
-            "indexes.get",
-            "indexes.create",
-            "indexes.update",
-            "settings.*",
-            "stats.get",
-            "tasks.get"
-        ],
+        "actions": SCOPED_KEY_ACTIONS,
         "indexes": [index_uid],
         "expiresAt": Value::Null,
     });
@@ -912,6 +953,11 @@ pub fn meili_config_from_values(
     if api_key.len() < 16 {
         return Err("FVOCI_MEILI_KEY must be at least 16 characters".into());
     }
+    let index_uid = meili_index_uid_from(index)?;
+    Ok(Some(MeiliConfig::new(url, api_key, index_uid)))
+}
+
+fn meili_index_uid_from(index: Option<&str>) -> Result<String, String> {
     let index_uid = index
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -923,7 +969,7 @@ pub fn meili_config_from_values(
     {
         return Err("FVOCI_MEILI_INDEX contains unsupported characters".into());
     }
-    Ok(Some(MeiliConfig::new(url, api_key, index_uid)))
+    Ok(index_uid)
 }
 
 pub fn meili_config_from_env() -> Result<Option<MeiliConfig>, String> {
@@ -951,18 +997,50 @@ pub async fn ensure_meili_key_file(dest: &Path) -> Result<(), String> {
         std::env::var("FVOCI_MEILI_URL").map_err(|_| "FVOCI_MEILI_URL is required".to_string())?;
     let url = parse_meili_url(&url)?;
     let master = read_meili_master_key_from_env()?;
-    let index = std::env::var("FVOCI_MEILI_INDEX").ok();
-    let index_uid = index
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or(MEILI_INDEX_UID);
-    ensure_scoped_meili_key(&url, &master, index_uid, dest)
+    let index_uid = meili_index_uid_from(std::env::var("FVOCI_MEILI_INDEX").ok().as_deref())?;
+    ensure_scoped_meili_key(&url, &master, &index_uid, dest)
         .await
         .map_err(|e| e.to_string())?;
     let key = fs::read_to_string(dest).map_err(|e| format!("meili key file: {e}"))?;
     let config = MeiliConfig::new(url, key.trim().to_string(), index_uid.to_string());
     ensure_meili_index(&config).await.map_err(|e| e.to_string())
+}
+
+/// One deadline per public operation (the source's single `opSignal`): request
+/// retries, batches and task polling all share it, so a stalled Meili cannot hold
+/// a caller for multiples of the per-request timeout.
+async fn with_op_deadline<T>(
+    fut: impl std::future::Future<Output = Result<T, MeiliError>>,
+) -> Result<T, MeiliError> {
+    tokio::time::timeout(Duration::from_millis(MEILI_OP_TIMEOUT_MS), fut)
+        .await
+        .unwrap_or(Err(MeiliError::Timeout))
+}
+
+pub async fn ensure_meili_index(config: &MeiliConfig) -> Result<(), MeiliError> {
+    with_op_deadline(ensure_meili_index_op(config)).await
+}
+
+pub async fn delete_meili_sources(config: &MeiliConfig, ids: &[String]) -> Result<(), MeiliError> {
+    with_op_deadline(delete_meili_sources_op(config, ids)).await
+}
+
+pub async fn delete_meili_by_filter(config: &MeiliConfig, filter: &str) -> Result<(), MeiliError> {
+    with_op_deadline(delete_meili_by_filter_op(config, filter)).await
+}
+
+pub async fn upsert_meili_sources(
+    config: &MeiliConfig,
+    docs: &[SearchSource],
+) -> Result<(), MeiliError> {
+    with_op_deadline(upsert_meili_sources_op(config, docs)).await
+}
+
+pub async fn search_meili(
+    config: &MeiliConfig,
+    input: &MeiliSearchInput,
+) -> Result<MeiliSearchPage, MeiliError> {
+    with_op_deadline(search_meili_op(config, input)).await
 }
 
 #[cfg(test)]

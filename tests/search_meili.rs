@@ -1,9 +1,9 @@
 #![cfg(feature = "db-tests")]
 
 use fvoci_server::search::meili::{
-    delete_meili_by_filter, ensure_meili_index, meili_eq, search_meili, search_source_id,
-    upsert_meili_sources, MeiliConfig, MeiliSearchInput, MeiliSearchScope, SearchSource,
-    SearchSourceKind,
+    delete_meili_by_filter, ensure_meili_index, ensure_scoped_meili_key, meili_eq, search_meili,
+    search_source_id, upsert_meili_sources, MeiliConfig, MeiliSearchInput, MeiliSearchScope,
+    SearchSource, SearchSourceKind,
 };
 use fvoci_server::search::text::index_document_text;
 use uuid::Uuid;
@@ -291,4 +291,72 @@ async fn ensure_upsert_search_scope_and_delete_by_filter() {
     .unwrap_or_else(|e| panic!("other workspace search: {e}"));
     assert_eq!(other.hits.len(), 1);
     assert_eq!(other.hits[0].resource_id, doc_b.to_string());
+}
+
+async fn keys_status(url: &str, key: &str) -> u16 {
+    reqwest::Client::new()
+        .get(format!("{}/keys", url.trim_end_matches('/')))
+        .bearer_auth(key)
+        .send()
+        .await
+        .expect("GET /keys")
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn scoped_key_is_index_only_reused_and_replaces_a_master_key_file() {
+    // CI passes the master key as FVOCI_MEILI_KEY; the server must only ever get
+    // the scoped key that this path writes.
+    let url = std::env::var("FVOCI_MEILI_URL").expect("FVOCI_MEILI_URL");
+    let master = std::env::var("FVOCI_MEILI_KEY").expect("FVOCI_MEILI_KEY");
+    let index_uid = format!("fvoci_{}", Uuid::now_v7().simple());
+    let dir = std::env::temp_dir().join(format!("fvoci-meili-key-{}", Uuid::now_v7()));
+    let dest = dir.join("key");
+
+    ensure_scoped_meili_key(&url, &master, &index_uid, &dest)
+        .await
+        .expect("create scoped key");
+    let scoped = std::fs::read_to_string(&dest).expect("key file");
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&dest).expect("key meta").permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o600, "key file must be private");
+    assert_ne!(scoped.trim(), master.trim());
+    assert_eq!(
+        keys_status(&url, scoped.trim()).await,
+        403,
+        "scoped key cannot manage keys"
+    );
+    ensure_meili_index(&MeiliConfig::new(
+        url.clone(),
+        scoped.trim().to_string(),
+        index_uid.clone(),
+    ))
+    .await
+    .expect("scoped key can ensure its own index");
+
+    ensure_scoped_meili_key(&url, &master, &index_uid, &dest)
+        .await
+        .expect("reuse scoped key");
+    assert_eq!(
+        std::fs::read_to_string(&dest).unwrap(),
+        scoped,
+        "valid scoped key is reused"
+    );
+
+    // A master key placed in the file must not be kept.
+    std::fs::write(&dest, master.trim()).unwrap();
+    ensure_scoped_meili_key(&url, &master, &index_uid, &dest)
+        .await
+        .expect("replace master key file");
+    let replaced = std::fs::read_to_string(&dest).unwrap();
+    assert_ne!(
+        replaced.trim(),
+        master.trim(),
+        "master key in the file must be replaced"
+    );
+    assert_eq!(keys_status(&url, replaced.trim()).await, 403);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

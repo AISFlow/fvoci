@@ -239,6 +239,10 @@ static PORTER: LazyLock<Porter> = LazyLock::new(Porter::new);
 
 /// Original Porter stem for `value`, matching npm `stemmer@2.0.1`.
 pub fn porter_stem(value: &str) -> String {
+    // The Porter port works on ASCII bytes; stem_text only passes [a-z]+ tokens.
+    if !value.is_ascii() {
+        return value.to_string();
+    }
     PORTER.stem(value)
 }
 

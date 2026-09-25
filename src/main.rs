@@ -101,11 +101,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(message.into());
     }
     if let Some(meili) = config.meili.as_ref() {
-        if let Err(error) = fvoci_server::search::meili::ensure_meili_index(meili).await {
-            pool.close().await;
-            return Err(format!("meilisearch index ensure failed: {error}").into());
+        use fvoci_server::search::meili::MeiliError;
+        match fvoci_server::search::meili::ensure_meili_index(meili).await {
+            Ok(()) => {
+                tracing::info!(url = %meili.url, index = %meili.index_uid, "meilisearch enabled");
+            }
+            // A rejected key is a configuration error: refuse to start.
+            Err(error @ (MeiliError::Http(401) | MeiliError::Http(403) | MeiliError::Config)) => {
+                pool.close().await;
+                return Err(format!("meilisearch configuration rejected: {error}").into());
+            }
+            // Like the source, an unavailable Meili must not take documents and
+            // collaboration down; search ensures the index lazily and reports a
+            // problem response until Meili is reachable.
+            Err(error) => {
+                tracing::warn!(url = %meili.url, index = %meili.index_uid, %error, "meilisearch not ready at startup; search will retry lazily");
+            }
         }
-        tracing::info!(url = %meili.url, index = %meili.index_uid, "meilisearch enabled");
     } else {
         tracing::info!("meilisearch disabled (FVOCI_MEILI_URL unset)");
     }
