@@ -2015,11 +2015,16 @@ async fn aborted_put_removes_writing_and_keeps_valid_part() {
     .expect("in-flight PUT should create a .writing file");
     aborted.abort();
     let _ = aborted.await;
-    assert_eq!(
-        writing_temps(&storage_root).await,
-        0,
-        "aborted PUT must remove staged .writing"
-    );
+    // If the abort lands while File::create is still on the blocking pool, that
+    // closure owns the unlink guard and removes the temp when it finishes, which
+    // can be just after the aborted task is joined. Wait (bounded, read-only).
+    let removed = tokio::time::timeout(Duration::from_secs(5), async {
+        while writing_temps(&storage_root).await > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(removed.is_ok(), "aborted PUT must remove staged .writing");
 
     let (status, resume, _) = json_request(
         app.clone(),
