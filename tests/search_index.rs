@@ -1974,63 +1974,87 @@ async fn batch_matches_sequential_processing_for_mixed_events() {
         .expect("admin");
     let app = pool::connect_app(&harness.app_url).await.expect("app");
     let fixture = seed(&admin, "qvoxequiv").await;
+    let ev = |verb: &'static str, ty: &'static str, id: Uuid| {
+        let admin = admin.clone();
+        async move { insert_event(&admin, fixture.workspace_id, verb, ty, id).await }
+    };
 
-    // Final PG state after a rename, a body edit, then trash + restore.
+    let sequential = test_meili();
+    ensure_meili_index(&sequential).await.expect("ensure seq");
+    let batched = test_meili();
+    ensure_meili_index(&batched).await.expect("ensure batch");
+    let consumer = search_index_consumer(batched.clone());
+    let deliver_both = |events: Vec<OutboxEvent>| {
+        let app = app.clone();
+        let sequential = sequential.clone();
+        let consumer = consumer.clone();
+        async move {
+            for event in &events {
+                process_search_index_event(&app, &sequential, event)
+                    .await
+                    .expect("sequential");
+            }
+            let (done, err) = consumer.deliver_batch(&app, Uuid::now_v7(), &events).await;
+            assert_eq!(done, events.len());
+            assert!(err.is_none(), "{err:?}");
+        }
+    };
+
+    // Phase 1: everything indexed, with a trash/restore round trip.
+    deliver_both(vec![
+        ev("document.created", "document", fixture.wiki_id).await,
+        ev("task.created", "task", fixture.task_id).await,
+        ev("comment.created", "comment", fixture.comment_id).await,
+        ev("attachment.created", "attachment", fixture.attachment_id).await,
+        ev("document.trashed", "document", fixture.wiki_id).await,
+        ev("document.restored", "document", fixture.wiki_id).await,
+    ])
+    .await;
+
+    // Phase 2: rename (must refresh the already-indexed comment and attachment),
+    // then a body-only edit last — last-event-only coalescing would lose the rename.
     sqlx::query("UPDATE fvoci.documents SET title = 'qvoxequiv renamed' WHERE id = $1")
         .bind(fixture.wiki_id)
         .execute(&admin)
         .await
         .expect("rename");
-    let ev = |verb: &'static str, ty: &'static str, id: Uuid| {
-        let admin = admin.clone();
-        async move { insert_event(&admin, fixture.workspace_id, verb, ty, id).await }
-    };
-    let mut events = vec![
-        ev("document.created", "document", fixture.wiki_id).await,
-        ev("comment.created", "comment", fixture.comment_id).await,
-        ev("attachment.created", "attachment", fixture.attachment_id).await,
-    ];
     let mut renamed = ev("document.updated", "document", fixture.wiki_id).await;
     renamed.payload = json!({ "title": "qvoxequiv renamed" });
     let mut body = ev("document.updated", "document", fixture.wiki_id).await;
     body.payload = json!({ "collab": true });
-    // Body-only edit last: coalescing to the last event alone would skip the
-    // rename's comment/attachment refresh.
-    events.push(ev("document.trashed", "document", fixture.wiki_id).await);
-    events.push(ev("document.restored", "document", fixture.wiki_id).await);
-    events.push(renamed);
-    events.push(body);
+    deliver_both(vec![renamed, body]).await;
 
-    let sequential = test_meili();
-    ensure_meili_index(&sequential).await.expect("ensure seq");
-    for event in &events {
-        process_search_index_event(&app, &sequential, event)
-            .await
-            .expect("sequential");
-    }
-    let batched = test_meili();
-    ensure_meili_index(&batched).await.expect("ensure batch");
-    let (done, err) = search_index_consumer(batched.clone())
-        .deliver_batch(&app, Uuid::now_v7(), &events)
-        .await;
-    assert_eq!(done, events.len());
-    assert!(err.is_none(), "{err:?}");
+    // Oracle: a fresh index rebuilt from the final PostgreSQL state.
+    let oracle = test_meili();
+    ensure_meili_index(&oracle).await.expect("ensure oracle");
+    let rebuild = rebuild_pool(&harness.admin_url)
+        .await
+        .expect("rebuild pool");
+    rebuild_search_index(&rebuild, &oracle, Some(fixture.workspace_id))
+        .await
+        .expect("rebuild oracle");
+    rebuild.close().await;
 
-    let mut seq_ids = meili_ids(&sequential).await;
-    let mut batch_ids = meili_ids(&batched).await;
-    seq_ids.sort();
-    batch_ids.sort();
-    assert!(!seq_ids.is_empty());
-    assert_eq!(seq_ids, batch_ids, "same indexed resources");
-    for id in &seq_ids {
-        let mut a = meili_doc(&sequential, id).await;
-        let mut b = meili_doc(&batched, id).await;
-        for doc in [&mut a, &mut b] {
-            if let Some(map) = doc.as_object_mut() {
-                map.remove("_rankingScore");
+    let mut oracle_ids = meili_ids(&oracle).await;
+    oracle_ids.sort();
+    assert!(!oracle_ids.is_empty());
+    for (label, index) in [("sequential", &sequential), ("batch", &batched)] {
+        let mut ids = meili_ids(index).await;
+        ids.sort();
+        assert_eq!(
+            ids, oracle_ids,
+            "{label}: same indexed resources as a rebuild"
+        );
+        for id in &oracle_ids {
+            let mut got = meili_doc(index, id).await;
+            let mut want = meili_doc(&oracle, id).await;
+            for doc in [&mut got, &mut want] {
+                if let Some(map) = doc.as_object_mut() {
+                    map.remove("_rankingScore");
+                }
             }
+            assert_eq!(got, want, "{label}: document {id} differs from a rebuild");
         }
-        assert_eq!(a, b, "document {id} differs between sequential and batch");
     }
 
     app.close().await;
