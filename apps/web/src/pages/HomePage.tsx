@@ -122,14 +122,16 @@ export function HomePage() {
               <div>
                 <strong>{workspace.name}</strong>
                 <p className="text-dense text-muted-foreground">{workspace.slug}</p>
+                <p className="text-dense text-muted-foreground">
+                  {t("dashboard.workspace.documentCount", { count: workspace.documentCount })}
+                  {" · "}
+                  {t("dashboard.workspace.assignedCount", { count: workspace.assignedCount })}
+                </p>
               </div>
               <span className="text-caption text-muted-foreground">{workspace.role}</span>
             </Link>
           ))}
         </div>
-        <p className="unavailable-note mt-6">
-          {t("workspace.counts.notice")}
-        </p>
       </main>
       <WorkspaceCreateDialog
         open={createOpen}

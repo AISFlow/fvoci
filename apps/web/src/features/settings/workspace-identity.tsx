@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formFieldMessage } from "@/lib/form-issues";
-import { workspaceNameInput } from "@/lib/validators";
+import { workspaceDeleteInput, workspaceNameInput } from "@/lib/validators";
 import "../settings/settings-shell.css";
 
 export function WorkspaceIdentitySection({
@@ -15,22 +15,34 @@ export function WorkspaceIdentitySection({
   workspaceSlug,
   workspaceKind,
   canManage,
+  isOwner,
   namePending,
   nameError,
   onSaveName,
+  deletePending,
+  deleteError,
+  onDelete,
 }: {
   workspaceName: string;
   workspaceSlug: string;
   workspaceKind: string;
   canManage: boolean;
+  isOwner: boolean;
   namePending: boolean;
   nameError: string | null;
   onSaveName: (name: string) => Promise<void>;
+  deletePending: boolean;
+  deleteError: string | null;
+  onDelete: (confirmSlug: string) => Promise<void>;
 }) {
   const [nameSaved, setNameSaved] = useState(false);
   const nameForm = useForm<{ name: string }>({
     resolver: zodResolver(workspaceNameInput),
     defaultValues: { name: workspaceName },
+  });
+  const deleteForm = useForm<{ confirmSlug: string }>({
+    resolver: zodResolver(workspaceDeleteInput),
+    defaultValues: { confirmSlug: "" },
   });
   const nameDirty = nameForm.formState.isDirty;
 
@@ -43,6 +55,10 @@ export function WorkspaceIdentitySection({
   }, [nameDirty]);
 
   const nameFieldError = formFieldMessage(nameForm.formState.errors.name, "name");
+  const confirmSlugError = formFieldMessage(
+    deleteForm.formState.errors.confirmSlug,
+    "confirmSlug",
+  );
 
   return (
     <section className="settings-section">
@@ -97,6 +113,54 @@ export function WorkspaceIdentitySection({
       ) : null}
       {workspaceKind === "team" && !canManage ? (
         <p className="text-ui text-muted-foreground">{t("workspace.settings.readOnly")}</p>
+      ) : null}
+      {workspaceKind === "team" && isOwner ? (
+        <details className="settings-disclosure">
+          <summary className="settings-disclosure__summary">{t("workspace.delete")}</summary>
+          <div className="settings-disclosure__body">
+            <form
+              onSubmit={deleteForm.handleSubmit(async (values) => {
+                try {
+                  await onDelete(values.confirmSlug);
+                } catch {
+                  return;
+                }
+              })}
+              noValidate
+              className="settings-form"
+            >
+              <Label htmlFor="workspace-delete-confirm">{t("workspace.deleteConfirm")}</Label>
+              <Input
+                id="workspace-delete-confirm"
+                type="text"
+                autoComplete="off"
+                disabled={deletePending}
+                aria-invalid={confirmSlugError || deleteError ? true : undefined}
+                aria-describedby={
+                  confirmSlugError ? "workspace-delete-confirm-error" : undefined
+                }
+                {...deleteForm.register("confirmSlug")}
+              />
+              {confirmSlugError ? (
+                <p
+                  id="workspace-delete-confirm-error"
+                  role="alert"
+                  className="settings-notice settings-notice--danger"
+                >
+                  {confirmSlugError}
+                </p>
+              ) : null}
+              {deleteError ? (
+                <p role="alert" className="settings-notice settings-notice--danger">
+                  {deleteError}
+                </p>
+              ) : null}
+              <Button type="submit" size="sm" variant="destructive" disabled={deletePending}>
+                {t("workspace.delete")}
+              </Button>
+            </form>
+          </div>
+        </details>
       ) : null}
       <p className="unavailable-note">{t("workspace.settings.unsupported.notice")}</p>
     </section>
