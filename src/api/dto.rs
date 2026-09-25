@@ -1056,6 +1056,17 @@ pub struct TaskListItemOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskDependencyOutput {
+    pub blocker_id: String,
+    pub blocked_id: String,
+    #[serde(rename = "type")]
+    pub dependency_type: String,
+    pub lag_days: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct TaskListResponse {
     pub items: Vec<TaskListItemOutput>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
@@ -1104,7 +1115,7 @@ pub struct TaskOutput {
     pub can_edit: bool,
     pub assignee_ids: Vec<String>,
     pub label_ids: Vec<String>,
-    pub dependencies: Vec<serde_json::Value>,
+    pub dependencies: Vec<TaskDependencyOutput>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub child_progress: Option<TaskChildProgressOutput>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
@@ -1145,6 +1156,62 @@ pub struct PatchLabelBody {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MilestoneOutput {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub due_date: Option<NaiveDate>,
+    pub sort_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MilestoneListResponse {
+    pub items: Vec<MilestoneOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateMilestoneBody {
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_double_option_date")]
+    pub due_date: Option<Option<NaiveDate>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchMilestoneBody {
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option_date")]
+    pub due_date: Option<Option<NaiveDate>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateTaskDependencyBody {
+    pub blocked_id: Uuid,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    #[serde(rename = "type")]
+    pub dependency_type: Option<String>,
+    pub lag_days: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskDependencyListResponse {
+    pub items: Vec<TaskDependencyOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

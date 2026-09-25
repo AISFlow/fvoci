@@ -12,6 +12,7 @@ pub mod invitations;
 pub mod labels;
 pub mod lookup;
 pub mod migrate;
+pub mod milestones;
 pub mod outbox;
 pub mod outbox_recover;
 pub mod pool;

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { ProjectGroupsSection } from "@/features/projects/project-groups";
+import { ProjectMilestonesSection } from "@/features/projects/project-milestones";
 import {
   backlogStatusId,
   findProjectByKey,
@@ -165,6 +166,13 @@ export function ProjectTasksPage() {
               }
             }}
           />
+          {workspace ? (
+            <ProjectMilestonesSection
+              workspaceId={workspace.id}
+              projectId={project.id}
+              canManage={project.status === "active" && roleAtLeast(workspace.role, "member")}
+            />
+          ) : null}
           {workspace ? (
             <ProjectGroupsSection
               workspaceId={workspace.id}

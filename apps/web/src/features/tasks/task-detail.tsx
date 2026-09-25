@@ -3,9 +3,7 @@ import { Link } from "react-router-dom";
 import { projectTasksPath } from "@/lib/href";
 import type { WorkflowStatus } from "@/features/projects/queries";
 import { TaskDetailForm } from "./task-detail-form";
-import type { TaskDetail } from "./queries";
-import type { TaskListItem } from "./queries";
-import type { LabelItem } from "./queries";
+import type { TaskDetail, TaskListItem, LabelItem, MilestoneItem } from "./queries";
 import type { MemberOutput } from "@/lib/contracts";
 import "@/features/projects/projects.css";
 
@@ -18,6 +16,8 @@ export function TaskDetailView({
   parentItems,
   members,
   labels,
+  milestones,
+  dependencyCandidates,
   readOnly,
   canEdit,
   pending,
@@ -33,6 +33,9 @@ export function TaskDetailView({
   onDueDateBlur,
   onAssigneesChange,
   onLabelsChange,
+  onMilestoneChange,
+  onAddDependency,
+  onRemoveDependency,
   onArchiveToggle,
   onTrash,
 }: {
@@ -44,6 +47,8 @@ export function TaskDetailView({
   parentItems: readonly Pick<TaskListItem, "id" | "type" | "number" | "title">[];
   members: readonly MemberOutput[];
   labels: readonly LabelItem[];
+  milestones: readonly MilestoneItem[];
+  dependencyCandidates: readonly Pick<TaskListItem, "id" | "number" | "title">[];
   readOnly: boolean;
   canEdit: boolean;
   pending?: boolean;
@@ -59,6 +64,13 @@ export function TaskDetailView({
   onDueDateBlur: (value: string) => void | Promise<void>;
   onAssigneesChange: (assigneeIds: string[]) => void | Promise<void>;
   onLabelsChange: (labelIds: string[]) => void | Promise<void>;
+  onMilestoneChange: (milestoneId: string | null) => void | Promise<void>;
+  onAddDependency: (input: {
+    blockedId: string;
+    type: "FS" | "SS" | "FF";
+    lagDays: number;
+  }) => void | Promise<void>;
+  onRemoveDependency: (edge: { blockerId: string; blockedId: string }) => void | Promise<void>;
   onArchiveToggle: (archived: boolean) => void | Promise<void>;
   onTrash: () => void | Promise<void>;
 }) {
@@ -79,6 +91,8 @@ export function TaskDetailView({
         parentItems={parentItems}
         members={members}
         labels={labels}
+        milestones={milestones}
+        dependencyCandidates={dependencyCandidates}
         readOnly={readOnly}
         canEdit={canEdit}
         pending={pending}
@@ -93,6 +107,9 @@ export function TaskDetailView({
         onDueDateBlur={onDueDateBlur}
         onAssigneesChange={onAssigneesChange}
         onLabelsChange={onLabelsChange}
+        onMilestoneChange={onMilestoneChange}
+        onAddDependency={onAddDependency}
+        onRemoveDependency={onRemoveDependency}
         onArchiveToggle={onArchiveToggle}
         onTrash={onTrash}
       />

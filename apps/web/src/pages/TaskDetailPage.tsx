@@ -14,7 +14,7 @@ import {
 import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features/tasks/task-errors";
 import { TaskDetailView } from "@/features/tasks/task-detail";
 import { lookupQuery, resolveLookupTarget } from "@/features/tasks/lookup";
-import { taskListQuery, taskQuery, projectLabelsQuery } from "@/features/tasks/queries";
+import { taskListQuery, taskQuery, projectLabelsQuery, projectMilestonesQuery } from "@/features/tasks/queries";
 import { membersQuery } from "@/lib/queries";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
@@ -55,6 +55,9 @@ export function TaskDetailPage() {
   const members = useQuery(membersQuery(workspace?.id ?? ""));
   const labels = useQuery(
     projectLabelsQuery(workspace?.id ?? "", project?.id ?? task.data?.projectId ?? ""),
+  );
+  const milestones = useQuery(
+    projectMilestonesQuery(workspace?.id ?? "", project?.id ?? task.data?.projectId ?? ""),
   );
 
   const workspaceId = workspace?.id ?? "";
@@ -222,6 +225,12 @@ export function TaskDetailPage() {
           parentItems={parentItems}
           members={members.data?.items ?? []}
           labels={labels.data?.items ?? []}
+          milestones={milestones.data?.items ?? []}
+          dependencyCandidates={parentItems.map((item) => ({
+            id: item.id,
+            number: item.number,
+            title: item.title,
+          }))}
           readOnly={!task.data.canEdit || task.data.archivedAt !== null}
           canEdit={task.data.canEdit}
           pending={pending}
@@ -278,6 +287,50 @@ export function TaskDetailPage() {
           }}
           onLabelsChange={async (labelIds) => {
             await runPatch({ labelIds });
+          }}
+          onMilestoneChange={async (milestoneId) => {
+            await runPatch({ milestoneId });
+          }}
+          onAddDependency={async (input) => {
+            if (!task.data) return;
+            setFieldError(null);
+            setActionError(null);
+            try {
+              await ensureOk(
+                await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies", {
+                  params: { path: { workspace_id: workspaceId, task_id: task.data.id } },
+                  body: input,
+                }),
+              );
+              await afterMutation();
+            } catch (err) {
+              setActionError(taskMutationErrorMessage(err, "task.dep.add.failed"));
+              await refetchAfterConflict(err);
+              throw err;
+            }
+          }}
+          onRemoveDependency={async (edge) => {
+            setFieldError(null);
+            setActionError(null);
+            try {
+              await ensureOk(
+                await api.DELETE(
+                  "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies/{blocked_id}",
+                  {
+                    params: {
+                      path: {
+                        workspace_id: workspaceId,
+                        task_id: edge.blockerId,
+                        blocked_id: edge.blockedId,
+                      },
+                    },
+                  },
+                ),
+              );
+              await afterMutation();
+            } catch (err) {
+              setActionError(taskMutationErrorMessage(err, "task.dep.remove.failed"));
+            }
           }}
           onArchiveToggle={async (archived) => {
             await runPatch({ archived });

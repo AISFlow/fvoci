@@ -12,23 +12,26 @@ use crate::api::dto::{
     AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
     CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
-    CreateDocumentBody, CreateGroupBody, CreateLabelBody, CreateProjectBody, CreateTaskBody,
-    CreateWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody, GroupListResponse,
-    GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput, InvitationAcceptBody,
-    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    CreateDocumentBody, CreateGroupBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody,
+    CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody, DocumentMetaResponse,
+    ExpectedDatesBody, GroupListResponse, GroupMemberBody, GroupMemberListResponse,
+    GroupMemberOutput, GroupOutput, InvitationAcceptBody, InvitationConsentItem,
+    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
     InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
     LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
-    MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse, PatchCommentBody,
-    PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchProjectBody, PatchTaskBody,
-    PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody, ProjectGroupGrantListResponse,
-    ProjectGroupGrantOutput, ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse,
-    ProjectOutput, PutAttachmentPartResponse, ResumeAttachmentUploadResponse,
-    RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse,
-    RevisionRestoreBody, RevisionRestoreResponse, SearchItemOutput, SearchListResponse,
-    SearchSnippetPiece, SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse,
-    SortDocumentBody, TaskChildOutput, TaskChildProgressOutput, TaskListResponse, TaskMetaOutput,
-    TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse,
-    WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+    MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
+    OkResponse, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
+    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
+    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
+    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
+    PutAttachmentPartResponse, ResumeAttachmentUploadResponse, RevisionCreateResponse,
+    RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
+    RevisionRestoreResponse, SearchItemOutput, SearchListResponse, SearchSnippetPiece,
+    SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, SortDocumentBody,
+    TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
+    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -121,6 +124,13 @@ impl Modify for CookieSecurityAddon {
         create_label,
         update_label,
         delete_label,
+        list_project_milestones,
+        create_milestone,
+        update_milestone,
+        delete_milestone,
+        list_project_dependencies,
+        add_task_dependency,
+        remove_task_dependency,
         create_document,
         list_tree,
         get_document,
@@ -205,6 +215,13 @@ impl Modify for CookieSecurityAddon {
             LabelListResponse,
             CreateLabelBody,
             PatchLabelBody,
+            MilestoneOutput,
+            MilestoneListResponse,
+            CreateMilestoneBody,
+            PatchMilestoneBody,
+            TaskDependencyOutput,
+            TaskDependencyListResponse,
+            CreateTaskDependencyBody,
             LookupItemOutput,
             LookupListResponse,
             SearchSnippetPiece,
@@ -1426,6 +1443,134 @@ fn update_label() {}
     )
 )]
 fn delete_label() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project milestones", body = MilestoneListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_milestones() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = CreateMilestoneBody,
+    responses(
+        (status = 201, description = "Created milestone", body = MilestoneOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_milestone() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones/{milestone_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("milestone_id" = String, description = "Milestone id"),
+    ),
+    request_body = PatchMilestoneBody,
+    responses(
+        (status = 200, description = "Milestone updated", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn update_milestone() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones/{milestone_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("milestone_id" = String, description = "Milestone id"),
+    ),
+    responses(
+        (status = 200, description = "Milestone deleted", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn delete_milestone() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/dependencies",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project dependencies", body = TaskDependencyListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_dependencies() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    request_body = CreateTaskDependencyBody,
+    responses(
+        (status = 200, description = "Dependency added", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn add_task_dependency() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies/{blocked_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+        ("blocked_id" = String, description = "Blocked task id"),
+    ),
+    responses(
+        (status = 200, description = "Dependency removed", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn remove_task_dependency() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

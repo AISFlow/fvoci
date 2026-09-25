@@ -525,7 +525,12 @@ pub fn map_project_error(err: ProjectDbError) -> AppError {
         ProjectDbError::AssigneeIsNotAMember => {
             AppError::from_code(ProblemCode::AssigneeIsNotAMember)
         }
-        ProjectDbError::LabelNotFound => AppError::from_code(ProblemCode::NotFound),
+        ProjectDbError::LabelNotFound
+        | ProjectDbError::MilestoneNotFound
+        | ProjectDbError::DependencyNotFound => AppError::from_code(ProblemCode::NotFound),
+        ProjectDbError::DependencyCycle
+        | ProjectDbError::DependencyContradiction
+        | ProjectDbError::TaskCannotBlockItself => AppError::from_code(ProblemCode::InvalidInput),
         ProjectDbError::InvalidInput => AppError::from_code(ProblemCode::InvalidInput),
         ProjectDbError::InvalidCursor => AppError {
             status: StatusCode::BAD_REQUEST,

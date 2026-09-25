@@ -41,6 +41,7 @@ pub struct PatchTaskMetaInput {
     pub due_at: FieldUpdate<DateTime<Utc>>,
     pub estimate: FieldUpdate<String>,
     pub parent_id: FieldUpdate<Uuid>,
+    pub milestone_id: FieldUpdate<Uuid>,
     pub recurrence: FieldUpdate<Value>,
     pub archived: Option<bool>,
     pub expected_dates: Option<ExpectedDatesInput>,
