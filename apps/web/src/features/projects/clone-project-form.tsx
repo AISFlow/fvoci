@@ -80,7 +80,7 @@ export function CloneProjectForm({
           visibility: parsed.body.visibility,
           description: parsed.body.description,
           icon: parsed.body.icon,
-          leadUserId: values.leadUserId,
+          ...(parsed.body.leadUserId ? { leadUserId: parsed.body.leadUserId } : {}),
         };
         try {
           await onSubmit(body);

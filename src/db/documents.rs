@@ -176,7 +176,7 @@ fn utf16_len(value: &str) -> usize {
     value.encode_utf16().count()
 }
 
-fn depth_of(path: &str) -> i32 {
+pub(crate) fn depth_of(path: &str) -> i32 {
     path.split('.').count() as i32
 }
 
@@ -969,7 +969,7 @@ pub(crate) async fn subtree_ids(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
-async fn is_descendant(
+pub(crate) async fn is_descendant(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     ancestor_id: Uuid,

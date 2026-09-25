@@ -778,6 +778,8 @@ pub async fn clone_project(
         return Ok(Err(ProjectDbError::NotFound));
     }
 
+    lock_tree(&mut tx, workspace_id).await?;
+
     let source = lock_project(&mut tx, workspace_id, source_project_id).await?;
     let Some(source) = source else {
         tx.rollback().await?;
@@ -800,8 +802,6 @@ pub async fn clone_project(
         Some(value) => optional_text_to_db(value),
         None => source.icon.clone(),
     };
-
-    lock_tree(&mut tx, workspace_id).await?;
 
     let inserted = sqlx::query_as::<_, (Uuid,)>(
         r#"

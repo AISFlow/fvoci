@@ -2404,3 +2404,50 @@ async fn project_documents_tree_create_and_move_emit_events() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn project_document_move_rejects_descendant_cycle() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _user_id, workspace_id) = setup_session(&harness).await;
+
+    let project = create_project(app.clone(), &cookie, workspace_id, "CYC", "workspace").await;
+    let project_id = project["id"].as_str().unwrap();
+    let root_id = project["rootDocumentId"].as_str().unwrap();
+
+    let (status, parent) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents"),
+        Some(json!({"parentId": root_id, "title": "Parent"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{parent:?}");
+    let parent_id = parent["id"].as_str().unwrap();
+
+    let (status, child) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents"),
+        Some(json!({"parentId": parent_id, "title": "Child"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{child:?}");
+    let child_id = child["id"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{parent_id}/move"
+        ),
+        Some(json!({"newParentId": child_id})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert_eq!(body["code"], "document_cycle");
+
+    harness.cleanup().await;
+}

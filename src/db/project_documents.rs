@@ -7,10 +7,11 @@ use uuid::Uuid;
 
 use crate::db::context::{lock_tree, set_tenant};
 use crate::db::documents::{
-    assert_document_writable, between, empty_document_json, fetch_document_row, format_display_id,
-    lock_document_rows, move_subtree, record_document_event_and_audit, row_to_meta, subtree_ids,
-    CreateDocumentInput, DocumentDbError, DocumentMeta, TreeNode, UpdateDocumentMetaInput,
-    DOCUMENT_SCHEMA_VERSION, MAX_TREE_DEPTH,
+    assert_document_writable, between, depth_of, empty_document_json, fetch_document_row,
+    format_display_id, is_descendant, lock_document_rows, move_subtree,
+    record_document_event_and_audit, row_to_meta, subtree_ids, CreateDocumentInput,
+    DocumentDbError, DocumentMeta, TreeNode, UpdateDocumentMetaInput, DOCUMENT_SCHEMA_VERSION,
+    MAX_TREE_DEPTH,
 };
 use crate::db::documents::{
     lock_membership_users, recheck_session, session_is_live, workspace_is_live,
@@ -51,6 +52,7 @@ async fn assert_project_document(
     project_id: Uuid,
     document_id: Uuid,
     require_live: bool,
+    on_affiliation_mismatch: DocumentDbError,
 ) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
     let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
         r#"
@@ -67,7 +69,7 @@ async fn assert_project_document(
         return Ok(Err(DocumentDbError::NotFound));
     };
     if doc_project_id != Some(project_id) {
-        return Ok(Err(DocumentDbError::AffiliationMismatch));
+        return Ok(Err(on_affiliation_mismatch));
     }
     if require_live && deleted_at.is_some() {
         return Ok(Err(DocumentDbError::NotFound));
@@ -231,7 +233,16 @@ pub async fn create_project_document(
 
     let parent_id = input.parent_id;
     let parent_path = if let Some(parent_id) = parent_id {
-        match assert_project_document(&mut tx, workspace_id, project_id, parent_id, true).await? {
+        match assert_project_document(
+            &mut tx,
+            workspace_id,
+            project_id,
+            parent_id,
+            true,
+            DocumentDbError::AffiliationMismatch,
+        )
+        .await?
+        {
             Ok(()) => {}
             Err(err) => {
                 tx.rollback().await?;
@@ -386,7 +397,16 @@ pub async fn get_project_document(
             return Ok(Err(err));
         }
     }
-    match assert_project_document(&mut tx, workspace_id, project_id, document_id, true).await? {
+    match assert_project_document(
+        &mut tx,
+        workspace_id,
+        project_id,
+        document_id,
+        true,
+        DocumentDbError::NotFound,
+    )
+    .await?
+    {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
@@ -442,7 +462,16 @@ pub async fn update_project_document_meta(
             return Ok(Err(err));
         }
     }
-    match assert_project_document(&mut tx, workspace_id, project_id, document_id, true).await? {
+    match assert_project_document(
+        &mut tx,
+        workspace_id,
+        project_id,
+        document_id,
+        true,
+        DocumentDbError::NotFound,
+    )
+    .await?
+    {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
@@ -484,16 +513,26 @@ pub async fn update_project_document_meta(
     .execute(&mut *tx)
     .await?;
 
+    let mut payload = json!({
+        "documentId": document_id.to_string(),
+        "projectId": project_id.to_string(),
+    });
+    if let Some(title) = input.title {
+        payload["title"] = json!(title);
+    }
+    if let Some(icon) = input.icon {
+        payload["icon"] = json!(icon);
+    }
+    if let Some(status) = input.status {
+        payload["status"] = json!(status);
+    }
     record_document_event_and_audit(
         &mut tx,
         workspace_id,
         actor_user_id,
         "document.updated",
         document_id,
-        json!({
-            "documentId": document_id.to_string(),
-            "projectId": project_id.to_string(),
-        }),
+        payload,
         client_ip,
     )
     .await?;
@@ -563,7 +602,7 @@ pub async fn move_project_document(
     .bind(document_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((doc_project_id, deleted_at, _doc_path, parent_id)) = doc else {
+    let Some((doc_project_id, deleted_at, doc_path, parent_id)) = doc else {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     };
@@ -576,7 +615,16 @@ pub async fn move_project_document(
         return Ok(Err(DocumentDbError::RootDocumentMove));
     }
 
-    match assert_project_document(&mut tx, workspace_id, project_id, new_parent_id, true).await? {
+    match assert_project_document(
+        &mut tx,
+        workspace_id,
+        project_id,
+        new_parent_id,
+        true,
+        DocumentDbError::NotFound,
+    )
+    .await?
+    {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
@@ -593,7 +641,28 @@ pub async fn move_project_document(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     };
-    if depth_of(&parent_path) + 1 > MAX_TREE_DEPTH {
+    if is_descendant(&mut tx, workspace_id, new_parent_id, document_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(DocumentDbError::Cycle));
+    }
+    let own_depth = depth_of(&doc_path);
+    let new_depth = depth_of(&parent_path) + 1;
+    let mut max_relative_depth = 0i32;
+    for id in &subtree {
+        if *id == document_id {
+            continue;
+        }
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT path FROM fvoci.documents WHERE workspace_id = $1 AND id = $2")
+                .bind(workspace_id)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some((path,)) = row {
+            max_relative_depth = max_relative_depth.max(depth_of(&path) - own_depth);
+        }
+    }
+    if new_depth + max_relative_depth > MAX_TREE_DEPTH {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::DepthLimit));
     }
@@ -642,8 +711,4 @@ pub async fn move_project_document(
         ))),
         None => Ok(Err(DocumentDbError::NotFound)),
     }
-}
-
-fn depth_of(path: &str) -> i32 {
-    path.split('.').count() as i32
 }

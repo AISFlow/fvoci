@@ -42,6 +42,18 @@ async function workspaceId(page: Page, slug: string): Promise<string> {
   return workspace.id;
 }
 
+async function ensureAcmeWorkspace(page: Page): Promise<void> {
+  const workspacesRes = await page.request.get("/api/v1/me/workspaces");
+  expect(workspacesRes.ok()).toBe(true);
+  const slugs = (await workspacesRes.json()).items.map((item: { slug: string }) => item.slug);
+  if (slugs.includes(admin.workspaceSlug)) return;
+
+  const createRes = await page.request.post("/api/v1/workspaces", {
+    data: { name: admin.workspaceName, slug: admin.workspaceSlug },
+  });
+  expect(createRes.status()).toBe(201);
+}
+
 async function ensureSetup(page: Page): Promise<void> {
   await page.goto("/");
   await expect(
@@ -70,6 +82,7 @@ async function ensureSetup(page: Page): Promise<void> {
   if (page.url().includes("/login") || (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0) {
     await login(page, admin.email, admin.password);
   }
+  await ensureAcmeWorkspace(page);
 }
 
 test("member creates a workspace project, task, and sees counts after reload", async ({ page }) => {
@@ -95,9 +108,10 @@ test("member creates a workspace project, task, and sees counts after reload", a
   await page.getByLabel("공개 범위").selectOption("workspace");
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
 
-  await expect(page).toHaveURL(/\/w\/acme\/LAB\/tasks$/);
+  await expect(page).toHaveURL(/\/w\/acme\/LAB$/);
   await expect(page.getByRole("heading", { name: "Lab" })).toBeVisible();
 
+  await page.goto("/w/acme/LAB/tasks");
   await page.getByRole("button", { name: "새 태스크" }).click();
   await page.getByLabel("제목").fill("첫 일");
   await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
@@ -200,7 +214,8 @@ test("private project is absent for non-members and viewer writes fail visibly",
   await page.getByLabel("이름", { exact: true }).fill("Hidden");
   await page.getByLabel("공개 범위").selectOption("private");
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
-  await expect(page).toHaveURL(/\/w\/acme\/HID\/tasks$/);
+  await expect(page).toHaveURL(/\/w\/acme\/HID$/);
+  await page.goto("/w/acme/HID/tasks");
 
   await page.getByRole("button", { name: "새 태스크" }).click();
   await page.getByLabel("제목").fill("비밀 초안");
@@ -247,7 +262,8 @@ test("private project is absent for non-members and viewer writes fail visibly",
   await page.goto("/w/acme/projects");
   await expect(page.getByRole("link", { name: /Hidden/ })).toBeVisible();
   await page.getByRole("link", { name: /Hidden/ }).click();
-  await expect(page).toHaveURL(/\/w\/acme\/HID\/tasks$/);
+  await expect(page).toHaveURL(/\/w\/acme\/HID$/);
+  await page.goto("/w/acme/HID/tasks");
   await page.getByRole("button", { name: "새 태스크" }).click();
   await page.getByLabel("제목").fill("비밀 일");
   await page.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
