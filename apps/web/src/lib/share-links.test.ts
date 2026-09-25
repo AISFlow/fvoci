@@ -6,7 +6,7 @@ import {
   shareTreeChildren,
   shareTreeRoots,
   starItemDisplayId,
-} from "./share.ts";
+} from "./share-links.ts";
 
 test("shareTreeRoots treats a parent outside the shared subtree as a root", () => {
   const nodes = [

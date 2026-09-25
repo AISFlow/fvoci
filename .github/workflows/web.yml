@@ -33,6 +33,7 @@ jobs:
           cache-dependency-path: |
             apps/web/package-lock.json
             packages/editor/package-lock.json
+            scripts/document-convert/package-lock.json
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -109,6 +110,8 @@ jobs:
             specs: e2e/comments-flow.spec.ts
           - flow: api-token-flow
             specs: e2e/api-token-flow.spec.ts
+          - flow: import-export-flow
+            specs: e2e/workspace-import-export.spec.ts
           - flow: share-stars-flow
             specs: e2e/share-stars-flow.spec.ts
     runs-on: ubuntu-24.04
@@ -122,6 +125,7 @@ jobs:
           cache-dependency-path: |
             apps/web/package-lock.json
             packages/editor/package-lock.json
+            scripts/document-convert/package-lock.json
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -176,6 +180,7 @@ jobs:
           cache-dependency-path: |
             apps/web/package-lock.json
             packages/editor/package-lock.json
+            scripts/document-convert/package-lock.json
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

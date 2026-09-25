@@ -655,6 +655,28 @@ pub struct BodyResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(utoipa::ToSchema))]
+pub struct StartImportBody {
+    pub workspace_id: Uuid,
+    pub source: String,
+    pub zip_base64: Option<String>,
+    pub file_name: Option<String>,
+    pub project_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(utoipa::ToSchema))]
+pub struct ImportJobResponse {
+    pub id: String,
+    pub workspace_id: String,
+    pub source: String,
+    pub status: String,
+    pub created_document_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RevisionCreateResponse {

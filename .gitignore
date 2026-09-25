@@ -2,3 +2,5 @@
 .env
 *.swp
 .DS_Store
+/.cargo-target/
+/scripts/document-convert/node_modules/

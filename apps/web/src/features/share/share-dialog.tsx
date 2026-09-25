@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { NativeModal } from "@/features/projects/native-modal";
 import { api, ensureOk, problemMessage } from "@/lib/api";
 import { documentShareLinksQuery, type ShareDocumentTarget } from "@/lib/queries/share";
-import { SHARE_DEFAULT_EXPIRES_DAYS, SHARE_EXPIRES_OPTIONS } from "@/lib/share";
+import { SHARE_DEFAULT_EXPIRES_DAYS, SHARE_EXPIRES_OPTIONS } from "@/lib/share-links";
 import "@/features/projects/projects.css";
 import "./share.css";
 

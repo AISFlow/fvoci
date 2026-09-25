@@ -8,7 +8,7 @@ import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { itemPath } from "@/lib/href";
 import { recentQuery, starsQuery } from "@/lib/queries/share";
-import { starItemDisplayId } from "@/lib/share";
+import { starItemDisplayId } from "@/lib/share-links";
 import "@/features/share/share.css";
 
 const dayFormat = new Intl.DateTimeFormat("ko", { month: "numeric", day: "numeric" });

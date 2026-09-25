@@ -162,7 +162,6 @@ export function WorkspaceIdentitySection({
           </div>
         </details>
       ) : null}
-      <p className="unavailable-note">{t("workspace.settings.unsupported.notice")}</p>
     </section>
   );
 }

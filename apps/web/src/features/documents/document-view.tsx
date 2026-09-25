@@ -23,6 +23,7 @@ import { collabBadge } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
 import { collabUserOf, setTitleEditing, useCollabSession } from "./collab-session";
 import { RevisionPanel } from "./revision-panel";
+import { DocumentExportMenu } from "./document-export-menu";
 import { ShareDialog } from "@/features/share/share-dialog";
 import { StarToggle } from "@/features/share/star-toggle";
 import "./document-shell.css";
@@ -351,6 +352,12 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
               />
             ) : null}
           </div>
+          <DocumentExportMenu
+            workspaceId={workspaceId}
+            documentId={documentId}
+            title={title}
+            persistNow={canPersist ? persistBody : undefined}
+          />
           {!readOnly ? (
             <div className="document-page__lifecycle" aria-label={t("doc.move.title")}>
               <label className="document-page__field">

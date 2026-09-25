@@ -45,6 +45,12 @@ export function tiptapJsonToYDoc(
 	return doc;
 }
 
+/** WHY: server-side import writes the same Yjs update an editor would, from
+ * this module's own yjs instance (a second copy breaks constructor checks). */
+export function tiptapJsonToYUpdate(json: TiptapDoc): Uint8Array {
+	return Y.encodeStateAsUpdate(tiptapJsonToYDoc(json));
+}
+
 export function yDocToTiptapJson(
 	doc: Y.Doc,
 	fragment = FVOCI_YDOC_FRAGMENT,

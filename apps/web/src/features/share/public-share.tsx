@@ -4,7 +4,7 @@ import { useLayoutEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import type { ShareTreeNode } from "@/lib/queries/share";
-import { isSafeShareHref, shareTreeChildren, shareTreeRoots } from "@/lib/share";
+import { isSafeShareHref, shareTreeChildren, shareTreeRoots } from "@/lib/share-links";
 import "./share.css";
 
 const dateFormat = new Intl.DateTimeFormat("ko", {

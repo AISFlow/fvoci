@@ -52,6 +52,7 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::search::router())
         .merge(routes::tasks::router())
         .merge(routes::documents::router())
+        .merge(routes::import::router())
         .merge(routes::revisions::router())
         .merge(routes::attachments::router())
         .merge(routes::comments::router())
