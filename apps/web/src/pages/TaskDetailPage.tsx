@@ -14,7 +14,8 @@ import {
 import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features/tasks/task-errors";
 import { TaskDetailView } from "@/features/tasks/task-detail";
 import { lookupQuery, resolveLookupTarget } from "@/features/tasks/lookup";
-import { taskListQuery, taskQuery } from "@/features/tasks/queries";
+import { taskListQuery, taskQuery, projectLabelsQuery } from "@/features/tasks/queries";
+import { membersQuery } from "@/lib/queries";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
@@ -51,6 +52,10 @@ export function TaskDetailPage() {
     taskListQuery(workspace?.id ?? "", project?.id ?? task.data?.projectId ?? ""),
   );
   const parentItems = mergeTaskListPages(taskPages.data?.pages ?? [])?.items ?? [];
+  const members = useQuery(membersQuery(workspace?.id ?? ""));
+  const labels = useQuery(
+    projectLabelsQuery(workspace?.id ?? "", project?.id ?? task.data?.projectId ?? ""),
+  );
 
   const workspaceId = workspace?.id ?? "";
   const taskId = task.data?.id ?? "";
@@ -215,6 +220,8 @@ export function TaskDetailPage() {
           task={task.data}
           statuses={workflow.data?.statuses ?? []}
           parentItems={parentItems}
+          members={members.data?.items ?? []}
+          labels={labels.data?.items ?? []}
           readOnly={!task.data.canEdit || task.data.archivedAt !== null}
           canEdit={task.data.canEdit}
           pending={pending}
@@ -265,6 +272,12 @@ export function TaskDetailPage() {
               return;
             }
             await runPatch(parsedDate.body);
+          }}
+          onAssigneesChange={async (assigneeIds) => {
+            await runPatch({ assigneeIds });
+          }}
+          onLabelsChange={async (labelIds) => {
+            await runPatch({ labelIds });
           }}
           onArchiveToggle={async (archived) => {
             await runPatch({ archived });

@@ -44,6 +44,8 @@ pub struct PatchTaskMetaInput {
     pub recurrence: FieldUpdate<Value>,
     pub archived: Option<bool>,
     pub expected_dates: Option<ExpectedDatesInput>,
+    pub assignee_ids: Option<Vec<Uuid>>,
+    pub label_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, Default)]

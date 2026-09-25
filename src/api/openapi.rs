@@ -12,21 +12,21 @@ use crate::api::dto::{
     AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
     CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
-    CreateDocumentBody, CreateProjectBody, CreateTaskBody, CreateWorkspaceBody,
+    CreateDocumentBody, CreateLabelBody, CreateProjectBody, CreateTaskBody, CreateWorkspaceBody,
     DocumentMetaResponse, ExpectedDatesBody, InvitationAcceptBody, InvitationConsentItem,
     InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
-    InvitationPublicResponse, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
-    MeApiTokenCreateBody, MemberResponse, MemberRoleBody, MembersResponse, MoveDocumentBody,
-    MoveTaskBody, OkResponse, PatchCommentBody, PatchDocumentBody, PatchMeBody, PatchProjectBody,
-    PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectListResponse,
-    ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
-    ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
-    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
-    SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, SortDocumentBody, TaskChildOutput, TaskChildProgressOutput,
-    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
-    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
-    WorkspaceListResponse, WorkspaceMetaResponse,
+    InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
+    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
+    MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse, PatchCommentBody,
+    PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchProjectBody, PatchTaskBody,
+    PatchWorkspaceBody, ProblemResponse, ProjectListResponse, ProjectMembersResponse,
+    ProjectOutput, PutAttachmentPartResponse, ResumeAttachmentUploadResponse,
+    RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse,
+    RevisionRestoreBody, RevisionRestoreResponse, SearchItemOutput, SearchListResponse,
+    SearchSnippetPiece, SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse,
+    SortDocumentBody, TaskChildOutput, TaskChildProgressOutput, TaskListResponse, TaskMetaOutput,
+    TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse,
+    WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -102,6 +102,11 @@ impl Modify for CookieSecurityAddon {
         move_task,
         trash_task,
         restore_task,
+        list_workspace_labels,
+        list_project_labels,
+        create_label,
+        update_label,
+        delete_label,
         create_document,
         list_tree,
         get_document,
@@ -172,6 +177,10 @@ impl Modify for CookieSecurityAddon {
             TaskChildOutput,
             TaskChildProgressOutput,
             TaskListResponse,
+            LabelOutput,
+            LabelListResponse,
+            CreateLabelBody,
+            PatchLabelBody,
             LookupItemOutput,
             LookupListResponse,
             SearchSnippetPiece,
@@ -1076,6 +1085,94 @@ fn trash_task() {}
     )
 )]
 fn restore_task() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/labels",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace labels", body = LabelListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_workspace_labels() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project labels", body = LabelListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_labels() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = CreateLabelBody,
+    responses(
+        (status = 201, description = "Created label", body = LabelOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_label() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels/{label_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("label_id" = String, description = "Label id"),
+    ),
+    request_body = PatchLabelBody,
+    responses(
+        (status = 200, description = "Label updated", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn update_label() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels/{label_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("label_id" = String, description = "Label id"),
+    ),
+    responses(
+        (status = 200, description = "Label deleted", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn delete_label() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

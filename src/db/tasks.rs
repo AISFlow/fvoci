@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -8,11 +10,13 @@ use crate::db::context::{
 };
 use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::db::labels::{assignee_filter_member_exists, label_is_visible};
 use crate::db::projects::{lock_project, project_permission, ProjectDbError};
 use crate::projects::ProjectPermission;
 use crate::tasks::list_query::{
     cursor_key_for_row, effective_sort_entries, encode_cursor, filter_fingerprint,
-    sort_value_token, ParsedTaskListQuery, SortDirection, SortField, TaskListCursor, ViewSort,
+    sort_value_token, AssigneeFilter, ParsedTaskListQuery, SortDirection, SortField,
+    TaskListCursor, ViewSort,
 };
 
 #[derive(Debug, Clone)]
@@ -72,10 +76,18 @@ pub struct TaskDetailRow {
     pub parent: Option<TaskParentRow>,
     pub children: Vec<TaskChildRow>,
     pub child_progress: Option<TaskChildProgress>,
+    pub assignee_ids: Vec<Uuid>,
+    pub label_ids: Vec<Uuid>,
+}
+
+pub struct TaskListItemRow {
+    pub meta: TaskMetaRow,
+    pub assignee_ids: Vec<Uuid>,
+    pub label_ids: Vec<Uuid>,
 }
 
 pub struct TaskListPage {
-    pub items: Vec<TaskMetaRow>,
+    pub items: Vec<TaskListItemRow>,
     pub status_counts: Vec<(Uuid, i64)>,
     pub next_cursor: Option<String>,
 }
@@ -112,6 +124,322 @@ async fn workspace_is_live(
             .fetch_optional(&mut **tx)
             .await?;
     Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
+}
+
+const MAX_TASK_REFS: usize = 50;
+
+fn unique_ids(ids: &[Uuid]) -> Vec<Uuid> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if seen.insert(*id) {
+            out.push(*id);
+        }
+    }
+    out
+}
+
+fn uuid_strings(ids: &[Uuid]) -> Vec<String> {
+    ids.iter().map(ToString::to_string).collect()
+}
+
+async fn list_task_assignee_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT user_id
+        FROM fvoci.task_assignees
+        WHERE workspace_id = $1 AND task_id = $2
+        ORDER BY user_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+async fn list_task_label_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT label_id
+        FROM fvoci.task_labels
+        WHERE workspace_id = $1 AND task_id = $2
+        ORDER BY label_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+async fn load_task_refs(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_ids: &[Uuid],
+) -> Result<(HashMap<Uuid, Vec<Uuid>>, HashMap<Uuid, Vec<Uuid>>), sqlx::Error> {
+    let mut assignees: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    let mut labels: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    if task_ids.is_empty() {
+        return Ok((assignees, labels));
+    }
+    let assignee_rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT task_id, user_id
+        FROM fvoci.task_assignees
+        WHERE workspace_id = $1 AND task_id = ANY($2)
+        ORDER BY task_id, user_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (task_id, user_id) in assignee_rows {
+        assignees.entry(task_id).or_default().push(user_id);
+    }
+    let label_rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT task_id, label_id
+        FROM fvoci.task_labels
+        WHERE workspace_id = $1 AND task_id = ANY($2)
+        ORDER BY task_id, label_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (task_id, label_id) in label_rows {
+        labels.entry(task_id).or_default().push(label_id);
+    }
+    Ok((assignees, labels))
+}
+
+async fn membership_exists(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let exists: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2)",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(exists.0)
+}
+
+async fn copy_task_assignees_and_labels(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    source_task_id: Uuid,
+    next_task_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.task_assignees (workspace_id, task_id, user_id)
+        SELECT workspace_id, $3, user_id
+        FROM fvoci.task_assignees
+        WHERE workspace_id = $1 AND task_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(source_task_id)
+    .bind(next_task_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.task_labels (workspace_id, task_id, label_id)
+        SELECT workspace_id, $3, label_id
+        FROM fvoci.task_labels
+        WHERE workspace_id = $1 AND task_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(source_task_id)
+    .bind(next_task_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn replace_task_assignees(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    task_id: Uuid,
+    assignee_ids: &[Uuid],
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if assignee_ids.len() > MAX_TASK_REFS {
+        return Ok(Err(ProjectDbError::InvalidInput));
+    }
+    let unique = unique_ids(assignee_ids);
+    if !unique.is_empty() {
+        let mut lock_ids = unique.clone();
+        lock_ids.push(actor_user_id);
+        lock_membership_users(tx, &lock_ids).await?;
+        for user_id in &unique {
+            if !membership_exists(tx, workspace_id, *user_id).await? {
+                return Ok(Err(ProjectDbError::AssigneeIsNotAMember));
+            }
+        }
+    }
+    let current = list_task_assignee_ids(tx, workspace_id, task_id).await?;
+    let changed = current.len() != unique.len() || unique.iter().any(|id| !current.contains(id));
+    for user_id in &unique {
+        if !current.contains(user_id) {
+            sqlx::query(
+                r#"
+                INSERT INTO fvoci.task_assignees (workspace_id, task_id, user_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (task_id, user_id) DO NOTHING
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    for user_id in &current {
+        if !unique.contains(user_id) {
+            sqlx::query(
+                r#"
+                DELETE FROM fvoci.task_assignees
+                WHERE workspace_id = $1 AND task_id = $2 AND user_id = $3
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    if changed {
+        let added: Vec<Uuid> = unique
+            .iter()
+            .copied()
+            .filter(|id| !current.contains(id))
+            .collect();
+        record_task_event_and_audit(
+            tx,
+            TaskChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "task.updated",
+                target_type: "task",
+                target_id: task_id,
+                payload: json!({
+                    "taskId": task_id.to_string(),
+                    "assigneeIds": uuid_strings(&unique),
+                    "addedAssigneeIds": uuid_strings(&added),
+                }),
+                client_ip,
+            },
+        )
+        .await?;
+    }
+    Ok(Ok(()))
+}
+
+async fn replace_task_labels(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    project_id: Uuid,
+    task_id: Uuid,
+    label_ids: &[Uuid],
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if label_ids.len() > MAX_TASK_REFS {
+        return Ok(Err(ProjectDbError::InvalidInput));
+    }
+    let unique = unique_ids(label_ids);
+    if !unique.is_empty() {
+        let known: Vec<(Uuid,)> = sqlx::query_as(
+            r#"
+            SELECT id
+            FROM fvoci.labels
+            WHERE workspace_id = $1 AND project_id = $2 AND id = ANY($3)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(&unique)
+        .fetch_all(&mut **tx)
+        .await?;
+        if known.len() != unique.len() {
+            return Ok(Err(ProjectDbError::LabelNotFound));
+        }
+    }
+    let current = list_task_label_ids(tx, workspace_id, task_id).await?;
+    let changed = current.len() != unique.len() || unique.iter().any(|id| !current.contains(id));
+    for label_id in &unique {
+        if !current.contains(label_id) {
+            sqlx::query(
+                r#"
+                INSERT INTO fvoci.task_labels (workspace_id, task_id, label_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (task_id, label_id) DO NOTHING
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .bind(label_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    for label_id in &current {
+        if !unique.contains(label_id) {
+            sqlx::query(
+                r#"
+                DELETE FROM fvoci.task_labels
+                WHERE workspace_id = $1 AND task_id = $2 AND label_id = $3
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .bind(label_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    if changed {
+        record_task_event_and_audit(
+            tx,
+            TaskChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "task.updated",
+                target_type: "task",
+                target_id: task_id,
+                payload: json!({
+                    "taskId": task_id.to_string(),
+                    "labelIds": uuid_strings(&unique),
+                }),
+                client_ip,
+            },
+        )
+        .await?;
+    }
+    Ok(Ok(()))
 }
 
 async fn record_task_event_and_audit(
@@ -838,6 +1166,8 @@ pub async fn get_task(
     } else {
         Some(load_task_child_progress(&mut tx, workspace_id, task_id).await?)
     };
+    let assignee_ids = list_task_assignee_ids(&mut tx, workspace_id, task_id).await?;
+    let label_ids = list_task_label_ids(&mut tx, workspace_id, task_id).await?;
 
     tx.commit().await?;
     Ok(Ok(TaskDetailRow {
@@ -847,6 +1177,8 @@ pub async fn get_task(
         parent,
         children,
         child_progress,
+        assignee_ids,
+        label_ids,
     }))
 }
 
@@ -900,8 +1232,20 @@ pub async fn list_project_tasks(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
+    if let Some(label_id) = query.view.filters.label_id {
+        if !label_is_visible(&mut tx, workspace_id, actor_user_id, label_id).await? {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::InvalidInput));
+        }
+    }
+    if let Some(AssigneeFilter::User(user_id)) = query.view.filters.assignee_id {
+        if !assignee_filter_member_exists(&mut tx, workspace_id, user_id).await? {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::InvalidInput));
+        }
+    }
 
-    let (base_conditions, base_binds) = task_list_filter_conditions(query);
+    let (base_conditions, base_binds) = task_list_filter_conditions(query, actor_user_id);
     let mut conditions = base_conditions.clone();
     let mut binds = base_binds.clone();
     let sort = effective_sort_entries(&query.view.sort);
@@ -1025,11 +1369,25 @@ pub async fn list_project_tasks(
     let status_counts = count_query.fetch_all(&mut *tx).await?;
 
     let mut items = Vec::new();
+    let mut item_ids = Vec::new();
     for row in rows.iter().take(query.limit as usize) {
         let record = map_task_row(row)?;
+        item_ids.push(record.id);
         let recurrence = row.try_get::<Option<Value>, _>("recurrence").ok().flatten();
         items.push(row_to_meta(workspace_id, record, recurrence));
     }
+    let (assignee_map, label_map) = load_task_refs(&mut tx, workspace_id, &item_ids).await?;
+    let items = items
+        .into_iter()
+        .map(|meta| {
+            let id = meta.id;
+            TaskListItemRow {
+                assignee_ids: assignee_map.get(&id).cloned().unwrap_or_default(),
+                label_ids: label_map.get(&id).cloned().unwrap_or_default(),
+                meta,
+            }
+        })
+        .collect();
     let next_cursor = if rows.len() as i32 > query.limit {
         let last = &rows[(query.limit - 1) as usize];
         let record = map_task_row(last)?;
@@ -1069,7 +1427,10 @@ pub async fn list_project_tasks(
     }))
 }
 
-fn task_list_filter_conditions(query: &ParsedTaskListQuery) -> (Vec<String>, Vec<String>) {
+fn task_list_filter_conditions(
+    query: &ParsedTaskListQuery,
+    actor_user_id: Uuid,
+) -> (Vec<String>, Vec<String>) {
     let mut binds: Vec<String> = Vec::new();
     let mut conditions = vec![
         "t.workspace_id = $1".to_string(),
@@ -1112,6 +1473,34 @@ fn task_list_filter_conditions(query: &ParsedTaskListQuery) -> (Vec<String>, Vec
         let idx = binds.len() + 3;
         binds.push(format!("%{}%", escape_ilike_pattern(title)));
         conditions.push(format!("t.title ILIKE ${idx} ESCAPE '\\'"));
+    }
+    if let Some(label_id) = query.view.filters.label_id {
+        let idx = binds.len() + 3;
+        binds.push(label_id.to_string());
+        conditions.push(format!(
+            "EXISTS (
+                SELECT 1 FROM fvoci.task_labels l
+                WHERE l.workspace_id = t.workspace_id
+                  AND l.task_id = t.id
+                  AND l.label_id = ${idx}::uuid
+            )"
+        ));
+    }
+    if let Some(assignee) = &query.view.filters.assignee_id {
+        let assignee_id = match assignee {
+            AssigneeFilter::Me => actor_user_id,
+            AssigneeFilter::User(id) => *id,
+        };
+        let idx = binds.len() + 3;
+        binds.push(assignee_id.to_string());
+        conditions.push(format!(
+            "EXISTS (
+                SELECT 1 FROM fvoci.task_assignees a
+                WHERE a.workspace_id = t.workspace_id
+                  AND a.task_id = t.id
+                  AND a.user_id = ${idx}::uuid
+            )"
+        ));
     }
     if let (Some(from), Some(to)) = (query.from, query.to) {
         let from_idx = binds.len() + 3;
@@ -1491,6 +1880,7 @@ async fn spawn_recurring_next_task(
     .bind(actor_user_id)
     .execute(&mut **tx)
     .await?;
+    copy_task_assignees_and_labels(tx, workspace_id, task.record.id, next_id).await?;
     record_task_event_and_audit(
         tx,
         TaskChangeRecord {
@@ -1628,6 +2018,8 @@ fn patch_only_unarchives(input: &crate::tasks::patch::PatchTaskMetaInput) -> boo
         && input.parent_id == crate::tasks::patch::FieldUpdate::Unchanged
         && input.recurrence == crate::tasks::patch::FieldUpdate::Unchanged
         && input.expected_dates.is_none()
+        && input.assignee_ids.is_none()
+        && input.label_ids.is_none()
 }
 
 pub async fn patch_task_meta(
@@ -1896,7 +2288,7 @@ pub async fn patch_task_meta(
             return Ok(Err(ProjectDbError::NotFound));
         };
         map_task_row(&row)?
-    } else if status_changed {
+    } else if status_changed || input.assignee_ids.is_some() || input.label_ids.is_some() {
         let row = sqlx::query(
             r#"
             SELECT id, project_id, number, title, type AS task_type, priority, status_id,
@@ -1955,6 +2347,43 @@ pub async fn patch_task_meta(
             },
         )
         .await?;
+    }
+    if let Some(assignee_ids) = &input.assignee_ids {
+        match replace_task_assignees(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            task_id,
+            assignee_ids,
+            client_ip,
+        )
+        .await?
+        {
+            Ok(()) => {}
+            Err(err) => {
+                tx.rollback().await?;
+                return Ok(Err(err));
+            }
+        }
+    }
+    if let Some(label_ids) = &input.label_ids {
+        match replace_task_labels(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            row.project_id,
+            task_id,
+            label_ids,
+            client_ip,
+        )
+        .await?
+        {
+            Ok(()) => {}
+            Err(err) => {
+                tx.rollback().await?;
+                return Ok(Err(err));
+            }
+        }
     }
 
     tx.commit().await?;

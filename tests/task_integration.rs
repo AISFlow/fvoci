@@ -1706,15 +1706,16 @@ async fn task_patch_rejects_empty_body_and_unsupported_relation_fields() {
     let (status, _) = patch_task(app.clone(), workspace_id, task_id, json!({}), &cookie).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    for body in [
-        json!({"assigneeIds": []}),
-        json!({"labelIds": []}),
+    let (status, problem) = patch_task(
+        app,
+        workspace_id,
+        task_id,
         json!({"milestoneId": Uuid::now_v7().to_string()}),
-    ] {
-        let (status, problem) = patch_task(app.clone(), workspace_id, task_id, body, &cookie).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(problem["code"], "invalid_input");
-    }
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(problem["code"], "invalid_input");
 
     admin.close().await;
     harness.cleanup().await;

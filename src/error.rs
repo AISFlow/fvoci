@@ -17,6 +17,7 @@ pub enum ProblemCode {
     PasswordInvalid,
     SlugTaken,
     OriginMismatch,
+    AssigneeIsNotAMember,
     NotFound,
     InsufficientPermissions,
     PersonalWorkspaceImmutable,
@@ -56,6 +57,7 @@ impl ProblemCode {
             Self::PasswordInvalid => "password_invalid",
             Self::SlugTaken => "slug_taken",
             Self::OriginMismatch => "origin_mismatch",
+            Self::AssigneeIsNotAMember => "assignee_is_not_a_member",
             Self::NotFound => "not_found",
             Self::InsufficientPermissions => "insufficient_permissions",
             Self::PersonalWorkspaceImmutable => "personal_workspace_is_immutable",
@@ -99,6 +101,7 @@ impl ProblemCode {
             Self::PasswordInvalid => "password_invalid",
             Self::SlugTaken => "slug taken",
             Self::OriginMismatch => "origin mismatch",
+            Self::AssigneeIsNotAMember => "assignee is not a member",
             Self::NotFound => "not found",
             Self::InsufficientPermissions => "insufficient permissions",
             Self::PersonalWorkspaceImmutable => "personal workspace is immutable",
@@ -140,7 +143,9 @@ impl ProblemCode {
             Self::AuthenticationRequired
             | Self::InvalidEmailOrPassword
             | Self::CannotAcceptInvitation => StatusCode::UNAUTHORIZED,
-            Self::InvalidInput | Self::PasswordInvalid => StatusCode::BAD_REQUEST,
+            Self::InvalidInput | Self::PasswordInvalid | Self::AssigneeIsNotAMember => {
+                StatusCode::BAD_REQUEST
+            }
             Self::InstanceSetupAlreadyCompleted
             | Self::NotFound
             | Self::InvitationNotFoundOrExpired => StatusCode::NOT_FOUND,

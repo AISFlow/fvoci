@@ -522,6 +522,11 @@ pub fn map_project_error(err: ProjectDbError) -> AppError {
             retry_after: None,
         },
         ProjectDbError::InvalidMoveAnchors => AppError::from_code(ProblemCode::InvalidInput),
+        ProjectDbError::AssigneeIsNotAMember => {
+            AppError::from_code(ProblemCode::AssigneeIsNotAMember)
+        }
+        ProjectDbError::LabelNotFound => AppError::from_code(ProblemCode::NotFound),
+        ProjectDbError::InvalidInput => AppError::from_code(ProblemCode::InvalidInput),
         ProjectDbError::InvalidCursor => AppError {
             status: StatusCode::BAD_REQUEST,
             code: ProblemCode::InvalidInput,

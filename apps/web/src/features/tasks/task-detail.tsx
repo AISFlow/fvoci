@@ -5,6 +5,8 @@ import type { WorkflowStatus } from "@/features/projects/queries";
 import { TaskDetailForm } from "./task-detail-form";
 import type { TaskDetail } from "./queries";
 import type { TaskListItem } from "./queries";
+import type { LabelItem } from "./queries";
+import type { MemberOutput } from "@/lib/contracts";
 import "@/features/projects/projects.css";
 
 export function TaskDetailView({
@@ -14,6 +16,8 @@ export function TaskDetailView({
   task,
   statuses,
   parentItems,
+  members,
+  labels,
   readOnly,
   canEdit,
   pending,
@@ -27,6 +31,8 @@ export function TaskDetailView({
   onPriorityChange,
   onHierarchySave,
   onDueDateBlur,
+  onAssigneesChange,
+  onLabelsChange,
   onArchiveToggle,
   onTrash,
 }: {
@@ -36,6 +42,8 @@ export function TaskDetailView({
   task: TaskDetail;
   statuses: readonly WorkflowStatus[];
   parentItems: readonly Pick<TaskListItem, "id" | "type" | "number" | "title">[];
+  members: readonly MemberOutput[];
+  labels: readonly LabelItem[];
   readOnly: boolean;
   canEdit: boolean;
   pending?: boolean;
@@ -49,6 +57,8 @@ export function TaskDetailView({
   onPriorityChange: (priority: string) => void | Promise<void>;
   onHierarchySave: (type: string, parentId: string | null) => void | Promise<void>;
   onDueDateBlur: (value: string) => void | Promise<void>;
+  onAssigneesChange: (assigneeIds: string[]) => void | Promise<void>;
+  onLabelsChange: (labelIds: string[]) => void | Promise<void>;
   onArchiveToggle: (archived: boolean) => void | Promise<void>;
   onTrash: () => void | Promise<void>;
 }) {
@@ -67,6 +77,8 @@ export function TaskDetailView({
         task={task}
         statuses={statuses}
         parentItems={parentItems}
+        members={members}
+        labels={labels}
         readOnly={readOnly}
         canEdit={canEdit}
         pending={pending}
@@ -79,6 +91,8 @@ export function TaskDetailView({
         onPriorityChange={onPriorityChange}
         onHierarchySave={onHierarchySave}
         onDueDateBlur={onDueDateBlur}
+        onAssigneesChange={onAssigneesChange}
+        onLabelsChange={onLabelsChange}
         onArchiveToggle={onArchiveToggle}
         onTrash={onTrash}
       />

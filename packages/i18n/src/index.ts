@@ -52,6 +52,7 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   task_archived: "task is archived — read-only",
   search_unavailable: "search unavailable",
   status_not_in_project_workflow: "status not in project workflow",
+  assignee_is_not_a_member: "assignee is not a member",
 };
 
 export function tProblemTitle(
