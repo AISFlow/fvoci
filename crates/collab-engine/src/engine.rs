@@ -1,9 +1,13 @@
 use yrs::error::{Error as YrsError, UpdateError};
+use yrs::types::text::YChange;
+use yrs::types::xml::XmlIn;
+use yrs::types::Attrs;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
-    Doc, GetString, OffsetKind, Options, ReadTxn, Snapshot, StateVector, Transact, Update,
-    XmlFragment, XmlFragmentRef,
+    Any, Doc, GetString, OffsetKind, Options, Out, ReadTxn, Snapshot, StateVector, Text, Transact,
+    TransactionMut, Update, Xml, XmlElementPrelim, XmlElementRef, XmlFragment, XmlFragmentRef,
+    XmlOut, XmlTextPrelim, XmlTextRef,
 };
 
 use crate::b64;
@@ -76,6 +80,8 @@ impl CollabEngine {
             Request::Snapshot => self.complete_snapshot(),
             Request::Inspect => self.inspect(),
             Request::Project { .. } => self.project(),
+            Request::RevisionSnapshot => self.revision_snapshot(),
+            Request::RestoreFromSnapshot { snap_b64, .. } => self.restore_from_snapshot(snap_b64),
         }
     }
 
@@ -267,8 +273,56 @@ impl CollabEngine {
         }
     }
 
+    /// Encode a Yrs Snapshot (state vector + delete set) of the live Doc.
+    /// Does not mutate the Doc. Bytes are returned in `update_b64`.
+    pub fn revision_snapshot(&mut self) -> EngineStatus {
+        if let Err(st) = self.bump_op() {
+            return st;
+        }
+        let txn = self.doc.transact();
+        let bytes = txn.snapshot().encode_v1();
+        drop(txn);
+        if let Err(st) = self.cap_output(&bytes, "revision_snapshot") {
+            return st;
+        }
+        self.ok_applied(Some(bytes))
+    }
+
+    /// Compute a forward updateV1 that replaces the live fragment with the
+    /// fragment reconstructed from `snap_bytes`. Does not mutate `self.doc`.
+    pub fn restore_from_snapshot(&mut self, snap_bytes: &[u8]) -> EngineStatus {
+        if let Err(st) = self.bump_op() {
+            return st;
+        }
+        match self.encode_restore_update(snap_bytes) {
+            Ok(bytes) => {
+                if let Err(st) = self.cap_output(&bytes, "revision_restore") {
+                    return st;
+                }
+                self.ok_applied(Some(bytes))
+            }
+            Err(st) => st,
+        }
+    }
+
+    fn encode_restore_update(&self, snap_bytes: &[u8]) -> Result<Vec<u8>, EngineStatus> {
+        self.cap_input(snap_bytes, "revision_snapshot")?;
+        let snap = Snapshot::decode_v1(snap_bytes)
+            .map_err(|err| classify_decode(err.into(), "snapshot"))?;
+        let reconstructed = reconstruct_doc_from_snapshot(&self.doc, &snap)?;
+        let work = clone_doc(&self.doc)?;
+        let dest = work.get_or_insert_xml_fragment(FRAGMENT);
+        let bytes = {
+            let src_txn = reconstructed.transact();
+            let mut dst_txn = work.transact_mut();
+            replace_fragment_from(&src_txn, &mut dst_txn, &dest)?;
+            dst_txn.encode_update_v1()
+        };
+        Ok(bytes)
+    }
+
     /// Restore a past revision using a Yrs/Yjs snapshot against the current Doc.
-    /// Used by tests; not a product persist path.
+    /// Used by tests; not a product persist path. Returns past STATE, not a forward update.
     pub fn encode_from_revision_snapshot(
         &self,
         snap_bytes: &[u8],
@@ -333,6 +387,172 @@ fn xml_view<T: ReadTxn>(txn: &T) -> (u32, String) {
 
 fn xml_len_string<T: ReadTxn>(txn: &T, xml: &XmlFragmentRef) -> (u32, String) {
     (xml.len(txn), xml.get_string(txn))
+}
+
+fn reconstruct_doc_from_snapshot(live: &Doc, snap: &Snapshot) -> Result<Doc, EngineStatus> {
+    let txn = live.transact();
+    let mut encoder = EncoderV1::new();
+    txn.encode_state_from_snapshot(snap, &mut encoder)
+        .map_err(|err| classify_decode(err, "encode_state_from_snapshot"))?;
+    drop(txn);
+    let bytes = encoder.to_vec();
+    let reconstructed = new_doc();
+    if !bytes.is_empty() {
+        apply_bytes_to_doc(&reconstructed, &bytes)?;
+    }
+    Ok(reconstructed)
+}
+
+fn clone_doc(live: &Doc) -> Result<Doc, EngineStatus> {
+    let complete = {
+        let txn = live.transact();
+        txn.encode_state_as_update_v1(&StateVector::default())
+    };
+    let cloned = new_doc();
+    if !complete.is_empty() {
+        apply_bytes_to_doc(&cloned, &complete)?;
+    }
+    Ok(cloned)
+}
+
+fn apply_bytes_to_doc(doc: &Doc, bytes: &[u8]) -> Result<(), EngineStatus> {
+    let update =
+        Update::decode_v1(bytes).map_err(|err| classify_decode(err.into(), "decode_v1"))?;
+    doc.transact_mut()
+        .apply_update(update)
+        .map_err(classify_apply)?;
+    Ok(())
+}
+
+fn replace_fragment_from<T: ReadTxn>(
+    src_txn: &T,
+    dst_txn: &mut TransactionMut,
+    dest: &XmlFragmentRef,
+) -> Result<(), EngineStatus> {
+    let dest_len = dest.len(dst_txn);
+    if dest_len > 0 {
+        dest.remove_range(dst_txn, 0, dest_len);
+    }
+    let Some(src) = src_txn.get_xml_fragment(FRAGMENT) else {
+        return Ok(());
+    };
+    copy_xml_children(src_txn, &src, dst_txn, dest)
+}
+
+fn copy_xml_children<T: ReadTxn, D: XmlFragment>(
+    src_txn: &T,
+    src: &impl XmlFragment,
+    dst_txn: &mut TransactionMut,
+    dest: &D,
+) -> Result<(), EngineStatus> {
+    for index in 0..src.len(src_txn) {
+        let child = src
+            .get(src_txn, index)
+            .ok_or_else(|| EngineStatus::Malformed {
+                detail: format!("restore: missing Xml child at {index}"),
+            })?;
+        match child {
+            XmlOut::Element(el) => copy_xml_element(src_txn, &el, dst_txn, dest)?,
+            XmlOut::Text(text) => copy_xml_text_node(src_txn, &text, dst_txn, dest)?,
+            XmlOut::Fragment(_) => {
+                return Err(EngineStatus::Malformed {
+                    detail: "restore: nested XmlFragment is unsupported".into(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_xml_element<T: ReadTxn, D: XmlFragment>(
+    src_txn: &T,
+    src: &XmlElementRef,
+    dst_txn: &mut TransactionMut,
+    dest: &D,
+) -> Result<(), EngineStatus> {
+    let tag = src.try_tag().ok_or_else(|| EngineStatus::Malformed {
+        detail: "restore: XmlElement missing tag".into(),
+    })?;
+    let idx = dest.len(dst_txn);
+    dest.push_back(
+        dst_txn,
+        XmlElementPrelim::new(tag.as_ref(), std::iter::empty::<XmlIn>()),
+    );
+    let XmlOut::Element(inserted) =
+        dest.get(dst_txn, idx)
+            .ok_or_else(|| EngineStatus::Malformed {
+                detail: "restore: inserted XmlElement missing".into(),
+            })?
+    else {
+        return Err(EngineStatus::Malformed {
+            detail: "restore: inserted child is not XmlElement".into(),
+        });
+    };
+    for (key, value) in src.attributes(src_txn) {
+        if let Out::Any(any) = value {
+            if matches!(any, Any::Undefined) {
+                continue;
+            }
+            inserted.insert_attribute(dst_txn, key, any);
+        }
+    }
+    copy_xml_children(src_txn, src, dst_txn, &inserted)
+}
+
+fn copy_xml_text_node<T: ReadTxn, D: XmlFragment>(
+    src_txn: &T,
+    src: &XmlTextRef,
+    dst_txn: &mut TransactionMut,
+    dest: &D,
+) -> Result<(), EngineStatus> {
+    let idx = dest.len(dst_txn);
+    dest.push_back(dst_txn, XmlTextPrelim::new(""));
+    let XmlOut::Text(inserted) = dest
+        .get(dst_txn, idx)
+        .ok_or_else(|| EngineStatus::Malformed {
+            detail: "restore: inserted XmlText missing".into(),
+        })?
+    else {
+        return Err(EngineStatus::Malformed {
+            detail: "restore: inserted child is not XmlText".into(),
+        });
+    };
+    let mut pieces: Vec<(String, Option<Attrs>)> = Vec::new();
+    for diff in src.diff(src_txn, YChange::identity) {
+        let insert = match diff.insert {
+            Out::Any(Any::String(s)) => s.to_string(),
+            other => {
+                return Err(EngineStatus::Malformed {
+                    detail: format!("restore: XmlText insert is not a string ({other:?})"),
+                });
+            }
+        };
+        let attrs = diff.attributes.map(|attrs| {
+            let mut filtered = Attrs::new();
+            for (key, value) in attrs.iter() {
+                if key.as_ref() != "ychange" {
+                    filtered.insert(key.clone(), value.clone());
+                }
+            }
+            filtered
+        });
+        pieces.push((insert, attrs));
+    }
+    let full: String = pieces.iter().map(|(text, _)| text.as_str()).collect();
+    if !full.is_empty() {
+        inserted.insert(dst_txn, 0, full.as_str());
+    }
+    let mut offset = 0u32;
+    for (insert, attrs) in pieces {
+        let len = insert.encode_utf16().count() as u32;
+        if let Some(attrs) = attrs {
+            if !attrs.is_empty() && len > 0 {
+                inserted.format(dst_txn, offset, len, attrs);
+            }
+        }
+        offset = offset.saturating_add(len);
+    }
+    Ok(())
 }
 
 fn classify_decode(err: YrsError, what: &str) -> EngineStatus {

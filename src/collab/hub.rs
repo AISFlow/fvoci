@@ -17,7 +17,8 @@ use uuid::Uuid;
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
 use crate::collab::room::{
-    ConnectionLease, JoinDelivery, JoinError, RoomHandle, RoomJoin, RoomKey,
+    CapturedRevision, ConnectionLease, JoinDelivery, JoinError, RevisionCaptureError,
+    RevisionRestoreError, RoomHandle, RoomJoin, RoomKey,
 };
 use crate::db::collab::resolve_collab_admission;
 
@@ -408,6 +409,70 @@ impl CollabHub {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    pub fn engine_bin(&self) -> std::path::PathBuf {
+        self.config.engine_bin.clone()
+    }
+
+    pub fn limits(&self) -> collab_engine::limits::Limits {
+        self.config.limits
+    }
+
+    pub fn rpc_timeout(&self) -> Duration {
+        Duration::from_millis(self.config.rpc_timeout_ms.max(1))
+    }
+
+    async fn live_handle(&self, key: RoomKey) -> Option<RoomHandle> {
+        let slot = self.room_slot(key).await?;
+        let phase = slot.phase.lock().await;
+        match &*phase {
+            RoomPhase::Live(live) if !live.handle.is_closed() => Some(live.handle.clone()),
+            _ => None,
+        }
+    }
+
+    pub async fn capture_if_live(
+        &self,
+        key: RoomKey,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Option<Result<CapturedRevision, RevisionCaptureError>> {
+        let handle = self.live_handle(key).await?;
+        Some(handle.capture_revision(actor_user_id, session_id).await)
+    }
+
+    pub async fn ensure_live_room(&self, key: RoomKey) -> Result<RoomHandle, JoinError> {
+        let mut retries = 0u8;
+        loop {
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Err(JoinError::EngineUnavailable);
+            }
+            let slot = self.get_or_create_room(key).await?;
+            if let Some(handle) = self.live_handle(key).await {
+                return Ok(handle);
+            }
+            let _ = self.wait_for_live_or_retry(key, slot).await?;
+            if !Self::allow_pre_enqueue_retry(&mut retries) {
+                return Err(JoinError::EngineUnavailable);
+            }
+        }
+    }
+
+    pub async fn restore_revision(
+        &self,
+        key: RoomKey,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        snap: Vec<u8>,
+    ) -> Result<(), RevisionRestoreError> {
+        let handle = self
+            .ensure_live_room(key)
+            .await
+            .map_err(|_| RevisionRestoreError::Unavailable)?;
+        handle
+            .restore_from_snapshot(actor_user_id, session_id, snap)
+            .await
     }
 
     #[cfg(feature = "db-tests")]

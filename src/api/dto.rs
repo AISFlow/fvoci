@@ -458,6 +458,65 @@ pub struct BodyResponse {
     pub version: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionCreateResponse {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionMetaResponse {
+    pub id: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub reason: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionListResponse {
+    pub items: Vec<RevisionMetaResponse>,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionDetailResponse {
+    pub id: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub reason: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub content_json: Value,
+    pub y_snapshot: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionRestoreBody {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub correlation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct RevisionRestoreResponse {
+    pub restored: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
