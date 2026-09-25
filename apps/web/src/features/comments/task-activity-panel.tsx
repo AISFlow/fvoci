@@ -7,7 +7,7 @@ import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-s
 import type { components } from "@/generated/api";
 import { meQuery } from "@/lib/queries";
 import { taskActivityQuery, type TaskActivityFilter } from "@/features/tasks/queries";
-import { CommentCompose, CommentItem, useCommentActions } from "./comment-actions";
+import { CommentItem, RootCommentCompose, useCommentActions } from "./comment-actions";
 import {
   FALLBACK_TIME_ZONE,
   TaskActivityChangeItem,
@@ -155,7 +155,7 @@ export function TaskActivityPanel({
           {t("task.activity.loadMore")}
         </Button>
       ) : null}
-      {!readOnly && filter !== "changes" ? <CommentCompose actions={actions} /> : null}
+      {!readOnly && filter !== "changes" ? <RootCommentCompose actions={actions} /> : null}
     </section>
   );
 }

@@ -21,6 +21,7 @@ import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { parseRef, projectsPath, projectTasksPath } from "@/lib/href";
+import { CommentPanel } from "@/features/comments/comment-panel";
 import "@/features/projects/projects.css";
 
 export function TaskDetailPage() {
@@ -188,7 +189,23 @@ export function TaskDetailPage() {
         </p>
       ) : null}
       {projectDocument ? (
-        <p className="task-home__note">{t("task.document.unsupported")}</p>
+        <article className="task-detail">
+          <header>
+            <p className="task-home__note">{projectDocument.displayId}</p>
+            <h1>{projectDocument.title}</h1>
+          </header>
+          <p className="task-home__note">{t("task.document.unsupported")}</p>
+          {me.data ? (
+            <CommentPanel
+              workspaceId={workspace.id}
+              kind="document"
+              targetId={projectDocument.id}
+              projectId={projectDocument.projectId ?? project?.id ?? ""}
+              currentUserId={me.data.userId}
+              readOnly={!(project?.canEdit ?? false)}
+            />
+          ) : null}
+        </article>
       ) : null}
       {lookup.isLoading ? <QueryLoading /> : null}
       {lookup.isError && !lookup404 ? (

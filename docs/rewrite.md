@@ -16,7 +16,7 @@
 ## 2. 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Orca Run `run_b01d432a9dee`.
-최신 수락 main `441e56fe6d5d6f80c1b3cde34226655e15efd9a9` (PR #1–51). main CI 성공은
+최신 수락 main `c3170b9c530a806b3be3f8a6d2ac074cb650e9ff` (#46까지; 열린 PR은 아래). main CI 성공은
 전체 포팅 완료나 협업 용량 수락을 뜻하지 않는다.
 
 | PR | merge | 범위 | 수락 근거 |
@@ -66,17 +66,24 @@
 | #47 | 1791015 | 태스크 댓글 패널·검색형 상위 태스크 선택 | E2E, 검토 |
 | #48 | f45bb7b | 전역 검색·댓글 hit·partial 추출 chunk·협업 본문 재색인 축소·검색 E2E | search_index10·search_query4, 검토+delta |
 | #50 | 62909be | 그룹 부여 SQL 단일 helper·#40/#47 후속 동등성 | 검토 |
+| #52 | 3e79f54 | 프로젝트 홈·프로젝트 문서 API(tree/create/move)·프로젝트 복제·lead 선택 | project38·E2E, 검토+delta×2 |
+| #54, #55 | — | 문서 기록, 설치 smoke 프레임 유실 수정(per-socket inbox) | CI, 자문 검토 |
+| #46 | c3170b9 | 협업 room 용량: 메모리 예산 admission(기본 30 room, 설정 상한 512), 1013 거부·슬롯 회수, primary admission, fence 상실 시 room 종료, 시작 시 PG 연결 예산 검사 | 64 room release probe(p95 103 ms·writer 손실 0·1011 0·hostile 5/5·대량 재접속·SIGTERM drain), 컨테이너 smoke x64/ARM64, 검토+delta×3 |
 
 검증 기준: 각 PR의 최종 HEAD에서 원격 Rust/Web/Native/Container install 워크플로가 실제 실행되고
 (PG suite는 `--no-fail-fast`), 별도 세션의 Opus 5.5 medium 검토 차단 사항이 해소된 뒤 기대 HEAD로
 squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있다.
 
-진행 중(미수락):
-- 협업 room 용량(#46): main은 여전히 `max_rooms.clamp(1, 4)`. 브랜치는 로컬 release probe로 64 room 기준(p95 103 ms·
-  writer 손실 0·1011 0·hostile 5/5·SIGTERM drain)을 통과했으나 독립 검토 차단 해소와 컨테이너 smoke CI 확인 전까지
-  **미수락**이다.
-- 휴일·ICS(#49, 019), 메일·초대 메일·비밀번호 재설정(#53, 020, #49 위), 프로젝트 홈·문서·복제(#52),
-  워크스페이스 삭제·counts·계정 생명주기(작업 중).
+진행 중(미수락): 메일·비밀번호 재설정(#53, 020), 검색 배치·잠금 취소 안전성(#57), 첨부 viewer·프로젝트 문서 댓글·
+그룹 멘션(#58), Web CI 공통 검사 분리(#59), 태스크 activity(#60, #53 위), 유지보수 job(#61, #53 위),
+S3 저장소·문서 가져오기/내보내기(작업 중).
+
+범위 결정(사용자 확인 2026-09-25): 기존 TypeScript FVOCI 배포가 없으므로 TS 데이터 이전(스키마 변환·사용자/세션/토큰
+이전·문서 corpus 일괄 이전·dual-write·TS 복귀)은 범위 밖이다. 신규 설치·Rust 스키마 migration·Rust 저장 데이터의
+재시작/crash 복원·백업/복구·업그레이드와 제품의 문서 가져오기/내보내기는 범위다.
+
+협업 room 수 구분: 제품 기본값 30, compose 설치 64(PostgreSQL max_connections 150), 검증 64 room×2 사용자 180 s
+(단일 WSL2 호스트), 설정 상한 512는 미검증.
 
 ## 3. 기능 대응표
 
@@ -90,13 +97,13 @@ squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있�
 | 워크스페이스 | domains/workspaces | 현재 역할·철회 경합·RLS·풀 컨텍스트 | 부분 | #4, #39 | 진행: counts·owner 전용 workspace 삭제(#56; 30일 purge 실행기·저장소 정리는 미구현). 미착수: workspace/guest/storage quota |
 | 멤버·초대 | invitation.ts, quota.ts, consent.ts | 좌석 한도(모든 billable 경로)·토큰 단일 사용·역할 상한 | 부분 | #21 | 미착수: 메일/SMTP, 수락 시 MFA/OIDC, legal consent 428, pending 목록/철회 API, 알림 설정 기본값, 계정 삭제 시 pending 정리, 다른 E2E의 SQL fixture 멤버 |
 | 그룹·권한 통합 | policies.ts effectivePermission, project/document_members(user XOR group) | 리소스별 단일 권한 함수 | 수락 | #23, #39, #50 | 후속: collab 프레임당 권한 재조회 축소·collab_delivery의 그룹 join 사본·설정 UI `canManage` DTO |
-| 프로젝트 | domains/projects | 비공개 접근(workspace admin 제외)·lead/멤버 제거 경합·원자성 | 부분 | #13, #39 | 진행: 프로젝트 홈·프로젝트 문서·복제·lead 선택(#52) |
+| 프로젝트 | domains/projects | 비공개 접근(workspace admin 제외)·lead/멤버 제거 경합·원자성 | 부분 | #13, #39, #52 | 미착수: 프로젝트 문서 본문(협업)·trash/restore/sort/duplicate route, collection/view 복제 |
 | 태스크 | domains/tasks, core/task.ts, workflow.ts | 권한·버전·WIP·반복 회차 원자성·키셋 커서 | 부분 | #13, #19, #26, #38, #40, #47 | 미착수: activity feed, 저장된 views(캘린더 view 포함) |
-| 일정·ICS·휴일 | routes.ts ics/holidays | 일정 의미 | 진행 | #49 | 진행: 휴일·ICS 피드(담당 태스크). 미착수: views 기반 ICS 분기 |
+| 일정·ICS·휴일 | routes.ts ics/holidays | 일정 의미 | 부분 | #49 | 수락: 휴일·ICS 피드(담당 태스크). 미착수: views 기반 ICS 분기 |
 | 위키 문서 | domains/documents, core/document.ts | 현재 문서 권한·트리 잠금 순서 | 부분 | #5, #23, #39 | 미착수: 공유·내보내기·확장 문서 기능, trash 영구 삭제 GC |
 | 리비전 | documents/revisions.ts, core/revision.ts, collab applyRestore | 복원은 room actor의 forward system update, durable 후 broadcast | 수락 | #25 | 리비전 routes의 `document_permission` 통합, writer-stale 후 committed_loaded 재설정(후속) |
 | 댓글 | comments/routes.ts, core/comment.ts | 문서 XOR 태스크·부모 활성·권한 | 부분 | #28, #47 | 미착수: 그룹 멘션, 프로젝트 문서 댓글. 후속: 이중 DELETE 중복 이벤트·resolve 경합·동시 trash된 태스크 댓글 |
-| 협업 | domains/collab, React/Tiptap | provider envelope·철회·CRDT 정본·persist barrier·writer generation·재시작 복원 | 부분(opt-in) | #6, #7, #18, #24, #27, #39 | 진행: **room 용량**(main 상한 4 room/서버, §2). 미검증: 실제 OS IME. 미착수: 기존 데이터 전체 호환, opt-in 해제 조건 |
+| 협업 | domains/collab, React/Tiptap | provider envelope·철회·CRDT 정본·persist barrier·writer generation·재시작 복원 | 부분(opt-in) | #6, #7, #18, #24, #27, #39, #46 | 수락: room 용량(기본 30, 64 검증; §2). 미검증: 실제 OS IME. 미착수: opt-in 해제 조건 |
 | 첨부 | domains/attachments, packages/storage | 부모 권한·원본 bytes·원자 완료·취소 | 부분 | #10, #39 | 미착수: S3, 썸네일, 태스크 등 다른 부모, 중단 업로드·임시 파일 GC, quota·디스크 부족 의미 |
 | HWP/HWPX 추출 | 원본 추출 경로, rhwp e8800c8 | 부분/손상/미지원을 빈 본문 성공으로 바꾸지 않음·자원 한도 | 부분 | #2, #8, #9, #11, #35 | 미착수: 썸네일 연결. 후속: lease 만료·재시도 결과 게시 경계 |
 | 검색·색인·AI | domains/search, packages/search | 검색에서도 인가·철회·색인 복구 | 부분 | #29, #30, #35, #48 | 수락: 워크스페이스·전역 검색, 댓글 hit, outbox 색인, 복구 후 rebuild, 검색 E2E. 미착수: 의미(벡터) 검색, 첨부 viewer route(첨부 hit는 상위 문서로 이동). 후속: 색인 처리량(아래 §5) |
@@ -130,10 +137,8 @@ squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있�
 
 - 협업 caret [1,1] 간헐 실패는 #24(awareness 갱신이 native caret을 덮는 제품 결함)로 수정했다. ACL poll이
   한 틱씩 건너뛰던 결함은 #27로 수정했다(철회 지연 2배 → 설정값).
-- 협업 room 용량: main은 서버당 최대 4 room(`clamp(1, 4)`), helper 8개 즉시 거부. 원본 대비 제약이며 수정 진행 중.
-  같은 process-wide child 상한 때문에 로컬 고병렬(32 스레드)에서 revision_integration·collab_projection이
-  간헐 실패한다(CI 4 스레드 정상, ARM64 CI 1회 재현). live room마다
-  소유 fence(advisory lock)용 PG 연결을 하나씩 점유하므로 room 수는 PG `max_connections`에 묶인다.
+- 협업 room마다 소유 fence(advisory lock)용 PG 연결(풀 밖)을 하나씩 점유한다. 필요 연결 = room 수 + 앱 풀 + reserve 10이며
+  시작 시 `max_connections`를 검사한다(#46). 유지보수 job claim이 실행 중 1개를 추가로 쓰며 reserve 안에 든다.
 - collab_product는 디버그 helper·병렬 56 스레드에서 짧은 내부 deadline 테스트가 간헐 실패할 수 있다(CI 정상).
   테스트 harness 수정과 용량 작업에서 함께 다룬다.
 - 실제 OS IME·특정 기기 입력은 미검증이다. 합성 이벤트 성공을 IME 검증으로 표시하지 않는다.
@@ -145,7 +150,7 @@ squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있�
   수렴하지만 부하 시 색인이 지연된다. 배치/비동기 대기 개선이 후속이다.
 - 초대·ICS 토큰이 URL 경로에 있어 `RUST_LOG=debug`/`tower_http=debug`에서 요청 URI 로그로 남을 수 있다(기본 info는
   기록하지 않음). 토큰 경로 마스킹이 후속이다.
-- 원본 TypeScript 설치에서의 데이터 이전은 지원하지 않는다(Rust 스키마 간 업그레이드와 구분).
+- TS 데이터 이전은 사용자 확인으로 범위 밖이다(§2).
 
 ## 6. 재개
 

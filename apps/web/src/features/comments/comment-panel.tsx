@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { ProblemError } from "@/lib/api";
 import { commentsQuery, type CommentsTargetKind } from "@/lib/queries/comments";
-import { CommentCompose, CommentItem, useCommentActions } from "./comment-actions";
+import { CommentItem, RootCommentCompose, useCommentActions } from "./comment-actions";
 import { buildCommentTree, type CommentNode } from "./comment-tree";
 import "./comments.css";
 
@@ -16,6 +16,7 @@ interface CommentPanelProps {
   targetId: string;
   currentUserId: string;
   readOnly?: boolean;
+  projectId?: string | null;
 }
 
 export function CommentPanel({
@@ -24,13 +25,15 @@ export function CommentPanel({
   targetId,
   currentUserId,
   readOnly = false,
+  projectId = null,
 }: CommentPanelProps) {
   const queryClient = useQueryClient();
-  const list = useInfiniteQuery(commentsQuery(workspaceId, kind, targetId));
+  const list = useInfiniteQuery(commentsQuery(workspaceId, kind, targetId, projectId));
   const actions = useCommentActions({
     workspaceId,
     kind,
     targetId,
+    projectId,
     invalidate: () =>
       queryClient.invalidateQueries({ queryKey: ["comments", workspaceId, kind, targetId] }),
   });
@@ -104,7 +107,7 @@ export function CommentPanel({
           {t("comment.list.loadMore")}
         </Button>
       ) : null}
-      {!readOnly ? <CommentCompose actions={actions} /> : null}
+      {!readOnly ? <RootCommentCompose actions={actions} /> : null}
     </section>
   );
 }

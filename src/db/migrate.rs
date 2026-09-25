@@ -25,6 +25,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
     (include_str!("../../migrations/018_notifications.sql"), 18),
     (include_str!("../../migrations/019_schedule_ics.sql"), 19),
     (include_str!("../../migrations/020_mail_reset.sql"), 20),
+    (include_str!("../../migrations/021_maintenance_gc.sql"), 21),
     (include_str!("../../migrations/022_task_activity.sql"), 22),
 ];
 
@@ -423,6 +424,10 @@ mod tests {
         (
             20,
             "cd4e1ec73457fed4f759ddbeff9d998a690afde5c3c4f6779ea20b45baf13fb4",
+        ),
+        (
+            21,
+            "7a9e03487d30c9e92e4f8b93e69d0bbc1b1ac20771161c6a71ba8ed48a90a50c",
         ),
         (
             22,

@@ -1,27 +1,59 @@
-import { t } from "@fvoci/i18n";
-import { useMutation } from "@tanstack/react-query";
+import { formatPersonName, t } from "@fvoci/i18n";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { loadErrorMessage } from "@/components/query-status";
-import { ensureOk, api } from "@/lib/api";
+import { ensureOk, ProblemError, api } from "@/lib/api";
+import { groupsQuery, membersQuery } from "@/lib/queries";
 import type { CommentsTargetKind } from "@/lib/queries/comments";
 import { nextReplyTarget } from "./comment-drafts";
+import { mentionTargetsFromBody } from "./group-mentions";
 import type { CommentOutput } from "./comment-tree";
 
 const REACTIONS = ["👍", "❤️", "🎉"] as const;
+const NONE = "";
+
+type MentionGroup = { id: string; name: string };
+
+function commentPostBody(
+  text: string,
+  parentId: string | null | undefined,
+  members: ReadonlyArray<{ userId: string; name: string }>,
+  groups: ReadonlyArray<MentionGroup>,
+) {
+  const mentions = mentionTargetsFromBody(text, members, groups);
+  return {
+    body: text,
+    parentId: parentId ?? undefined,
+    mentionedUserIds: mentions.mentionedUserIds,
+    mentionedGroupIds: mentions.mentionedGroupIds,
+  };
+}
+
+function appendGroupMention(body: string, name: string): string {
+  const prefix = body.length === 0 || body.endsWith(" ") || body.endsWith("\n") ? "" : " ";
+  return `${body}${prefix}@${name} `;
+}
 
 /** Comment mutations and draft state shared by the comment panel and the task activity feed. */
 export function useCommentActions({
   workspaceId,
   kind,
   targetId,
+  projectId = null,
   invalidate,
 }: {
   workspaceId: string;
   kind: CommentsTargetKind;
   targetId: string;
+  /** Set for comments on a project document (project-scoped comment route). */
+  projectId?: string | null;
   invalidate: () => Promise<unknown>;
 }) {
+  const queryClient = useQueryClient();
+  const project = projectId && projectId.length > 0 ? projectId : null;
+  const groupsList = useQuery(groupsQuery(workspaceId));
+  const groups = groupsList.error instanceof ProblemError ? [] : (groupsList.data?.items ?? []);
   const [draft, setDraft] = useState("");
   const [replyDraft, setReplyDraft] = useState("");
   const [replyToId, setReplyToId] = useState<string | null>(null);
@@ -31,24 +63,55 @@ export function useCommentActions({
   const onError = (error: unknown) => setActionError(loadErrorMessage(error));
 
   const create = useMutation({
-    mutationFn: async (body: { text: string; parentId?: string | null }) =>
-      ensureOk(
+    mutationFn: async (body: { text: string; parentId?: string | null }) => {
+      let members: ReadonlyArray<{ userId: string; name: string }> = [];
+      let mentionGroups: ReadonlyArray<MentionGroup> = [];
+      if (body.text.includes("@")) {
+        const [membersResult, groupsResult] = await Promise.allSettled([
+          queryClient.fetchQuery(membersQuery(workspaceId)),
+          queryClient.fetchQuery(groupsQuery(workspaceId)),
+        ]);
+        if (membersResult.status === "fulfilled") {
+          members = membersResult.value.items.map((member) => ({
+            userId: member.userId,
+            name: formatPersonName(member),
+          }));
+        } else if (!(membersResult.reason instanceof ProblemError)) {
+          throw membersResult.reason;
+        }
+        if (groupsResult.status === "fulfilled") {
+          mentionGroups = groupsResult.value.items;
+        } else if (!(groupsResult.reason instanceof ProblemError)) {
+          throw groupsResult.reason;
+        }
+      }
+      const payload = commentPostBody(body.text, body.parentId, members, mentionGroups);
+      return ensureOk(
         kind === "document"
-          ? await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments", {
-              params: { path: { workspace_id: workspaceId, document_id: targetId } },
-              body: {
-                body: body.text,
-                parentId: body.parentId ?? undefined,
-              },
-            })
+          ? project
+            ? await api.POST(
+                "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments",
+                {
+                  params: {
+                    path: {
+                      workspace_id: workspaceId,
+                      project_id: project,
+                      document_id: targetId,
+                    },
+                  },
+                  body: payload,
+                },
+              )
+            : await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments", {
+                params: { path: { workspace_id: workspaceId, document_id: targetId } },
+                body: payload,
+              })
           : await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments", {
               params: { path: { workspace_id: workspaceId, task_id: targetId } },
-              body: {
-                body: body.text,
-                parentId: body.parentId ?? undefined,
-              },
+              body: payload,
             }),
-      ),
+      );
+    },
     onSuccess: async () => {
       setDraft("");
       setReplyDraft("");
@@ -133,6 +196,7 @@ export function useCommentActions({
     react.isPending;
 
   return {
+    groups,
     draft,
     setDraft,
     replyDraft,
@@ -295,58 +359,98 @@ export function CommentItem({
         </form>
       ) : null}
       {actions.replyToId === comment.id && !readOnly ? (
-        <form
-          data-comment-reply=""
-          className="comment-thread__compose"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const text = actions.replyDraft.trim();
-            if (!text) return;
+        <CommentCompose
+          actions={actions}
+          draft={actions.replyDraft}
+          onDraftChange={actions.setReplyDraft}
+          onSubmit={(text) => {
             void actions.create.mutateAsync({ text, parentId: comment.id });
           }}
-        >
-          <textarea
-            className="comment-thread__input"
-            value={actions.replyDraft}
-            aria-label={t("comment.placeholder")}
-            disabled={pending}
-            onChange={(event) => actions.setReplyDraft(event.target.value)}
-          />
-          <Button type="submit" size="sm" disabled={pending || actions.replyDraft.trim() === ""}>
-            {t("comment.submit")}
-          </Button>
-        </form>
+          testAttr="data-comment-reply"
+        />
       ) : null}
       {children}
     </li>
   );
 }
 
-/** New root comment form. */
-export function CommentCompose({ actions }: { actions: CommentActions }) {
-  const { pending } = actions;
+/** Root or reply comment form with the group-mention picker. */
+export function CommentCompose({
+  actions,
+  draft,
+  onDraftChange,
+  onSubmit,
+  testAttr,
+}: {
+  actions: CommentActions;
+  draft: string;
+  onDraftChange: (body: string) => void;
+  onSubmit: (body: string) => void;
+  testAttr: "data-comment-compose" | "data-comment-reply";
+}) {
+  const { pending, groups } = actions;
+  const attrs = { [testAttr]: "" };
   return (
     <form
-      data-comment-compose=""
+      {...attrs}
       className="comment-thread__compose"
       onSubmit={(event) => {
         event.preventDefault();
-        const text = actions.draft.trim();
+        const text = draft.trim();
         if (!text) return;
-        void actions.create.mutateAsync({ text, parentId: null });
+        onSubmit(text);
       }}
     >
       <textarea
         className="comment-thread__input"
-        value={actions.draft}
+        value={draft}
         aria-label={t("comment.placeholder")}
         placeholder={t("comment.placeholder")}
         disabled={pending}
-        onChange={(event) => actions.setDraft(event.target.value)}
+        onChange={(event) => onDraftChange(event.target.value)}
       />
-      <Button type="submit" disabled={pending || actions.draft.trim() === ""}>
-        {t("comment.submit")}
-      </Button>
+      <div className="comment-thread__compose-row">
+        {groups.length > 0 ? (
+          <select
+            className="comment-thread__mention"
+            aria-label={t("group.mention")}
+            value={NONE}
+            disabled={pending}
+            onChange={(event) => {
+              const groupId = event.target.value;
+              event.target.value = NONE;
+              const group = groups.find((item) => item.id === groupId);
+              if (!group) return;
+              onDraftChange(appendGroupMention(draft, group.name));
+            }}
+          >
+            <option value={NONE}>{t("group.mention")}</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        <Button type="submit" size="sm" disabled={pending || draft.trim() === ""}>
+          {t("comment.submit")}
+        </Button>
+      </div>
     </form>
+  );
+}
+
+/** New root comment form. */
+export function RootCommentCompose({ actions }: { actions: CommentActions }) {
+  return (
+    <CommentCompose
+      actions={actions}
+      draft={actions.draft}
+      onDraftChange={actions.setDraft}
+      onSubmit={(text) => {
+        void actions.create.mutateAsync({ text, parentId: null });
+      }}
+      testAttr="data-comment-compose"
+    />
   );
 }

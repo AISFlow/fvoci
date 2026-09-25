@@ -179,6 +179,19 @@ async fn can_view_document(
     user_id: Uuid,
     document_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
+    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((project_id,)) = row else {
+        return Ok(false);
+    };
+    if let Some(project_id) = project_id {
+        return can_view_project(tx, workspace_id, user_id, project_id).await;
+    }
     Ok(
         document_permission(tx, workspace_id, user_id, document_id, true)
             .await?
@@ -515,6 +528,20 @@ async fn comment_created_audience(
     comment: &CommentSnap,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut candidates = payload_uuid_array(&event.payload, "mentionedUserIds");
+    for group_id in payload_uuid_array(&event.payload, "mentionedGroupIds") {
+        let members: Vec<(Uuid,)> = sqlx::query_as(
+            r#"
+            SELECT user_id
+            FROM fvoci.group_members
+            WHERE workspace_id = $1 AND group_id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(group_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        candidates.extend(members.into_iter().map(|(id,)| id));
+    }
     if let Some(parent_id) = comment.parent_id {
         if let Some(parent) = load_comment(tx, workspace_id, parent_id).await? {
             candidates.push(parent.created_by);
