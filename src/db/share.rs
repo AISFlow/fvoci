@@ -751,7 +751,7 @@ pub async fn share_attachment(
     };
     type AttRow = (
         Uuid,
-        Uuid,
+        Option<Uuid>,
         String,
         String,
         Option<i64>,
@@ -795,6 +795,11 @@ pub async fn share_attachment(
         tx.rollback().await?;
         return Ok(None);
     }
+    // A task attachment (no document parent) is never reachable by a share.
+    let Some(document_id) = document_id else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
     let visible = visible_document_ids(&mut tx, &share).await?;
     if !visible.contains(&document_id) {
         tx.rollback().await?;

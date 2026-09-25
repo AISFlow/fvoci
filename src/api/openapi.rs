@@ -25,41 +25,42 @@ use crate::api::dto::{
     ActivityListResponse, AddProjectMemberBody, AdminInstanceSettingsOutput, AdminSystemOutput,
     AdminUserItemOutput, AdminUserListResponse, AdminUserPatchBody, AdminUserPatchOutput,
     AdminWorkspaceItemOutput, AdminWorkspaceListResponse, AncestorsResponse, ApiTokenCreateBody,
-    ApiTokenCreatedOutput, ApiTokenListResponse, ApiTokenOutput, AttachmentOutput,
-    AttachmentPartUrlResponse, AttachmentUploadedPartResponse, AuditLogItemOutput,
-    AuditLogListResponse, BodyResponse, BrandingOutput, BrandingPatchSchema, CloneProjectBody,
-    CommentListResponse, CommentOutput, CommentReactionBody, CommentReactionSummary,
-    CompleteAttachmentUploadBody, ConsentItemBody, ConsentsPendingResponse, ConsentsSubmitBody,
-    CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
-    CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody, CreateMilestoneBody,
-    CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
-    DeleteWorkspaceBody, DocumentMetaResponse, DocumentShareLinkCreateBody, ExpectedDatesBody,
-    GroupListResponse, GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput,
-    HolidaysListResponse, IcsTokenResponse, ImportJobResponse, InstanceAdminBody,
-    InstanceSettingsOutput, InstanceSettingsPatchSchema, InvitationAcceptBody,
-    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
-    InvitationPublicResponse, LabelListResponse, LabelOutput, LegalDocumentOutput,
-    LegalPublishBody, LegalVersionMetaOutput, LegalVersionsResponse, LoginBody, LoginResponse,
-    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput,
-    MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse, MilestoneOutput,
-    MoveDocumentBody, MoveTaskBody, NotificationItemOutput, NotificationListResponse,
-    NotificationPatchBody, NotificationPrefsBody, NotificationReadAllResponse,
-    NotificationUnreadCountResponse, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
-    PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody,
-    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
-    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
-    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PublicBrandingOutput,
-    PublicSettingsValues, PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
-    ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
-    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
-    SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, ShareCreateBody, ShareLinkCreatedOutput,
-    ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput, SortDocumentBody,
-    StarCreateBody, StarItemOutput, StarListResponse, StartImportBody, TaskChildOutput,
-    TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse,
-    TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse,
-    TreeResponse, WorkflowOutput, WorkspaceConsentsResponse, WorkspaceListItemResponse,
-    WorkspaceListResponse, WorkspaceMemberConsentsOutput, WorkspaceMetaResponse,
+    ApiTokenCreatedOutput, ApiTokenListResponse, ApiTokenOutput, AttachmentEditContextOutput,
+    AttachmentListOutput, AttachmentOutput, AttachmentPartUrlResponse,
+    AttachmentUploadedPartResponse, AuditLogItemOutput, AuditLogListResponse, BodyResponse,
+    BrandingOutput, BrandingPatchSchema, CloneProjectBody, CommentListResponse, CommentOutput,
+    CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody, ConsentItemBody,
+    ConsentsPendingResponse, ConsentsSubmitBody, CreateAttachmentUploadBody,
+    CreateAttachmentUploadResponse, CreateCommentBody, CreateDocumentBody, CreateGroupBody,
+    CreateHolidayBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody, CreateTaskBody,
+    CreateTaskDependencyBody, CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse,
+    DocumentShareLinkCreateBody, ExpectedDatesBody, GroupListResponse, GroupMemberBody,
+    GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
+    IcsTokenResponse, ImportJobResponse, InstanceAdminBody, InstanceSettingsOutput,
+    InstanceSettingsPatchSchema, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
+    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LabelListResponse,
+    LabelOutput, LegalDocumentOutput, LegalPublishBody, LegalVersionMetaOutput,
+    LegalVersionsResponse, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
+    MeApiTokenCreateBody, MemberConsentOutput, MemberResponse, MemberRoleBody, MembersResponse,
+    MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody, NotificationItemOutput,
+    NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
+    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PasswordResetBody,
+    PasswordResetConfirmBody, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
+    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
+    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
+    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
+    PublicBrandingOutput, PublicSettingsValues, PutAttachmentPartResponse, RecentItemOutput,
+    RecentListResponse, ResumeAttachmentUploadResponse, RevisionCreateResponse,
+    RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
+    RevisionRestoreResponse, SearchItemOutput, SearchListResponse, SearchSnippetPiece,
+    SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, ShareCreateBody,
+    ShareLinkCreatedOutput, ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput,
+    SortDocumentBody, StarCreateBody, StarItemOutput, StarListResponse, StartImportBody,
+    TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
+    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceConsentsResponse,
+    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMemberConsentsOutput,
+    WorkspaceMetaResponse,
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
@@ -223,7 +224,13 @@ impl Modify for CookieSecurityAddon {
         resume_attachment_upload,
         complete_attachment_upload,
         get_attachment_meta,
+        delete_attachment,
         download_attachment,
+        create_project_document_attachment_upload,
+        create_task_attachment_upload,
+        list_task_attachments,
+        get_attachment_edit_context,
+        create_attachment_edit_copy,
         list_document_comments,
         create_document_comment,
         list_project_document_comments,
@@ -440,6 +447,8 @@ impl Modify for CookieSecurityAddon {
             AttachmentUploadedPartResponse,
             CompleteAttachmentUploadBody,
             AttachmentOutput,
+            AttachmentListOutput,
+            AttachmentEditContextOutput,
             PutAttachmentPartResponse,
             CreateCommentBody,
             PatchCommentBody,
@@ -539,7 +548,7 @@ impl Modify for CookieSecurityAddon {
         (name = "search", description = "Workspace search and display id lookup"),
         (name = "tasks", description = "Project task operations"),
         (name = "documents", description = "Wiki documents"),
-        (name = "attachments", description = "Wiki document attachments"),
+        (name = "attachments", description = "Document and task attachments"),
         (name = "comments", description = "Document and task comments"),
         (name = "notifications", description = "In-app notifications"),
         (name = "schedule", description = "Holidays and ICS calendar feeds"),
@@ -3431,6 +3440,136 @@ fn get_attachment_meta() {}
     )
 )]
 fn download_attachment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Attachment id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted; storage is reclaimed through the object journal", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden (uploader needs edit, others manage)", body = ProblemResponse),
+        (status = 409, description = "Parent project or task archived", body = ProblemResponse),
+    )
+)]
+fn delete_attachment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/uploads",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Project document id"),
+    ),
+    request_body = CreateAttachmentUploadBody,
+    responses(
+        (status = 201, description = "Upload session created", body = CreateAttachmentUploadResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 402, description = "Storage or upload limit", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
+        (status = 413, description = "File too large", body = ProblemResponse),
+        (status = 429, description = "Create rate limited", body = ProblemResponse),
+    )
+)]
+fn create_project_document_attachment_upload() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/uploads",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    request_body = CreateAttachmentUploadBody,
+    responses(
+        (status = 201, description = "Upload session created", body = CreateAttachmentUploadResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 402, description = "Storage or upload limit", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project or task archived", body = ProblemResponse),
+        (status = 413, description = "File too large", body = ProblemResponse),
+        (status = 429, description = "Create rate limited", body = ProblemResponse),
+    )
+)]
+fn create_task_attachment_upload() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/attachments",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    responses(
+        (status = 200, description = "Task attachments, oldest first", body = AttachmentListOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_task_attachments() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/edit-context",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Attachment id"),
+    ),
+    responses(
+        (status = 200, description = "Whether the caller may save an edited HWP/HWPX copy", body = AttachmentEditContextOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Attachment failed virus scan", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_attachment_edit_context() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/edit-copy",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Source HWP/HWPX attachment id"),
+    ),
+    request_body = CreateAttachmentUploadBody,
+    responses(
+        (status = 201, description = "Upload session for the edited copy on the same parent", body = CreateAttachmentUploadResponse),
+        (status = 400, description = "Invalid input or source is not HWP/HWPX", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 402, description = "Storage or upload limit", body = ProblemResponse),
+        (status = 403, description = "Attachment failed virus scan", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Parent archived", body = ProblemResponse),
+        (status = 413, description = "File too large", body = ProblemResponse),
+        (status = 429, description = "Create rate limited", body = ProblemResponse),
+    )
+)]
+fn create_attachment_edit_copy() {}
 
 #[cfg(feature = "api-schema")]
 pub fn spec_json() -> String {

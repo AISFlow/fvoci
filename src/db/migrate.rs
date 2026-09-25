@@ -39,6 +39,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/028_collections_views.sql"),
         28,
     ),
+    (
+        include_str!("../../migrations/031_attachments_complete.sql"),
+        31,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -476,6 +480,10 @@ mod tests {
         (
             28,
             "99627ccc208879f385340ee888f25cfd7e85f2a57b692a9cfc8cfb2280f7216d",
+        ),
+        (
+            31,
+            "fce80643a26c02173165b5415d62cdcb68dfdb55d51b36a5ea42acd74c56cd27",
         ),
     ];
 

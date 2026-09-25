@@ -157,6 +157,8 @@
 	"ics.holidays.remove": "삭제",
 	"ics.holidays.date": "공휴일 날짜",
 	"task.attach.paste": "붙여넣으면 첨부됩니다",
+	"task.attach.pick": "파일 첨부",
+	"task.attach.uploading": "첨부하는 중…",
 	"task.attach.delete": "삭제",
 	"task.attach.delete.confirm.title": "첨부를 삭제할까요?",
 	"task.attach.delete.confirm.body": "{{name}} 파일이 삭제됩니다. 되돌릴 수 없습니다.",

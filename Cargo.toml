@@ -141,6 +141,11 @@ path = "tests/attachment_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "attachment_parents_integration"
+path = "tests/attachment_parents_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "attachment_extract_integration"
 path = "tests/attachment_extract_integration.rs"
 required-features = ["db-tests"]

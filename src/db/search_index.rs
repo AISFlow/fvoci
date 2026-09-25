@@ -181,26 +181,48 @@ pub async fn load_sources(
         }
         SearchSourceKind::Attachment => {
             r#"
-            SELECT 'attachment'::text AS kind, a.id AS resource_id, a.workspace_id,
-                   d.project_id, a.document_id, NULL::uuid AS task_id,
-                   NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
-                   a.name AS title, coalesce(x.text, a.extract_text) AS body,
-                   coalesce(x.chosung, '') AS chosung,
-                   date_trunc('milliseconds', a.created_at) AS ua
-            FROM fvoci.attachments a
-            JOIN fvoci.documents d
-              ON d.workspace_id = a.workspace_id AND d.id = a.document_id
-            LEFT JOIN fvoci.attachment_text x
-              ON x.workspace_id = a.workspace_id AND x.attachment_id = a.id
-             AND x.status IN ('ok', 'partial') AND x.text <> ''
-            WHERE a.workspace_id = $1 AND a.id = $2
-              AND a.status = 'stored' AND a.scan_status <> 'infected'
-              AND d.deleted_at IS NULL
-              AND (d.project_id IS NULL OR EXISTS (
-                    SELECT 1 FROM fvoci.projects p
-                    WHERE p.workspace_id = $1 AND p.id = d.project_id AND p.deleted_at IS NULL
-              ))
-            ORDER BY coalesce(x.chunk_no, -1)
+            SELECT * FROM (
+                SELECT 'attachment'::text AS kind, a.id AS resource_id, a.workspace_id,
+                       d.project_id, a.document_id, NULL::uuid AS task_id,
+                       NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
+                       a.name AS title, coalesce(x.text, a.extract_text) AS body,
+                       coalesce(x.chosung, '') AS chosung,
+                       date_trunc('milliseconds', a.created_at) AS ua
+                FROM fvoci.attachments a
+                JOIN fvoci.documents d
+                  ON d.workspace_id = a.workspace_id AND d.id = a.document_id
+                LEFT JOIN fvoci.attachment_text x
+                  ON x.workspace_id = a.workspace_id AND x.attachment_id = a.id
+                 AND x.status IN ('ok', 'partial') AND x.text <> ''
+                WHERE a.workspace_id = $1 AND a.id = $2
+                  AND a.status = 'stored' AND a.scan_status <> 'infected'
+                  AND d.deleted_at IS NULL
+                  AND (d.project_id IS NULL OR EXISTS (
+                        SELECT 1 FROM fvoci.projects p
+                        WHERE p.workspace_id = $1 AND p.id = d.project_id AND p.deleted_at IS NULL
+                  ))
+                UNION ALL
+                SELECT 'attachment'::text AS kind, a.id AS resource_id, a.workspace_id,
+                       t.project_id, NULL::uuid AS document_id, a.task_id,
+                       NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
+                       a.name AS title, coalesce(x.text, a.extract_text) AS body,
+                       coalesce(x.chosung, '') AS chosung,
+                       date_trunc('milliseconds', a.created_at) AS ua
+                FROM fvoci.attachments a
+                JOIN fvoci.tasks t
+                  ON t.workspace_id = a.workspace_id AND t.id = a.task_id
+                LEFT JOIN fvoci.attachment_text x
+                  ON x.workspace_id = a.workspace_id AND x.attachment_id = a.id
+                 AND x.status IN ('ok', 'partial') AND x.text <> ''
+                WHERE a.workspace_id = $1 AND a.id = $2
+                  AND a.status = 'stored' AND a.scan_status <> 'infected'
+                  AND t.deleted_at IS NULL AND t.archived_at IS NULL
+                  AND EXISTS (
+                        SELECT 1 FROM fvoci.projects p
+                        WHERE p.workspace_id = $1 AND p.id = t.project_id AND p.deleted_at IS NULL
+                  )
+            ) u
+            ORDER BY coalesce(chunk_no, -1)
             "#
         }
     };
@@ -459,45 +481,70 @@ async fn query_attachments(
     limit: i64,
     scope: &SourceScope,
 ) -> Result<Vec<SearchIndexRow>, sqlx::Error> {
-    if scope.task_id.is_some() {
-        return Ok(Vec::new());
-    }
     let (include, after_id, after_chunk) = after_pred(SearchSourceKind::Attachment, after);
     if !include {
         return Ok(Vec::new());
     }
+    // Source `attachDocs` / `attachTasks`: a document scope only sees
+    // document attachments, a task scope only that task's attachments.
     let rows = sqlx::query(
         r#"
-        SELECT 'attachment'::text AS kind, a.id AS resource_id, a.workspace_id,
-               d.project_id, a.document_id, NULL::uuid AS task_id,
-               NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
-               a.name AS title, coalesce(x.text, a.extract_text) AS body,
-               coalesce(x.chosung, '') AS chosung,
-               date_trunc('milliseconds', a.created_at) AS ua
-        FROM fvoci.attachments a
-        JOIN fvoci.documents d
-          ON d.workspace_id = a.workspace_id AND d.id = a.document_id
-        LEFT JOIN fvoci.attachment_text x
-          ON x.workspace_id = a.workspace_id AND x.attachment_id = a.id
-         AND x.status IN ('ok', 'partial') AND x.text <> ''
-        WHERE a.workspace_id = $1 AND a.status = 'stored' AND a.scan_status <> 'infected'
-          AND d.deleted_at IS NULL
-          AND (d.project_id IS NULL OR EXISTS (
-                SELECT 1 FROM fvoci.projects p
-                WHERE p.workspace_id = $1 AND p.id = d.project_id AND p.deleted_at IS NULL
-          ))
-          AND ($5::uuid IS NULL OR (a.id, coalesce(x.chunk_no, -1)) > ($5::uuid, $6))
-          AND (
-                $2::uuid IS NOT NULL AND d.project_id = $2
-                OR $3::uuid IS NOT NULL AND $4 AND EXISTS (
-                    SELECT 1 FROM fvoci.documents AS root
-                    WHERE root.workspace_id = $1 AND root.id = $3
-                      AND (d.path = root.path OR substr(d.path, 1, length(root.path) + 1) = root.path || '.')
-                )
-                OR $3::uuid IS NOT NULL AND NOT $4 AND a.document_id = $3
-                OR $2::uuid IS NULL AND $3::uuid IS NULL
-          )
-        ORDER BY a.id, coalesce(x.chunk_no, -1)
+        SELECT * FROM (
+            SELECT 'attachment'::text AS kind, a.id AS resource_id, a.workspace_id,
+                   d.project_id, a.document_id, NULL::uuid AS task_id,
+                   NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
+                   a.name AS title, coalesce(x.text, a.extract_text) AS body,
+                   coalesce(x.chosung, '') AS chosung,
+                   date_trunc('milliseconds', a.created_at) AS ua
+            FROM fvoci.attachments a
+            JOIN fvoci.documents d
+              ON d.workspace_id = a.workspace_id AND d.id = a.document_id
+            LEFT JOIN fvoci.attachment_text x
+              ON x.workspace_id = a.workspace_id AND x.attachment_id = a.id
+             AND x.status IN ('ok', 'partial') AND x.text <> ''
+            WHERE a.workspace_id = $1 AND a.status = 'stored' AND a.scan_status <> 'infected'
+              AND d.deleted_at IS NULL
+              AND (d.project_id IS NULL OR EXISTS (
+                    SELECT 1 FROM fvoci.projects p
+                    WHERE p.workspace_id = $1 AND p.id = d.project_id AND p.deleted_at IS NULL
+              ))
+              AND ($5::uuid IS NULL OR (a.id, coalesce(x.chunk_no, -1)) > ($5::uuid, $6))
+              AND $8::uuid IS NULL
+              AND (
+                    $2::uuid IS NOT NULL AND d.project_id = $2
+                    OR $3::uuid IS NOT NULL AND $4 AND EXISTS (
+                        SELECT 1 FROM fvoci.documents AS root
+                        WHERE root.workspace_id = $1 AND root.id = $3
+                          AND (d.path = root.path OR substr(d.path, 1, length(root.path) + 1) = root.path || '.')
+                    )
+                    OR $3::uuid IS NOT NULL AND NOT $4 AND a.document_id = $3
+                    OR $2::uuid IS NULL AND $3::uuid IS NULL
+              )
+            UNION ALL
+            SELECT 'attachment'::text AS kind, a.id AS resource_id, a.workspace_id,
+                   t.project_id, NULL::uuid AS document_id, a.task_id,
+                   NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
+                   a.name AS title, coalesce(x.text, a.extract_text) AS body,
+                   coalesce(x.chosung, '') AS chosung,
+                   date_trunc('milliseconds', a.created_at) AS ua
+            FROM fvoci.attachments a
+            JOIN fvoci.tasks t
+              ON t.workspace_id = a.workspace_id AND t.id = a.task_id
+            LEFT JOIN fvoci.attachment_text x
+              ON x.workspace_id = a.workspace_id AND x.attachment_id = a.id
+             AND x.status IN ('ok', 'partial') AND x.text <> ''
+            WHERE a.workspace_id = $1 AND a.status = 'stored' AND a.scan_status <> 'infected'
+              AND t.deleted_at IS NULL AND t.archived_at IS NULL
+              AND EXISTS (
+                    SELECT 1 FROM fvoci.projects p
+                    WHERE p.workspace_id = $1 AND p.id = t.project_id AND p.deleted_at IS NULL
+              )
+              AND ($5::uuid IS NULL OR (a.id, coalesce(x.chunk_no, -1)) > ($5::uuid, $6))
+              AND $3::uuid IS NULL
+              AND ($2::uuid IS NULL OR t.project_id = $2)
+              AND ($8::uuid IS NULL OR a.task_id = $8)
+        ) u
+        ORDER BY resource_id, coalesce(chunk_no, -1)
         LIMIT $7
         "#,
     )
@@ -508,6 +555,7 @@ async fn query_attachments(
     .bind(if after_id.is_nil() { None } else { Some(after_id) })
     .bind(after_chunk)
     .bind(limit)
+    .bind(scope.task_id)
     .fetch_all(&mut **tx)
     .await?;
     Ok(rows.into_iter().filter_map(map_row).collect())
