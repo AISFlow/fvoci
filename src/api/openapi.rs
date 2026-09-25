@@ -1,13 +1,14 @@
 // Path stubs exist only for OpenAPI generation.
 
 #[cfg(feature = "api-schema")]
-use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 #[cfg(feature = "api-schema")]
 use utoipa::{Modify, OpenApi};
 
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
-    AddProjectMemberBody, AncestorsResponse, AttachmentOutput, AttachmentPartUrlResponse,
+    AddProjectMemberBody, AncestorsResponse, ApiTokenCreateBody, ApiTokenCreatedOutput,
+    ApiTokenListResponse, ApiTokenOutput, AttachmentOutput, AttachmentPartUrlResponse,
     AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
     CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
@@ -15,16 +16,17 @@ use crate::api::dto::{
     DocumentMetaResponse, ExpectedDatesBody, InvitationAcceptBody, InvitationConsentItem,
     InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
     InvitationPublicResponse, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
-    MemberResponse, MemberRoleBody, MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse,
-    PatchCommentBody, PatchDocumentBody, PatchMeBody, PatchProjectBody, PatchTaskBody,
-    PatchWorkspaceBody, ProblemResponse, ProjectListResponse, ProjectMembersResponse,
-    ProjectOutput, PutAttachmentPartResponse, ResumeAttachmentUploadResponse,
-    RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse,
-    RevisionRestoreBody, RevisionRestoreResponse, SearchItemOutput, SearchListResponse,
-    SearchSnippetPiece, SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse,
-    SortDocumentBody, TaskChildOutput, TaskChildProgressOutput, TaskListResponse, TaskMetaOutput,
-    TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse,
-    WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+    MeApiTokenCreateBody, MemberResponse, MemberRoleBody, MembersResponse, MoveDocumentBody,
+    MoveTaskBody, OkResponse, PatchCommentBody, PatchDocumentBody, PatchMeBody, PatchProjectBody,
+    PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectListResponse,
+    ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
+    ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
+    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
+    SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
+    SetupResponse, SetupStatusResponse, SortDocumentBody, TaskChildOutput, TaskChildProgressOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
+    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -37,6 +39,15 @@ impl Modify for CookieSecurityAddon {
         components.add_security_scheme(
             "fvoci_session",
             SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new("fvoci_session"))),
+        );
+        components.add_security_scheme(
+            "bearer_api_token",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("API token")
+                    .build(),
+            ),
         );
     }
 }
@@ -67,6 +78,12 @@ impl Modify for CookieSecurityAddon {
         create_invitation,
         get_invitation,
         accept_invitation,
+        list_workspace_api_tokens,
+        create_workspace_api_token,
+        revoke_workspace_api_token,
+        list_me_api_tokens,
+        create_me_api_token,
+        revoke_me_api_token,
         list_projects,
         create_project,
         get_project,
@@ -127,6 +144,11 @@ impl Modify for CookieSecurityAddon {
             InvitationCreateBody,
             InvitationCreateResponse,
             InvitationPublicResponse,
+            ApiTokenCreateBody,
+            MeApiTokenCreateBody,
+            ApiTokenOutput,
+            ApiTokenCreatedOutput,
+            ApiTokenListResponse,
             InvitationLegalDocument,
             InvitationAcceptBody,
             InvitationConsentItem,
@@ -613,6 +635,107 @@ fn get_invitation() {}
     )
 )]
 fn accept_invitation() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/api-tokens",
+    tag = "api-tokens",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace API tokens", body = ApiTokenListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_workspace_api_tokens() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/api-tokens",
+    tag = "api-tokens",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = ApiTokenCreateBody,
+    responses(
+        (status = 201, description = "Token created; secret shown once", body = ApiTokenCreatedOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn create_workspace_api_token() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/api-tokens/{id}",
+    tag = "api-tokens",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("id" = String, description = "Token id"),
+    ),
+    responses(
+        (status = 200, description = "Token revoked", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn revoke_workspace_api_token() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/api-tokens",
+    tag = "api-tokens",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "Current user API tokens", body = ApiTokenListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_me_api_tokens() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/me/api-tokens",
+    tag = "api-tokens",
+    security(("fvoci_session" = [])),
+    request_body = MeApiTokenCreateBody,
+    responses(
+        (status = 201, description = "Token created; secret shown once", body = ApiTokenCreatedOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn create_me_api_token() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/me/api-tokens/{id}",
+    tag = "api-tokens",
+    security(("fvoci_session" = [])),
+    params(("id" = String, description = "Token id")),
+    responses(
+        (status = 200, description = "Token revoked", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn revoke_me_api_token() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -1422,6 +1545,8 @@ mod tests {
         for (name, fields) in [
             ("SessionUserOutput", &["familyName", "emailVerifiedAt"][..]),
             ("MemberResponse", &["familyName"][..]),
+            ("ApiTokenOutput", &["userId", "expiresAt"][..]),
+            ("ApiTokenCreatedOutput", &["userId", "expiresAt"][..]),
         ] {
             for field in fields {
                 assert_required_nullable(schemas, name, field);
@@ -1446,6 +1571,11 @@ mod tests {
         for field in ["id", "name", "mime", "scanStatus"] {
             assert_required_non_nullable(schemas, "AttachmentOutput", field);
         }
+        for field in ["id", "workspaceId", "name", "scopes", "createdAt"] {
+            assert_required_non_nullable(schemas, "ApiTokenOutput", field);
+            assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", field);
+        }
+        assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", "token");
         let create = &schemas["CreateDocumentBody"];
         assert!(create["required"]
             .as_array()

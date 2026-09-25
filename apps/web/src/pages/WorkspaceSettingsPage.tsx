@@ -4,6 +4,7 @@ import { Navigate } from "react-router-dom";
 import { useState } from "react";
 import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity";
 import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
+import { WorkspaceTokensSection } from "@/features/settings/workspace-tokens";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
@@ -90,6 +91,7 @@ export function WorkspaceSettingsPage() {
             currentUserRole={workspace.role}
           />
         ) : null}
+        {canManage ? <WorkspaceTokensSection workspaceId={workspace.id} /> : null}
       </div>
     </WorkspaceShell>
   );

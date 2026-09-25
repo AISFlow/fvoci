@@ -149,3 +149,8 @@ required-features = ["db-tests"]
 name = "search_query"
 path = "tests/search_query.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "api_token_integration"
+path = "tests/api_token_integration.rs"
+required-features = ["db-tests"]

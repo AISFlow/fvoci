@@ -61,3 +61,21 @@ export const invitationAcceptInput = z.object({
     .optional(),
   password: optionalPassword,
 });
+
+export const apiTokenScope = z.enum([
+  "documents.read",
+  "documents.write",
+  "tasks.read",
+  "tasks.write",
+  "projects.read",
+  "projects.manage",
+  "share.manage",
+  "workspace.manage",
+]);
+
+export const apiTokenCreateInput = z.object({
+  name: z.string().trim().min(1, "i18n:form.too_small").max(100, "i18n:form.too_big"),
+  scopes: z.array(apiTokenScope).min(1, "i18n:token.scopes.required"),
+  unlimited: z.boolean().optional(),
+  service: z.boolean().optional(),
+});
