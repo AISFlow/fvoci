@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::attachments::UploadLimits;
 use crate::auth::password::Keyring;
+use crate::search::meili::{meili_config_from_env, MeiliConfig};
 
 pub const DEFAULT_UPLOAD_PART_SIZE_BYTES: i64 = 32 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES: i64 = 5120_i64 * 1024 * 1024;
@@ -23,6 +24,8 @@ pub struct Config {
     pub upload: UploadLimits,
     /// Wall deadline covering HTTP drain, hub join, and pool close after the stop signal.
     pub shutdown_deadline: Duration,
+    /// Present when `FVOCI_MEILI_URL` is set. The API key is never logged.
+    pub meili: Option<MeiliConfig>,
 }
 
 impl Clone for Config {
@@ -38,6 +41,7 @@ impl Clone for Config {
             storage_root: self.storage_root.clone(),
             upload: self.upload.clone(),
             shutdown_deadline: self.shutdown_deadline,
+            meili: self.meili.clone(),
         }
     }
 }
@@ -54,6 +58,7 @@ impl fmt::Debug for Config {
             .field("storage_root", &self.storage_root)
             .field("upload", &self.upload)
             .field("shutdown_deadline", &self.shutdown_deadline)
+            .field("meili", &self.meili)
             .finish()
     }
 }
@@ -104,6 +109,7 @@ impl Config {
 
         let shutdown_deadline =
             parse_shutdown_deadline_ms(env::var("FVOCI_SHUTDOWN_DEADLINE_MS").ok().as_deref())?;
+        let meili = meili_config_from_env()?;
 
         Ok(Self {
             bind,
@@ -116,6 +122,7 @@ impl Config {
             storage_root,
             upload,
             shutdown_deadline,
+            meili,
         })
     }
 }
