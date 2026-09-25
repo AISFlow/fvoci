@@ -192,7 +192,7 @@ pub async fn load_sources(
               ON d.workspace_id = a.workspace_id AND d.id = a.document_id
             LEFT JOIN fvoci.attachment_text x
               ON x.workspace_id = a.workspace_id AND x.attachment_id = a.id
-             AND x.status = 'ok' AND x.text <> ''
+             AND x.status IN ('ok', 'partial') AND x.text <> ''
             WHERE a.workspace_id = $1 AND a.id = $2
               AND a.status = 'stored' AND a.scan_status <> 'infected'
               AND d.deleted_at IS NULL
@@ -479,7 +479,7 @@ async fn query_attachments(
           ON d.workspace_id = a.workspace_id AND d.id = a.document_id
         LEFT JOIN fvoci.attachment_text x
           ON x.workspace_id = a.workspace_id AND x.attachment_id = a.id
-         AND x.status = 'ok' AND x.text <> ''
+         AND x.status IN ('ok', 'partial') AND x.text <> ''
         WHERE a.workspace_id = $1 AND a.status = 'stored' AND a.scan_status <> 'infected'
           AND d.deleted_at IS NULL
           AND (d.project_id IS NULL OR EXISTS (
@@ -525,7 +525,7 @@ pub async fn replace_attachment_chunks(
         .bind(attachment_id)
         .execute(&mut **tx)
         .await?;
-    if status != "ok" {
+    if status != "ok" && status != "partial" {
         return Ok(());
     }
     for chunk in chunks {
@@ -533,7 +533,7 @@ pub async fn replace_attachment_chunks(
             r#"
             INSERT INTO fvoci.attachment_text (
                 workspace_id, attachment_id, chunk_no, start_offset, end_offset, text, chosung, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'ok')
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(workspace_id)
@@ -543,6 +543,7 @@ pub async fn replace_attachment_chunks(
         .bind(chunk.end)
         .bind(&chunk.text)
         .bind(to_chosung(&chunk.text))
+        .bind(status)
         .execute(&mut **tx)
         .await?;
     }

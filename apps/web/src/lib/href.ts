@@ -79,6 +79,16 @@ export function documentPath(slug: string, displayId: string): string {
   return `/w/${slug.toLowerCase()}/${displayId}`;
 }
 
+export const COMMENTS_ANCHOR_ID = "document-comments";
+
+export function attachmentPath(slug: string, attachmentId: string, chunkNo?: number | null): string {
+  const base = `/w/${slug.toLowerCase()}/a/${attachmentId}/view`;
+  if (chunkNo === null || chunkNo === undefined) {
+    return base;
+  }
+  return `${base}?chunk=${chunkNo}`;
+}
+
 export function itemPath(slug: string, displayId: string): string {
   return documentPath(slug, displayId);
 }

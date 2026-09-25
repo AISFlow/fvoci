@@ -8,6 +8,8 @@ import {
   projectTasksPath,
   projectsPath,
   searchPath,
+  attachmentPath,
+  COMMENTS_ANCHOR_ID,
 } from "./href.ts";
 
 test("parseRef distinguishes project keys from KEY-n items and wiki refs", () => {
@@ -42,4 +44,7 @@ test("canonical project and task paths lower-case slug and upper-case key", () =
   assert.equal(projectTasksPath("Acme", "lab"), "/w/acme/LAB/tasks");
   assert.equal(searchPath("Acme"), "/w/acme/search");
   assert.equal(searchPath("Acme", { q: "ㄱㅅ", tab: "document" }), "/w/acme/search?q=%E3%84%B1%E3%85%85&tab=document");
+  assert.equal(attachmentPath("Acme", "att-1"), "/w/acme/a/att-1/view");
+  assert.equal(attachmentPath("Acme", "att-1", 2), "/w/acme/a/att-1/view?chunk=2");
+  assert.equal(COMMENTS_ANCHOR_ID, "document-comments");
 });
