@@ -7,6 +7,7 @@ import {
   projectKeyIssue,
   projectTasksPath,
   projectsPath,
+  searchPath,
 } from "./href.ts";
 
 test("parseRef distinguishes project keys from KEY-n items and wiki refs", () => {
@@ -39,4 +40,6 @@ test("project key validation matches source reserved and KEY-n rejection", () =>
 test("canonical project and task paths lower-case slug and upper-case key", () => {
   assert.equal(projectsPath("Acme"), "/w/acme/projects");
   assert.equal(projectTasksPath("Acme", "lab"), "/w/acme/LAB/tasks");
+  assert.equal(searchPath("Acme"), "/w/acme/search");
+  assert.equal(searchPath("Acme", { q: "ㄱㅅ", tab: "document" }), "/w/acme/search?q=%E3%84%B1%E3%85%85&tab=document");
 });

@@ -24,6 +24,10 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES` | Upload size ceiling; defaults to 5120 MiB. This is independent of the native extractor's 20 MiB input ceiling. |
 | `FVOCI_UPLOAD_CREATE_RATE_PER_5MIN` | Upload creation rate limit; defaults to 120. Must be positive. |
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
+| `FVOCI_MEILI_URL` | Meilisearch HTTP origin. Unset disables search (later routes return a problem). |
+| `FVOCI_MEILI_KEY` | API key used when `FVOCI_MEILI_KEY_FILE` is unset. Required (with the file form) if the URL is set. Never logged. |
+| `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. |
+| `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 
 Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. The crate uses SQLx `runtime-tokio-rustls`.
 
@@ -298,9 +302,18 @@ docker compose -f infra/rust/compose.yml --env-file infra/rust/.env up -d --wait
 
 The `init` service runs `fvoci-migrate`, creates the non-superuser
 `FVOCI_APP_ROLE` if missing, then `fvoci-migrate --grant-app-role <role>` with the
-owner `DATABASE_URL`. The stack fails if init exits nonzero; `server` starts only
-after init succeeds. The server receives only `DATABASE_APP_URL`; the owner URL is
-given to the one-shot init service alone. Preserve the `storage` and `pgdata` volumes across restarts.
+owner `DATABASE_URL`. When `FVOCI_MEILI_URL` is set it also runs
+`fvoci-migrate --ensure-meili-key` with the Meilisearch **master** key, writes a
+scoped API key (index `fvoci` only) to `/run/fvoci/meili/api_key` (mode 0600,
+uid 1000), and ensures index settings. The stack fails if init exits nonzero;
+`server` starts only after init succeeds. The server receives only
+`DATABASE_APP_URL` and `FVOCI_MEILI_URL` + `FVOCI_MEILI_KEY_FILE`; it never
+receives the owner database URL or `MEILI_MASTER_KEY`. Preserve the `storage`,
+`pgdata`, `searchdata`, and `meili_key` volumes across restarts.
+
+Search is disabled when `FVOCI_MEILI_URL` is unset. If the URL is set without
+`FVOCI_MEILI_KEY` or `FVOCI_MEILI_KEY_FILE`, the server refuses to start. Keys
+are never logged.
 
 The server is published on `FVOCI_PUBLISH_ADDR:FVOCI_PUBLISH_PORT` (default
 `127.0.0.1`, loopback only). `FVOCI_PUBLIC_ORIGIN` must be the exact origin browsers
@@ -316,6 +329,68 @@ a graceful `docker compose stop server` (stopped container must report exit code
 a recreated server container on the same volumes, and post-recreate reads.
 CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
 `.github/workflows/install.yml` (no secrets, no image publish).
+
+## Backup and restore
+
+This is the logical backup for the Compose install above (the source advanced
+install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
+of every volume, and it is not PITR.
+
+**Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
+functions) and `fvoci`, taken as the PostgreSQL owner role through the
+`postgres` service, plus a `tar` of the `storage` volume. **Omitted:** Meilisearch (`searchdata`), the scoped API key
+volume, Compose env files, pepper keys, and database passwords. The search
+index is derived. Restore runs `fvoci-migrate --ensure-meili-key`, which writes
+a new scoped key and ensures index settings. Product `search-rebuild` is not in
+this slice; attachment `extract_text` is in PostgreSQL and comes back with the
+dump. Keep `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID` the same as
+the original or existing passwords will not verify. `POSTGRES_USER`,
+`POSTGRES_DB`, and `FVOCI_APP_ROLE` names must match; cluster passwords and
+`MEILI_MASTER_KEY` may be new. `scripts/restore.sh` compares the keyring fingerprint recorded in the backup manifest and refuses to restore with a different keyring.
+
+**Ordering:** `scripts/backup.sh` stops the server (the only writer) and checks
+that no other client sessions remain, then dumps PostgreSQL, then archives
+storage. Stored attachment keys in the dump must exist as
+`objects/<key>/payload` in the tar, so restored files cover every database
+reference. Archives are created with directory mode `0700` and file mode
+`0600`. The dump contains whatever the database already stored (including
+password hashes); the archive does not add the env file or Meili master key.
+
+Backup a running project (restarts the server afterwards unless
+`--leave-stopped`):
+
+```sh
+scripts/backup.sh \
+  --project fvoci-rust-install \
+  --env-file infra/rust/.env \
+  --output /srv/fvoci-backups/fvoci-2026-09-25
+```
+
+Restore only into a **new** Compose project whose install volumes do not exist.
+Do not restore onto the source project. On failure the target is left for
+diagnosis; delete only that project with `docker compose -p <name> down -v`.
+
+```sh
+scripts/restore.sh \
+  --project fvoci-restore-check \
+  --env-file /srv/fvoci-restore/.env \
+  --input /srv/fvoci-backups/fvoci-2026-09-25
+```
+
+Restore starts postgres and Meilisearch on empty volumes, creates the
+application role, restores the dump, restores storage, then runs the one-shot
+`init` job (`fvoci-migrate`, `--grant-app-role`, `--ensure-meili-key`; all
+idempotent on this path) and starts the server. Confirm login with the original
+password, document body, attachment bytes, extraction text, and tasks.
+
+`scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
+source project (setup/login, wiki collab body, HWPX upload and extraction,
+project/task, a document comment), backs it up, deletes that stack
+and its volumes, restores into a second project, and checks those artifacts
+plus uid `1000` and that the restored server receives only `DATABASE_APP_URL`.
+Trap cleanup removes only those two projects. CI runs it as a separate job on
+`ubuntu-24.04` and `ubuntu-24.04-arm` in `.github/workflows/install.yml` (no
+secrets, no image publish).
 
 When `FVOCI_EXTRACTOR_BIN` is absent, extraction is explicitly disabled and stored
 HWP/HWPX attachments remain pending. An invalid configured path fails startup.

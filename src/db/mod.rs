@@ -3,6 +3,7 @@ pub mod attachment_extract;
 pub mod attachments;
 pub mod collab;
 pub mod collab_delivery;
+pub mod comments;
 pub mod context;
 pub mod documents;
 pub mod identity;
@@ -12,6 +13,7 @@ pub mod migrate;
 pub mod pool;
 pub mod projects;
 pub mod quota;
+pub mod revisions;
 pub mod tasks;
 pub mod workspace;
 

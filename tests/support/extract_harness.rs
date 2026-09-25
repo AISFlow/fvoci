@@ -160,6 +160,7 @@ pub async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> App
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
         },
         collab: None,
+        meili: None,
     }
 }
 

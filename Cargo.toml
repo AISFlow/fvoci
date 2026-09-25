@@ -40,6 +40,7 @@ hex = "0.4"
 hmac = "0.12"
 rand = "0.9"
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -100,6 +101,11 @@ path = "tests/task_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "comment_integration"
+path = "tests/comment_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "attachment_integration"
 path = "tests/attachment_integration.rs"
 required-features = ["db-tests"]
@@ -132,6 +138,16 @@ required-features = ["db-tests"]
 [[test]]
 name = "collab_shutdown"
 path = "tests/collab_shutdown.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "search_meili"
+path = "tests/search_meili.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "search_query"
+path = "tests/search_query.rs"
 required-features = ["db-tests"]
 
 [[test]]

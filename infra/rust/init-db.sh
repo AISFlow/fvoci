@@ -19,3 +19,9 @@ SQL
 
 /opt/fvoci/bin/fvoci-migrate
 /opt/fvoci/bin/fvoci-migrate --grant-app-role "$FVOCI_APP_ROLE"
+
+if [ -n "${FVOCI_MEILI_URL:-}" ]; then
+  : "${MEILI_MASTER_KEY:?MEILI_MASTER_KEY is required when FVOCI_MEILI_URL is set}"
+  KEY_FILE="${FVOCI_MEILI_KEY_FILE:-/run/fvoci/meili/api_key}"
+  /opt/fvoci/bin/fvoci-migrate --ensure-meili-key "$KEY_FILE"
+fi

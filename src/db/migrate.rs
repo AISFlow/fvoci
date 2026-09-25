@@ -14,6 +14,8 @@ const MIGRATIONS: &[(&str, i32)] = &[
     ),
     (include_str!("../../migrations/008_projects.sql"), 8),
     (include_str!("../../migrations/009_invitations.sql"), 9),
+    (include_str!("../../migrations/010_revisions.sql"), 10),
+    (include_str!("../../migrations/011_comments.sql"), 11),
     (include_str!("../../migrations/012_api_tokens.sql"), 12),
 ];
 
@@ -28,11 +30,6 @@ pub const SCHEMA_GATE_OPERATOR_HINT: &str =
 /// Latest migration version compiled into this binary.
 pub fn latest_migration_version() -> i32 {
     MIGRATIONS.last().map(|(_, version)| *version).unwrap_or(0)
-}
-
-/// Number of migration files compiled into this binary (versions may skip).
-pub fn compiled_migration_count() -> i64 {
-    i64::try_from(MIGRATIONS.len()).unwrap_or(0)
 }
 
 pub fn schema_version_gate(actual: Option<i32>, expected: i32) -> Result<(), String> {
@@ -288,7 +285,7 @@ pub async fn assert_app_role(pool: &PgPool) -> Result<(), String> {
                   'sessions', 'events', 'audit_log', 'documents', 'document_states',
                   'document_collab_updates', 'document_collab_op_receipts', 'attachments',
                   'projects', 'project_members', 'workflows', 'statuses', 'tasks',
-                  'invitations', 'api_tokens'
+                  'invitations', 'revisions', 'comments', 'api_tokens'
               )
               AND pg_get_userbyid(c.relowner) = current_user
         )
@@ -369,6 +366,14 @@ mod tests {
         (
             9,
             "640c6063ba24cbe90a00dbd98cf54945752265fbfceef9221ee027bfa26289b6",
+        ),
+        (
+            10,
+            "64594b33a13df1ed29479d4b07d692850e0c806b0b76749cc0316e3eaea8dfa8",
+        ),
+        (
+            11,
+            "ab17b10baa2533ebccaf994ae5c4d1d0f1ce7bc82a56f9e77371c483f48bf3e5",
         ),
         (
             12,

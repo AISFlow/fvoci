@@ -385,6 +385,7 @@ pub fn test_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig 
         idle_evict_ms,
         revoke_poll_ms: 5_000,
         client_id_ttl_ms: 60_000,
+        rpc_timeout_ms: 5_000,
     }
 }
 
@@ -433,6 +434,7 @@ pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> (AppState, Ar
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
         },
         collab: Some(hub.clone()),
+        meili: None,
     };
     (state, hub)
 }

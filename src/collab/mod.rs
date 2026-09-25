@@ -10,6 +10,7 @@ pub mod engine_bridge;
 pub mod guard;
 pub mod hub;
 pub mod origin;
+pub mod revision;
 pub mod room;
 pub mod transport;
 pub mod validation;
@@ -18,6 +19,7 @@ pub mod y_sync;
 
 pub use config::CollabConfig;
 pub use hub::CollabHub;
+pub use room::{CapturedRevision, RevisionCaptureError, RevisionRestoreError};
 pub use wire::{
     decode, encode, AuthMessage, AuthMessageType, CollabKind, CollabRoomName, ConnectionMessage,
     DocumentMessage, Limits, MessageType, SyncMessage, SyncStep, WireError, WireFrame,

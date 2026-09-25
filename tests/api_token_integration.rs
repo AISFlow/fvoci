@@ -157,6 +157,7 @@ async fn app_state(app_url: &str) -> AppState {
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
         },
         collab: None,
+        meili: None,
     }
 }
 
