@@ -4,8 +4,7 @@ use uuid::Uuid;
 
 use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
 use crate::db::documents::between;
-use crate::db::projects::{lock_project, project_permission, visible_project_sql, ProjectDbError};
-use crate::db::workspace::WorkspaceRole;
+use crate::db::projects::{lock_project, project_permission, ProjectDbError};
 use crate::projects::ProjectPermission;
 
 pub const MILESTONE_NAME_MAX: usize = 200;
@@ -36,21 +35,6 @@ async fn workspace_is_live(
             .fetch_optional(&mut **tx)
             .await?;
     Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
-}
-
-async fn membership_role(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    user_id: Uuid,
-) -> Result<Option<WorkspaceRole>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
 }
 
 async fn require_project_view(
@@ -374,40 +358,5 @@ pub async fn project_milestone_exists(
     .bind(milestone_id)
     .fetch_one(&mut **tx)
     .await?;
-    Ok(exists.0)
-}
-
-pub async fn milestone_is_visible(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    milestone_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let Some(role) = membership_role(tx, workspace_id, actor_user_id).await? else {
-        return Ok(false);
-    };
-    let guest = role == WorkspaceRole::Guest;
-    let visible = visible_project_sql("p", 3, 4);
-    let sql = format!(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM fvoci.milestones m
-            INNER JOIN fvoci.projects p
-                ON p.workspace_id = m.workspace_id AND p.id = m.project_id
-            WHERE m.workspace_id = $1
-              AND m.id = $2
-              AND p.deleted_at IS NULL
-              AND {visible}
-        )
-        "#
-    );
-    let exists: (bool,) = sqlx::query_as(&sql)
-        .bind(workspace_id)
-        .bind(milestone_id)
-        .bind(guest)
-        .bind(actor_user_id)
-        .fetch_one(&mut **tx)
-        .await?;
     Ok(exists.0)
 }
