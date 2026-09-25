@@ -243,20 +243,40 @@ async fn put_upload_part(
         }
         Err(_) => return Err(AppError::internal()),
     };
+    // Held until the part is committed; refused before the body is read.
+    let Some(_slot) = state.upload.part_put_slots.try_acquire(user_id) else {
+        return Err(AppError::upload_capacity_exceeded(
+            PART_SLOT_RETRY_AFTER_SECS,
+        ));
+    };
     let declared_len = declared_body_length(&headers, &body)?;
     let stream = body.into_data_stream();
-    let mut staged = state
-        .storage
-        .stage_part_stream(
+    // Bounds how long a paced body can hold its slot, on every driver.
+    let body_deadline = state
+        .upload
+        .part_put_slots
+        .body_deadline(declared_len.unwrap_or(max_bytes));
+    let mut staged = tokio::time::timeout(
+        body_deadline,
+        state.storage.stage_part_stream(
             &storage_key,
             upload_ref.as_deref(),
             part_number,
             stream,
             declared_len,
             max_bytes,
-        )
-        .await
-        .map_err(map_storage_error)?;
+        ),
+    )
+    .await
+    .map_err(|_| {
+        tracing::info!(
+            attachment_id = %attachment_id,
+            part_number,
+            "attachment.part_body_deadline"
+        );
+        AppError::from_code(ProblemCode::InvalidInput)
+    })?
+    .map_err(map_storage_error)?;
     #[cfg(feature = "db-tests")]
     crate::db::attachments::test_barrier::wait_pre_publish_barrier(attachment_id).await;
     let part = commit_upload_part(
@@ -608,6 +628,8 @@ async fn serve_download(
     }
 }
 
+const PART_SLOT_RETRY_AFTER_SECS: u32 = 2;
+
 /// The part's declared length: `Content-Length`, or the exact size the body
 /// already knows (e.g. a buffered body). A malformed header is rejected; no
 /// declared length at all (chunked) yields `None`, which the S3 driver refuses.
@@ -632,7 +654,9 @@ fn map_storage_error(err: StorageError) -> AppError {
         StorageError::EtagMismatch | StorageError::PartTooSmall => {
             AppError::from_code(ProblemCode::SubmittedPartsDoNotMatchUploadedParts)
         }
-        StorageError::LengthRequired | StorageError::LengthMismatch => {
+        // A body that broke off mid-stream is the client's failure: answer
+        // 400 (usually unseen) instead of logging a server error.
+        StorageError::LengthRequired | StorageError::LengthMismatch | StorageError::ClientBody => {
             AppError::from_code(ProblemCode::InvalidInput)
         }
         _ => AppError::internal(),

@@ -184,6 +184,9 @@ async fn app_state_with_part_size(
             part_size_bytes,
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+            part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+            ),
         },
         collab: None,
         meili: None,
@@ -276,8 +279,15 @@ async fn setup_session_with_part_size(
     storage: ObjectStorage,
     part_size_bytes: i64,
 ) -> (axum::Router, String, Uuid) {
-    let app =
-        app_router(app_state_with_part_size(&harness.app_url, storage, part_size_bytes).await);
+    let state = app_state_with_part_size(&harness.app_url, storage, part_size_bytes).await;
+    setup_session_with_state(harness, state).await
+}
+
+async fn setup_session_with_state(
+    harness: &TestDb,
+    state: AppState,
+) -> (axum::Router, String, Uuid) {
+    let app = app_router(state);
     let (_, _, cookie_hdr) = json_request(
         app.clone(),
         "POST",
@@ -574,11 +584,11 @@ async fn s3_http_upload_download_and_stale_gc() {
     let pool = pool::connect_app(&harness.app_url).await.unwrap();
     // Each run is bounded: the listing stops at the batch limit across
     // workspaces instead of loading every stale row.
-    let one = fvoci_server::db::attachments::list_stale_uploading(&pool, cutoff, 1)
+    let one = fvoci_server::db::attachments::list_stale_uploading(&pool, cutoff, None, 1)
         .await
         .unwrap();
     assert_eq!(one.len(), 1);
-    let all = fvoci_server::db::attachments::list_stale_uploading(&pool, cutoff, 10)
+    let all = fvoci_server::db::attachments::list_stale_uploading(&pool, cutoff, None, 10)
         .await
         .unwrap();
     let mut seen: Vec<Uuid> = all.iter().map(|row| row.workspace_id).collect();
@@ -1134,6 +1144,8 @@ async fn gc_stale_uploads(
         pool,
         storage,
         cutoff,
+        None,
+        fvoci_server::jobs::UPLOAD_GC_BATCH,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -1247,6 +1259,18 @@ async fn s3_part_put_streams_with_a_bounded_declared_length() {
     let (body, _) = tracked_body(vec![payload.clone(), vec![1u8; 500]]);
     let (status, problem) = put_raw(&app, &cookie, &part_url, Some(1000), body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "long: {problem:?}");
+    // Review D3: the client's body breaking off mid-stream (disconnect) is a
+    // 400 client error, not a 500, and stores nothing.
+    let broken = axum::body::Body::from_stream(stream::iter(vec![
+        Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&payload[..100])),
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "client went away",
+        )),
+    ]));
+    let (status, problem) = put_raw(&app, &cookie, &part_url, Some(1000), broken).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "disconnect: {problem:?}");
+    assert_eq!(problem["code"], "invalid_input", "{problem:?}");
     let parts = storage.list_parts(&key, Some(&upload_id)).await.unwrap();
     assert!(
         parts.is_empty(),
@@ -1690,5 +1714,84 @@ async fn s3_verify_stored_objects_reports_missing_and_fails_on_storage_errors() 
     );
     assert!(!report.is_complete());
     pool.close().await;
+    harness.cleanup().await;
+}
+
+/// Review D2: part PUTs in flight are bounded per process. With every slot
+/// taken, a PUT is refused with 503 + Retry-After before its body is read,
+/// and succeeds once a slot frees up.
+#[tokio::test]
+async fn s3_part_put_slots_bound_concurrent_uploads() {
+    use fvoci_server::db::attachments::test_barrier;
+
+    let harness = TestDb::bootstrap().await;
+    let storage = s3_backend().await;
+    let mut state = app_state_with_part_size(
+        &harness.app_url,
+        storage.clone(),
+        fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+    )
+    .await;
+    state.upload.part_put_slots = fvoci_server::attachments::PartPutSlots::new(1);
+    let (app, cookie, workspace_id) = setup_session_with_state(&harness, state).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let mut urls = Vec::new();
+    let mut ids = Vec::new();
+    for name in ["slot-a.bin", "slot-b.bin"] {
+        let (status, created, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+            Some(json!({ "name": name, "sizeBytes": 4 })),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created:?}");
+        ids.push(created["attachmentId"].as_str().unwrap().to_string());
+        urls.push(created["parts"][0]["url"].as_str().unwrap().to_string());
+    }
+
+    // The first PUT holds the only slot while parked before publish.
+    let mut barrier = test_barrier::arm_pre_publish(Uuid::parse_str(&ids[0]).unwrap());
+    let first = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let url = urls[0].clone();
+        async move { put_part(&app, &cookie, &url, b"aaaa").await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+        .await
+        .expect("first PUT should reach the pre-publish barrier")
+        .expect("barrier entered");
+
+    let (body, polled) = tracked_body(vec![b"bbbb".to_vec()]);
+    let mut req = Request::builder()
+        .method("PUT")
+        .uri(&urls[1])
+        .header("cookie", format!("fvoci_session={cookie}"))
+        .header("content-type", "application/octet-stream")
+        .header("content-length", 4)
+        .body(body)
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["retry-after"], "2");
+    let problem: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(problem["code"], "upload_capacity_exceeded", "{problem:?}");
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+
+    barrier.proceed();
+    let (status, _) = first.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    // The slot is released with the finished request.
+    let (status, _) = put_part(&app, &cookie, &urls[1], b"bbbb").await;
+    assert_eq!(status, StatusCode::OK);
     harness.cleanup().await;
 }

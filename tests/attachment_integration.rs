@@ -169,6 +169,9 @@ async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppStat
             part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+            part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+            ),
         },
         collab: None,
         meili: None,
@@ -2404,8 +2407,103 @@ async fn gc_stale_uploads(
         pool,
         storage,
         cutoff,
+        None,
+        fvoci_server::jobs::UPLOAD_GC_BATCH,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await
     .map(|stats| stats.purged)
+}
+
+#[tokio::test]
+async fn trickling_part_put_times_out_and_releases_its_slot() {
+    let harness = TestDb::bootstrap().await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-trickle-{}", Uuid::now_v7()));
+    let mut state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
+    state.upload.part_put_slots = fvoci_server::attachments::PartPutSlots::with_per_user(1, 1)
+        .with_body_deadline(Duration::from_millis(300), 1 << 40);
+    let app = app_router(state);
+    let (_, _, cookie_hdr) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/setup",
+        Some(json!({
+            "email": "trickle@example.com",
+            "password": "supersecret1",
+            "givenName": "Trickle",
+            "workspaceSlug": "trickle",
+            "workspaceName": "Trickle"
+        })),
+        None,
+    )
+    .await;
+    let cookie = extract_session_cookie(cookie_hdr.as_ref().unwrap());
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'trickle'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    admin.close().await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let bytes = b"abcd";
+    let (_, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "trickle.bin",
+        bytes,
+    )
+    .await;
+
+    // Two bytes, then the client goes quiet: the local driver has no
+    // transport deadline of its own, so the part deadline must end it.
+    let hanging = stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
+        bytes::Bytes::from_static(b"ab"),
+    )])
+    .chain(futures_util::stream::pending());
+    let mut put = Request::builder()
+        .method("PUT")
+        .uri(part_url.clone())
+        .header("cookie", format!("fvoci_session={cookie}"))
+        .header("content-type", "application/octet-stream")
+        .header("content-length", bytes.len())
+        .body(Body::from_stream(hanging))
+        .unwrap();
+    put.extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let response = tokio::time::timeout(Duration::from_secs(10), app.clone().oneshot(put))
+        .await
+        .expect("the part deadline ends a trickling body")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let removed = tokio::time::timeout(Duration::from_secs(5), async {
+        while writing_temps(&storage_root).await > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        removed.is_ok(),
+        "timed-out PUT must remove its staged .writing"
+    );
+
+    // The only slot came back with the timed-out request.
+    let (status, _, _) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(bytes.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    harness.cleanup().await;
 }
