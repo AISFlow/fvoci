@@ -702,6 +702,10 @@ fn spawn_child(req: SpawnRequest, slot: SlotGuard) -> Result<EngineSession, Engi
 
     let pid = child.id();
     register_live_child_pid(pid);
+    #[cfg(target_os = "linux")]
+    if child_oom_score_adj(pid).is_some_and(|value| value != 1000) {
+        OOM_BACKSTOP_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     #[cfg(feature = "test-hang")]
     record_spawn(pid);
 
@@ -983,6 +987,15 @@ pub fn raise_nofile_to_hard_limit() {
     }
 }
 
+static OOM_BACKSTOP_MISSING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True once a spawned helper was observed without `oom_score_adj=1000` (the
+/// container profile denied it), i.e. cgroup OOM may pick the server instead.
+pub fn oom_backstop_missing() -> bool {
+    OOM_BACKSTOP_MISSING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Raise `oom_score_adj` so cgroup/kernel OOM prefers helpers over the parent server.
 fn apply_child_oom_score_adj() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
@@ -1011,7 +1024,6 @@ fn apply_child_oom_score_adj() -> std::io::Result<()> {
     }
 }
 
-#[cfg(feature = "test-hang")]
 pub fn child_oom_score_adj(pid: u32) -> Option<i32> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj")).ok()?;
     text.trim().parse().ok()

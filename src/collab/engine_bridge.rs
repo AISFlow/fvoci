@@ -159,6 +159,20 @@ fn worker_loop(
 
 #[allow(clippy::result_large_err)]
 fn spawn_session(engine_bin: &Path, limits: Limits) -> Result<EngineSession, EngineReport> {
+    let session = spawn_session_inner(engine_bin, limits);
+    if session.is_ok() && collab_engine::process::oom_backstop_missing() {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                "collab helper OOM backstop unavailable: oom_score_adj was not applied (container profile); container mem_limit and per-helper limits remain the bound"
+            );
+        }
+    }
+    session
+}
+
+#[allow(clippy::result_large_err)]
+fn spawn_session_inner(engine_bin: &Path, limits: Limits) -> Result<EngineSession, EngineReport> {
     EngineSession::spawn(SpawnRequest {
         engine_bin: engine_bin.to_path_buf(),
         limits,
