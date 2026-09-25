@@ -1,0 +1,1379 @@
+[
+ {
+  "name": "list_tasks",
+  "description": "List tasks using structured filters and sort. assigneeId may be me. Optional from/to (YYYY-MM-DD) filter by calendar overlap.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "query": {
+     "type": "object",
+     "properties": {
+      "filters": {
+       "default": {},
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "task",
+          "bug",
+          "story",
+          "epic",
+          "subtask"
+         ]
+        },
+        "statusId": {
+         "type": "string",
+         "format": "uuid",
+         "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "assigneeId": {
+         "anyOf": [
+          {
+           "type": "string",
+           "format": "uuid",
+           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          {
+           "type": "string",
+           "const": "me"
+          }
+         ]
+        },
+        "priority": {
+         "type": "string",
+         "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "urgent"
+         ]
+        },
+        "labelId": {
+         "type": "string",
+         "format": "uuid",
+         "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "milestoneId": {
+         "type": "string",
+         "format": "uuid",
+         "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "openOnly": {
+         "type": "boolean"
+        },
+        "dueBefore": {
+         "type": "string",
+         "format": "date",
+         "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+        },
+        "title": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 1000
+        },
+        "custom": {
+         "maxItems": 25,
+         "type": "array",
+         "items": {
+          "oneOf": [
+           {
+            "type": "object",
+            "properties": {
+             "fieldId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+             },
+             "operator": {
+              "type": "string",
+              "const": "equals"
+             },
+             "value": {
+              "anyOf": [
+               {
+                "type": "string",
+                "maxLength": 1000
+               },
+               {
+                "type": "number"
+               },
+               {
+                "type": "boolean"
+               }
+              ]
+             }
+            },
+            "required": [
+             "fieldId",
+             "operator",
+             "value"
+            ],
+            "additionalProperties": false
+           },
+           {
+            "type": "object",
+            "properties": {
+             "fieldId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+             },
+             "operator": {
+              "type": "string",
+              "const": "empty"
+             }
+            },
+            "required": [
+             "fieldId",
+             "operator"
+            ],
+            "additionalProperties": false
+           }
+          ]
+         }
+        }
+       },
+       "additionalProperties": false
+      },
+      "sort": {
+       "default": [],
+       "maxItems": 3,
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "field": {
+          "anyOf": [
+           {
+            "type": "string",
+            "enum": [
+             "priority",
+             "due",
+             "updated",
+             "created",
+             "rank",
+             "title",
+             "status",
+             "number"
+            ]
+           },
+           {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+           }
+          ]
+         },
+         "direction": {
+          "type": "string",
+          "enum": [
+           "asc",
+           "desc"
+          ]
+         }
+        },
+        "required": [
+         "field",
+         "direction"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     "additionalProperties": false
+    },
+    "archived": {
+     "type": "boolean"
+    },
+    "cursor": {
+     "type": "string",
+     "maxLength": 1024
+    },
+    "limit": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 100
+    },
+    "from": {
+     "type": "string",
+     "format": "date",
+     "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+    },
+    "to": {
+     "type": "string",
+     "format": "date",
+     "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "projectId"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "get_task",
+  "description": "Get a task by id, including body and relations.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "list_task_activity",
+  "description": "List a task's metadata changes and comments in chronological pages.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "filter": {
+     "type": "string",
+     "enum": [
+      "all",
+      "comments",
+      "changes"
+     ]
+    },
+    "cursor": {
+     "type": "string",
+     "maxLength": 1024
+    },
+    "limit": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 100
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "create_task",
+  "description": "Create a task, bug, story, epic, or subtask. Subtasks require a standard task parent; standard tasks may belong to an epic.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "type": {
+     "type": "string",
+     "enum": [
+      "task",
+      "bug",
+      "story",
+      "epic",
+      "subtask"
+     ]
+    },
+    "title": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 500
+    },
+    "priority": {
+     "type": "string",
+     "enum": [
+      "none",
+      "low",
+      "medium",
+      "high",
+      "urgent"
+     ]
+    },
+    "statusId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "startDate": {
+     "type": "string",
+     "format": "date",
+     "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+    },
+    "dueDate": {
+     "type": "string",
+     "format": "date",
+     "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+    },
+    "parentId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "milestoneId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "projectId",
+    "title"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "patch_task",
+  "description": "Patch task metadata, including atomic type and parent changes.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "type": {
+     "type": "string",
+     "enum": [
+      "task",
+      "bug",
+      "story",
+      "epic",
+      "subtask"
+     ]
+    },
+    "title": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 500
+    },
+    "priority": {
+     "type": "string",
+     "enum": [
+      "none",
+      "low",
+      "medium",
+      "high",
+      "urgent"
+     ]
+    },
+    "statusId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "startDate": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "date",
+       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "dueDate": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "date",
+       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "dueAt": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "date-time",
+       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "estimate": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "parentId": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "uuid",
+       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "milestoneId": {
+     "anyOf": [
+      {
+       "type": "string",
+       "format": "uuid",
+       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "archived": {
+     "type": "boolean"
+    },
+    "assigneeIds": {
+     "maxItems": 50,
+     "type": "array",
+     "items": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+     }
+    },
+    "labelIds": {
+     "maxItems": 50,
+     "type": "array",
+     "items": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+     }
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "add_comment",
+  "description": "Add a comment on a document or a task. Pass exactly one of documentId or taskId.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "description": "Required for a project document; omit for wiki documents.",
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "documentId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "taskId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "body": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 8000
+    },
+    "parentId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "mentionedUserIds": {
+     "maxItems": 50,
+     "type": "array",
+     "items": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+     }
+    },
+    "mentionedGroupIds": {
+     "maxItems": 50,
+     "type": "array",
+     "items": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+     }
+    }
+   },
+   "required": [
+    "workspaceId",
+    "body"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "resolve_comment",
+  "description": "Resolve a comment thread.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "list_labels",
+  "description": "List labels in a project.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "projectId"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "create_label",
+  "description": "Create a project label.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "name": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 100
+    },
+    "color": {
+     "type": "string",
+     "enum": [
+      "gray",
+      "red",
+      "orange",
+      "amber",
+      "green",
+      "teal",
+      "blue",
+      "violet",
+      "pink"
+     ]
+    }
+   },
+   "required": [
+    "workspaceId",
+    "projectId",
+    "name",
+    "color"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "patch_label",
+  "description": "Patch a project label name or color.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "name": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 100
+    },
+    "color": {
+     "type": "string",
+     "enum": [
+      "gray",
+      "red",
+      "orange",
+      "amber",
+      "green",
+      "teal",
+      "blue",
+      "violet",
+      "pink"
+     ]
+    }
+   },
+   "required": [
+    "workspaceId",
+    "projectId",
+    "id"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "list_task_dependencies",
+  "description": "List task dependency relations in a project.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "projectId"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "add_task_dependency",
+  "description": "Add a dependency: path id is the blocker, blockedId is the successor.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "blockedId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "type": {
+     "type": "string",
+     "enum": [
+      "FS",
+      "SS",
+      "FF"
+     ]
+    },
+    "lagDays": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id",
+    "blockedId"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "remove_task_dependency",
+  "description": "Remove a task dependency relation.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "blockedId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id",
+    "blockedId"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "search",
+  "description": "Search documents, tasks, attachments, and comments in a workspace.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "q": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 200
+    },
+    "type": {
+     "type": "string",
+     "enum": [
+      "all",
+      "document",
+      "task",
+      "attachment",
+      "comment"
+     ]
+    },
+    "cursor": {
+     "type": "string",
+     "maxLength": 1024
+    },
+    "limit": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 50
+    }
+   },
+   "required": [
+    "workspaceId",
+    "q"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "get_document_body",
+  "description": "Get a document body as contentJson, or as markdown when format=md.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "description": "Required for a project document; omit for wiki documents.",
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "format": {
+     "type": "string",
+     "enum": [
+      "md"
+     ]
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "put_document_body",
+  "description": "Replace a document body. Pass exactly one of contentMd or contentJson.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "description": "Required for a project document; omit for wiki documents.",
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "contentMd": {
+     "type": "string"
+    },
+    "contentJson": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/__schema0"
+      }
+     ]
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "definitions": {
+    "__schema0": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "number"
+      },
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      },
+      {
+       "type": "array",
+       "items": {
+        "$ref": "#/definitions/__schema0"
+       }
+      },
+      {
+       "type": "object",
+       "propertyNames": {
+        "type": "string"
+       },
+       "additionalProperties": {
+        "$ref": "#/definitions/__schema0"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "patch_document_block",
+  "description": "Replace one Tiptap block in a document by UniqueID (attrs.id). Body is the node JSON; attrs.id must match blockId.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "description": "Required for a project document; omit for wiki documents.",
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "id": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "blockId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "type": {
+     "type": "string",
+     "minLength": 1
+    },
+    "attrs": {
+     "type": "object",
+     "propertyNames": {
+      "type": "string"
+     },
+     "additionalProperties": {}
+    },
+    "content": {
+     "type": "array",
+     "items": {}
+    },
+    "marks": {
+     "type": "array",
+     "items": {}
+    },
+    "text": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "id",
+    "blockId",
+    "type"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "get_calendar",
+  "description": "List tasks overlapping [from, to] (YYYY-MM-DD), with optional structured filters and sort.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "projectId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "from": {
+     "type": "string",
+     "format": "date",
+     "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+    },
+    "to": {
+     "type": "string",
+     "format": "date",
+     "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+    },
+    "query": {
+     "type": "object",
+     "properties": {
+      "filters": {
+       "default": {},
+       "type": "object",
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "task",
+          "bug",
+          "story",
+          "epic",
+          "subtask"
+         ]
+        },
+        "statusId": {
+         "type": "string",
+         "format": "uuid",
+         "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "assigneeId": {
+         "anyOf": [
+          {
+           "type": "string",
+           "format": "uuid",
+           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          {
+           "type": "string",
+           "const": "me"
+          }
+         ]
+        },
+        "priority": {
+         "type": "string",
+         "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "urgent"
+         ]
+        },
+        "labelId": {
+         "type": "string",
+         "format": "uuid",
+         "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "milestoneId": {
+         "type": "string",
+         "format": "uuid",
+         "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "openOnly": {
+         "type": "boolean"
+        },
+        "dueBefore": {
+         "type": "string",
+         "format": "date",
+         "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+        },
+        "title": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 1000
+        },
+        "custom": {
+         "maxItems": 25,
+         "type": "array",
+         "items": {
+          "oneOf": [
+           {
+            "type": "object",
+            "properties": {
+             "fieldId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+             },
+             "operator": {
+              "type": "string",
+              "const": "equals"
+             },
+             "value": {
+              "anyOf": [
+               {
+                "type": "string",
+                "maxLength": 1000
+               },
+               {
+                "type": "number"
+               },
+               {
+                "type": "boolean"
+               }
+              ]
+             }
+            },
+            "required": [
+             "fieldId",
+             "operator",
+             "value"
+            ],
+            "additionalProperties": false
+           },
+           {
+            "type": "object",
+            "properties": {
+             "fieldId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+             },
+             "operator": {
+              "type": "string",
+              "const": "empty"
+             }
+            },
+            "required": [
+             "fieldId",
+             "operator"
+            ],
+            "additionalProperties": false
+           }
+          ]
+         }
+        }
+       },
+       "additionalProperties": false
+      },
+      "sort": {
+       "default": [],
+       "maxItems": 3,
+       "type": "array",
+       "items": {
+        "type": "object",
+        "properties": {
+         "field": {
+          "anyOf": [
+           {
+            "type": "string",
+            "enum": [
+             "priority",
+             "due",
+             "updated",
+             "created",
+             "rank",
+             "title",
+             "status",
+             "number"
+            ]
+           },
+           {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+           }
+          ]
+         },
+         "direction": {
+          "type": "string",
+          "enum": [
+           "asc",
+           "desc"
+          ]
+         }
+        },
+        "required": [
+         "field",
+         "direction"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     "additionalProperties": false
+    },
+    "archived": {
+     "type": "boolean"
+    },
+    "limit": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 500
+    }
+   },
+   "required": [
+    "workspaceId",
+    "projectId",
+    "from",
+    "to"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "ai_summarize_document",
+  "description": "Summarize a document (up to 400 chars). Needs the server's AI feature; a 503 'ai unavailable' means it is off.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "documentId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "documentId"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "ai_generate_tasks",
+  "description": "Propose task titles from a document's headings. Needs the server's AI feature; a 503 'ai unavailable' means it is off.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "documentId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "documentId"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ },
+ {
+  "name": "ai_suggest_links",
+  "description": "Suggest other visible documents to link from a document. Needs the server's AI feature; a 503 'ai unavailable' means it is off.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "workspaceId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "documentId": {
+     "type": "string",
+     "format": "uuid",
+     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    }
+   },
+   "required": [
+    "workspaceId",
+    "documentId"
+   ],
+   "$schema": "http://json-schema.org/draft-07/schema#"
+  },
+  "execution": {
+   "taskSupport": "forbidden"
+  }
+ }
+]

@@ -184,6 +184,22 @@ Integration tests always create and drop their own UUID database and app role; t
 
 PATCH requires `givenName`; `familyName` omitted preserves the value, null or an empty string clears it. Other optional fields are `locale` (`ko`), `timezone`, `weekStartsOn` (0/1), and `textScale` (16/18/20). Unknown fields are rejected. Use the bound address printed at startup; default port 0 is selected by the listening socket.
 
+### Response security headers
+
+Every response carries the source's global security headers (`http-security.ts`,
+nosecone defaults): a `Content-Security-Policy` (`default-src 'self'`, same-origin
+`connect-src` for the API and `/collab` WebSocket, `frame-ancestors 'self'`,
+`object-src 'none'`, inline shell blocks only by build-time hash, embed frames for
+YouTube/Vimeo/Figma), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
+nosniff`, `X-Frame-Options: SAMEORIGIN`, COOP/CORP `same-origin`,
+`Origin-Agent-Cluster`, `X-DNS-Prefetch-Control: off`, `X-Download-Options`,
+`X-Permitted-Cross-Domain-Policies: none`, `X-XSS-Protection: 0` and a
+`Permissions-Policy` that denies unused device APIs. With an `https://`
+`FVOCI_PUBLIC_ORIGIN` it adds `Strict-Transport-Security: max-age=31536000;
+includeSubDomains` and `upgrade-insecure-requests`. Routes that set a stricter
+policy keep it (share pages and fragments, attachment and branding downloads use
+`sandbox` or nonce policies).
+
 ## Initial workspace operations
 
 Authenticated sessions can list `GET /api/v1/me/workspaces` and read metadata with
@@ -568,3 +584,51 @@ offline test commands are in `scripts/prepare-extract-helper.sh` and
 `scripts/run-extract-tests.sh`; the latter must fail if required DB/helper inputs
 are absent. These integration commands are being wired with the pending native
 job submission and are not yet a released support claim.
+
+## Product MCP server (`fvoci-mcp`)
+
+`fvoci-mcp` is the source `apps/mcp` server as a Rust binary: an MCP server over
+stdio (newline-delimited JSON-RPC 2.0) whose tools call the FVOCI HTTP API with a
+personal API token. Tool names, descriptions and input schemas are the source's
+(`src/bin/fvoci-mcp/tools.json`, generated from the source server at the pinned
+SHA): `list_tasks`, `get_task`, `list_task_activity`, `create_task`, `patch_task`,
+`add_comment`, `resolve_comment`, `list_labels`, `create_label`, `patch_label`,
+`list_task_dependencies`, `add_task_dependency`, `remove_task_dependency`,
+`search`, `get_document_body`, `put_document_body`, `patch_document_block`,
+`get_calendar`, `ai_summarize_document`, `ai_generate_tasks`, `ai_suggest_links`.
+There are no resources or prompts (as in the source).
+
+```sh
+cargo build --release --bin fvoci-mcp
+FVOCI_URL=https://fvoci.example.com FVOCI_TOKEN=<personal API token> target/release/fvoci-mcp
+```
+
+MCP client configuration (for example):
+
+```json
+{ "mcpServers": { "fvoci": { "command": "/path/to/fvoci-mcp",
+  "env": { "FVOCI_URL": "https://fvoci.example.com", "FVOCI_TOKEN": "<token>" } } } }
+```
+
+- Create the token in workspace settings (API tokens). The server enforces its
+  scopes and workspace: `tasks.read`/`tasks.write` for task, label, dependency
+  and task-comment tools, `documents.read`/`documents.write` for document body
+  and document-comment tools. A call outside the token's scope or workspace
+  returns the server's refusal as a tool error (`{"status":404,...}`), a revoked
+  token `{"status":401,...}`.
+- `FVOCI_URL` must be `https://`, or `http://` to `localhost`/`127.0.0.1`/`[::1]`.
+  The token is read only from `FVOCI_TOKEN`, never printed, and never sent
+  across a redirect (redirects are not followed). Messages over 16 MiB on stdin,
+  API responses over 8 MiB and requests over 60 s are refused.
+- Arguments are validated against the schema before any request (tool error
+  `MCP error -32602: Input validation error: ...`).
+- Not provided: the source's `--http <port>` streamable HTTP transport (the
+  binary exits 1 on any argument). Server routes still missing for some tools
+  return their HTTP error: PAT access to `search`, `get_document_body` with
+  `format=md`, `put_document_body`, `patch_document_block`, and project-document
+  bodies.
+
+Tests: `tests/mcp_integration.rs` starts a real `fvoci-server` process (fresh
+database, app role, port 0), mints tokens over HTTP and drives the binary over
+stdio (`cargo test --features db-tests --test mcp_integration`).
+
