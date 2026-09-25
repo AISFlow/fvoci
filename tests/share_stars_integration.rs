@@ -11,7 +11,7 @@ use fvoci_server::db::context::{set_system, set_tenant};
 use fvoci_server::db::share::hydrate_share_hits;
 use project_harness::{
     add_workspace_user, admin_pool, app_pool, create_project, http_request, json_request,
-    setup_session, TestDb,
+    setup_session, setup_session_with_convert, TestDb,
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -757,9 +757,7 @@ async fn document_share_scope_rechecks_state_on_every_request() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // PDF is not available in this build; invalid query is still 400.
-    let (status, _, _) = raw_get(app.clone(), &format!("{base}/pdf"), &[]).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    // PDF (helper-backed, see share_pdf_* tests): invalid query is 400.
     let (status, _, _) = raw_get(app.clone(), &format!("{base}/pdf?documentId=nope"), &[]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
@@ -1630,5 +1628,117 @@ async fn stars_and_recent_gate_on_current_access() {
     assert!(!recent_ids(&app, &cookie, ws).await.contains(&archived));
 
     admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn share_pdf_renders_shared_scope_through_convert_helper() {
+    let convert = fvoci_server::documents::convert::ConvertClient::from_env().expect(
+        "FVOCI_DOCUMENT_CONVERT_BIN is required; run scripts/prepare-document-convert.sh first",
+    );
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, ws) = setup_session_with_convert(&harness, Some(convert)).await;
+    let admin = admin_pool(&harness).await;
+    let root = create_wiki_doc(&app, &cookie, ws, None, "공유 PDF").await;
+    let child = create_wiki_doc(&app, &cookie, ws, Some(&root), "하위 PDF").await;
+    let sibling = create_wiki_doc(&app, &cookie, ws, None, "형제").await;
+    set_content(
+        &admin,
+        &root,
+        json!({"type": "doc", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "한글 본문 PDF"}]}
+        ]}),
+    )
+    .await;
+    let (_, token) = share_document(&app, &cookie, ws, &root).await;
+    let base = format!("/api/v1/share/{token}/pdf");
+
+    let (status, headers, bytes) = raw_get(app.clone(), &base, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(headers["content-type"], "application/pdf");
+    assert_eq!(headers["cache-control"], "private, no-store");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    let disposition = headers["content-disposition"].to_str().unwrap();
+    assert!(disposition.starts_with("attachment;"), "{disposition}");
+    assert!(
+        disposition.contains("filename*=UTF-8''%EA%B3%B5%EC%9C%A0%20PDF.pdf"),
+        "{disposition}"
+    );
+    assert!(bytes.starts_with(b"%PDF-"), "not a PDF");
+
+    let (status, headers, bytes) =
+        raw_get(app.clone(), &format!("{base}?documentId={child}"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes.starts_with(b"%PDF-"));
+    assert!(headers["content-disposition"]
+        .to_str()
+        .unwrap()
+        .contains("%ED%95%98%EC%9C%84%20PDF.pdf"));
+
+    for (query, want) in [
+        (format!("?documentId={sibling}"), StatusCode::NOT_FOUND),
+        (
+            format!("?documentId={}", Uuid::now_v7()),
+            StatusCode::NOT_FOUND,
+        ),
+        ("?documentId=nope".to_string(), StatusCode::BAD_REQUEST),
+        ("?other=1".to_string(), StatusCode::BAD_REQUEST),
+    ] {
+        let (status, _, _) = raw_get(app.clone(), &format!("{base}{query}"), &[]).await;
+        assert_eq!(status, want, "{query}");
+    }
+    let (status, _, _) = raw_get(
+        app.clone(),
+        &format!("/api/v1/share/{}/pdf", "x".repeat(43)),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Trashed root and revocation both end PDF access.
+    sqlx::query("UPDATE fvoci.documents SET deleted_at = now() WHERE id = $1")
+        .bind(Uuid::parse_str(&root).unwrap())
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, _, _) = raw_get(app.clone(), &base, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    sqlx::query("UPDATE fvoci.documents SET deleted_at = NULL WHERE id = $1")
+        .bind(Uuid::parse_str(&root).unwrap())
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.share_links")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, _, _) = raw_get(app.clone(), &base, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn share_pdf_without_convert_helper_is_a_server_error_after_scope_checks() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, ws) = setup_session(&harness).await;
+    let root = create_wiki_doc(&app, &cookie, ws, None, "헬퍼 없음").await;
+    let (_, token) = share_document(&app, &cookie, ws, &root).await;
+    // Scope checks still run first: an unknown token is 404, not 500.
+    let (status, _, _) = raw_get(
+        app.clone(),
+        &format!("/api/v1/share/{}/pdf", "x".repeat(43)),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = raw_get(app.clone(), &format!("/api/v1/share/{token}/pdf"), &[]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     harness.cleanup().await;
 }

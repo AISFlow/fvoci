@@ -42,6 +42,9 @@ use crate::db::share::{
     share_document, share_public_meta, share_search_scope, share_tree, DocumentAffiliation,
     ShareDbError, ShareLinkRecord, ShareSearchRow, ShareTarget,
 };
+use crate::documents::export::{
+    export_filename, render_document_export, ExportFormat, ExportRenderError,
+};
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access};
 use crate::http::guard::check_origin;
@@ -678,9 +681,10 @@ pub struct SharePdfQuery {
     pub document_id: Option<String>,
 }
 
-/// PDF export needs the document convert helper, which is not on main yet.
-/// The route keeps its shape (limit, query validation, share scope) and answers
-/// 404 for every token until the helper lands.
+/// Source share `pdf`: the root (or `documentId` inside the visible subtree)
+/// rendered by the document convert helper, `${title}.pdf` as an attachment.
+/// Same share-ip limit and per-request scope checks as the body route. Without
+/// a configured helper the route fails like the member export route (500, logged).
 async fn public_pdf_route(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -695,12 +699,61 @@ async fn public_pdf_route(
         ),
     };
     enforce_share_limit(&state, peer).await?;
-    share_document(&state.auth.db.pool, &token, document_id)
+    let doc = share_document(&state.auth.db.pool, &token, document_id)
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
-    tracing::debug!("share pdf export is not available in this build");
-    Err(not_found())
+    let Some(convert) = state.document_convert.as_ref() else {
+        tracing::error!("share pdf requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
+        return Err(AppError::internal());
+    };
+    let rendered =
+        match render_document_export(convert, ExportFormat::Pdf, &doc.title, &doc.content_json)
+            .await
+        {
+            Ok(v) => v,
+            Err(ExportRenderError::InvalidInput) => {
+                return Err(AppError::from_code(ProblemCode::InvalidInput));
+            }
+            Err(ExportRenderError::TooLarge) => {
+                return Ok(problem_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "document_body_exceeds_document_max_body_bytes",
+                    "document body exceeds document max body bytes",
+                ));
+            }
+            Err(ExportRenderError::Failed) => return Err(AppError::internal()),
+        };
+    let filename = export_filename(&doc.title, &rendered.ext);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    headers.insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition_attachment(&filename))
+            .map_err(|_| AppError::internal())?,
+    );
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/pdf"));
+    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    Ok((StatusCode::OK, headers, rendered.bytes).into_response())
+}
+
+fn problem_response(status: StatusCode, code: &str, title: &str) -> Response {
+    let body = json!({
+        "type": "about:blank",
+        "title": title,
+        "status": status.as_u16(),
+        "code": code,
+    });
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/problem+json"),
+    );
+    (status, headers, Json(body)).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -710,18 +763,11 @@ pub struct ShareSearchQuery {
 }
 
 fn search_unavailable() -> Response {
-    let body = json!({
-        "type": "about:blank",
-        "title": "search unavailable",
-        "status": 503,
-        "code": "search_unavailable",
-    });
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/problem+json"),
-    );
-    (StatusCode::SERVICE_UNAVAILABLE, headers, Json(body)).into_response()
+    problem_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "search_unavailable",
+        "search unavailable",
+    )
 }
 
 async fn collect_share_hits(

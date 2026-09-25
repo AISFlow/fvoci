@@ -3916,6 +3916,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description PDF of the shared root or of `documentId` in the share */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": unknown;
+                };
+            };
             /** @description Invalid input */
             400: {
                 headers: {
@@ -3925,8 +3934,17 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description Not available in this build */
+            /** @description Outside the share, unknown, expired or revoked */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Document body too large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

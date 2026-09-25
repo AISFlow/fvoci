@@ -42,6 +42,7 @@ export function PublicSharePage() {
 
   return (
     <PublicShareView
+      token={token}
       title={data.title}
       expiresAt={data.expiresAt}
       tree={tree.data?.items ?? []}

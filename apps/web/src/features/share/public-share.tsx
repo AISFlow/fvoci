@@ -1,9 +1,9 @@
 import { asSafeHtml, SafeHtmlView } from "@fvoci/editor/safe-html";
 import { t } from "@fvoci/i18n";
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import type { ShareTreeNode } from "@/lib/queries/share";
+import { downloadSharePdf, type ShareTreeNode } from "@/lib/queries/share";
 import { isSafeShareHref, shareTreeChildren, shareTreeRoots } from "@/lib/share-links";
 import "./share.css";
 
@@ -117,6 +117,7 @@ export function PublicShareGate({ message }: { message: string }) {
 }
 
 export function PublicShareView({
+  token,
   title,
   expiresAt,
   tree,
@@ -127,6 +128,7 @@ export function PublicShareView({
   bodyError,
   onRetryBody,
 }: {
+  token: string;
   title: string;
   expiresAt: string;
   tree: readonly ShareTreeNode[];
@@ -140,6 +142,7 @@ export function PublicShareView({
   const roots = shareTreeRoots(tree);
   const heading = tree.find((node) => node.id === activeDocumentId)?.title ?? title;
   const hasTree = tree.length > 1;
+  const [pdfPending, setPdfPending] = useState(false);
 
   return (
     <div className="share-page">
@@ -163,14 +166,34 @@ export function PublicShareView({
           </aside>
         ) : null}
         <main className="share-page__main">
-          <div>
-            <h1 className="share-page__heading">{heading}</h1>
-            <p className="share-page__meta">
-              <span className="share-page__badge">{t("doc.readOnly")}</span>
-              <span>
-                {t("share.expires")} {formatDate(expiresAt)}
-              </span>
-            </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="share-page__heading">{heading}</h1>
+              <p className="share-page__meta">
+                <span className="share-page__badge">{t("doc.readOnly")}</span>
+                <span>
+                  {t("share.expires")} {formatDate(expiresAt)}
+                </span>
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={pdfPending}
+              onClick={() => {
+                setPdfPending(true);
+                void downloadSharePdf(token, heading, activeDocumentId)
+                  .catch(() => {
+                    window.alert(t("export.pdf.failed"));
+                  })
+                  .finally(() => {
+                    setPdfPending(false);
+                  });
+              }}
+            >
+              {t("export.pdf")}
+            </Button>
           </div>
           {bodyLoading ? (
             <p role="status" className="share-page__status">

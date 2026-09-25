@@ -1513,6 +1513,12 @@
           }
         ],
         "responses": {
+          "200": {
+            "description": "PDF of the shared root or of `documentId` in the share",
+            "content": {
+              "application/pdf": {}
+            }
+          },
           "400": {
             "description": "Invalid input",
             "content": {
@@ -1524,7 +1530,17 @@
             }
           },
           "404": {
-            "description": "Not available in this build",
+            "description": "Outside the share, unknown, expired or revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Document body too large",
             "content": {
               "application/json": {
                 "schema": {

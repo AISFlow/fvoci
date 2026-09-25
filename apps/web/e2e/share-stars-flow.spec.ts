@@ -107,6 +107,17 @@ test("owner stars and shares a wiki document; the public link needs no session a
   await expect(reader.getByTestId("share-body")).not.toContainText(bodyText);
   await tree.getByRole("button", { name: rootTitle }).click();
   await expect(reader.getByTestId("share-body")).toContainText(bodyText);
+  // The anonymous reader downloads the shown document as PDF.
+  const pdfDownload = reader.waitForEvent("download");
+  await reader.getByRole("button", { name: "PDF" }).click();
+  const pdf = await pdfDownload;
+  expect(pdf.suggestedFilename()).toBe(`${rootTitle}.pdf`);
+  const pdfBytes = await pdf.createReadStream().then(async (stream) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(chunk as Buffer);
+    return Buffer.concat(chunks);
+  });
+  expect(pdfBytes.subarray(0, 5).toString("latin1")).toBe("%PDF-");
   expect(apiPaths.length).toBeGreaterThan(0);
   for (const path of apiPaths) {
     expect(path.startsWith("/api/v1/share/")).toBe(true);

@@ -335,7 +335,17 @@ fn extract_session_cookie(set_cookie: &str) -> String {
 }
 
 pub async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid, Uuid) {
-    let app = app_router(app_state(&harness.app_url).await);
+    setup_session_with_convert(harness, None).await
+}
+
+/// `setup_session` with a document convert helper wired into the app state.
+pub async fn setup_session_with_convert(
+    harness: &TestDb,
+    document_convert: Option<fvoci_server::documents::convert::ConvertClient>,
+) -> (axum::Router, String, Uuid, Uuid) {
+    let mut state = app_state(&harness.app_url).await;
+    state.document_convert = document_convert;
+    let app = app_router(state);
     let response = app
         .clone()
         .oneshot(

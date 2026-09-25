@@ -2283,8 +2283,10 @@ fn get_share_tree() {}
         ("documentId" = Option<String>, Query, description = "Document inside the share"),
     ),
     responses(
+        (status = 200, description = "PDF of the shared root or of `documentId` in the share", content_type = "application/pdf"),
         (status = 400, description = "Invalid input", body = ProblemResponse),
-        (status = 404, description = "Not available in this build", body = ProblemResponse),
+        (status = 404, description = "Outside the share, unknown, expired or revoked", body = ProblemResponse),
+        (status = 413, description = "Document body too large", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
     )
 )]

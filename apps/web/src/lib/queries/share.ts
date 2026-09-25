@@ -1,6 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
 import type { components } from "@/generated/api";
 import { api, ensureOk, ProblemError } from "@/lib/api";
+import { shareDownloadName, triggerDownload } from "@/lib/share";
 
 export type StarItem = components["schemas"]["StarItemOutput"];
 export type RecentItem = components["schemas"]["RecentItemOutput"];
@@ -113,4 +114,21 @@ export function sharePublicBodyQuery(token: string, documentId: string | null, e
     enabled,
     retry: noRetryOn404,
   });
+}
+
+/** Source `downloadSharePdf`: the shown document (root when `documentId` is null). */
+export async function downloadSharePdf(
+  token: string,
+  title: string,
+  documentId: string | null,
+): Promise<void> {
+  const search = documentId ? `?documentId=${encodeURIComponent(documentId)}` : "";
+  const response = await fetch(
+    `/api/v1/share/${encodeURIComponent(token)}/pdf${search}`,
+    { credentials: "omit" },
+  );
+  if (!response.ok) {
+    throw new Error(`share pdf failed: ${response.status}`);
+  }
+  triggerDownload(shareDownloadName(title, "pdf"), await response.blob());
 }
