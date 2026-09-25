@@ -60,6 +60,12 @@ fn strict_date<E: serde::de::Error>(value: String) -> Result<NaiveDate, E> {
     })
 }
 
+fn deserialize_required_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<NaiveDate, D::Error> {
+    strict_date(String::deserialize(deserializer)?)
+}
+
 fn deserialize_optional_non_null_date<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<NaiveDate>, D::Error> {
@@ -237,6 +243,29 @@ pub struct WorkspaceMetaResponse {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct OkResponse {
     pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateHolidayBody {
+    #[serde(deserialize_with = "deserialize_required_date")]
+    pub date: NaiveDate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct HolidaysListResponse {
+    pub can_edit: bool,
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct IcsTokenResponse {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -194,4 +194,16 @@ mod tests {
         let monday = add_working_days(friday, 1, &holidays);
         assert_eq!(monday, NaiveDate::from_ymd_opt(2031, 4, 14).unwrap());
     }
+
+    #[test]
+    fn lag_skips_holidays() {
+        let monday = NaiveDate::from_ymd_opt(2031, 4, 14).unwrap();
+        let mut holidays = HashSet::new();
+        holidays.insert(monday);
+        let friday = NaiveDate::from_ymd_opt(2031, 4, 11).unwrap();
+        assert_eq!(
+            add_working_days(friday, 1, &holidays),
+            NaiveDate::from_ymd_opt(2031, 4, 15).unwrap()
+        );
+    }
 }

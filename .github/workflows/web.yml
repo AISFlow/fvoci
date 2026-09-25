@@ -45,6 +45,8 @@ jobs:
             specs: e2e/task-comments-flow.spec.ts
           - flow: search-flow
             specs: e2e/search-flow.spec.ts
+          - flow: schedule-ics-flow
+            specs: e2e/schedule-ics-flow.spec.ts
           - flow: wiki-lifecycle-flow
             specs: e2e/workspace-wiki-lifecycle.spec.ts
           - flow: comments-flow

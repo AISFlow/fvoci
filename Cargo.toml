@@ -184,3 +184,8 @@ required-features = ["db-tests"]
 name = "notification_integration"
 path = "tests/notification_integration.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "schedule_ics_integration"
+path = "tests/schedule_ics_integration.rs"
+required-features = ["db-tests"]
