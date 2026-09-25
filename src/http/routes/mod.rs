@@ -6,6 +6,7 @@ pub mod documents;
 pub mod groups;
 pub mod invitations;
 pub mod lookup;
+pub mod notifications;
 pub mod projects;
 pub mod revisions;
 pub mod search;
