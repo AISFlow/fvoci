@@ -7,6 +7,7 @@ import type { TaskDetail, TaskListItem, LabelItem, MilestoneItem } from "./queri
 import type { MemberOutput } from "@/lib/contracts";
 import { TaskActivityPanel } from "@/features/comments/task-activity-panel";
 import { StarToggle } from "@/features/share/star-toggle";
+import { TaskCollectionProperties } from "@/features/collections/task-collection-properties";
 import "@/features/projects/projects.css";
 
 export function TaskDetailView({
@@ -122,6 +123,11 @@ export function TaskDetailView({
         onRemoveDependency={onRemoveDependency}
         onArchiveToggle={onArchiveToggle}
         onTrash={onTrash}
+      />
+      <TaskCollectionProperties
+        workspaceId={workspaceId}
+        taskId={task.id}
+        readOnly={readOnly}
       />
       <section className="task-detail__body" aria-label={t("doc.body.a11y")}>
         <p className="task-home__note">{t("task.body.unavailable")}</p>

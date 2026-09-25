@@ -14,15 +14,22 @@ export type MilestoneItem = components["schemas"]["MilestoneOutput"];
 export type MilestoneListResponse = components["schemas"]["MilestoneListResponse"];
 export type TaskDependency = components["schemas"]["TaskDependencyOutput"];
 
-export function taskListQuery(workspaceId: string, projectId: string) {
+/** `viewQuery` is the encoded `?query=` JSON (see `encodeViewQueryParam`), if any. */
+export function taskListQuery(workspaceId: string, projectId: string, viewQuery?: string) {
   return infiniteQueryOptions({
-    queryKey: ["tasks", workspaceId, projectId] as const,
+    queryKey: ["tasks", workspaceId, projectId, viewQuery ?? ""] as const,
     queryFn: async ({ pageParam }) =>
       ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks", {
           params: {
             path: { workspace_id: workspaceId, project_id: projectId },
-            query: pageParam ? { cursor: pageParam } : undefined,
+            query:
+              pageParam || viewQuery
+                ? {
+                    ...(viewQuery ? { query: viewQuery } : {}),
+                    ...(pageParam ? { cursor: pageParam } : {}),
+                  }
+                : undefined,
           },
         }),
       ),
