@@ -24,7 +24,6 @@ use crate::api::dto::{
     OkResponse, WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
 };
 use crate::auth::scopes::ApiTokenScope;
-use crate::db::documents::get_wiki_document;
 use crate::db::integrations::{
     create_webhook, list_webhooks, remove_webhook, IntegrationDbError, NewWebhook, WebhookRow,
 };
@@ -303,8 +302,21 @@ async fn install_github_route(
         tracing::warn!(error = %err, "github.app_slug_failed");
         AppError::from_code(ProblemCode::InvalidInput)
     })?;
+    // The state is single use and bound to this admin session (the callback
+    // must come back with the same session cookie).
+    let nonce = github::new_install_nonce();
+    github::begin_install(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        &nonce,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_db_error)?;
     let state_token =
-        config.sign_install_state(workspace_id, chrono::Utc::now().timestamp_millis());
+        config.sign_install_state(workspace_id, &nonce, chrono::Utc::now().timestamp_millis());
     Ok(Json(GithubInstallUrlOutput {
         url: config.install_redirect(&slug, &state_token),
     }))
@@ -393,9 +405,15 @@ struct CallbackQuery {
     installation_id: Option<String>,
 }
 
+/// Source `completeGithubInstall`, hardened: the browser must bring back the
+/// session that started the install, the nonce is consumed once, GitHub must
+/// confirm the installation belongs to this app, and an existing link to
+/// another installation is not overwritten.
 async fn github_callback_route(
     State(state): State<AppState>,
     Extension(integrations): Extension<Arc<Integrations>>,
+    headers: HeaderMap,
+    jar: CookieJar,
     query: Result<Query<CallbackQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response, AppError> {
     let invalid = || AppError::from_code(ProblemCode::InvalidInput);
@@ -410,15 +428,32 @@ async fn github_callback_route(
     if !github::installation_id_is_valid(installation_id) {
         return Err(invalid());
     }
-    let Some(workspace_id) =
+    let Some((workspace_id, nonce)) =
         config.verify_install_state(&state_token, chrono::Utc::now().timestamp_millis())
     else {
         return Err(invalid());
     };
-    github::complete_install(&state.auth.db.pool, workspace_id, installation_id)
-        .await
-        .map_err(internal)?
-        .map_err(|_| invalid())?;
+    let auth =
+        require_request_auth(&state, &headers, &jar, Access::Session, Some(workspace_id)).await?;
+    match github::installation_exists(config, installation_id).await {
+        Ok(true) => {}
+        Ok(false) => return Err(invalid()),
+        Err(err) => {
+            tracing::warn!(error = %err, "github.installation_check_failed");
+            return Err(invalid());
+        }
+    }
+    github::complete_install(
+        &state.auth.db.pool,
+        workspace_id,
+        auth.user_id,
+        auth.credential_id,
+        &nonce,
+        installation_id,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(|_| invalid())?;
     let target = format!("{}/", state.public_origin.trim_end_matches('/'));
     // Source answers 302 Found.
     Ok((StatusCode::FOUND, [(axum::http::header::LOCATION, target)]).into_response())
@@ -511,7 +546,7 @@ async fn ai_document(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<(String, String), AppError> {
-    let meta = get_wiki_document(
+    let (title, content_json) = ai::viewable_document(
         &state.auth.db.pool,
         workspace_id,
         user_id,
@@ -520,7 +555,7 @@ async fn ai_document(
     )
     .await
     .map_err(internal)?
-    .map_err(|_| AppError::from_code(ProblemCode::NotFound))?;
+    .ok_or_else(|| AppError::from_code(ProblemCode::NotFound))?;
     let convert = state
         .document_convert
         .as_ref()
@@ -528,14 +563,14 @@ async fn ai_document(
     // An empty title makes the helper's markdown export the bare body, which
     // is source `documentContentMd`.
     let (bytes, _, _) = convert
-        .export_binary("export_md", "", &meta.content_json)
+        .export_binary("export_md", "", &content_json)
         .await
         .map_err(|err| {
             tracing::warn!(error = %err, "ai.markdown_failed");
             AppError::internal()
         })?;
     let markdown = String::from_utf8(bytes).map_err(|_| AppError::internal())?;
-    Ok((markdown, meta.title))
+    Ok((markdown, title))
 }
 
 async fn ai_summarize_route(
@@ -588,7 +623,7 @@ async fn ai_suggest_links_route(
     check_origin(&headers, &state.public_origin)?;
     let (user_id, session_id) =
         ai_admit(&state, &integrations, &headers, &jar, workspace_id).await?;
-    get_wiki_document(
+    ai::viewable_document(
         &state.auth.db.pool,
         workspace_id,
         user_id,
@@ -597,7 +632,7 @@ async fn ai_suggest_links_route(
     )
     .await
     .map_err(internal)?
-    .map_err(|_| AppError::from_code(ProblemCode::NotFound))?;
+    .ok_or_else(|| AppError::from_code(ProblemCode::NotFound))?;
     let ids =
         ai::visible_document_ids(&state.auth.db.pool, workspace_id, user_id, body.document_id)
             .await

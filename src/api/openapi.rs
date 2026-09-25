@@ -43,16 +43,16 @@ use crate::api::dto::{
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
+    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
+    GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
+    WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
+};
+#[cfg(feature = "api-schema")]
+use crate::api::dto::{
     DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, EmailChangeBody,
     ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse,
     MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, TokenBody, WithdrawBody,
     WorkspaceStatusOutput,
-};
-#[cfg(feature = "api-schema")]
-use crate::api::dto::{
-    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
-    GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
-    WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
 };
 
 #[cfg(feature = "api-schema")]

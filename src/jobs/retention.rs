@@ -164,15 +164,15 @@ async fn purge_archived_batch(pool: &PgPool) -> Result<u32, sqlx::Error> {
     Ok(deleted as u32)
 }
 
-/// Source `gcWebhookDeliveries` (90 days) and the GitHub delivery-id dedupe
-/// rows (30 days), in bounded batches.
+/// Source `gcWebhookDeliveries` (90 days), the GitHub delivery-id dedupe
+/// rows (30 days) and expired install states, in bounded batches.
 pub async fn run_integration_gc(
     pool: &PgPool,
     cancel: &CancellationToken,
 ) -> Result<(u32, u32), sqlx::Error> {
     use crate::db::integrations::{
-        purge_github_deliveries, purge_settled_deliveries, GITHUB_DELIVERY_RETENTION_DAYS,
-        INTEGRATION_GC_BATCH, WEBHOOK_DELIVERY_RETENTION_DAYS,
+        purge_expired_install_states, purge_github_deliveries, purge_settled_deliveries,
+        GITHUB_DELIVERY_RETENTION_DAYS, INTEGRATION_GC_BATCH, WEBHOOK_DELIVERY_RETENTION_DAYS,
     };
     let mut webhook = 0u32;
     let mut github = 0u32;
@@ -191,6 +191,16 @@ pub async fn run_integration_gc(
             break;
         }
         let n = purge_github_deliveries(pool, GITHUB_DELIVERY_RETENTION_DAYS).await?;
+        github += n as u32;
+        if (n as i64) < INTEGRATION_GC_BATCH {
+            break;
+        }
+    }
+    for _ in 0..GC_DELETE_ROUNDS {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let n = purge_expired_install_states(pool).await?;
         github += n as u32;
         if (n as i64) < INTEGRATION_GC_BATCH {
             break;

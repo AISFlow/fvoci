@@ -1,7 +1,7 @@
 //! GitHub App integration (source `core/github.ts`).
 //!
-//! Workspace admins install the app (signed `state` round trip through
-//! github.com), link tasks to issues, and receive signed GitHub webhooks that
+//! Workspace admins install the app (a signed, single-use `state` bound to the
+//! initiating session, round trip through github.com), link tasks to issues, and receive signed GitHub webhooks that
 //! create/rename/close/reopen linked tasks. Status changes made in FVOCI are
 //! pushed back to the linked issue by the `github` outbox consumer. All API
 //! calls go to `GITHUB_API_URL` (default `https://api.github.com`), an
@@ -17,6 +17,7 @@ use base64::Engine;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use regex::Regex;
+use ring::hkdf;
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use serde_json::{json, Value};
@@ -26,6 +27,7 @@ use tracing::warn;
 use url::Url;
 use uuid::Uuid;
 
+use crate::auth::password::Keyring;
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, set_system, set_tenant,
 };
@@ -34,7 +36,7 @@ use crate::db::documents::{
 };
 use crate::db::identity::{append_audit, append_event_channel, AuditAppend, EventAppend};
 use crate::db::integrations::{require_manager_read, require_manager_write, IntegrationDbError};
-use crate::db::outbox::OutboxEvent;
+use crate::db::outbox::{advance_cursor_tx, OutboxEvent};
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::task_activity::record_task_activity;
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
@@ -45,6 +47,9 @@ pub const GITHUB_CONSUMER: &str = "github";
 pub const GITHUB_API_DEFAULT: &str = "https://api.github.com";
 const GITHUB_WEB: &str = "https://github.com";
 const STATE_TTL_MS: i64 = 600_000;
+pub const STATE_SECRET_MIN_BYTES: usize = 32;
+/// Serializes webhook and link writes for one `(workspace, repo, issue)`.
+const ISSUE_LOCK_NAMESPACE: i32 = 1_907_030;
 const TITLE_MAX: usize = 500;
 /// Source 15 s; two calls per synced event must fit the 30 s outbox lease.
 const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -65,6 +70,8 @@ pub struct GithubConfig {
     pub app_id: String,
     key: Arc<RsaKeyPair>,
     webhook_secret: String,
+    /// Install `state` MAC key; server-only (see [`GithubConfig::from_env`]).
+    state_key: [u8; 32],
     pub api_base: Url,
 }
 
@@ -74,6 +81,7 @@ impl std::fmt::Debug for GithubConfig {
             .field("app_id", &self.app_id)
             .field("private_key", &"<redacted>")
             .field("webhook_secret", &"<redacted>")
+            .field("state_key", &"<redacted>")
             .field("api_base", &self.api_base.as_str())
             .finish()
     }
@@ -100,12 +108,55 @@ pub fn parse_private_key(pem: &str) -> Result<RsaKeyPair, String> {
     parsed.map_err(|err| format!("GITHUB_APP_PRIVATE_KEY rejected: {err}"))
 }
 
+/// Install-state MAC key derived from the active `ENCRYPTION_KEYS` key
+/// (HKDF-SHA256, distinct salt/info, so it is never the sealing key itself).
+pub fn derive_state_key(keys: &Keyring) -> [u8; 32] {
+    let ikm = keys
+        .keys
+        .get(&keys.active_id)
+        .expect("keyring active key present");
+    let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, b"fvoci:github-install-state").extract(ikm);
+    let mut out = [0u8; 32];
+    prk.expand(&[b"v1"], hkdf::HKDF_SHA256)
+        .and_then(|okm| okm.fill(&mut out))
+        .expect("hkdf output length");
+    out
+}
+
+/// `GITHUB_STATE_SECRET` (at least 32 bytes) keyed through HMAC to 32 bytes.
+pub fn state_key_from_secret(secret: &str) -> Result<[u8; 32], String> {
+    if secret.len() < STATE_SECRET_MIN_BYTES {
+        return Err(format!(
+            "GITHUB_STATE_SECRET must be at least {STATE_SECRET_MIN_BYTES} bytes"
+        ));
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac key");
+    mac.update(b"fvoci:github-install-state:v1");
+    Ok(mac.finalize().into_bytes().into())
+}
+
+/// Plain http is only for a loopback API (local fakes); anything else would
+/// send the app JWT and installation tokens in clear.
+fn api_base_is_allowed(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
 impl GithubConfig {
     pub fn new(
         app_id: &str,
         private_key_pem: &str,
         webhook_secret: &str,
         api_base: &str,
+        state_key: [u8; 32],
     ) -> Result<Self, String> {
         let app_id = app_id.trim();
         if app_id.is_empty() || webhook_secret.is_empty() {
@@ -113,20 +164,24 @@ impl GithubConfig {
         }
         let api_base = Url::parse(api_base.trim().trim_end_matches('/'))
             .map_err(|err| format!("invalid GITHUB_API_URL: {err}"))?;
-        if !matches!(api_base.scheme(), "http" | "https") {
-            return Err("GITHUB_API_URL must be http(s)".into());
+        if !api_base_is_allowed(&api_base) {
+            return Err("GITHUB_API_URL must be https (http only for a loopback host)".into());
         }
         Ok(Self {
             app_id: app_id.to_string(),
             key: Arc::new(parse_private_key(private_key_pem)?),
             webhook_secret: webhook_secret.to_string(),
+            state_key,
             api_base,
         })
     }
 
     /// `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` all
-    /// set, or none (source superRefine).
-    pub fn from_env() -> Result<Option<Self>, String> {
+    /// set, or none (source superRefine). The install-state key is
+    /// `GITHUB_STATE_SECRET` when set, else derived from `ENCRYPTION_KEYS`
+    /// (source used the server-only `SECRET_KEY`; the webhook secret is also
+    /// known to GitHub App managers, so it is not used). Neither: boot fails.
+    pub fn from_env(encryption_keys: Option<&Keyring>) -> Result<Option<Self>, String> {
         let read = |name: &str| {
             std::env::var(name)
                 .ok()
@@ -142,7 +197,17 @@ impl GithubConfig {
             [Some(id), Some(key), Some(secret)] => {
                 let api =
                     read("GITHUB_API_URL").unwrap_or_else(|| GITHUB_API_DEFAULT.to_string());
-                Self::new(&id, &key, &secret, &api).map(Some)
+                let state_key = match (read("GITHUB_STATE_SECRET"), encryption_keys) {
+                    (Some(state_secret), _) => state_key_from_secret(&state_secret)?,
+                    (None, Some(keys)) => derive_state_key(keys),
+                    (None, None) => {
+                        return Err(
+                            "GitHub App needs GITHUB_STATE_SECRET or ENCRYPTION_KEYS for the install state key"
+                                .into(),
+                        )
+                    }
+                };
+                Self::new(&id, &key, &secret, &api, state_key).map(Some)
             }
             _ => Err(
                 "GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_WEBHOOK_SECRET must all be set together, or none"
@@ -151,8 +216,14 @@ impl GithubConfig {
         }
     }
 
-    fn api(&self, path: &str) -> String {
-        format!("{}{}", self.api_base.as_str().trim_end_matches('/'), path)
+    /// `GITHUB_API_URL` plus percent-encoded path segments.
+    fn api(&self, segments: &[&str]) -> Url {
+        let mut url = self.api_base.clone();
+        url.path_segments_mut()
+            .expect("http(s) base")
+            .pop_if_empty()
+            .extend(segments);
+        url
     }
 
     /// Source `createGithubAppJwt`: RS256, `iat` now-60, `exp` now+540.
@@ -179,29 +250,24 @@ impl GithubConfig {
         ))
     }
 
-    /// Install `state` MAC key. Source uses SECRET_KEY; this server has no
-    /// general secret, so the key is derived from the app webhook secret with a
-    /// distinct label (the webhook MAC itself signs only GitHub bodies).
-    fn state_key(&self) -> [u8; 32] {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(self.webhook_secret.as_bytes()).expect("hmac key");
-        mac.update(b"fvoci:github-install-state:v1");
-        mac.finalize().into_bytes().into()
-    }
-
-    pub fn sign_install_state(&self, workspace_id: Uuid, now_ms: i64) -> String {
+    /// Source `signInstallState` plus a nonce `n`: its hash is stored with the
+    /// initiating user and session and consumed once by the callback.
+    pub fn sign_install_state(&self, workspace_id: Uuid, nonce: &str, now_ms: i64) -> String {
         let payload = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(
-                &json!({ "w": workspace_id.to_string(), "e": now_ms + STATE_TTL_MS }),
-            )
+            serde_json::to_vec(&json!({
+                "w": workspace_id.to_string(),
+                "n": nonce,
+                "e": now_ms + STATE_TTL_MS,
+            }))
             .expect("state json"),
         );
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.state_key()).expect("hmac key");
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.state_key).expect("hmac key");
         mac.update(payload.as_bytes());
         format!("{payload}.{}", hex::encode(mac.finalize().into_bytes()))
     }
 
-    pub fn verify_install_state(&self, state: &str, now_ms: i64) -> Option<Uuid> {
+    /// Returns the workspace and nonce of an authentic, unexpired state.
+    pub fn verify_install_state(&self, state: &str, now_ms: i64) -> Option<(Uuid, String)> {
         let (payload, mac_hex) = state.rsplit_once('.')?;
         if payload.is_empty()
             || mac_hex.len() != 64
@@ -211,16 +277,17 @@ impl GithubConfig {
         {
             return None;
         }
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.state_key()).expect("hmac key");
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.state_key).expect("hmac key");
         mac.update(payload.as_bytes());
         mac.verify_slice(&hex::decode(mac_hex).ok()?).ok()?;
         let decoded: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
         let workspace_id = Uuid::parse_str(decoded.get("w")?.as_str()?).ok()?;
+        let nonce = decoded.get("n")?.as_str().filter(|n| !n.is_empty())?;
         let expires = decoded.get("e")?.as_f64()?;
         if expires < now_ms as f64 {
             return None;
         }
-        Some(workspace_id)
+        Some((workspace_id, nonce.to_string()))
     }
 
     /// Source `verifyGithubWebhookSignature`: `sha256=<64 lowercase hex>`,
@@ -266,9 +333,8 @@ pub enum GithubApiError {
 }
 
 async fn github_call(
-    github: &GithubConfig,
     method: reqwest::Method,
-    path: &str,
+    url: Url,
     bearer: &str,
     body: Option<Value>,
 ) -> Result<(u16, Option<Value>), GithubApiError> {
@@ -278,7 +344,7 @@ async fn github_call(
         .build()
         .map_err(|err| GithubApiError::Transport(err.without_url().to_string()))?;
     let mut request = client
-        .request(method, github.api(path))
+        .request(method, url)
         .header("accept", "application/vnd.github+json")
         .header("authorization", format!("Bearer {bearer}"))
         .header("x-github-api-version", "2022-11-28")
@@ -318,11 +384,33 @@ fn string_field(value: &Option<Value>, key: &str) -> Option<String> {
 /// Source `fetchAppSlug`.
 pub async fn fetch_app_slug(github: &GithubConfig) -> Result<String, GithubApiError> {
     let jwt = github.app_jwt().map_err(|_| GithubApiError::Invalid)?;
-    let (status, body) = github_call(github, reqwest::Method::GET, "/app", &jwt, None).await?;
+    let (status, body) =
+        github_call(reqwest::Method::GET, github.api(&["app"]), &jwt, None).await?;
     if !(200..300).contains(&status) {
         return Err(GithubApiError::Status(status));
     }
     string_field(&body, "slug").ok_or(GithubApiError::Invalid)
+}
+
+/// `GET /app/installations/{id}` with the app JWT: whether the installation
+/// exists and belongs to this app (404 otherwise).
+pub async fn installation_exists(
+    github: &GithubConfig,
+    installation_id: &str,
+) -> Result<bool, GithubApiError> {
+    let jwt = github.app_jwt().map_err(|_| GithubApiError::Invalid)?;
+    let (status, _) = github_call(
+        reqwest::Method::GET,
+        github.api(&["app", "installations", installation_id]),
+        &jwt,
+        None,
+    )
+    .await?;
+    match status {
+        200..=299 => Ok(true),
+        404 => Ok(false),
+        other => Err(GithubApiError::Status(other)),
+    }
 }
 
 /// Source `installationToken`.
@@ -332,9 +420,8 @@ async fn installation_token(
 ) -> Result<String, GithubApiError> {
     let jwt = github.app_jwt().map_err(|_| GithubApiError::Invalid)?;
     let (status, body) = github_call(
-        github,
         reqwest::Method::POST,
-        &format!("/app/installations/{installation_id}/access_tokens"),
+        github.api(&["app", "installations", installation_id, "access_tokens"]),
         &jwt,
         None,
     )
@@ -384,6 +471,52 @@ pub async fn check_manager(
     Ok(ok)
 }
 
+/// A fresh install nonce: 256 random bits, base64url.
+pub fn new_install_nonce() -> String {
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Stores the install nonce hash for this admin session (valid as long as the
+/// signed state). Expired rows of the workspace are dropped on the way.
+pub async fn begin_install(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    nonce: &str,
+) -> Result<Result<(), IntegrationDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !require_manager_write(&mut tx, workspace_id, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    }
+    sqlx::query(
+        "DELETE FROM fvoci.github_install_states WHERE workspace_id = $1 AND expires_at <= now()",
+    )
+    .bind(workspace_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.github_install_states
+            (nonce_hash, workspace_id, user_id, session_id, expires_at)
+        VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5::double precision))
+        "#,
+    )
+    .bind(crate::auth::token::hash_token(nonce))
+    .bind(workspace_id)
+    .bind(actor_user_id)
+    .bind(session_id)
+    .bind(STATE_TTL_MS as f64 / 1000.0)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(()))
+}
+
 pub async fn remove_installation(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -429,25 +562,63 @@ pub fn installation_id_is_valid(raw: &str) -> bool {
     !raw.is_empty() && raw.len() <= 20 && raw.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Source `completeGithubInstall`: the verified state names the workspace;
-/// one installation per workspace, one workspace per installation.
+/// Source `completeGithubInstall`, stricter: the nonce is consumed once and
+/// only by the admin session that started the install; one installation per
+/// workspace, one workspace per installation, and an existing link to another
+/// installation is not replaced (uninstall first).
 pub async fn complete_install(
     pool: &PgPool,
     workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    nonce: &str,
     installation_id: &str,
 ) -> Result<Result<(), IntegrationDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
+    let consumed: Option<bool> = sqlx::query_scalar(
+        r#"
+        DELETE FROM fvoci.github_install_states
+        WHERE nonce_hash = $1 AND workspace_id = $2 AND user_id = $3 AND session_id = $4
+        RETURNING expires_at > now()
+        "#,
+    )
+    .bind(crate::auth::token::hash_token(nonce))
+    .bind(workspace_id)
+    .bind(actor_user_id)
+    .bind(session_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if consumed != Some(true) {
+        // A consumed-but-expired nonce stays consumed.
+        tx.commit().await?;
         return Ok(Err(IntegrationDbError::NotFound));
+    }
+    if !require_manager_write(&mut tx, workspace_id, actor_user_id, session_id).await? {
+        tx.commit().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    }
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT installation_id FROM fvoci.github_installations WHERE workspace_id = $1 FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    match existing.as_deref() {
+        Some(current) if current == installation_id => {
+            tx.commit().await?;
+            return Ok(Ok(()));
+        }
+        Some(_) => {
+            tx.commit().await?;
+            return Ok(Err(IntegrationDbError::Conflict));
+        }
+        None => {}
     }
     let result = sqlx::query(
         r#"
         INSERT INTO fvoci.github_installations (id, workspace_id, installation_id)
         VALUES ($1, $2, $3)
-        ON CONFLICT (workspace_id)
-        DO UPDATE SET installation_id = EXCLUDED.installation_id, updated_at = now()
         "#,
     )
     .bind(Uuid::now_v7())
@@ -468,7 +639,7 @@ pub async fn complete_install(
         AuditAppend {
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
-            actor_user_id: None,
+            actor_user_id: Some(actor_user_id),
             verb: "github.installed".into(),
             target_type: None,
             target_id: None,
@@ -491,6 +662,23 @@ pub struct IssueLinkRow {
 
 pub fn repo_is_valid(repo: &str) -> bool {
     (3..=200).contains(&repo.chars().count()) && REPO_RE.is_match(repo)
+}
+
+/// Serializes the inbound create-or-update of one issue with a concurrent
+/// delivery or manual link of the same issue, so the second one sees the first
+/// one's link instead of failing on the unique index.
+async fn lock_issue(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    repo: &str,
+    issue_number: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+        .bind(ISSUE_LOCK_NAMESPACE)
+        .bind(format!("{workspace_id}:{repo}#{issue_number}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// Source `linkGithubIssue`: project edit permission on the task; a task and
@@ -541,6 +729,7 @@ pub async fn link_issue(
         tx.rollback().await?;
         return Ok(Err(IntegrationDbError::NotFound));
     }
+    lock_issue(&mut tx, workspace_id, repo, issue_number).await?;
     let id = Uuid::now_v7();
     let inserted = sqlx::query(
         r#"
@@ -974,6 +1163,7 @@ async fn apply_issue_event(
     let Some(actor_user_id) = first_owner(tx, workspace_id).await? else {
         return Ok(InboundOutcome::Ignored);
     };
+    lock_issue(tx, workspace_id, &issue.repo, issue.number).await?;
     let linked: Option<Uuid> = sqlx::query_scalar(
         r#"
         SELECT task_id FROM fvoci.github_issue_links
@@ -1176,6 +1366,18 @@ async fn sync_target(
     ))
 }
 
+/// `owner/name` as two path segments; `.`/`..` would change the request path.
+fn repo_segments(repo: &str) -> Option<(&str, &str)> {
+    let (owner, name) = repo.split_once('/')?;
+    let dotted = |segment: &str| segment == "." || segment == "..";
+    (!owner.is_empty() && !name.is_empty() && !dotted(owner) && !dotted(name))
+        .then_some((owner, name))
+}
+
+/// Source `syncLinkedGithubIssue`. Client errors (token or PATCH) are final:
+/// the event is one per status change on the shared `github` cursor, so a
+/// workspace whose app was removed or suspended on GitHub must not hold other
+/// workspaces behind its retries. 5xx and transport errors are retried.
 pub async fn sync_linked_issue(
     pool: &PgPool,
     github: &GithubConfig,
@@ -1184,13 +1386,24 @@ pub async fn sync_linked_issue(
     let Some(target) = sync_target(pool, event).await? else {
         return Ok(());
     };
-    let token = installation_token(github, &target.installation_id)
-        .await
-        .map_err(|err| OutboxProcessError::Delivery(format!("github token: {err}")))?;
+    let Some((owner, name)) = repo_segments(&target.repo) else {
+        warn!(event_id = %event.id, "github.repo_unusable");
+        return Ok(());
+    };
+    let token = match installation_token(github, &target.installation_id).await {
+        Ok(token) => token,
+        Err(GithubApiError::Status(status)) if (400..500).contains(&status) => {
+            warn!(event_id = %event.id, http_status = status, "github.token_refused");
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(OutboxProcessError::Delivery(format!("github token: {err}")));
+        }
+    };
+    let issue_number = target.issue_number.to_string();
     let (status, _) = github_call(
-        github,
         reqwest::Method::PATCH,
-        &format!("/repos/{}/issues/{}", target.repo, target.issue_number),
+        github.api(&["repos", owner, name, "issues", &issue_number]),
         &token,
         Some(json!({ "state": target.state })),
     )
@@ -1209,12 +1422,39 @@ pub async fn sync_linked_issue(
     Ok(())
 }
 
+/// With the app configured, pushes status changes to GitHub. Without it, the
+/// same cursor only moves forward (PgOnly, no effect), so configuring the app
+/// later does not replay every status change recorded while it was off.
 pub struct GithubSyncConsumer {
-    github: GithubConfig,
+    github: Option<GithubConfig>,
 }
 
-pub fn github_sync_consumer(github: GithubConfig) -> Arc<dyn OutboxConsumer> {
+pub fn github_sync_consumer(github: Option<GithubConfig>) -> Arc<dyn OutboxConsumer> {
     Arc::new(GithubSyncConsumer { github })
+}
+
+async fn skip_event(
+    pool: &PgPool,
+    lease_owner: Uuid,
+    event: &OutboxEvent,
+) -> Result<(), OutboxProcessError> {
+    let mut tx = pool.begin().await?;
+    if !advance_cursor_tx(
+        &mut tx,
+        GITHUB_CONSUMER,
+        lease_owner,
+        &event.xact,
+        event.seq,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Err(OutboxProcessError::Delivery(
+            "advance rejected in pg-only tx".into(),
+        ));
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 impl OutboxConsumer for GithubSyncConsumer {
@@ -1223,16 +1463,25 @@ impl OutboxConsumer for GithubSyncConsumer {
     }
 
     fn delivery_mode(&self) -> DeliveryMode {
-        DeliveryMode::External
+        if self.github.is_some() {
+            DeliveryMode::External
+        } else {
+            DeliveryMode::PgOnly
+        }
     }
 
     fn deliver<'a>(
         &'a self,
         pool: &'a PgPool,
-        _lease_owner: Uuid,
+        lease_owner: Uuid,
         event: &'a OutboxEvent,
     ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
-        Box::pin(async move { sync_linked_issue(pool, &self.github, event).await })
+        Box::pin(async move {
+            match &self.github {
+                Some(github) => sync_linked_issue(pool, github, event).await,
+                None => skip_event(pool, lease_owner, event).await,
+            }
+        })
     }
 
     /// One event per call: its two requests (token + PATCH, 10 s each) fit
@@ -1249,15 +1498,19 @@ mod tests {
     const TEST_KEY: &str = include_str!("../../tests/fixtures/github-app-test-key.pem");
 
     fn config() -> GithubConfig {
-        GithubConfig::new("123", TEST_KEY, "whsec", "http://127.0.0.1:9").expect("config")
+        GithubConfig::new("123", TEST_KEY, "whsec", "http://127.0.0.1:9", [7u8; 32])
+            .expect("config")
     }
 
     #[test]
     fn state_round_trip_expiry_and_tamper() {
         let github = config();
         let ws = Uuid::now_v7();
-        let state = github.sign_install_state(ws, 1_000);
-        assert_eq!(github.verify_install_state(&state, 1_000), Some(ws));
+        let state = github.sign_install_state(ws, "nonce-1", 1_000);
+        assert_eq!(
+            github.verify_install_state(&state, 1_000),
+            Some((ws, "nonce-1".to_string()))
+        );
         assert_eq!(
             github.verify_install_state(&state, 1_000 + STATE_TTL_MS + 1),
             None
@@ -1265,8 +1518,60 @@ mod tests {
         let mut tampered = state.clone();
         tampered.insert(0, 'x');
         assert_eq!(github.verify_install_state(&tampered, 1_000), None);
-        let other = GithubConfig::new("123", TEST_KEY, "other", "http://127.0.0.1:9").expect("c");
+        // Same webhook secret, other state key: the webhook secret alone
+        // cannot mint install state.
+        let other = GithubConfig::new("123", TEST_KEY, "whsec", "http://127.0.0.1:9", [8u8; 32])
+            .expect("c");
         assert_eq!(other.verify_install_state(&state, 1_000), None);
+    }
+
+    #[test]
+    fn state_key_sources() {
+        assert!(state_key_from_secret(&"s".repeat(STATE_SECRET_MIN_BYTES - 1)).is_err());
+        let a = state_key_from_secret(&"s".repeat(STATE_SECRET_MIN_BYTES)).expect("key");
+        let b = state_key_from_secret(&"t".repeat(STATE_SECRET_MIN_BYTES)).expect("key");
+        assert_ne!(a, b);
+        let keys = Keyring::parse_named(
+            r#"{"k1":"0101010101010101010101010101010101010101010101010101010101010101","k2":"0202020202020202020202020202020202020202020202020202020202020202"}"#,
+            "k1",
+            "ENCRYPTION_KEYS",
+        )
+        .expect("keys");
+        let derived = derive_state_key(&keys);
+        assert_ne!(derived.as_slice(), keys.keys["k1"].as_slice());
+        assert_eq!(derived, derive_state_key(&keys));
+    }
+
+    #[test]
+    fn api_base_is_https_or_loopback_http() {
+        let make = |api: &str| GithubConfig::new("1", TEST_KEY, "s", api, [1u8; 32]);
+        assert!(make("https://api.github.com").is_ok());
+        assert!(make("https://ghe.example.com/api/v3").is_ok());
+        assert!(make("http://127.0.0.1:9").is_ok());
+        assert!(make("http://[::1]:9").is_ok());
+        assert!(make("http://localhost:9").is_ok());
+        assert!(make("http://api.github.com").is_err());
+        assert!(make("http://10.0.0.1").is_err());
+        assert!(make("ftp://api.github.com").is_err());
+    }
+
+    #[test]
+    fn api_paths_are_percent_encoded_segments() {
+        let github = GithubConfig::new(
+            "1",
+            TEST_KEY,
+            "s",
+            "https://ghe.example.com/api/v3/",
+            [1u8; 32],
+        )
+        .expect("config");
+        assert_eq!(
+            github.api(&["repos", "o", "a?b#c", "issues", "7"]).as_str(),
+            "https://ghe.example.com/api/v3/repos/o/a%3Fb%23c/issues/7"
+        );
+        assert_eq!(repo_segments("octo/repo"), Some(("octo", "repo")));
+        assert_eq!(repo_segments("../x"), None);
+        assert_eq!(repo_segments("o/.."), None);
     }
 
     #[test]
@@ -1311,6 +1616,6 @@ mod tests {
         assert!(installation_id_is_valid("12345"));
         assert!(!installation_id_is_valid("12a"));
         assert!(!installation_id_is_valid(""));
-        assert!(GithubConfig::new("1", "not a key", "s", GITHUB_API_DEFAULT).is_err());
+        assert!(GithubConfig::new("1", "not a key", "s", GITHUB_API_DEFAULT, [1u8; 32]).is_err());
     }
 }

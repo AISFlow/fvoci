@@ -448,20 +448,43 @@ pub async fn purge_settled_deliveries(pool: &PgPool, days: i32) -> Result<u64, s
     Ok(deleted)
 }
 
+/// Install round trips that were never completed. Plain `DELETE … IN`: the
+/// app role has no UPDATE here, which `FOR UPDATE SKIP LOCKED` would need.
+pub async fn purge_expired_install_states(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_system(&mut tx).await?;
+    let deleted = sqlx::query(
+        r#"
+        DELETE FROM fvoci.github_install_states
+        WHERE nonce_hash IN (
+            SELECT nonce_hash FROM fvoci.github_install_states
+            WHERE expires_at <= now()
+            ORDER BY expires_at
+            LIMIT $1
+        )
+        "#,
+    )
+    .bind(INTEGRATION_GC_BATCH)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// Plain `DELETE … IN` for the same reason as the install states.
 pub async fn purge_github_deliveries(pool: &PgPool, days: i32) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
     let deleted = sqlx::query(
         r#"
-        WITH doomed AS (
+        DELETE FROM fvoci.github_deliveries
+        WHERE delivery_id IN (
             SELECT delivery_id FROM fvoci.github_deliveries
             WHERE processed_at < now() - make_interval(days => $1)
             ORDER BY processed_at
             LIMIT $2
-            FOR UPDATE SKIP LOCKED
         )
-        DELETE FROM fvoci.github_deliveries AS g USING doomed
-        WHERE g.delivery_id = doomed.delivery_id
         "#,
     )
     .bind(days)

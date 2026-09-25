@@ -20,6 +20,7 @@ use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router_with_integrations, state::AppState};
 use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
+use fvoci_server::integrations::webhooks::WebhookSenderHandle;
 use fvoci_server::jobs::{spawn_maintenance, MaintenanceHandle, MaintenanceSettings};
 use fvoci_server::outbox::{
     spawn_outbox_dispatcher, OutboxDispatcherHandle, OutboxDispatcherSettings,
@@ -266,16 +267,16 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         ai = integrations.ai.is_some(),
         "integrations configured"
     );
-    consumers.push(fvoci_server::integrations::webhooks::webhooks_consumer(
+    consumers.push(fvoci_server::integrations::webhooks::webhooks_consumer());
+    let webhook_sender = Some(fvoci_server::integrations::webhooks::spawn_webhook_sender(
+        pool.clone(),
         integrations.outbound.clone(),
         integrations.encryption_keys.clone(),
         fvoci_server::integrations::webhooks::WebhookDeliverySettings::default(),
     ));
-    if let Some(github) = integrations.github.clone() {
-        consumers.push(fvoci_server::integrations::github::github_sync_consumer(
-            github,
-        ));
-    }
+    consumers.push(fvoci_server::integrations::github::github_sync_consumer(
+        integrations.github.clone(),
+    ));
     let outbox_dispatcher = spawn_outbox_dispatcher(
         OutboxDispatcherSettings::from_env(),
         pool.clone(),
@@ -335,12 +336,14 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
     let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
+    let webhook_task = Arc::new(tokio::sync::Mutex::new(webhook_sender));
     let maintenance_task = Arc::new(tokio::sync::Mutex::new(maintenance));
     let import_task = Arc::new(tokio::sync::Mutex::new(import_job));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
     let outbox_task_for_signal = outbox_task.clone();
+    let webhook_task_for_signal = webhook_task.clone();
     let maintenance_task_for_signal = maintenance_task.clone();
     let import_task_for_signal = import_task.clone();
 
@@ -360,6 +363,9 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             if let Some(job) = outbox_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
                 tracing::info!("outbox dispatcher shutdown started concurrently with HTTP drain");
+            }
+            if let Some(job) = webhook_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
             }
             if let Some(job) = import_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
@@ -408,7 +414,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
-                    let outbox = join_outbox_finished(&outbox_task).await;
+                    let outbox = join_outbox_finished(&outbox_task, &webhook_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
                     let import = join_import_finished(&import_task).await;
                     drain_pool.close().await;
@@ -441,7 +447,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
-                    let outbox = join_outbox_finished(&outbox_task).await;
+                    let outbox = join_outbox_finished(&outbox_task, &webhook_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
                     let import = join_import_finished(&import_task).await;
                     drain_pool.close().await;
@@ -485,7 +491,12 @@ async fn join_extract_finished(
 
 async fn join_outbox_finished(
     outbox_task: &tokio::sync::Mutex<Option<OutboxDispatcherHandle>>,
+    webhook_task: &tokio::sync::Mutex<Option<WebhookSenderHandle>>,
 ) -> Result<(), String> {
+    if let Some(job) = webhook_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await?;
+    }
     if let Some(job) = outbox_task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;

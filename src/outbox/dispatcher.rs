@@ -87,18 +87,6 @@ pub trait OutboxConsumer: Send + Sync {
     fn batch_event_cap(&self) -> usize {
         usize::MAX
     }
-
-    /// Work the consumer owns beyond the event stream, e.g. sending the
-    /// per-target retries that `deliver` fanned out into its own table. Runs
-    /// under this consumer's lease after every event pass, cancelled at
-    /// `budget` (the lease minus a margin). Returns whether anything was done.
-    fn run_due<'a>(
-        &'a self,
-        _pool: &'a PgPool,
-        _budget: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, OutboxProcessError>> + Send + 'a>> {
-        Box::pin(async { Ok(false) })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -249,34 +237,6 @@ async fn process_consumer_cycle(
         return Ok(true);
     }
 
-    let mut worked = process_event_pass(settings, pool, consumer, owner, cancel, ttl_secs).await?;
-    if cancel.is_cancelled() || !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
-        return Ok(worked);
-    }
-    let budget = lease_batch_timeout(settings.lease_ttl);
-    match tokio::time::timeout(budget, consumer.run_due(pool, budget)).await {
-        Ok(Ok(did)) => worked |= did,
-        Ok(Err(err)) => {
-            warn!(consumer = consumer.name(), error = %err, "outbox consumer due work failed");
-        }
-        Err(_) => {
-            warn!(
-                consumer = consumer.name(),
-                "outbox consumer due work exceeded lease budget"
-            );
-        }
-    }
-    Ok(worked)
-}
-
-async fn process_event_pass(
-    settings: &OutboxDispatcherSettings,
-    pool: &PgPool,
-    consumer: &Arc<dyn OutboxConsumer>,
-    owner: Uuid,
-    cancel: &CancellationToken,
-    ttl_secs: i64,
-) -> Result<bool, sqlx::Error> {
     // Fail closed on restore xid epoch before the retry sweep. `read` evaluates
     // snapshot and comparison in one statement; a separate xmax helper raced.
     let events = match read_events(pool, consumer.name(), settings.batch_limit).await {

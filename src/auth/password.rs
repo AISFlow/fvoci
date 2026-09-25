@@ -50,12 +50,18 @@ impl fmt::Debug for Keyring {
 }
 
 impl Keyring {
+    /// `PASSWORD_PEPPER_KEYS` keyring.
     pub fn parse(raw: &str, active_id: &str) -> Result<Self, String> {
+        Self::parse_named(raw, active_id, "PASSWORD_PEPPER_KEYS")
+    }
+
+    /// Same format for another variable; `name` only labels the JSON error.
+    pub fn parse_named(raw: &str, active_id: &str, name: &str) -> Result<Self, String> {
         if !KEY_ID_RE.is_match(active_id) {
             return Err("invalid active key id".into());
         }
         let parsed: HashMap<String, String> =
-            serde_json::from_str(raw).map_err(|_| "invalid keyring json".to_string())?;
+            serde_json::from_str(raw).map_err(|_| format!("invalid {name} json"))?;
         if parsed.is_empty() || parsed.len() > 32 {
             return Err("keyring must have 1-32 keys".into());
         }

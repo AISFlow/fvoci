@@ -86,6 +86,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.ics_tokens TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.webhooks TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.webhook_deliveries TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.github_installations TO :"app_role";
+GRANT SELECT, INSERT, DELETE ON fvoci.github_install_states TO :"app_role";
+REVOKE UPDATE ON fvoci.github_install_states FROM :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.github_issue_links TO :"app_role";
 GRANT SELECT, INSERT, DELETE ON fvoci.github_deliveries TO :"app_role";
 REVOKE UPDATE ON fvoci.github_deliveries FROM :"app_role";

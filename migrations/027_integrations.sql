@@ -92,6 +92,31 @@ CREATE POLICY tenant_isolation ON fvoci.github_installations
         OR (SELECT public.app_system_ctx_on())
     );
 
+-- Pending install round trips: the hash of the nonce carried in the signed
+-- state, bound to the admin user and session that started it. The callback
+-- deletes the row (single use) and must present the same session.
+CREATE TABLE fvoci.github_install_states (
+    nonce_hash text PRIMARY KEY,
+    workspace_id uuid NOT NULL REFERENCES fvoci.workspaces (id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES fvoci.users (id) ON DELETE CASCADE,
+    session_id uuid NOT NULL,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT github_install_states_nonce_hash_check CHECK (nonce_hash ~ '^[0-9a-f]{64}$')
+);
+
+CREATE INDEX github_install_states_workspace_id_idx ON fvoci.github_install_states (workspace_id);
+CREATE INDEX github_install_states_expires_at_idx ON fvoci.github_install_states (expires_at);
+
+ALTER TABLE fvoci.github_install_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fvoci.github_install_states FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON fvoci.github_install_states
+    AS PERMISSIVE FOR ALL TO public
+    USING (
+        workspace_id = (SELECT public.app_tenant_id())
+        OR (SELECT public.app_system_ctx_on())
+    );
+
 CREATE TABLE fvoci.github_issue_links (
     id uuid PRIMARY KEY,
     workspace_id uuid NOT NULL,

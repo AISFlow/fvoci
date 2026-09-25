@@ -312,7 +312,9 @@ pub async fn assert_app_role(pool: &PgPool) -> Result<(), String> {
                   'outbox_failures', 'processed_events', 'attachment_text', 'labels',
                   'task_assignees', 'task_labels', 'milestones', 'task_dependencies',
                   'notifications', 'notification_prefs', 'workspace_holidays', 'ics_tokens',
-                  'magic_tokens', 'task_activity'
+                  'magic_tokens', 'task_activity', 'webhooks', 'webhook_deliveries',
+                  'github_installations', 'github_install_states', 'github_issue_links',
+                  'github_deliveries'
               )
               AND pg_get_userbyid(c.relowner) = current_user
         )
@@ -460,7 +462,7 @@ mod tests {
         ),
         (
             27,
-            "b4cf4f15f140fa1e0c4854faf8d8e1421b875df15178a5d446b0f83bfc154d8d",
+            "abb60b87ee539663e93c9fa68b8eb986748c2acccd210c0f655c061b378c9d68",
         ),
     ];
 

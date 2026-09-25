@@ -26,9 +26,13 @@ use fvoci_server::integrations::github::{github_sync_consumer, parse_private_key
 use fvoci_server::integrations::outbound::{
     Outbound, OutboundPolicy, Resolve, ResolveFuture, SystemResolver,
 };
-use fvoci_server::integrations::webhooks::{webhooks_consumer, WebhookDeliverySettings};
+use fvoci_server::integrations::webhooks::{
+    spawn_webhook_sender, webhooks_consumer, WebhookDeliverySettings, WebhookSenderHandle,
+};
 use fvoci_server::integrations::{ai::AiConfig, Integrations};
-use fvoci_server::outbox::{spawn_outbox_dispatcher, OutboxConsumer, OutboxDispatcherSettings};
+use fvoci_server::outbox::{
+    spawn_outbox_dispatcher, OutboxConsumer, OutboxDispatcherHandle, OutboxDispatcherSettings,
+};
 use hmac::{Hmac, Mac};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, create_project, setup_session, test_peer, TestDb,
@@ -267,15 +271,48 @@ fn dispatcher_settings() -> OutboxDispatcherSettings {
     }
 }
 
-fn delivery_consumer(outbound: Outbound, timeout: Duration) -> Arc<dyn OutboxConsumer> {
-    webhooks_consumer(
-        outbound,
-        Some(keys()),
-        WebhookDeliverySettings {
-            request_timeout: timeout,
-            ..WebhookDeliverySettings::default()
-        },
-    )
+fn delivery_settings(timeout: Duration) -> WebhookDeliverySettings {
+    WebhookDeliverySettings {
+        request_timeout: timeout,
+        poll_interval: Duration::from_millis(50),
+        ..WebhookDeliverySettings::default()
+    }
+}
+
+/// The product wiring: the outbox dispatcher fans out (`webhooks` consumer,
+/// plus `extra` consumers) and an independent sender task sends due rows.
+struct Delivery {
+    dispatcher: OutboxDispatcherHandle,
+    sender: WebhookSenderHandle,
+}
+
+impl Delivery {
+    fn start(
+        pool: &PgPool,
+        outbound: Outbound,
+        timeout: Duration,
+        extra: Vec<Arc<dyn OutboxConsumer>>,
+    ) -> Self {
+        let mut consumers = vec![webhooks_consumer()];
+        consumers.extend(extra);
+        Self {
+            dispatcher: spawn_outbox_dispatcher(dispatcher_settings(), pool.clone(), consumers)
+                .expect("dispatcher"),
+            sender: spawn_webhook_sender(
+                pool.clone(),
+                outbound,
+                Some(keys()),
+                delivery_settings(timeout),
+            ),
+        }
+    }
+
+    async fn stop(self) {
+        self.sender.request_shutdown();
+        self.dispatcher.request_shutdown();
+        self.sender.join().await.unwrap();
+        self.dispatcher.join().await.unwrap();
+    }
 }
 
 fn hmac_hex(secret: &str, body: &[u8]) -> String {
@@ -562,12 +599,7 @@ async fn webhook_delivers_a_signed_source_payload_through_the_outbox() {
     .await;
 
     let pool = project_harness::app_pool(&harness).await;
-    let dispatcher = spawn_outbox_dispatcher(
-        dispatcher_settings(),
-        pool.clone(),
-        vec![delivery_consumer(outbound, Duration::from_secs(10))],
-    )
-    .expect("dispatcher");
+    let dispatcher = Delivery::start(&pool, outbound, Duration::from_secs(10), Vec::new());
 
     let project = create_project(app.clone(), &cookie, workspace_id, "HOOK", "workspace").await;
     wait_until("webhook POST", || {
@@ -641,8 +673,7 @@ async fn webhook_delivers_a_signed_source_payload_through_the_outbox() {
     assert_eq!(deliveries(&admin, hook_id).await.len(), 1);
     assert_eq!(receiver.count(), 1);
 
-    dispatcher.request_shutdown();
-    dispatcher.join().await.unwrap();
+    dispatcher.stop().await;
     pool.close().await;
     admin.close().await;
     harness.cleanup().await;
@@ -665,12 +696,7 @@ async fn webhook_retries_with_source_backoff_and_stops_on_client_errors() {
     )
     .await;
     let pool = project_harness::app_pool(&harness).await;
-    let dispatcher = spawn_outbox_dispatcher(
-        dispatcher_settings(),
-        pool.clone(),
-        vec![delivery_consumer(outbound, Duration::from_millis(400))],
-    )
-    .expect("dispatcher");
+    let dispatcher = Delivery::start(&pool, outbound, Duration::from_millis(400), Vec::new());
 
     // 500 → retry in 60 s; 503 → 300 s; timeout → 900 s; 502 → 900 s;
     // fifth failure (500) → failed. Each retry is made due by moving
@@ -791,8 +817,7 @@ async fn webhook_retries_with_source_backoff_and_stops_on_client_errors() {
     let row = deliveries(&admin, down_hook).await.remove(0);
     assert_eq!((row.status.as_str(), row.http_status), ("pending", None));
 
-    dispatcher.request_shutdown();
-    dispatcher.join().await.unwrap();
+    dispatcher.stop().await;
     pool.close().await;
     admin.close().await;
     harness.cleanup().await;
@@ -831,12 +856,7 @@ async fn webhook_refuses_redirects_private_answers_and_reads_bounded_responses()
         hooks.insert(name, id);
     }
     let pool = project_harness::app_pool(&harness).await;
-    let dispatcher = spawn_outbox_dispatcher(
-        dispatcher_settings(),
-        pool.clone(),
-        vec![delivery_consumer(outbound, Duration::from_secs(5))],
-    )
-    .expect("dispatcher");
+    let dispatcher = Delivery::start(&pool, outbound, Duration::from_secs(5), Vec::new());
     receiver.script("/endless", &[Reply::Endless]);
     let started = Instant::now();
     insert_event(&admin, workspace_id, "task.deleted", None, json!({})).await;
@@ -922,8 +942,7 @@ async fn webhook_refuses_redirects_private_answers_and_reads_bounded_responses()
         .collect();
     assert_eq!(paths, ["/redirect"], "Location was not followed");
 
-    dispatcher.request_shutdown();
-    dispatcher.join().await.unwrap();
+    dispatcher.stop().await;
     pool.close().await;
     admin.close().await;
     harness.cleanup().await;
@@ -985,12 +1004,7 @@ async fn webhook_fan_out_rechecks_creator_role_and_event_visibility() {
     .await;
 
     let pool = project_harness::app_pool(&harness).await;
-    let dispatcher = spawn_outbox_dispatcher(
-        dispatcher_settings(),
-        pool.clone(),
-        vec![delivery_consumer(outbound, Duration::from_secs(5))],
-    )
-    .expect("dispatcher");
+    let dispatcher = Delivery::start(&pool, outbound, Duration::from_secs(5), Vec::new());
     wait_until("visible delivery", || {
         let receiver = receiver.clone();
         async move { receiver.count() == 1 }
@@ -1072,8 +1086,7 @@ async fn webhook_fan_out_rechecks_creator_role_and_event_visibility() {
     assert_eq!(status, StatusCode::OK);
     assert!(deliveries(&admin, hook_id).await.is_empty());
 
-    dispatcher.request_shutdown();
-    dispatcher.join().await.unwrap();
+    dispatcher.stop().await;
     pool.close().await;
     admin.close().await;
     harness.cleanup().await;
@@ -1082,10 +1095,47 @@ async fn webhook_fan_out_rechecks_creator_role_and_event_visibility() {
 // ---------------------------------------------------------------------------
 // GitHub (local fake API; github.com is never contacted)
 
+/// Scripted fake of the GitHub REST API. Token and PATCH replies pop from
+/// per-installation / per-issue queues (default 201 / 200); `GET
+/// /app/installations/{id}` answers 200 only for ids in `installations`.
 #[derive(Clone, Default)]
 struct FakeGithub {
     calls: Arc<Mutex<Vec<(String, String, Value)>>>,
     public_key: Arc<Vec<u8>>,
+    installations: Arc<Mutex<std::collections::HashSet<String>>>,
+    token_replies: Arc<Mutex<HashMap<String, VecDeque<u16>>>>,
+    patch_replies: Arc<Mutex<HashMap<String, VecDeque<u16>>>>,
+}
+
+impl FakeGithub {
+    fn script_token(&self, installation: &str, statuses: &[u16]) {
+        self.token_replies
+            .lock()
+            .unwrap()
+            .entry(installation.to_string())
+            .or_default()
+            .extend(statuses);
+    }
+
+    fn script_patch(&self, path: &str, statuses: &[u16]) {
+        self.patch_replies
+            .lock()
+            .unwrap()
+            .entry(path.to_string())
+            .or_default()
+            .extend(statuses);
+    }
+
+    fn calls(&self) -> Vec<(String, String, Value)> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn count(&self, method: &str, path: &str) -> usize {
+        self.calls()
+            .iter()
+            .filter(|c| c.0 == method && c.1 == path)
+            .count()
+    }
 }
 
 fn verify_jwt(fake: &FakeGithub, headers: &HeaderMap) -> bool {
@@ -1128,6 +1178,25 @@ async fn fake_app(AxState(fake): AxState<FakeGithub>, headers: HeaderMap) -> Res
     Json(json!({ "slug": "fvoci-test" })).into_response()
 }
 
+async fn fake_installation(
+    AxState(fake): AxState<FakeGithub>,
+    AxPath(id): AxPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    fake.calls
+        .lock()
+        .unwrap()
+        .push(("GET".into(), format!("/app/installations/{id}"), json!({})));
+    if !verify_jwt(&fake, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if fake.installations.lock().unwrap().contains(&id) {
+        Json(json!({ "id": id.parse::<u64>().unwrap() })).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
 async fn fake_token(
     AxState(fake): AxState<FakeGithub>,
     AxPath(id): AxPath<String>,
@@ -1141,7 +1210,16 @@ async fn fake_token(
     if !verify_jwt(&fake, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    (StatusCode::CREATED, Json(json!({ "token": "ghs_fake" }))).into_response()
+    let scripted = fake
+        .token_replies
+        .lock()
+        .unwrap()
+        .get_mut(&id)
+        .and_then(VecDeque::pop_front);
+    match scripted.unwrap_or(201) {
+        201 => (StatusCode::CREATED, Json(json!({ "token": "ghs_fake" }))).into_response(),
+        other => StatusCode::from_u16(other).unwrap().into_response(),
+    }
 }
 
 async fn fake_patch(
@@ -1150,26 +1228,39 @@ async fn fake_patch(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    fake.calls.lock().unwrap().push((
-        "PATCH".into(),
-        format!("/repos/{owner}/{repo}/issues/{number}"),
-        body,
-    ));
+    let path = format!("/repos/{owner}/{repo}/issues/{number}");
+    fake.calls
+        .lock()
+        .unwrap()
+        .push(("PATCH".into(), path.clone(), body));
     if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer ghs_fake") {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({})).into_response()
+    let scripted = fake
+        .patch_replies
+        .lock()
+        .unwrap()
+        .get_mut(&path)
+        .and_then(VecDeque::pop_front);
+    StatusCode::from_u16(scripted.unwrap_or(200))
+        .unwrap()
+        .into_response()
 }
 
 async fn start_fake_github() -> (FakeGithub, SocketAddr) {
     let key = parse_private_key(GITHUB_KEY).unwrap();
     use ring::signature::KeyPair;
     let fake = FakeGithub {
-        calls: Arc::default(),
         public_key: Arc::new(key.public_key().as_ref().to_vec()),
+        ..FakeGithub::default()
     };
+    fake.installations
+        .lock()
+        .unwrap()
+        .extend(["42".to_string(), "43".to_string()]);
     let app = Router::new()
         .route("/app", get(fake_app))
+        .route("/app/installations/{id}", get(fake_installation))
         .route("/app/installations/{id}/access_tokens", post(fake_token))
         .route("/repos/{owner}/{repo}/issues/{number}", patch(fake_patch))
         .with_state(fake.clone());
@@ -1181,8 +1272,17 @@ async fn start_fake_github() -> (FakeGithub, SocketAddr) {
     (fake, addr)
 }
 
+const STATE_KEY: [u8; 32] = [9u8; 32];
+
 fn github_config(addr: SocketAddr) -> GithubConfig {
-    GithubConfig::new("123", GITHUB_KEY, GITHUB_SECRET, &format!("http://{addr}")).unwrap()
+    GithubConfig::new(
+        "123",
+        GITHUB_KEY,
+        GITHUB_SECRET,
+        &format!("http://{addr}"),
+        STATE_KEY,
+    )
+    .unwrap()
 }
 
 fn github_integrations(addr: SocketAddr) -> Arc<Integrations> {
@@ -1192,10 +1292,63 @@ fn github_integrations(addr: SocketAddr) -> Arc<Integrations> {
     })
 }
 
+async fn second_workspace(app: &Router, cookie: &str, slug: &str) -> Uuid {
+    let (status, body, _) = call(
+        app,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({ "name": slug, "slug": slug })),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    Uuid::parse_str(body["id"].as_str().unwrap()).unwrap()
+}
+
+/// `POST …/github/install` and the `state` of the returned github.com URL.
+async fn start_install(app: &Router, cookie: &str, workspace_id: Uuid) -> String {
+    let (status, body, _) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/github/install"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let url = url::Url::parse(body["url"].as_str().unwrap()).unwrap();
+    assert_eq!(url.host_str(), Some("github.com"));
+    assert_eq!(url.path(), "/apps/fvoci-test/installations/new");
+    url.query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.to_string())
+        .unwrap()
+}
+
+async fn callback(
+    app: &Router,
+    state: &str,
+    installation_id: &str,
+    cookie: Option<&str>,
+) -> (StatusCode, HeaderMap) {
+    let (status, _, headers) = call(
+        app,
+        "GET",
+        &format!(
+            "/api/v1/github/callback?state={}&installation_id={installation_id}",
+            urlencode(state)
+        ),
+        None,
+        cookie,
+    )
+    .await;
+    (status, headers)
+}
+
 #[tokio::test]
 async fn github_install_callback_get_and_remove() {
     let harness = TestDb::bootstrap().await;
-    let (_, cookie, _, workspace_id) = setup_session(&harness).await;
+    let (_, cookie, owner_id, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
     let (fake, fake_addr) = start_fake_github().await;
     let app = app(&harness, github_integrations(fake_addr)).await;
@@ -1207,27 +1360,20 @@ async fn github_install_callback_get_and_remove() {
         (StatusCode::OK, json!({ "installationId": null }))
     );
 
-    let (status, body, _) = call(
-        &app,
-        "POST",
-        &format!("{base}/install"),
-        None,
-        Some(&cookie),
+    let state = start_install(&app, &cookie, workspace_id).await;
+    assert_eq!(fake.calls()[0].1, "/app", "slug via the fake API");
+    // The nonce is stored hashed with the initiating user and session.
+    let (user_id, session_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT user_id, session_id FROM fvoci.github_install_states WHERE workspace_id = $1",
     )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let url = url::Url::parse(body["url"].as_str().unwrap()).unwrap();
-    assert_eq!(url.host_str(), Some("github.com"));
-    assert_eq!(url.path(), "/apps/fvoci-test/installations/new");
-    let state = url
-        .query_pairs()
-        .find(|(k, _)| k == "state")
-        .map(|(_, v)| v.to_string())
-        .unwrap();
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(user_id, owner_id);
     assert_eq!(
-        fake.calls.lock().unwrap()[0].1,
-        "/app",
-        "slug via the fake API"
+        session_id,
+        project_harness::session_id_for_user(&admin, owner_id).await
     );
 
     // Member cannot start or read; bad/forged state and ids are 400.
@@ -1240,13 +1386,27 @@ async fn github_install_callback_get_and_remove() {
         let (status, _, _) = call(&app, method, &path, None, Some(&member.cookie)).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
     }
-    let forged = GithubConfig::new("123", GITHUB_KEY, "other-secret", "http://127.0.0.1:9")
-        .unwrap()
-        .sign_install_state(workspace_id, chrono::Utc::now().timestamp_millis());
+    // Same webhook secret, another state key: forged.
+    let forged = GithubConfig::new(
+        "123",
+        GITHUB_KEY,
+        GITHUB_SECRET,
+        "http://127.0.0.1:9",
+        [1u8; 32],
+    )
+    .unwrap()
+    .sign_install_state(workspace_id, "guess", chrono::Utc::now().timestamp_millis());
+    // Authentic MAC, but a nonce that was never issued.
+    let unissued = github_config(fake_addr).sign_install_state(
+        workspace_id,
+        "never-issued",
+        chrono::Utc::now().timestamp_millis(),
+    );
     for query in [
-        format!("state={forged}&installation_id=42"),
-        format!("state={state}&installation_id=4x2"),
-        format!("state={state}"),
+        format!("state={}&installation_id=42", urlencode(&forged)),
+        format!("state={}&installation_id=42", urlencode(&unissued)),
+        format!("state={}&installation_id=4x2", urlencode(&state)),
+        format!("state={}", urlencode(&state)),
         "installation_id=42".to_string(),
     ] {
         let (status, _, _) = call(
@@ -1254,27 +1414,87 @@ async fn github_install_callback_get_and_remove() {
             "GET",
             &format!("/api/v1/github/callback?{query}"),
             None,
-            None,
+            Some(&cookie),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
     }
 
-    let (status, _, headers) = call(
-        &app,
-        "GET",
-        &format!(
-            "/api/v1/github/callback?state={}&installation_id=42",
-            urlencode(&state)
-        ),
-        None,
-        None,
-    )
-    .await;
+    // The callback needs the session that started the install: none is 401,
+    // another admin of the same workspace is refused.
+    assert_eq!(
+        callback(&app, &state, "42", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let other_admin = add_workspace_user(&admin, workspace_id, "admin", "a2").await;
+    assert_eq!(
+        callback(&app, &state, "42", Some(&other_admin.cookie))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    // An installation GitHub does not know for this app is refused before
+    // the nonce is spent.
+    assert_eq!(
+        callback(&app, &state, "999", Some(&cookie)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(fake.count("GET", "/app/installations/999"), 1);
+
+    let checks = fake.count("GET", "/app/installations/42");
+    let (status, headers) = callback(&app, &state, "42", Some(&cookie)).await;
     assert_eq!(status, StatusCode::FOUND);
     assert_eq!(headers["location"], "http://localhost/");
+    assert_eq!(fake.count("GET", "/app/installations/42"), checks + 1);
     let (_, body, _) = call(&app, "GET", &base, None, Some(&cookie)).await;
     assert_eq!(body, json!({ "installationId": "42" }));
+    let audit_actor: Option<Uuid> = sqlx::query_scalar(
+        "SELECT actor_user_id FROM fvoci.audit_log WHERE verb = 'github.installed' AND workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(audit_actor, Some(owner_id));
+    // Single use: the same state again is refused.
+    assert_eq!(
+        callback(&app, &state, "42", Some(&cookie)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // A new round trip cannot silently replace the link with another
+    // installation; completing it with the same one is idempotent.
+    let again = start_install(&app, &cookie, workspace_id).await;
+    assert_eq!(
+        callback(&app, &again, "43", Some(&cookie)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, body, _) = call(&app, "GET", &base, None, Some(&cookie)).await;
+    assert_eq!(body, json!({ "installationId": "42" }));
+    let again = start_install(&app, &cookie, workspace_id).await;
+    assert_eq!(
+        callback(&app, &again, "42", Some(&cookie)).await.0,
+        StatusCode::FOUND
+    );
+
+    // Another workspace cannot claim an installation that is linked here.
+    let other_ws = second_workspace(&app, &cookie, "gh-other").await;
+    let other_state = start_install(&app, &cookie, other_ws).await;
+    assert_eq!(
+        callback(&app, &other_state, "42", Some(&cookie)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    // A state minted for one workspace does not complete another's install
+    // (the workspace is inside the MAC; the nonce row is per workspace).
+    let (_, body, _) = call(
+        &app,
+        "GET",
+        &format!("/api/v1/workspaces/{other_ws}/github"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(body, json!({ "installationId": null }));
 
     let (status, _, _) = call(&app, "DELETE", &base, None, Some(&cookie)).await;
     assert_eq!(status, StatusCode::OK);
@@ -1282,6 +1502,48 @@ async fn github_install_callback_get_and_remove() {
     assert_eq!(body, json!({ "installationId": null }));
     let (status, _, _) = call(&app, "DELETE", &base, None, Some(&cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // An expired, never-completed round trip is removed by maintenance.
+    let stale = start_install(&app, &cookie, workspace_id).await;
+    sqlx::query("UPDATE fvoci.github_install_states SET expires_at = now() - interval '1 second'")
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        callback(&app, &stale, "43", Some(&cookie)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    // The daily sweep (app role) also drops GitHub delivery ids past 30 days.
+    let old_delivery = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fvoci.github_deliveries (delivery_id, processed_at) VALUES ($1, now() - interval '31 days'), ($2, now())",
+    )
+    .bind(old_delivery)
+    .bind(Uuid::now_v7())
+    .execute(&admin)
+    .await
+    .unwrap();
+    let pool = project_harness::app_pool(&harness).await;
+    let sweep_state = app_state(&harness.app_url).await;
+    let stats = fvoci_server::jobs::run_daily_sweep(
+        &pool,
+        &sweep_state.storage,
+        &sweep_state.mailer,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .expect("sweep lock");
+    let states_left: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.github_install_states")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    let deliveries_left: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.github_deliveries")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!((states_left, deliveries_left), (0, 1));
+    assert!(stats.github_deliveries >= 2, "{stats:?}");
 
     // Without the app configured, install is 400 (source) and the public
     // endpoints refuse input.
@@ -1298,6 +1560,7 @@ async fn github_install_callback_get_and_remove() {
     let (status, _) = raw_post(&plain, "/api/v1/github/webhook", b"{}", &[]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    pool.close().await;
     admin.close().await;
     harness.cleanup().await;
 }
@@ -1608,7 +1871,7 @@ async fn github_issue_links_and_status_sync_use_the_fake_api() {
     let dispatcher = spawn_outbox_dispatcher(
         dispatcher_settings(),
         pool.clone(),
-        vec![github_sync_consumer(github_config(fake_addr))],
+        vec![github_sync_consumer(Some(github_config(fake_addr)))],
     )
     .expect("dispatcher");
     let (status, body, _) = call(
@@ -1825,6 +2088,897 @@ async fn ai_routes_are_member_gated_and_use_the_document_markdown() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Round 2: GitHub sync finality, isolation and concurrency
+
+/// Reads through RLS with the system context, as product workers do.
+async fn system_scalar_uuid(admin: &PgPool, sql: &str, bind: Uuid) -> Option<Uuid> {
+    let mut tx = admin.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let value = sqlx::query_scalar(sql)
+        .bind(bind)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    value
+}
+
+async fn last_task_event(admin: &PgPool, task_id: &str) -> Uuid {
+    system_scalar_uuid(
+        admin,
+        "SELECT id FROM fvoci.events WHERE target_id = $1 AND verb = 'task.updated' ORDER BY xact DESC, seq DESC LIMIT 1",
+        Uuid::parse_str(task_id).unwrap(),
+    )
+    .await
+    .expect("task.updated event")
+}
+
+async fn processed(admin: &PgPool, consumer: &str, event_id: Uuid) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM fvoci.processed_events WHERE consumer = $1 AND event_id = $2)",
+    )
+    .bind(consumer)
+    .bind(event_id)
+    .fetch_one(admin)
+    .await
+    .unwrap()
+}
+
+async fn github_failures(admin: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM fvoci.outbox_failures WHERE consumer = 'github'")
+        .fetch_one(admin)
+        .await
+        .unwrap()
+}
+
+async fn install_row(admin: &PgPool, workspace_id: Uuid, installation_id: &str) {
+    sqlx::query(
+        "INSERT INTO fvoci.github_installations (id, workspace_id, installation_id) VALUES ($1, $2, $3)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(installation_id)
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+/// A project with one task linked to `repo#number`; returns the task id and
+/// the project's workflow statuses.
+async fn linked_task(
+    app: &Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    key: &str,
+    repo: &str,
+    number: i64,
+) -> (String, Vec<Value>) {
+    let project = create_project(app.clone(), cookie, workspace_id, key, "workspace").await;
+    let project_id = project["id"].as_str().unwrap().to_string();
+    let statuses = workflow_statuses(app, cookie, workspace_id, &project_id).await;
+    let (status, task, _) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({ "title": format!("{key} task") })),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    let task_id = task["id"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/github/issue-links"),
+        Some(json!({ "taskId": task_id, "repo": repo, "issueNumber": number })),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    (task_id, statuses)
+}
+
+async fn move_task(app: &Router, cookie: &str, workspace_id: Uuid, task_id: &str, status: &str) {
+    let (code, body, _) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move"),
+        Some(json!({ "statusId": status })),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+}
+
+fn github_dispatcher(
+    pool: &PgPool,
+    config: Option<GithubConfig>,
+    failure_backoff: Duration,
+) -> OutboxDispatcherHandle {
+    spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            failure_backoff,
+            ..dispatcher_settings()
+        },
+        pool.clone(),
+        vec![github_sync_consumer(config)],
+    )
+    .expect("dispatcher")
+}
+
+#[tokio::test]
+async fn github_token_client_errors_are_final_and_do_not_hold_other_workspaces() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, _, ws_a) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (fake, fake_addr) = start_fake_github().await;
+    let app = app(&harness, github_integrations(fake_addr)).await;
+    let ws_b = second_workspace(&app, &cookie, "gh-b").await;
+    // A: the app was removed on GitHub but the `installation` webhook never
+    // arrived, so the row stays and every token request answers 404.
+    install_row(&admin, ws_a, "404001").await;
+    fake.script_token("404001", &[404, 404, 404, 404, 404, 404]);
+    install_row(&admin, ws_b, "42").await;
+    let (task_a, statuses_a) = linked_task(&app, &cookie, ws_a, "GHA", "octo/a", 1).await;
+    let (task_b, statuses_b) = linked_task(&app, &cookie, ws_b, "GHB", "octo/b", 2).await;
+
+    // A retried event would wait 30 s before its next attempt and hold the
+    // shared cursor that long; B must be PATCHed well before that.
+    let pool = project_harness::app_pool(&harness).await;
+    let dispatcher = github_dispatcher(
+        &pool,
+        Some(github_config(fake_addr)),
+        Duration::from_secs(30),
+    );
+    move_task(
+        &app,
+        &cookie,
+        ws_a,
+        &task_a,
+        &status_of(&statuses_a, "done"),
+    )
+    .await;
+    move_task(
+        &app,
+        &cookie,
+        ws_b,
+        &task_b,
+        &status_of(&statuses_b, "done"),
+    )
+    .await;
+    let started = Instant::now();
+    wait_until("B PATCHed", || {
+        let fake = fake.clone();
+        async move { fake.count("PATCH", "/repos/octo/b/issues/2") == 1 }
+    })
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "B waited {:?} behind A",
+        started.elapsed()
+    );
+    assert_eq!(
+        fake.count("POST", "/app/installations/404001/access_tokens"),
+        1,
+        "a 4xx token answer is not retried"
+    );
+    assert_eq!(fake.count("PATCH", "/repos/octo/a/issues/1"), 0);
+    assert!(processed(&admin, "github", last_task_event(&admin, &task_a).await).await);
+    assert_eq!(github_failures(&admin).await, 0);
+    dispatcher.request_shutdown();
+    dispatcher.join().await.unwrap();
+
+    // 5xx and transport errors stay retryable: token 503, then PATCH 500,
+    // then success. A canceled task closes the issue (source parity).
+    let dispatcher = github_dispatcher(
+        &pool,
+        Some(github_config(fake_addr)),
+        Duration::from_millis(100),
+    );
+    let tokens_before = fake.count("POST", "/app/installations/42/access_tokens");
+    fake.script_token("42", &[503]);
+    fake.script_patch("/repos/octo/b/issues/2", &[500]);
+    move_task(
+        &app,
+        &cookie,
+        ws_b,
+        &task_b,
+        &status_of(&statuses_b, "canceled"),
+    )
+    .await;
+    let event = last_task_event(&admin, &task_b).await;
+    wait_until("retried PATCH delivered", || {
+        let admin = admin.clone();
+        async move { processed(&admin, "github", event).await }
+    })
+    .await;
+    assert_eq!(
+        fake.count("POST", "/app/installations/42/access_tokens") - tokens_before,
+        3,
+        "token 503, token ok + PATCH 500, token ok + PATCH ok"
+    );
+    let patches: Vec<Value> = fake
+        .calls()
+        .into_iter()
+        .filter(|c| c.0 == "PATCH" && c.1 == "/repos/octo/b/issues/2")
+        .map(|c| c.2)
+        .collect();
+    assert_eq!(
+        patches,
+        vec![
+            json!({"state": "closed"}),
+            json!({"state": "closed"}),
+            json!({"state": "closed"})
+        ]
+    );
+    wait_until("failure row cleared", || {
+        let admin = admin.clone();
+        async move { github_failures(&admin).await == 0 }
+    })
+    .await;
+
+    // PATCH 4xx is final: one request, no failure row.
+    fake.script_patch("/repos/octo/b/issues/2", &[404]);
+    move_task(
+        &app,
+        &cookie,
+        ws_b,
+        &task_b,
+        &status_of(&statuses_b, "backlog"),
+    )
+    .await;
+    let event = last_task_event(&admin, &task_b).await;
+    wait_until("4xx PATCH settled", || {
+        let admin = admin.clone();
+        async move { processed(&admin, "github", event).await }
+    })
+    .await;
+    assert_eq!(fake.count("PATCH", "/repos/octo/b/issues/2"), 4);
+    assert_eq!(github_failures(&admin).await, 0);
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.unwrap();
+    pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn github_sync_does_not_replay_changes_made_while_unconfigured() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (fake, fake_addr) = start_fake_github().await;
+    let app = app(&harness, github_integrations(fake_addr)).await;
+    install_row(&admin, workspace_id, "42").await;
+    let (task_id, statuses) = linked_task(&app, &cookie, workspace_id, "OFF", "octo/off", 3).await;
+    let pool = project_harness::app_pool(&harness).await;
+
+    // App not configured on this server: the cursor still moves.
+    let dispatcher = github_dispatcher(&pool, None, Duration::from_millis(100));
+    move_task(
+        &app,
+        &cookie,
+        workspace_id,
+        &task_id,
+        &status_of(&statuses, "done"),
+    )
+    .await;
+    let skipped = last_task_event(&admin, &task_id).await;
+    let skipped_seq: i64 = sqlx::query_scalar("SELECT seq FROM fvoci.events WHERE id = $1")
+        .bind(skipped)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    wait_until("cursor passed the event", || {
+        let admin = admin.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT (c.last_xact, c.last_seq) >= (e.xact, e.seq)
+                FROM fvoci.outbox_consumers c, fvoci.events e
+                WHERE c.consumer = 'github' AND e.id = $1
+                "#,
+            )
+            .bind(skipped)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    })
+    .await;
+    assert!(skipped_seq > 0);
+    dispatcher.request_shutdown();
+    dispatcher.join().await.unwrap();
+
+    // Configured later: only changes from now on are pushed.
+    let dispatcher = github_dispatcher(
+        &pool,
+        Some(github_config(fake_addr)),
+        Duration::from_millis(100),
+    );
+    move_task(
+        &app,
+        &cookie,
+        workspace_id,
+        &task_id,
+        &status_of(&statuses, "backlog"),
+    )
+    .await;
+    let event = last_task_event(&admin, &task_id).await;
+    wait_until("new change pushed", || {
+        let admin = admin.clone();
+        async move { processed(&admin, "github", event).await }
+    })
+    .await;
+    let patches: Vec<Value> = fake
+        .calls()
+        .into_iter()
+        .filter(|c| c.0 == "PATCH")
+        .map(|c| c.2)
+        .collect();
+    assert_eq!(patches, vec![json!({"state": "open"})]);
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.unwrap();
+    pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+fn issue_payload(action: &str, installation: u64, number: i64, title: &str, state: &str) -> Value {
+    json!({
+        "action": action,
+        "installation": { "id": installation },
+        "repository": { "full_name": "octo/race" },
+        "issue": { "number": number, "title": title, "state": state },
+    })
+}
+
+async fn links_for(admin: &PgPool, number: i32) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.github_issue_links WHERE repo = 'octo/race' AND issue_number = $1",
+    )
+    .bind(number)
+    .fetch_one(admin)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn github_concurrent_and_redelivered_webhooks_apply_once() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (_fake, fake_addr) = start_fake_github().await;
+    let app = app(&harness, github_integrations(fake_addr)).await;
+    create_project(app.clone(), &cookie, workspace_id, "RACE", "workspace").await;
+    install_row(&admin, workspace_id, "42").await;
+
+    // The same delivery sent twice at once: applied once.
+    let opened = issue_payload("opened", 42, 1, "once", "open");
+    let delivery = Uuid::now_v7().to_string();
+    let (a, b) = tokio::join!(
+        github_hook(&app, "issues", &delivery, &opened),
+        github_hook(&app, "issues", &delivery, &opened)
+    );
+    assert_eq!((a, b), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(links_for(&admin, 1).await, 1);
+
+    // `opened` and `edited` for the same unlinked issue at once: the second
+    // waits for the first one's link instead of failing on the unique index.
+    for number in 2..8 {
+        let (first_id, second_id) = (Uuid::now_v7().to_string(), Uuid::now_v7().to_string());
+        let first = issue_payload("opened", 42, number, "first", "open");
+        let second = issue_payload("edited", 42, number, "second", "open");
+        let (a, b) = tokio::join!(
+            github_hook(&app, "issues", &first_id, &first),
+            github_hook(&app, "issues", &second_id, &second)
+        );
+        assert_eq!((a, b), (StatusCode::OK, StatusCode::OK), "issue {number}");
+        assert_eq!(links_for(&admin, number as i32).await, 1, "issue {number}");
+    }
+
+    // A delivery whose apply fails is not marked: GitHub's redelivery of the
+    // same id is applied.
+    project_harness::install_insert_fail_trigger(&admin, "tasks", "fail_task_insert").await;
+    let failing = issue_payload("opened", 42, 20, "redelivered", "open");
+    let delivery = Uuid::now_v7().to_string();
+    assert_eq!(
+        github_hook(&app, "issues", &delivery, &failing).await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(links_for(&admin, 20).await, 0);
+    project_harness::drop_insert_fail_trigger(&admin, "tasks", "fail_task_insert").await;
+    assert_eq!(
+        github_hook(&app, "issues", &delivery, &failing).await,
+        StatusCode::OK
+    );
+    assert_eq!(links_for(&admin, 20).await, 1);
+    assert_eq!(
+        github_hook(&app, "issues", &delivery, &failing).await,
+        StatusCode::OK
+    );
+    assert_eq!(links_for(&admin, 20).await, 1);
+
+    // `installation.suspend` removes the link; later events are ignored.
+    assert_eq!(
+        github_hook(
+            &app,
+            "installation",
+            &Uuid::now_v7().to_string(),
+            &json!({"action": "suspend", "installation": {"id": 42}})
+        )
+        .await,
+        StatusCode::OK
+    );
+    let installs: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.github_installations")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(installs, 0);
+    assert_eq!(
+        github_hook(
+            &app,
+            "issues",
+            &Uuid::now_v7().to_string(),
+            &issue_payload("opened", 42, 30, "after suspend", "open")
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(links_for(&admin, 30).await, 0);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Round 2: webhook sender independence
+
+#[tokio::test]
+async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (receiver, addr) = start_receiver().await;
+    let outbound = outbound("127.0.0.1", &[]);
+    let app = app(&harness, integrations(outbound.clone())).await;
+    let (hook_id, _) = create_hook(
+        &app,
+        &cookie,
+        workspace_id,
+        &format!("http://{addr}/tarpit"),
+        &["project.created"],
+    )
+    .await;
+    // The tarpit answers after 60 s; the request budget is 10 s (source).
+    receiver.script("/tarpit", &[Reply::Slow(Duration::from_secs(60))]);
+    let member = add_workspace_user(&admin, workspace_id, "member", "n").await;
+
+    let pool = project_harness::app_pool(&harness).await;
+    let delivery = Delivery::start(
+        &pool,
+        outbound,
+        Duration::from_secs(10),
+        vec![fvoci_server::notifications::notifications_consumer()],
+    );
+    let project = create_project(app.clone(), &cookie, workspace_id, "SLOW", "workspace").await;
+    wait_until("tarpit request in flight", || {
+        let receiver = receiver.clone();
+        async move { receiver.count() == 1 }
+    })
+    .await;
+
+    // While that request is held, a notification is produced promptly.
+    let project_id = project["id"].as_str().unwrap();
+    let (status, task, _) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({ "title": "notify me" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    let task_id = task["id"].as_str().unwrap();
+    let (status, body, _) = call(
+        &app,
+        "PATCH",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}"),
+        Some(json!({ "assigneeIds": [member.user_id] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let started = Instant::now();
+    wait_until("member notification", || {
+        let admin = admin.clone();
+        let user = member.user_id;
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM fvoci.notifications WHERE user_id = $1",
+            )
+            .bind(user)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+                > 0
+        }
+    })
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "notification waited {:?} behind the webhook send",
+        started.elapsed()
+    );
+    // The webhook attempt is still in flight (claimed, not yet recorded).
+    let rows = deliveries(&admin, hook_id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].status.as_str(), rows[0].attempt), ("pending", 0));
+
+    delivery.stop().await;
+    pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Round 2: RLS catalog and cross-tenant access with the app role
+
+const INTEGRATION_TABLES: [&str; 6] = [
+    "webhooks",
+    "webhook_deliveries",
+    "github_installations",
+    "github_install_states",
+    "github_issue_links",
+    "github_deliveries",
+];
+
+#[tokio::test]
+async fn integration_tables_force_rls_and_isolate_tenants() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, owner_id, ws_a) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (_fake, fake_addr) = start_fake_github().await;
+    let app = app(&harness, github_integrations(fake_addr)).await;
+    let ws_b = second_workspace(&app, &cookie, "rls-b").await;
+
+    for table in INTEGRATION_TABLES {
+        let (enabled, forced): (bool, bool) = sqlx::query_as(
+            r#"
+            SELECT c.relrowsecurity, c.relforcerowsecurity
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'fvoci' AND c.relname = $1
+            "#,
+        )
+        .bind(table)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert!(enabled && forced, "{table} must FORCE RLS");
+        let policies: Vec<(String, String)> = sqlx::query_as(
+            "SELECT policyname::text, qual FROM pg_policies WHERE schemaname = 'fvoci' AND tablename = $1",
+        )
+        .bind(table)
+        .fetch_all(&admin)
+        .await
+        .unwrap();
+        assert_eq!(policies.len(), 1, "{table}: {policies:?}");
+        let qual = &policies[0].1;
+        match table {
+            "github_deliveries" => assert!(
+                !qual.contains("app_tenant_id") && qual.contains("app_system_ctx_on"),
+                "{table}: {qual}"
+            ),
+            "github_issue_links" => assert!(
+                qual.contains("app_tenant_id") && !qual.contains("app_system_ctx_on"),
+                "{table}: {qual}"
+            ),
+            _ => assert!(
+                qual.contains("app_tenant_id") && qual.contains("app_system_ctx_on"),
+                "{table}: {qual}"
+            ),
+        }
+    }
+
+    // One row of each tenant-scoped table in workspace A.
+    let (hook_id, _) = create_hook(
+        &app,
+        &cookie,
+        ws_a,
+        "https://example.com/rls",
+        &["task.created"],
+    )
+    .await;
+    let event = insert_event(&admin, ws_a, "task.created", None, json!({})).await;
+    sqlx::query(
+        "INSERT INTO fvoci.webhook_deliveries (id, workspace_id, webhook_id, event_id, status, next_attempt_at) VALUES ($1, $2, $3, $4, 'pending', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws_a)
+    .bind(hook_id)
+    .bind(event)
+    .execute(&admin)
+    .await
+    .unwrap();
+    install_row(&admin, ws_a, "42").await;
+    start_install(&app, &cookie, ws_a).await;
+    linked_task(&app, &cookie, ws_a, "RLS", "octo/rls", 1).await;
+    sqlx::query("INSERT INTO fvoci.github_deliveries (delivery_id) VALUES ($1)")
+        .bind(Uuid::now_v7())
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let pool = project_harness::app_pool(&harness).await;
+    let is_superuser: bool = sqlx::query_scalar(
+        "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !is_superuser,
+        "checks must run as the unprivileged app role"
+    );
+    let count = |table: &'static str, tenant: Option<Uuid>, system: bool| {
+        let pool = pool.clone();
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            if let Some(tenant) = tenant {
+                fvoci_server::db::context::set_tenant(&mut tx, tenant)
+                    .await
+                    .unwrap();
+            }
+            if system {
+                fvoci_server::db::context::set_system(&mut tx)
+                    .await
+                    .unwrap();
+            }
+            let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM fvoci.{table}"))
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            tx.rollback().await.unwrap();
+            n
+        }
+    };
+    for table in INTEGRATION_TABLES {
+        let own = count(table, Some(ws_a), false).await;
+        let other = count(table, Some(ws_b), false).await;
+        let none = count(table, None, false).await;
+        let system = count(table, None, true).await;
+        match table {
+            "github_deliveries" => assert_eq!((own, other, none, system), (0, 0, 0, 1), "{table}"),
+            "github_issue_links" => assert_eq!((own, other, none, system), (1, 0, 0, 0), "{table}"),
+            _ => assert_eq!((own, other, none, system), (1, 0, 0, 1), "{table}"),
+        }
+    }
+
+    // Writes naming another tenant's workspace are refused by the policy.
+    let mut tx = pool.begin().await.unwrap();
+    fvoci_server::db::context::set_tenant(&mut tx, ws_b)
+        .await
+        .unwrap();
+    let err = sqlx::query(
+        "INSERT INTO fvoci.github_installations (id, workspace_id, installation_id) VALUES ($1, $2, '77')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws_a)
+    .execute(&mut *tx)
+    .await
+    .expect_err("cross-tenant insert");
+    assert!(err.to_string().contains("row-level security"), "{err}");
+    tx.rollback().await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    fvoci_server::db::context::set_tenant(&mut tx, ws_b)
+        .await
+        .unwrap();
+    let err = sqlx::query(
+        "INSERT INTO fvoci.github_install_states (nonce_hash, workspace_id, user_id, session_id, expires_at) VALUES ($1, $2, $3, $4, now())",
+    )
+    .bind("a".repeat(64))
+    .bind(ws_a)
+    .bind(owner_id)
+    .bind(Uuid::now_v7())
+    .execute(&mut *tx)
+    .await
+    .expect_err("cross-tenant insert");
+    assert!(err.to_string().contains("row-level security"), "{err}");
+    tx.rollback().await.unwrap();
+    // Tenant B cannot update or delete tenant A's rows (they are invisible).
+    let mut tx = pool.begin().await.unwrap();
+    fvoci_server::db::context::set_tenant(&mut tx, ws_b)
+        .await
+        .unwrap();
+    for table in ["webhooks", "github_installations", "github_issue_links"] {
+        let n = sqlx::query(&format!("DELETE FROM fvoci.{table}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(n, 0, "{table}");
+    }
+    tx.rollback().await.unwrap();
+
+    pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Round 2: AI document permission and rate limit
+
+#[tokio::test]
+async fn ai_routes_follow_document_permission_and_rate_limit() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let convert = fvoci_server::documents::convert::ConvertClient::from_env().expect(
+        "FVOCI_DOCUMENT_CONVERT_BIN is required; run scripts/prepare-document-convert.sh first",
+    );
+    let mut state = app_state(&harness.app_url).await;
+    state.document_convert = Some(convert);
+    let enabled = Arc::new(Integrations {
+        ai: Some(AiConfig::new("ai-secret")),
+        ..(*integrations(outbound("", &[]))).clone()
+    });
+    let app = fvoci_server::http::router_with_integrations(state, None, enabled);
+    let path = |action: &str| format!("/api/v1/workspaces/{workspace_id}/ai/{action}");
+
+    let (status, wiki, _) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({ "parentId": null, "title": "위키" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{wiki}");
+    let wiki_id = wiki["id"].as_str().unwrap().to_string();
+    // A private project with one document; the owner is its only member.
+    let project = create_project(app.clone(), &cookie, workspace_id, "PRV", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let project_doc = Uuid::now_v7();
+    project_harness::insert_project_document(
+        &admin,
+        workspace_id,
+        project_id,
+        project_doc,
+        owner_id,
+        999,
+    )
+    .await;
+
+    // Project documents resolve through the project (source requirePermission).
+    let (status, out, _) = call(
+        &app,
+        "POST",
+        &path("summarize"),
+        Some(json!({ "documentId": project_doc })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let (status, out, _) = call(
+        &app,
+        "POST",
+        &path("suggest-links"),
+        Some(json!({ "documentId": wiki_id })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    // Every live document of the project (its home page and ours), and
+    // nothing else: the wiki page itself is excluded.
+    let project_docs: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM fvoci.documents WHERE project_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(project_id)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert!(project_docs.contains(&project_doc));
+    let mut suggested: Vec<String> = out["documentIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    suggested.sort();
+    let mut expected: Vec<String> = project_docs.iter().map(Uuid::to_string).collect();
+    expected.sort();
+    assert_eq!(suggested, expected);
+
+    // A member outside the private project neither reads nor sees it.
+    let member = add_workspace_user(&admin, workspace_id, "member", "ai-m").await;
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &path("generate-tasks"),
+        Some(json!({ "documentId": project_doc })),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, out, _) = call(
+        &app,
+        "POST",
+        &path("suggest-links"),
+        Some(json!({ "documentId": wiki_id })),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["documentIds"], json!([]));
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &path("suggest-links"),
+        Some(json!({ "documentId": project_doc })),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A guest has no wiki permission: the wiki document is hidden too.
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "ai-g").await;
+    for action in ["summarize", "generate-tasks", "suggest-links"] {
+        let (status, _, _) = call(
+            &app,
+            "POST",
+            &path(action),
+            Some(json!({ "documentId": wiki_id })),
+            Some(&guest.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{action}");
+    }
+
+    // 10 requests per 5 minutes per user (source), counted before the
+    // document lookup; the 11th is 429 with Retry-After.
+    let limited = add_workspace_user(&admin, workspace_id, "member", "ai-rl").await;
+    for i in 0..10 {
+        let (status, _, _) = call(
+            &app,
+            "POST",
+            &path("summarize"),
+            Some(json!({ "documentId": wiki_id })),
+            Some(&limited.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "request {i}");
+    }
+    let (status, _, headers) = call(
+        &app,
+        "POST",
+        &path("summarize"),
+        Some(json!({ "documentId": wiki_id })),
+        Some(&limited.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(headers.contains_key("retry-after"));
+    // Another user is not affected.
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &path("summarize"),
+        Some(json!({ "documentId": wiki_id })),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
     admin.close().await;
     harness.cleanup().await;

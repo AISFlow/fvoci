@@ -67,6 +67,13 @@ impl OutboundPolicy {
                 .and_then(|e| e.strip_suffix(']'))
                 .unwrap_or(entry);
             if let Ok(ip) = bare.parse::<IpAddr>() {
+                // 0.0.0.0 / :: are not a receiver; as a connect target they
+                // reach the local host.
+                if ip.is_unspecified() {
+                    return Err(format!(
+                        "invalid FVOCI_WEBHOOK_ALLOW_TARGETS entry (unspecified address): {entry}"
+                    ));
+                }
                 policy.addrs.insert(ip);
                 policy.hosts.insert(canonical_ip_host(ip));
             } else if bare
@@ -123,6 +130,8 @@ pub fn is_private_ipv4(ip: Ipv4Addr) -> bool {
         || (a == 198 && (b == 18 || b == 19))
         // IETF protocol assignments and documentation ranges.
         || (a == 192 && b == 0 && (c == 0 || c == 2))
+        // Deprecated 6to4 relay anycast.
+        || (a == 192 && b == 88 && c == 99)
         || (a == 198 && b == 51 && c == 100)
         || (a == 203 && b == 0 && c == 113)
         || a >= 224
@@ -280,8 +289,8 @@ impl Outbound {
     }
 
     /// POST `body` to `url` after re-validating it, connecting only to the
-    /// checked address. Returns the HTTP status. `timeout` bounds connect,
-    /// request and the capped body read together.
+    /// checked address. Returns the HTTP status. `timeout` bounds name
+    /// resolution, connect, request and the capped body read together.
     pub async fn post(
         &self,
         raw_url: &str,
@@ -290,12 +299,19 @@ impl Outbound {
         timeout: Duration,
     ) -> Result<u16, OutboundError> {
         let url = parse_target_url(raw_url, &self.policy)?;
-        let pinned = self.pin(&url).await?;
+        let started = tokio::time::Instant::now();
+        // The reqwest timeout does not cover this lookup.
+        let pinned = tokio::time::timeout(timeout, self.pin(&url))
+            .await
+            .map_err(|_| OutboundError::Transport("resolve timeout".into()))??;
+        let remaining = timeout
+            .saturating_sub(started.elapsed())
+            .max(Duration::from_millis(1));
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
-            .timeout(timeout)
-            .connect_timeout(timeout)
+            .timeout(remaining)
+            .connect_timeout(remaining)
             .pool_max_idle_per_host(0);
         if let Some(Host::Domain(name)) = url.host() {
             builder = builder.resolve(name, pinned);
@@ -378,6 +394,7 @@ mod tests {
             "http://[64:ff9b::a9fe:a9fe]/",
             "http://0.0.0.0/",
             "http://224.0.0.1/",
+            "http://192.88.99.1/",
             "",
         ] {
             assert!(
@@ -407,6 +424,12 @@ mod tests {
         assert!(parse_target_url("http://other.test:5555/", &policy).is_err());
         assert!(parse_target_url("http://localhost:5555/", &policy).is_err());
         assert!(OutboundPolicy::parse_allow_list("a b").is_err());
+        for unspecified in ["0.0.0.0", "::", "[::]", "127.0.0.1,0.0.0.0"] {
+            assert!(
+                OutboundPolicy::parse_allow_list(unspecified).is_err(),
+                "{unspecified}"
+            );
+        }
     }
 
     struct Fixed(Vec<IpAddr>);
@@ -441,5 +464,32 @@ mod tests {
         }
         let empty = Outbound::new(none(), Arc::new(Fixed(vec![])));
         assert_eq!(empty.pin(&url).await, Err(OutboundRejected::Resolve));
+    }
+
+    struct Hang;
+
+    impl Resolve for Hang {
+        fn lookup<'a>(&'a self, _host: &'a str) -> ResolveFuture<'a> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn post_bounds_a_lookup_that_never_answers() {
+        let outbound = Outbound::new(none(), Arc::new(Hang));
+        let started = std::time::Instant::now();
+        let result = outbound
+            .post(
+                "https://example.com/",
+                &[],
+                Vec::new(),
+                Duration::from_millis(200),
+            )
+            .await;
+        assert!(
+            matches!(&result, Err(OutboundError::Transport(kind)) if kind == "resolve timeout"),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

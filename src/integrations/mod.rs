@@ -54,7 +54,7 @@ impl Integrations {
         let encryption_keys = match (keys, active) {
             (None, None) => None,
             (Some(keys), Some(active)) => Some(Arc::new(
-                Keyring::parse(&keys, &active)
+                Keyring::parse_named(&keys, &active, "ENCRYPTION_KEYS")
                     .map_err(|err| format!("invalid ENCRYPTION_KEYS: {err}"))?,
             )),
             _ => {
@@ -63,10 +63,11 @@ impl Integrations {
                 )
             }
         };
+        let github = github::GithubConfig::from_env(encryption_keys.as_deref())?;
         Ok(Self {
             encryption_keys,
             outbound: outbound::Outbound::system(outbound::OutboundPolicy::from_env()?),
-            github: github::GithubConfig::from_env()?,
+            github,
             ai: ai::AiConfig::from_env(),
         })
     }

@@ -3,22 +3,27 @@
 //! The `webhooks` outbox consumer is PgOnly: in the transaction that advances
 //! its cursor it fans each workspace event into `webhook_deliveries` for every
 //! hook subscribed to the verb whose creator may still manage the workspace and
-//! can see the event. Its `run_due` hook, run by the same dispatcher under the
-//! same lease, sends due rows: signed POST, 2xx delivered, 4xx (and refused
-//! targets/redirects) terminal, otherwise retry after 1 / 5 / 15 min up to 5
-//! attempts. There is no separate queue or scheduler.
+//! can see the event. A separate sender task ([`spawn_webhook_sender`], source
+//! ran webhook jobs on their own queue) sends due rows: signed POST, 2xx
+//! delivered, 4xx (and refused targets/redirects) terminal, otherwise retry
+//! after 1 / 5 / 15 min up to 5 attempts. The sender keeps at most `batch`
+//! requests in flight and claims more as each one finishes, so a slow receiver
+//! holds one slot for at most the request timeout and never the outbox
+//! dispatcher that serves notifications, mail and search.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use sqlx::{PgPool, Postgres, Transaction};
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
-use tracing::{info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::auth::password::Keyring;
@@ -304,12 +309,14 @@ pub async fn fan_out(
 
 #[derive(Debug, Clone)]
 pub struct WebhookDeliverySettings {
-    /// Per-request budget (source 10 s); also capped by the lease budget left.
+    /// Per-request budget (source 10 s), name resolution included.
     pub request_timeout: Duration,
-    /// Rows claimed per pass (source 20); sent concurrently.
+    /// Requests in flight at once (source concurrency 20).
     pub batch: i64,
     /// Claim lease (source 240 s): a crashed sender's rows return after this.
     pub claim_lease: Duration,
+    /// Idle poll for newly due rows.
+    pub poll_interval: Duration,
 }
 
 impl Default for WebhookDeliverySettings {
@@ -318,36 +325,16 @@ impl Default for WebhookDeliverySettings {
             request_timeout: Duration::from_secs(10),
             batch: 20,
             claim_lease: Duration::from_secs(240),
+            poll_interval: Duration::from_secs(1),
         }
     }
 }
 
-pub struct WebhooksConsumer {
-    outbound: Outbound,
-    keys: Option<Arc<Keyring>>,
-    settings: WebhookDeliverySettings,
-}
+/// Fan-out only; sending is [`spawn_webhook_sender`].
+pub struct WebhooksConsumer;
 
-impl WebhooksConsumer {
-    pub fn new(
-        outbound: Outbound,
-        keys: Option<Arc<Keyring>>,
-        settings: WebhookDeliverySettings,
-    ) -> Self {
-        Self {
-            outbound,
-            keys,
-            settings,
-        }
-    }
-}
-
-pub fn webhooks_consumer(
-    outbound: Outbound,
-    keys: Option<Arc<Keyring>>,
-    settings: WebhookDeliverySettings,
-) -> Arc<dyn OutboxConsumer> {
-    Arc::new(WebhooksConsumer::new(outbound, keys, settings))
+pub fn webhooks_consumer() -> Arc<dyn OutboxConsumer> {
+    Arc::new(WebhooksConsumer)
 }
 
 impl OutboxConsumer for WebhooksConsumer {
@@ -366,24 +353,6 @@ impl OutboxConsumer for WebhooksConsumer {
         event: &'a OutboxEvent,
     ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
         Box::pin(async move { fan_out_event(pool, lease_owner, event).await })
-    }
-
-    fn run_due<'a>(
-        &'a self,
-        pool: &'a PgPool,
-        budget: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, OutboxProcessError>> + Send + 'a>> {
-        Box::pin(async move {
-            let sent = deliver_due(
-                pool,
-                &self.outbound,
-                self.keys.clone(),
-                &self.settings,
-                budget,
-            )
-            .await?;
-            Ok(sent > 0)
-        })
     }
 }
 
@@ -521,48 +490,95 @@ async fn deliver_one(
     Ok(())
 }
 
-/// One claim-and-send pass within `budget`. Returns rows claimed.
-pub async fn deliver_due(
-    pool: &PgPool,
-    outbound: &Outbound,
-    keys: Option<Arc<Keyring>>,
-    settings: &WebhookDeliverySettings,
-    budget: Duration,
-) -> Result<usize, sqlx::Error> {
-    let started = Instant::now();
-    // Leave room to record results after the slowest request.
-    let margin = Duration::from_millis(500);
-    let request_timeout = settings
-        .request_timeout
-        .min(budget.saturating_sub(margin))
-        .max(Duration::from_millis(1));
-    let due = claim_due_deliveries(pool, settings.batch, settings.claim_lease).await?;
-    let claimed = due.len();
-    let mut sends = JoinSet::new();
-    for row in due {
-        sends.spawn(deliver_one(
-            pool.clone(),
-            outbound.clone(),
-            keys.clone(),
-            row,
-            request_timeout,
-        ));
+pub struct WebhookSenderHandle {
+    cancel: CancellationToken,
+    join: tokio::task::JoinHandle<()>,
+    pub wake: Arc<Notify>,
+}
+
+impl WebhookSenderHandle {
+    pub fn request_shutdown(&self) {
+        self.cancel.cancel();
     }
-    while let Some(joined) = sends.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => warn!(error = %err, "webhook.record_failed"),
-            Err(err) => warn!(error = %err, "webhook.send_task_failed"),
+
+    pub async fn join(self) -> Result<(), String> {
+        self.join
+            .await
+            .map_err(|err| format!("webhook sender task join failed: {err}"))
+    }
+}
+
+/// Sends due `webhook_deliveries` rows on its own task. Shutdown aborts the
+/// requests in flight; their rows return after the claim lease and the
+/// attempt fence keeps a late record from counting twice.
+pub fn spawn_webhook_sender(
+    pool: PgPool,
+    outbound: Outbound,
+    keys: Option<Arc<Keyring>>,
+    settings: WebhookDeliverySettings,
+) -> WebhookSenderHandle {
+    let cancel = CancellationToken::new();
+    let wake = Arc::new(Notify::new());
+    let join = tokio::spawn(run_sender(
+        pool,
+        outbound,
+        keys,
+        settings,
+        cancel.child_token(),
+        wake.clone(),
+    ));
+    WebhookSenderHandle { cancel, join, wake }
+}
+
+fn log_send_result(joined: Result<Result<(), sqlx::Error>, tokio::task::JoinError>) {
+    match joined {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!(error = %err, "webhook.record_failed"),
+        Err(err) if err.is_cancelled() => {}
+        Err(err) => warn!(error = %err, "webhook.send_task_failed"),
+    }
+}
+
+async fn run_sender(
+    pool: PgPool,
+    outbound: Outbound,
+    keys: Option<Arc<Keyring>>,
+    settings: WebhookDeliverySettings,
+    cancel: CancellationToken,
+    wake: Arc<Notify>,
+) {
+    let slots = settings.batch.max(1) as usize;
+    let mut sends: JoinSet<Result<(), sqlx::Error>> = JoinSet::new();
+    while !cancel.is_cancelled() {
+        while let Some(joined) = sends.try_join_next() {
+            log_send_result(joined);
+        }
+        let free = slots.saturating_sub(sends.len());
+        if free > 0 {
+            match claim_due_deliveries(&pool, free as i64, settings.claim_lease).await {
+                Ok(due) => {
+                    for row in due {
+                        sends.spawn(deliver_one(
+                            pool.clone(),
+                            outbound.clone(),
+                            keys.clone(),
+                            row,
+                            settings.request_timeout,
+                        ));
+                    }
+                }
+                Err(err) => warn!(error = %err, "webhook.claim_failed"),
+            }
+        }
+        // A finished send frees a slot and claims again at once.
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            () = wake.notified() => {}
+            () = tokio::time::sleep(settings.poll_interval) => {}
+            Some(joined) = sends.join_next(), if !sends.is_empty() => log_send_result(joined),
         }
     }
-    if claimed > 0 {
-        info!(
-            claimed,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "webhook.deliver_pass"
-        );
-    }
-    Ok(claimed)
+    sends.shutdown().await;
 }
 
 #[cfg(test)]
