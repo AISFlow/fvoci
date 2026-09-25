@@ -5,6 +5,7 @@ pub mod invitations;
 pub mod lookup;
 pub mod projects;
 pub mod revisions;
+pub mod search;
 pub mod setup;
 pub mod tasks;
 pub mod workspaces;

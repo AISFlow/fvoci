@@ -502,6 +502,7 @@ async fn collab_app_state_with_config(app_url: &str, cfg: CollabConfig) -> AppSt
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
         },
         collab: Some(Arc::new(CollabHub::new(cfg, pool))),
+        meili: None,
     }
 }
 
@@ -532,6 +533,7 @@ async fn collab_app_state(app_url: &str, with_collab: bool) -> AppState {
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
         },
         collab,
+        meili: None,
     }
 }
 
