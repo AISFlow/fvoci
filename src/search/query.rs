@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
 use crate::db::documents::{document_permission, membership_role, workspace_is_live};
+use crate::db::group_grants::guest_wiki_document_ids_select_sql;
 use crate::db::projects::{project_permission, LockedProject};
 use crate::db::workspace::{list_workspaces_for_user, WorkspaceRole};
 use crate::display_id::format_display_id;
@@ -479,28 +480,14 @@ async fn load_search_acl(
         }
     }
     let wiki_document_ids = if role == WorkspaceRole::Guest {
-        sqlx::query_as::<_, (Uuid,)>(
-            r#"
-            SELECT DISTINCT dm.document_id
-            FROM fvoci.document_members dm
-            INNER JOIN fvoci.group_members gm
-                ON gm.workspace_id = dm.workspace_id AND gm.group_id = dm.group_id
-            INNER JOIN fvoci.documents d
-                ON d.workspace_id = dm.workspace_id AND d.id = dm.document_id
-            WHERE dm.workspace_id = $1
-              AND gm.user_id = $2
-              AND dm.group_id IS NOT NULL
-              AND d.project_id IS NULL
-              AND d.deleted_at IS NULL
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(actor_user_id)
-        .fetch_all(&mut **tx)
-        .await?
-        .into_iter()
-        .map(|(id,)| id)
-        .collect()
+        sqlx::query_as::<_, (Uuid,)>(&guest_wiki_document_ids_select_sql(1, 2))
+            .bind(workspace_id)
+            .bind(actor_user_id)
+            .fetch_all(&mut **tx)
+            .await?
+            .into_iter()
+            .map(|(id,)| id)
+            .collect()
     } else {
         Vec::new()
     };

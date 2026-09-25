@@ -9,6 +9,9 @@ use crate::db::context::{
     lock_membership_users, lock_tree, recheck_session, session_is_live, set_tenant,
 };
 use crate::db::documents::{empty_document_json, to_path_label, DOCUMENT_SCHEMA_VERSION};
+use crate::db::group_grants::{
+    group_project_grant_exists_sql, group_project_grant_roles_select_sql,
+};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::workspace::WorkspaceRole;
 use crate::projects::{
@@ -65,6 +68,7 @@ pub struct ProjectListItem {
     pub project: ProjectRow,
     pub task_count: i64,
     pub open_task_count: i64,
+    pub can_edit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -190,21 +194,15 @@ pub(crate) async fn project_member_role(
     project_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<ProjectMemberRole>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String,)>(
+    let rows = sqlx::query_as::<_, (String,)>(&format!(
         r#"
         SELECT role FROM fvoci.project_members
         WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3
         UNION ALL
-        SELECT pm.role
-        FROM fvoci.project_members pm
-        INNER JOIN fvoci.group_members gm
-            ON gm.workspace_id = pm.workspace_id AND gm.group_id = pm.group_id
-        WHERE pm.workspace_id = $1
-          AND pm.project_id = $2
-          AND gm.user_id = $3
-          AND pm.group_id IS NOT NULL
+        {}
         "#,
-    )
+        group_project_grant_roles_select_sql(1, 2, 3)
+    ))
     .bind(workspace_id)
     .bind(project_id)
     .bind(user_id)
@@ -252,17 +250,9 @@ pub(crate) fn visible_project_sql(
                   AND pm.project_id = {project_alias}.id
                   AND pm.user_id = ${actor_param}
             )
-            OR EXISTS (
-                SELECT 1
-                FROM fvoci.project_members pm
-                INNER JOIN fvoci.group_members gm
-                    ON gm.workspace_id = pm.workspace_id AND gm.group_id = pm.group_id
-                WHERE pm.workspace_id = {project_alias}.workspace_id
-                  AND pm.project_id = {project_alias}.id
-                  AND gm.user_id = ${actor_param}
-                  AND pm.group_id IS NOT NULL
-            )
-        )"
+            OR {group_exists}
+        )",
+        group_exists = group_project_grant_exists_sql(project_alias, actor_param),
     )
 }
 
@@ -1100,6 +1090,23 @@ pub async fn list_projects(
         .fetch_one(&mut *tx)
         .await?;
 
+        let locked = LockedProject {
+            id: project_id,
+            key: row.1.clone(),
+            name: row.2.clone(),
+            description: row.3.clone(),
+            icon: row.4.clone(),
+            visibility: row.5.clone(),
+            root_document_id: row.6,
+            status: row.7.clone(),
+            created_by: row.8,
+            created_at: row.9,
+            updated_at: row.10,
+        };
+        let can_edit = project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+            .await?
+            .at_least(ProjectPermission::Edit);
+
         items.push(ProjectListItem {
             project: ProjectRow {
                 id: project_id,
@@ -1117,6 +1124,7 @@ pub async fn list_projects(
             },
             task_count: counts.0,
             open_task_count: counts.1,
+            can_edit,
         });
     }
     tx.commit().await?;

@@ -216,6 +216,7 @@ async fn list_projects_route(
                     updated_at: item.project.updated_at,
                     task_count: item.task_count,
                     open_task_count: item.open_task_count,
+                    can_edit: item.can_edit,
                 })
                 .collect(),
         })),

@@ -5896,6 +5896,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Project archived",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -5953,6 +5963,16 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Project archived",
             "content": {
               "application/json": {
                 "schema": {
@@ -6035,6 +6055,16 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Project archived",
             "content": {
               "application/json": {
                 "schema": {
@@ -6454,6 +6484,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Project archived",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -6511,6 +6551,16 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Project archived",
             "content": {
               "application/json": {
                 "schema": {
@@ -6593,6 +6643,16 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Project archived",
             "content": {
               "application/json": {
                 "schema": {
@@ -7368,6 +7428,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Project or task archived",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -7425,6 +7495,16 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Project or task archived",
             "content": {
               "application/json": {
                 "schema": {
@@ -8537,10 +8617,7 @@
             "format": "uuid"
           },
           "lagDays": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int32"
           },
           "type": {
@@ -9709,9 +9786,13 @@
           "createdAt",
           "updatedAt",
           "taskCount",
-          "openTaskCount"
+          "openTaskCount",
+          "canEdit"
         ],
         "properties": {
+          "canEdit": {
+            "type": "boolean"
+          },
           "createdAt": {
             "type": "string",
             "format": "date-time"
