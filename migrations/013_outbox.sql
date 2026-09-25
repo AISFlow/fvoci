@@ -234,25 +234,29 @@ BEGIN
     END IF;
 
     -- Retry at or below the cursor is only a dead-letter skip that was requeued.
-    SELECT true
-    INTO already_applied
+    -- Lock the lease row like the forward UPDATE does, so a lease steal waits for
+    -- this transaction, and let the DELETE itself be the check: a concurrent owner
+    -- that already resolved the row deletes nothing and must roll back.
+    PERFORM 1
     FROM fvoci.outbox_consumers AS c
-    INNER JOIN fvoci.outbox_failures AS f
-        ON f.consumer = c.consumer
-       AND f.event_id = v_event_id
     WHERE c.consumer = p_consumer
       AND c.lease_owner = p_owner
       AND c.lease_until > pg_catalog.now()
-      AND (p_xact, p_seq) <= (c.last_xact, c.last_seq)
+    FOR NO KEY UPDATE;
+
+    DELETE FROM fvoci.outbox_failures AS f
+    USING fvoci.outbox_consumers AS c
+    WHERE f.consumer = p_consumer
+      AND f.event_id = v_event_id
       AND f.skipped_at IS NOT NULL
-      AND f.dead_at IS NULL;
+      AND f.dead_at IS NULL
+      AND c.consumer = f.consumer
+      AND c.lease_owner = p_owner
+      AND c.lease_until > pg_catalog.now()
+      AND (p_xact, p_seq) <= (c.last_xact, c.last_seq)
+    RETURNING true INTO already_applied;
 
     IF already_applied THEN
-        DELETE FROM fvoci.outbox_failures AS f
-        WHERE f.consumer = p_consumer
-          AND f.event_id = v_event_id
-          AND f.skipped_at IS NOT NULL
-          AND f.dead_at IS NULL;
         PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
         RETURN true;
     END IF;
@@ -448,8 +452,11 @@ BEGIN
         dead_at = NULL,
         next_attempt_at = pg_catalog.now(),
         updated_at = pg_catalog.now()
+    -- Only a row the dispatcher already skipped past; a dead row still above the
+    -- cursor is skipped on the next pass and can be requeued after that.
     WHERE f.consumer = p_consumer
       AND f.event_id = p_event_id
+      AND f.skipped_at IS NOT NULL
     RETURNING true INTO requeued;
 
     RETURN COALESCE(requeued, false);
