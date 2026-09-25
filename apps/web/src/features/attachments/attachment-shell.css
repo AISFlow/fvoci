@@ -1,0 +1,95 @@
+.attachment-viewer {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.attachment-viewer__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem 1rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem clamp(1rem, 3vw, 1.5rem);
+}
+
+.attachment-viewer__name {
+  margin: 0;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: var(--text-ui-size);
+  line-height: var(--text-ui-leading);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-viewer__stage {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.attachment-viewer__pane {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem clamp(1rem, 3vw, 1.5rem) 1.5rem;
+}
+
+.attachment-viewer__pane--center {
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.85rem;
+}
+
+.attachment-viewer__status,
+.attachment-viewer__alert {
+  margin: 0;
+  font-size: var(--text-ui-size);
+  line-height: var(--text-ui-leading);
+  word-break: keep-all;
+}
+
+.attachment-viewer__alert {
+  color: var(--destructive);
+}
+
+.attachment-viewer__text {
+  max-height: 80vh;
+  margin: 0;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-ui-size);
+  line-height: var(--text-ui-leading);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.attachment-viewer__text mark {
+  border-radius: 0.2rem;
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+  color: var(--foreground);
+}
+
+.attachment-viewer__image {
+  max-width: 100%;
+  max-height: 80vh;
+  object-fit: contain;
+}
+
+.attachment-viewer__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}

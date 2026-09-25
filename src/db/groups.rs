@@ -80,6 +80,14 @@ async fn load_group(
     ))
 }
 
+pub(crate) async fn list_group_member_user_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    group_member_ids(tx, workspace_id, group_id).await
+}
+
 async fn group_member_ids(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,

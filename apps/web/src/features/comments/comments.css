@@ -61,3 +61,20 @@
   font: inherit;
   resize: vertical;
 }
+
+.comment-thread__compose-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.comment-thread__mention {
+  min-height: 2rem;
+  max-width: 12rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: var(--background);
+  padding: 0.25rem 0.5rem;
+  font: inherit;
+}

@@ -8,6 +8,7 @@ import {
   projectTasksPath,
   projectsPath,
   searchPath,
+  attachmentViewPath,
   COMMENTS_ANCHOR_ID,
 } from "./href.ts";
 
@@ -44,4 +45,6 @@ test("canonical project and task paths lower-case slug and upper-case key", () =
   assert.equal(searchPath("Acme"), "/w/acme/search");
   assert.equal(searchPath("Acme", { q: "ㄱㅅ", tab: "document" }), "/w/acme/search?q=%E3%84%B1%E3%85%85&tab=document");
   assert.equal(COMMENTS_ANCHOR_ID, "document-comments");
+  assert.equal(attachmentViewPath("Acme", "a1"), "/w/acme/a/a1/view");
+  assert.equal(attachmentViewPath("Acme", "a1", 3), "/w/acme/a/a1/view?chunk=3");
 });
