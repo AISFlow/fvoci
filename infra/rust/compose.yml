@@ -74,6 +74,7 @@ services:
       FVOCI_EXTRACTOR_BIN: /opt/fvoci/bin/document-extract
       FVOCI_EXTRACT_POLL_SECS: ${FVOCI_EXTRACT_POLL_SECS:-2}
       FVOCI_SHUTDOWN_DEADLINE_MS: ${FVOCI_SHUTDOWN_DEADLINE_MS:-30000}
+      RUST_LOG: ${RUST_LOG:-}
       FVOCI_MEILI_URL: http://meilisearch:7700
       FVOCI_MEILI_KEY_FILE: /run/fvoci/meili/api_key
     volumes:
