@@ -6,6 +6,20 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder
 use utoipa::{Modify, OpenApi};
 
 #[cfg(feature = "api-schema")]
+use crate::api::collections_dto::{
+    CollectionAttachBody, CollectionCreateBody, CollectionFieldCreateBody,
+    CollectionFieldListResponse, CollectionFieldOutput, CollectionFieldPatchBody,
+    CollectionItemLookupResponse, CollectionItemOutput, CollectionListResponse,
+    CollectionOptionOutput, CollectionOptionPatch, CollectionOutput, CollectionQueryBody,
+    CollectionQueryDayOutput, CollectionQueryGroupOutput, CollectionQueryItemOutput,
+    CollectionQueryPreviewOutput, CollectionQueryResponse, CollectionQueryWindow,
+    CollectionValueBody, CollectionValueResponse, CollectionViewBody, CollectionViewListResponse,
+    CollectionViewOutput, DocumentTagAssignBody, DocumentTagCreateBody, DocumentTagListResponse,
+    DocumentTagOutput, DocumentTagPatchBody, DocumentTagPoolItemOutput,
+    DocumentTagPoolListResponse, ProjectCollectionOutput, ProjectViewCreateBody,
+    ProjectViewListResponse, ProjectViewOutput, ProjectViewPatchBody,
+};
+#[cfg(feature = "api-schema")]
 use crate::api::dto::{
     ActivityActorOutput, ActivityChangeOutput, ActivityCommentParentOutput, ActivityItemOutput,
     ActivityListResponse, AddProjectMemberBody, AdminInstanceSettingsOutput, AdminSystemOutput,
@@ -46,6 +60,12 @@ use crate::api::dto::{
     TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse,
     TreeResponse, WorkflowOutput, WorkspaceConsentsResponse, WorkspaceListItemResponse,
     WorkspaceListResponse, WorkspaceMemberConsentsOutput, WorkspaceMetaResponse,
+};
+#[cfg(feature = "api-schema")]
+use crate::api::dto::{
+    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
+    GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
+    WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
@@ -236,6 +256,18 @@ impl Modify for CookieSecurityAddon {
         delete_workspace_holiday,
         create_ics_token,
         get_ics_feed,
+        list_webhooks_path,
+        create_webhook_path,
+        remove_webhook_path,
+        get_github_path,
+        remove_github_path,
+        install_github_path,
+        link_github_issue_path,
+        github_callback_path,
+        github_webhook_path,
+        ai_summarize_path,
+        ai_generate_tasks_path,
+        ai_suggest_links_path,
         list_stars,
         create_star,
         delete_star,
@@ -273,9 +305,50 @@ impl Modify for CookieSecurityAddon {
         pending_consents,
         submit_consents,
         workspace_consents,
+        list_document_tags,
+        create_document_tag,
+        update_document_tag,
+        delete_document_tag,
+        list_wiki_document_tags,
+        assign_wiki_document_tag,
+        unassign_wiki_document_tag,
+        list_project_document_tags,
+        assign_project_document_tag,
+        unassign_project_document_tag,
+        list_collections,
+        create_collection,
+        list_collection_fields,
+        create_collection_field,
+        update_collection_field,
+        attach_collection_item,
+        put_collection_value,
+        query_collection,
+        list_collection_views,
+        create_collection_view,
+        update_collection_view,
+        delete_collection_view,
+        get_document_collection_item,
+        get_task_collection_item,
+        get_project_collection,
+        list_project_views,
+        create_project_view,
+        update_project_view,
+        delete_project_view,
     ),
     components(
         schemas(
+            WebhookCreateBody,
+            WebhookOutput,
+            WebhookCreatedOutput,
+            WebhookListResponse,
+            GithubInstallOutput,
+            GithubInstallUrlOutput,
+            GithubIssueLinkBody,
+            GithubIssueLinkOutput,
+            AiDocumentBody,
+            AiSummarizeOutput,
+            AiGenerateTasksOutput,
+            AiSuggestLinksOutput,
             SetupStatusResponse,
             BrandingOutput,
             SetupBody,
@@ -428,6 +501,42 @@ impl Modify for CookieSecurityAddon {
             I18nSettings,
             SecuritySettings,
             OperatorSettings,
+            DocumentTagOutput,
+            DocumentTagPoolItemOutput,
+            DocumentTagPoolListResponse,
+            DocumentTagListResponse,
+            DocumentTagCreateBody,
+            DocumentTagPatchBody,
+            DocumentTagAssignBody,
+            CollectionOutput,
+            CollectionListResponse,
+            ProjectCollectionOutput,
+            CollectionOptionOutput,
+            CollectionFieldOutput,
+            CollectionFieldListResponse,
+            CollectionItemOutput,
+            CollectionItemLookupResponse,
+            CollectionValueResponse,
+            CollectionQueryItemOutput,
+            CollectionQueryPreviewOutput,
+            CollectionQueryGroupOutput,
+            CollectionQueryDayOutput,
+            CollectionQueryResponse,
+            CollectionViewOutput,
+            CollectionViewListResponse,
+            ProjectViewOutput,
+            ProjectViewListResponse,
+            CollectionCreateBody,
+            CollectionFieldCreateBody,
+            CollectionOptionPatch,
+            CollectionFieldPatchBody,
+            CollectionAttachBody,
+            CollectionValueBody,
+            CollectionQueryWindow,
+            CollectionQueryBody,
+            CollectionViewBody,
+            ProjectViewCreateBody,
+            ProjectViewPatchBody,
         )
     ),
     modifiers(&CookieSecurityAddon),
@@ -443,6 +552,9 @@ impl Modify for CookieSecurityAddon {
         (name = "comments", description = "Document and task comments"),
         (name = "notifications", description = "In-app notifications"),
         (name = "schedule", description = "Holidays and ICS calendar feeds"),
+        (name = "integrations", description = "Webhooks, GitHub App and document AI actions"),
+        (name = "document-tags", description = "Workspace document tags"),
+        (name = "collections", description = "Typed collections, values, queries and views"),
     )
 )]
 pub struct ApiDoc;
@@ -3786,6 +3898,592 @@ fn submit_consents() {}
 )]
 fn workspace_consents() {}
 
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/document-tags",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("q" = Option<String>, Query, description = "Name substring"),
+        ("limit" = Option<i32>, Query, description = "1..=100, default 50"),
+    ),
+    responses(
+        (status = 200, description = "Workspace tag pool", body = DocumentTagPoolListResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn list_document_tags() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/document-tags",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+    ),
+    request_body = DocumentTagCreateBody,
+    responses(
+        (status = 201, description = "Created tag", body = DocumentTagOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Members and above only", body = ProblemResponse),
+        (status = 409, description = "Tag name taken", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn create_document_tag() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/document-tags/{tag_id}",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("tag_id" = String, description = "Tag id"),
+    ),
+    request_body = DocumentTagPatchBody,
+    responses(
+        (status = 200, description = "Updated tag", body = DocumentTagOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Admins only", body = ProblemResponse),
+        (status = 409, description = "Tag name taken", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn update_document_tag() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/document-tags/{tag_id}",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("tag_id" = String, description = "Tag id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted", body = OkResponse),
+        (status = 403, description = "Admins only", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn delete_document_tag() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/tags",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Assigned tags", body = DocumentTagListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn list_wiki_document_tags() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/tags",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = DocumentTagAssignBody,
+    responses(
+        (status = 200, description = "Assigned tag", body = DocumentTagOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn assign_wiki_document_tag() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/tags/{tag_id}",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("tag_id" = String, description = "Tag id"),
+    ),
+    responses(
+        (status = 200, description = "Unassigned", body = OkResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn unassign_wiki_document_tag() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/tags",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Assigned tags", body = DocumentTagListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn list_project_document_tags() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/tags",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = DocumentTagAssignBody,
+    responses(
+        (status = 200, description = "Assigned tag", body = DocumentTagOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn assign_project_document_tag() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/tags/{tag_id}",
+    tag = "document-tags",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+        ("tag_id" = String, description = "Tag id"),
+    ),
+    responses(
+        (status = 200, description = "Unassigned", body = OkResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn unassign_project_document_tag() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/collections",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+    ),
+    responses(
+        (status = 200, description = "Readable collections", body = CollectionListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn list_collections() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/collections",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+    ),
+    request_body = CollectionCreateBody,
+    responses(
+        (status = 201, description = "Created collection", body = CollectionOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn create_collection() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/fields",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+    ),
+    responses(
+        (status = 200, description = "Fields with options", body = CollectionFieldListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn list_collection_fields() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/fields",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+    ),
+    request_body = CollectionFieldCreateBody,
+    responses(
+        (status = 201, description = "Created field", body = CollectionFieldOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn create_collection_field() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/fields/{field_id}",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+        ("field_id" = String, description = "Field id"),
+    ),
+    request_body = CollectionFieldPatchBody,
+    responses(
+        (status = 200, description = "Updated field", body = CollectionFieldOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 409, description = "Version mismatch or project archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn update_collection_field() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/items",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+    ),
+    request_body = CollectionAttachBody,
+    responses(
+        (status = 201, description = "Item (idempotent)", body = CollectionItemOutput),
+        (status = 400, description = "Invalid input or scope mismatch", body = ProblemResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 409, description = "Archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn attach_collection_item() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    put,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/items/{item_id}/values",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+        ("item_id" = String, description = "Item id"),
+    ),
+    request_body = CollectionValueBody,
+    responses(
+        (status = 200, description = "New item version", body = CollectionValueResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Edit access required", body = ProblemResponse),
+        (status = 409, description = "Version mismatch or archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn put_collection_value() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/query",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+    ),
+    request_body = CollectionQueryBody,
+    responses(
+        (status = 200, description = "Query page", body = CollectionQueryResponse),
+        (status = 400, description = "Invalid input or cursor", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn query_collection() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/views",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+    ),
+    responses(
+        (status = 200, description = "Own and shared views", body = CollectionViewListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn list_collection_views() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/views",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+    ),
+    request_body = CollectionViewBody,
+    responses(
+        (status = 201, description = "Created view", body = CollectionViewOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Shared views need manage", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn create_collection_view() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/views/{view_id}",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+        ("view_id" = String, description = "View id"),
+    ),
+    request_body = CollectionViewBody,
+    responses(
+        (status = 200, description = "Updated view", body = CollectionViewOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 403, description = "Shared views need manage", body = ProblemResponse),
+        (status = 409, description = "Version mismatch or project archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn update_collection_view() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/collections/{collection_id}/views/{view_id}",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("collection_id" = String, description = "Collection id"),
+        ("view_id" = String, description = "View id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted", body = OkResponse),
+        (status = 403, description = "Shared views need manage", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn delete_collection_view() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/collection-item",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Item or null", body = CollectionItemLookupResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn get_document_collection_item() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/collection-item",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    responses(
+        (status = 200, description = "Item or null", body = CollectionItemLookupResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn get_task_collection_item() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/collection",
+    tag = "collections",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project task collection", body = ProjectCollectionOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn get_project_collection() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/views",
+    tag = "tasks",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Own saved views", body = ProjectViewListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn list_project_views() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/views",
+    tag = "tasks",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = ProjectViewCreateBody,
+    responses(
+        (status = 201, description = "Created view", body = ProjectViewOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn create_project_view() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/views/{view_id}",
+    tag = "tasks",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("view_id" = String, description = "View id"),
+    ),
+    request_body = ProjectViewPatchBody,
+    responses(
+        (status = 200, description = "Updated", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 409, description = "Config changed since expectedConfig", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn update_project_view() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/views/{view_id}",
+    tag = "tasks",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("view_id" = String, description = "View id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not readable", body = ProblemResponse),
+    )
+)]
+fn delete_project_view() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3993,3 +4691,201 @@ mod tests {
         }
     }
 }
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace webhooks (secrets are never listed)", body = WebhookListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn list_webhooks_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = WebhookCreateBody,
+    responses(
+        (status = 201, description = "Created webhook; the signing secret is shown only here", body = WebhookCreatedOutput),
+        (status = 400, description = "Invalid URL or events", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+        (status = 503, description = "Secret encryption keys are not configured", body = ProblemResponse),
+    )
+)]
+fn create_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks/{webhook_id}",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("webhook_id" = String, description = "Webhook id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted webhook and its deliveries", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn remove_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/github",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "GitHub App installation", body = GithubInstallOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn get_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/github",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Removed the installation link", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "No installation, or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn remove_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/github/install",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "GitHub App install URL with a signed state", body = GithubInstallUrlOutput),
+        (status = 400, description = "GitHub App not configured or unreachable", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn install_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/github/issue-links",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = GithubIssueLinkBody,
+    responses(
+        (status = 201, description = "Linked the task to an issue", body = GithubIssueLinkOutput),
+        (status = 400, description = "Invalid repo/number or already linked", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Task not found or no project edit permission", body = ProblemResponse),
+    )
+)]
+fn link_github_issue_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/github/callback",
+    tag = "integrations",
+    params(
+        ("state" = Option<String>, Query, description = "Signed install state"),
+        ("installation_id" = Option<String>, Query, description = "GitHub installation id"),
+    ),
+    responses(
+        (status = 302, description = "Installed; redirects to the app"),
+        (status = 400, description = "Invalid or expired state", body = ProblemResponse),
+    )
+)]
+fn github_callback_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/github/webhook",
+    tag = "integrations",
+    responses(
+        (status = 200, description = "Accepted", body = OkResponse),
+        (status = 400, description = "Not configured or invalid payload", body = ProblemResponse),
+        (status = 401, description = "Signature invalid", body = ProblemResponse),
+        (status = 413, description = "Body too large", body = ProblemResponse),
+    )
+)]
+fn github_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/summarize",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Summary", body = AiSummarizeOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_summarize_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/generate-tasks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Task titles", body = AiGenerateTasksOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_generate_tasks_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/suggest-links",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Visible document ids", body = AiSuggestLinksOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_suggest_links_path() {}

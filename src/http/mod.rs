@@ -95,6 +95,19 @@ async fn canonicalize_bearer_path(req: Request, next: Next) -> Response {
 }
 
 pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
+    router_with_integrations(
+        state,
+        static_dir,
+        std::sync::Arc::new(crate::integrations::Integrations::disabled()),
+    )
+}
+
+/// `router` with integration settings (webhook keys, GitHub App, AI).
+pub fn router_with_integrations(
+    state: AppState,
+    static_dir: Option<PathBuf>,
+    integrations: std::sync::Arc<crate::integrations::Integrations>,
+) -> Router {
     let collab = Router::new()
         .route("/collab", get(collab_entry))
         .with_state(state.clone());
@@ -118,10 +131,14 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::comments::router())
         .merge(routes::api_tokens::router())
         .merge(routes::ics::router())
+        .merge(routes::integrations::router(integrations))
         .merge(routes::stars::router())
         .merge(routes::share::router())
         .merge(routes::admin::router())
         .merge(routes::legal::router())
+        .merge(routes::collections::router())
+        .merge(routes::document_tags::router())
+        .merge(routes::project_views::router())
         .merge(collab)
         .layer(middleware::from_fn_with_state(state.clone(), consent_gate))
         .layer(middleware::from_fn(canonicalize_bearer_path))

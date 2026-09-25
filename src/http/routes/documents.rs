@@ -90,8 +90,18 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Deserialize)]
-struct TreeQuery {
-    tag: Option<String>,
+pub(crate) struct TreeQuery {
+    pub(crate) tag: Option<String>,
+}
+
+/// Source `treeListQuery`: optional `tag` uuid narrowing the tree.
+pub(crate) fn parse_tree_tag(raw: Option<&str>) -> Result<Option<Uuid>, AppError> {
+    match raw {
+        None => Ok(None),
+        Some(raw) => crate::http::routes::stars::parse_body_uuid(raw)
+            .map(Some)
+            .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -297,9 +307,7 @@ async fn list_tree(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<TreeResponse>, DocumentApiError> {
-    if query.tag.is_some() {
-        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-    }
+    let tag = parse_tree_tag(query.tag.as_deref())?;
     let (_user, user_id, session_id) = require_session(
         &state,
         &headers,
@@ -311,10 +319,23 @@ async fn list_tree(
     let result = list_wiki_tree(&state.auth.db.pool, workspace_id, user_id, session_id)
         .await
         .map_err(internal)?;
+    let tagged = match tag {
+        Some(tag) => Some(
+            crate::db::document_tags::tagged_document_id_set(
+                &state.auth.db.pool,
+                workspace_id,
+                tag,
+            )
+            .await
+            .map_err(internal)?,
+        ),
+        None => None,
+    };
     match result {
         Ok(items) => Ok(Json(TreeResponse {
             items: items
                 .into_iter()
+                .filter(|n| tagged.as_ref().is_none_or(|ids| ids.contains(&n.id)))
                 .map(|n| TreeNodeResponse {
                     id: n.id.to_string(),
                     workspace_id: n.workspace_id.to_string(),

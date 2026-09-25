@@ -996,13 +996,18 @@ pub async fn clone_project(
     .execute(&mut *tx)
     .await?;
 
-    crate::db::project_clone::copy_project_configuration(
+    if !crate::db::project_clone::copy_project_configuration(
         &mut tx,
         workspace_id,
         source_project_id,
         dest_project_id,
+        actor_user_id,
     )
-    .await?;
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::InvalidInput));
+    }
 
     record_project_event_and_audit(
         &mut tx,

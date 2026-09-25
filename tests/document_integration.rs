@@ -866,6 +866,19 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
         &[],
     )
     .await;
+    // An unknown tag narrows the tree to nothing; a malformed one is rejected.
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"], json!([]));
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/tree?tag=not-a-uuid"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "invalid_input");
 

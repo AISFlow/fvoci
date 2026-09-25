@@ -816,6 +816,13 @@ pub async fn remove_member(
         ],
     )
     .await?;
+    let transferred_shared_views = crate::db::collections::transfer_shared_view_ownership(
+        &mut tx,
+        workspace_id,
+        target_user_id,
+        actor_user_id,
+    )
+    .await?;
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
         .bind(workspace_id)
         .bind(target_user_id)
@@ -825,6 +832,7 @@ pub async fn remove_member(
         "userId": target_user_id.to_string(),
         "role": target_role.as_str(),
         "revokedInvitations": revoked_invitations,
+        "transferredSharedViews": transferred_shared_views,
     });
     record_workspace_event_and_audit(
         &mut tx,

@@ -1,12 +1,14 @@
 import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import { WorkspaceGroupsSection } from "@/features/settings/workspace-groups";
 import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity";
 import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
 import { WorkspaceCalendarSection } from "@/features/settings/workspace-calendar";
 import { WorkspaceTokensSection } from "@/features/settings/workspace-tokens";
+import { WorkspaceWebhooksSection } from "@/features/settings/workspace-webhooks";
+import { WorkspaceGithubSection } from "@/features/settings/workspace-github";
 import { DeletedProjectsSection } from "@/features/settings/deleted-projects";
 import { WorkspaceImportSection } from "@/features/settings/workspace-import";
 import { NotificationPrefsSection } from "@/features/notifications/notification-prefs";
@@ -14,6 +16,7 @@ import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
+import { documentTagsSettingsPath } from "@/lib/href";
 
 function roleAtLeast(role: string, minimum: string): boolean {
   const order = ["guest", "member", "admin", "owner"];
@@ -101,6 +104,11 @@ export function WorkspaceSettingsPage() {
       activeNav="settings"
     >
       <div className="settings-page">
+        <nav aria-label={t("nav.workspaceSettings")} className="mb-6 flex flex-wrap gap-3">
+          <Link to={documentTagsSettingsPath(slug)} className="text-ui underline underline-offset-2">
+            {t("settings.documentTags.nav")}
+          </Link>
+        </nav>
         <WorkspaceIdentitySection
           workspaceName={metaQuery.data?.name ?? workspace.name}
           workspaceSlug={metaQuery.data?.slug ?? workspace.slug}
@@ -134,6 +142,8 @@ export function WorkspaceSettingsPage() {
         ) : null}
         <WorkspaceCalendarSection workspaceId={workspace.id} />
         {canManage ? <WorkspaceTokensSection workspaceId={workspace.id} /> : null}
+        {canManage ? <WorkspaceWebhooksSection workspaceId={workspace.id} /> : null}
+        {canManage ? <WorkspaceGithubSection workspaceId={workspace.id} /> : null}
         {canManage && workspace.kind === "team" ? (
           <DeletedProjectsSection workspaceId={workspace.id} />
         ) : null}
