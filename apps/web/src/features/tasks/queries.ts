@@ -77,6 +77,35 @@ export function taskQuery(workspaceId: string, taskId: string) {
   });
 }
 
+export type TaskActivityFilter = "all" | "comments" | "changes";
+
+export function taskActivityQuery(
+  workspaceId: string,
+  taskId: string,
+  filter: TaskActivityFilter,
+) {
+  return infiniteQueryOptions({
+    queryKey: ["task-activity", workspaceId, taskId, filter] as const,
+    queryFn: async ({ pageParam }) =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/activity", {
+          params: {
+            path: { workspace_id: workspaceId, task_id: taskId },
+            query: {
+              filter,
+              limit: 50,
+              ...(pageParam ? { cursor: pageParam } : {}),
+            },
+          },
+        }),
+      ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
+    enabled: Boolean(workspaceId) && Boolean(taskId),
+    retry: false,
+  });
+}
+
 export function projectLabelsQuery(workspaceId: string, projectId: string) {
   return queryOptions({
     queryKey: ["labels", workspaceId, projectId] as const,

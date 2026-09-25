@@ -12,11 +12,13 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateLabelBody, CreateMilestoneBody, CreateTaskBody, CreateTaskDependencyBody,
-    LabelListResponse, LabelOutput, MilestoneListResponse, MilestoneOutput, MoveTaskBody,
-    OkResponse, PatchLabelBody, PatchMilestoneBody, PatchTaskBody, TaskChildOutput,
-    TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListItemOutput,
-    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TaskStatusCountOutput,
+    ActivityActorOutput, ActivityChangeOutput, ActivityCommentParentOutput, ActivityItemOutput,
+    ActivityListResponse, CreateLabelBody, CreateMilestoneBody, CreateTaskBody,
+    CreateTaskDependencyBody, LabelListResponse, LabelOutput, MilestoneListResponse,
+    MilestoneOutput, MoveTaskBody, OkResponse, PatchLabelBody, PatchMilestoneBody, PatchTaskBody,
+    TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput,
+    TaskListItemOutput, TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput,
+    TaskStatusCountOutput,
 };
 use crate::auth::session::SessionUser;
 use crate::db::labels::{
@@ -26,6 +28,7 @@ use crate::db::milestones::{
     create_milestone, list_project_milestones, purge_milestone, update_milestone,
 };
 use crate::db::projects::ProjectDbError;
+use crate::db::task_activity::{list_task_activity, TaskActivityDbError, TaskActivityOutputItem};
 use crate::db::tasks::{
     add_task_dependency, create_task, get_task, list_project_dependencies, list_project_tasks,
     move_task, patch_task_meta, remove_task_dependency, restore_task, trash_task, CreateTaskInput,
@@ -35,6 +38,7 @@ use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
+use crate::tasks::activity::{ActivityFilter, ActivityListQuery};
 use crate::tasks::dependency::DependencyType;
 use crate::tasks::list_query::{parse_task_list_query, TaskListQueryError};
 use crate::tasks::patch::{
@@ -53,6 +57,13 @@ pub struct TaskListQueryParams {
     pub to: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TaskActivityQueryParams {
+    pub filter: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i32>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
@@ -62,6 +73,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}",
             get(get_task_route).patch(patch_task_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/activity",
+            get(list_task_activity_route),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move",
@@ -156,6 +171,7 @@ async fn create_task_route(
             recurrence: body.recurrence,
         },
         Some(&ip),
+        activity_channel(&headers),
     )
     .await
     .map_err(internal)?;
@@ -256,6 +272,7 @@ async fn patch_task_route(
         session_id,
         input,
         Some(&ip),
+        activity_channel(&headers),
     )
     .await
     .map_err(internal)?;
@@ -301,6 +318,7 @@ async fn move_task_route(
             after_id: body.after_id,
         },
         Some(&ip),
+        activity_channel(&headers),
     )
     .await
     .map_err(internal)?;
@@ -1114,6 +1132,117 @@ impl IntoResponse for TaskApiError {
                 (status, headers, Json(body)).into_response()
             }
         }
+    }
+}
+
+fn activity_channel(headers: &HeaderMap) -> &'static str {
+    if headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Bearer "))
+    {
+        "api"
+    } else {
+        "web"
+    }
+}
+
+async fn list_task_activity_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
+    query: Result<Query<TaskActivityQueryParams>, QueryRejection>,
+) -> Result<Json<ActivityListResponse>, TaskApiError> {
+    let Query(query) = query.map_err(AppError::from)?;
+    let filter = match query.filter.as_deref().unwrap_or("all") {
+        "all" => ActivityFilter::All,
+        "comments" => ActivityFilter::Comments,
+        "changes" => ActivityFilter::Changes,
+        _ => return Err(AppError::from_code(ProblemCode::InvalidInput).into()),
+    };
+    let limit = query.limit.unwrap_or(50);
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = list_task_activity(
+        &state.auth.db.pool,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        task_id,
+        ActivityListQuery {
+            filter,
+            limit,
+            cursor: query.cursor,
+        },
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(page) => Ok(Json(ActivityListResponse {
+            items: page.items.into_iter().map(activity_item_output).collect(),
+            next_cursor: page.next_cursor,
+        })),
+        Err(TaskActivityDbError::InvalidInput | TaskActivityDbError::InvalidCursor) => {
+            Err(AppError::from_code(ProblemCode::InvalidInput).into())
+        }
+        Err(TaskActivityDbError::NotFound) => {
+            Err(AppError::from_code(ProblemCode::NotFound).into())
+        }
+    }
+}
+
+fn activity_item_output(item: TaskActivityOutputItem) -> ActivityItemOutput {
+    match item {
+        TaskActivityOutputItem::Change(change) => ActivityItemOutput::Change {
+            id: change.id,
+            created_at: change.created_at,
+            actor: change.actor.map(activity_actor_output),
+            channel: change.channel,
+            kind: change.kind,
+            changes: change
+                .changes
+                .into_iter()
+                .filter_map(|value| {
+                    let field = value.get("field")?.as_str()?.to_string();
+                    Some(ActivityChangeOutput {
+                        field,
+                        from: value
+                            .get("from")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        to: value.get("to").cloned().unwrap_or(serde_json::Value::Null),
+                    })
+                })
+                .collect(),
+        },
+        TaskActivityOutputItem::Comment(comment) => ActivityItemOutput::Comment {
+            id: comment.id,
+            created_at: comment.created_at,
+            actor: comment.actor.map(activity_actor_output),
+            comment: Box::new(serde_json::from_value(comment.comment).expect("comment shape")),
+            parent: comment.parent.map(|parent| ActivityCommentParentOutput {
+                id: parent.id,
+                body: parent.body,
+                actor: parent.actor.map(activity_actor_output),
+            }),
+        },
+    }
+}
+
+fn activity_actor_output(
+    actor: crate::db::task_activity::ActivityActorOutput,
+) -> ActivityActorOutput {
+    ActivityActorOutput {
+        id: actor.id,
+        name: actor.name,
     }
 }
 

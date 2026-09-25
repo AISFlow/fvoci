@@ -1156,6 +1156,22 @@ export interface paths {
         patch: operations["patch_task"];
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_task_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments": {
         parameters: {
             query?: never;
@@ -1288,6 +1304,48 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ActivityActorOutput: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        ActivityChangeOutput: {
+            field: string;
+            from: unknown;
+            to: unknown;
+        };
+        ActivityCommentParentOutput: {
+            actor?: components["schemas"]["ActivityActorOutput"] | null;
+            body: string;
+            /** Format: uuid */
+            id: string;
+        };
+        ActivityItemOutput: {
+            actor?: components["schemas"]["ActivityActorOutput"] | null;
+            changes: components["schemas"]["ActivityChangeOutput"][];
+            channel: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            /** @enum {string} */
+            type: "change";
+        } | {
+            actor?: components["schemas"]["ActivityActorOutput"] | null;
+            comment: components["schemas"]["CommentOutput"];
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            parent?: components["schemas"]["ActivityCommentParentOutput"] | null;
+            /** @enum {string} */
+            type: "comment";
+        };
+        ActivityListResponse: {
+            items: components["schemas"]["ActivityItemOutput"][];
+            nextCursor?: string | null;
+        };
         AddProjectMemberBody: {
             role: string;
             /** Format: uuid */
@@ -6918,6 +6976,56 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_task_activity: {
+        parameters: {
+            query?: {
+                /** @description all | comments | changes */
+                filter?: string;
+                /** @description Pagination cursor */
+                cursor?: string;
+                /** @description Page size */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Task id */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task activity feed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivityListResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

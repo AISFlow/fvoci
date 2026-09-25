@@ -1429,6 +1429,63 @@ pub struct CommentListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ActivityActorOutput {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ActivityChangeOutput {
+    pub field: String,
+    pub from: serde_json::Value,
+    pub to: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ActivityCommentParentOutput {
+    pub id: Uuid,
+    pub body: String,
+    pub actor: Option<ActivityActorOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub enum ActivityItemOutput {
+    #[serde(rename = "change")]
+    Change {
+        id: Uuid,
+        created_at: DateTime<Utc>,
+        actor: Option<ActivityActorOutput>,
+        channel: String,
+        kind: String,
+        changes: Vec<ActivityChangeOutput>,
+    },
+    #[serde(rename = "comment")]
+    Comment {
+        id: Uuid,
+        created_at: DateTime<Utc>,
+        actor: Option<ActivityActorOutput>,
+        comment: Box<CommentOutput>,
+        parent: Option<ActivityCommentParentOutput>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ActivityListResponse {
+    pub items: Vec<ActivityItemOutput>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct ProblemResponse {
     pub title: String,
