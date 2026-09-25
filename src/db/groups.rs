@@ -80,6 +80,37 @@ async fn load_group(
     ))
 }
 
+async fn group_member_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    group_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (Uuid,)>(
+        r#"
+        SELECT user_id
+        FROM fvoci.group_members
+        WHERE workspace_id = $1 AND group_id = $2
+        ORDER BY user_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(group_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+async fn lock_actor_and_group_members(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    group_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut lock_users = group_member_ids(tx, workspace_id, group_id).await?;
+    lock_users.push(actor_user_id);
+    lock_membership_users(tx, &lock_users).await
+}
+
 async fn lock_group(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -216,7 +247,7 @@ pub async fn purge_group(
 ) -> Result<Result<(), GroupDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    lock_actor_and_group_members(&mut tx, workspace_id, actor_user_id, group_id).await?;
     if !recheck_session(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(GroupDbError::Forbidden));
@@ -234,17 +265,15 @@ pub async fn purge_group(
         tx.rollback().await?;
         return Ok(Err(GroupDbError::NotFound));
     }
-    let lead_projects = sqlx::query_as::<_, (Uuid,)>(
+    let granted_projects = sqlx::query_as::<_, (Uuid, String, String)>(
         r#"
-        SELECT p.id
+        SELECT p.id, p.visibility, pm.role
         FROM fvoci.projects p
         INNER JOIN fvoci.project_members pm
             ON pm.workspace_id = p.workspace_id AND pm.project_id = p.id
         WHERE p.workspace_id = $1
           AND p.deleted_at IS NULL
-          AND p.visibility = 'private'
           AND pm.group_id = $2
-          AND pm.role = 'lead'
         ORDER BY p.id
         FOR NO KEY UPDATE OF p
         "#,
@@ -257,10 +286,12 @@ pub async fn purge_group(
         tx.rollback().await?;
         return Ok(Err(GroupDbError::NotFound));
     }
-    for (project_id,) in lead_projects {
-        if count_project_leads_except(&mut tx, workspace_id, project_id, None, Some(group_id))
-            .await?
-            == 0
+    for (project_id, visibility, grant_role) in granted_projects {
+        if visibility == "private"
+            && grant_role == "lead"
+            && count_project_leads_except(&mut tx, workspace_id, project_id, None, Some(group_id))
+                .await?
+                == 0
         {
             tx.rollback().await?;
             return Ok(Err(GroupDbError::LastLead));
@@ -792,7 +823,7 @@ pub async fn remove_group_from_document(
 ) -> Result<Result<(), GroupDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    lock_actor_and_group_members(&mut tx, workspace_id, actor_user_id, group_id).await?;
     if !recheck_session(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Err(GroupDbError::Forbidden));

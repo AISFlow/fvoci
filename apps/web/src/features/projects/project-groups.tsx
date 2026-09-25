@@ -17,9 +17,11 @@ function roleLabel(role: string): string {
 export function ProjectGroupsSection({
   workspaceId,
   projectId,
+  canManage,
 }: {
   workspaceId: string;
   projectId: string;
+  canManage: boolean;
 }) {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
@@ -102,20 +104,22 @@ export function ProjectGroupsSection({
                 <span>
                   {nameById.get(row.groupId) ?? row.groupId} · {roleLabel(row.role)}
                 </span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={revoke.isPending}
-                  onClick={() => void revoke.mutateAsync(row.groupId)}
-                >
-                  {t("project.groups.remove")}
-                </Button>
+                {canManage ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={revoke.isPending}
+                    onClick={() => void revoke.mutateAsync(row.groupId)}
+                  >
+                    {t("project.groups.remove")}
+                  </Button>
+                ) : null}
               </li>
             ))}
           </ul>
         )}
-        {available.length === 0 ? (
+        {!canManage ? null : available.length === 0 ? (
           groups.length === 0 ? null : (
             <p className="text-ui text-muted-foreground">{t("group.grant.noneLeft")}</p>
           )
@@ -124,11 +128,12 @@ export function ProjectGroupsSection({
             className="mt-3 flex flex-wrap items-end gap-2"
             onSubmit={(event) => {
               event.preventDefault();
-              const data = new FormData(event.currentTarget);
+              const form = event.currentTarget;
+              const data = new FormData(form);
               const groupId = data.get("groupId");
               const role = data.get("role");
               if (typeof groupId !== "string" || groupId === "" || typeof role !== "string") return;
-              void grant.mutateAsync({ groupId, role }).then(() => event.currentTarget.reset());
+              void grant.mutateAsync({ groupId, role }).then(() => form.reset());
             }}
           >
             <div>

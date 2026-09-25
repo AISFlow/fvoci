@@ -3,7 +3,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
-use crate::db::projects::{lock_project, project_permission, ProjectDbError};
+use crate::db::projects::{lock_project, project_permission, visible_project_sql, ProjectDbError};
 use crate::db::workspace::WorkspaceRole;
 use crate::projects::ProjectPermission;
 
@@ -56,24 +56,6 @@ async fn membership_role(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.and_then(|(role,)| WorkspaceRole::parse(&role)))
-}
-
-pub(crate) fn visible_project_sql(
-    project_alias: &str,
-    guest_param: u32,
-    actor_param: u32,
-) -> String {
-    format!(
-        "(
-            ({project_alias}.visibility = 'workspace' AND ${guest_param} = false)
-            OR EXISTS (
-                SELECT 1 FROM fvoci.project_members pm
-                WHERE pm.workspace_id = {project_alias}.workspace_id
-                  AND pm.project_id = {project_alias}.id
-                  AND pm.user_id = ${actor_param}
-            )
-        )"
-    )
 }
 
 async fn require_project_view(

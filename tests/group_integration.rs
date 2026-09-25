@@ -6,8 +6,9 @@ mod project_harness;
 
 use axum::http::StatusCode;
 use project_harness::{
-    add_workspace_user, admin_pool, app_pool, create_project, http_request, json_request,
-    setup_session, TestDb,
+    add_workspace_user, admin_pool, app_pool, create_project, hold_membership_user_lock,
+    http_request, json_request, session_id_for_user, setup_session, wait_for_advisory_blocked_by,
+    TestDb,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -745,5 +746,458 @@ async fn group_pat_scopes_match_source() {
     .await;
     assert_eq!(status, StatusCode::OK, "{list_ok:?}");
 
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn remove_project_member_returns_not_found_for_group_only_member() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "group-only").await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "GOM", "private").await;
+    let project_id = project["id"].as_str().unwrap();
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "그룹전용"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let group_id = created["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": member.user_id.to_string()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups"),
+        Some(json!({"groupId": group_id, "role": "member"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let events_before: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM fvoci.events WHERE verb = 'project_member.removed'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let audits_before: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'project_member.removed'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/members/{}",
+            member.user_id
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+
+    let events_after: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM fvoci.events WHERE verb = 'project_member.removed'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let audits_after: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'project_member.removed'",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events_after.0, events_before.0);
+    assert_eq!(audits_after.0, audits_before.0);
+
+    let (status, still) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{still:?}");
+
+    let (status, role_body) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/members/{}",
+            member.user_id
+        ),
+        Some(json!({"role": "viewer"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{role_body:?}");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn update_project_lead_rejects_group_only_member_without_demoting() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "lead-group").await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "LGO", "private").await;
+    let project_id = project["id"].as_str().unwrap();
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "리드후보"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let group_id = created["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": member.user_id.to_string()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups"),
+        Some(json!({"groupId": group_id, "role": "member"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
+        Some(json!({"leadUserId": member.user_id.to_string()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
+    assert_eq!(body["code"], "conflict");
+
+    let (status, members) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let owner_row = members["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["userId"] == owner_id.to_string())
+        .expect("owner remains a direct member");
+    assert_eq!(owner_row["role"], "lead");
+    assert!(members["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["userId"] != member.user_id.to_string()));
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn group_granted_member_sees_private_project_and_labels() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "list-grant").await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "VIS", "private").await;
+    let project_id = project["id"].as_str().unwrap();
+
+    let (status, label) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels"),
+        Some(json!({"name": "버그", "color": "red"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{label:?}");
+    let label_id = label["id"].as_str().unwrap();
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "목록권한"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let group_id = created["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": member.user_id.to_string()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups"),
+        Some(json!({"groupId": group_id, "role": "member"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, listed) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed:?}");
+    assert!(listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["id"] == project_id));
+
+    let (status, labels) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/labels"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{labels:?}");
+    assert!(labels["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["id"] == label_id && item["projectId"] == project_id));
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn purge_group_waits_on_member_advisory_lock_then_revokes() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "race-purge").await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "RCE", "private").await;
+    let project_id = project["id"].as_str().unwrap().to_string();
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "경합"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let group_id = created["id"].as_str().unwrap().to_string();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": member.user_id.to_string()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups"),
+        Some(json!({"groupId": group_id, "role": "member"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut barrier = admin.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    hold_membership_user_lock(&mut barrier, member.user_id).await;
+
+    let purge = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let group_id = group_id.clone();
+        async move {
+            json_request(
+                app,
+                "DELETE",
+                &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}"),
+                None,
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    wait_for_advisory_blocked_by(&admin, blocker_pid).await;
+    assert!(
+        !purge.is_finished(),
+        "purge must wait for the in-flight member advisory lock"
+    );
+    barrier.commit().await.unwrap();
+    let (status, body) = purge.await.expect("purge join");
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (status, after) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{after:?}");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn wiki_grant_revoke_is_visible_to_collab_acl_poll() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "collab-grant").await;
+    let (status, wiki) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"parentId": null, "title": "협업문서"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{wiki:?}");
+    let wiki_id: Uuid = wiki["id"].as_str().unwrap().parse().unwrap();
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "위키편집"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let group_id = created["id"].as_str().unwrap().to_string();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": guest.user_id.to_string()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{wiki_id}/groups"),
+        Some(json!({"groupId": group_id, "role": "member"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let app_db = app_pool(&harness).await;
+    let guest_session = session_id_for_user(&admin, guest.user_id).await;
+    let admitted = fvoci_server::db::collab_delivery::check_delivery_admission(
+        &app_db,
+        workspace_id,
+        guest.user_id,
+        guest_session,
+        wiki_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        admitted,
+        fvoci_server::db::collab_delivery::DeliveryAdmission::Allowed { read_only: false }
+    );
+
+    let mut barrier = admin.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    hold_membership_user_lock(&mut barrier, guest.user_id).await;
+    let revoke = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let group_id = group_id.clone();
+        async move {
+            json_request(
+                app,
+                "DELETE",
+                &format!("/api/v1/workspaces/{workspace_id}/documents/{wiki_id}/groups"),
+                Some(json!({"groupId": group_id})),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    wait_for_advisory_blocked_by(&admin, blocker_pid).await;
+    assert!(!revoke.is_finished(), "document grant revoke must wait");
+    barrier.commit().await.unwrap();
+    let (status, body) = revoke.await.expect("revoke join");
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let denied = fvoci_server::db::collab_delivery::check_delivery_admission(
+        &app_db,
+        workspace_id,
+        guest.user_id,
+        guest_session,
+        wiki_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        denied,
+        fvoci_server::db::collab_delivery::DeliveryAdmission::Denied
+    );
+
+    app_db.close().await;
+    admin.close().await;
     harness.cleanup().await;
 }

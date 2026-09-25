@@ -20,6 +20,11 @@ import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { formatDisplayId, itemPath, parseRef, projectsPath } from "@/lib/href";
 import "@/features/projects/projects.css";
 
+function roleAtLeast(role: string, minimum: string): boolean {
+  const order = ["guest", "member", "admin", "owner"];
+  return order.indexOf(role) >= order.indexOf(minimum);
+}
+
 export function ProjectTasksPage() {
   const { ref } = useParams<{ ref: string }>();
   const navigate = useNavigate();
@@ -161,7 +166,11 @@ export function ProjectTasksPage() {
             }}
           />
           {workspace ? (
-            <ProjectGroupsSection workspaceId={workspace.id} projectId={project.id} />
+            <ProjectGroupsSection
+              workspaceId={workspace.id}
+              projectId={project.id}
+              canManage={roleAtLeast(workspace.role, "admin")}
+            />
           ) : null}
         </div>
       ) : null}
