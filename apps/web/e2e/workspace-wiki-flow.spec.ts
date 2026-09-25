@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Response, type Route } from "@playwright/test";
-import { createE2eUser, login } from "./helpers";
+import { createE2eUser, login, logout } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -273,7 +273,7 @@ test("admin sees member document and guest cannot read wiki", async ({ page }) =
     membershipRole: "guest",
   });
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, guest.email, guest.password);
 
   const guestTreeRes = await page.request.get(`/api/v1/workspaces/${id}/tree`);

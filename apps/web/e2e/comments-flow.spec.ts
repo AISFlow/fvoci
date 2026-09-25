@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, login } from "./helpers";
+import { createE2eUser, login, logout } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -37,7 +37,7 @@ test("member adds and resolves a wiki document comment", async ({ page }) => {
     membershipRole: "member",
   });
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, member.email, member.password);
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
