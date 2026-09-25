@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod auth;
+pub mod comments;
 pub mod documents;
 pub mod invitations;
 pub mod lookup;

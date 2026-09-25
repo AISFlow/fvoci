@@ -997,45 +997,65 @@ pub struct LookupListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub struct SearchSnippetPiece {
-    pub text: String,
-    pub r#match: bool,
+pub struct CreateCommentBody {
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_user_ids: Option<Vec<Uuid>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_group_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchCommentBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentReactionBody {
+    pub emoji: String,
+    pub on: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub struct SearchItemOutput {
-    pub r#type: String,
-    pub id: String,
-    pub title: String,
-    #[cfg_attr(feature = "api-schema", schema(required = true))]
-    pub display_id: Option<String>,
-    #[cfg_attr(feature = "api-schema", schema(required = true))]
-    pub extract_status: Option<String>,
-    #[cfg_attr(feature = "api-schema", schema(required = true))]
-    pub chunk_no: Option<i64>,
-    #[cfg_attr(feature = "api-schema", schema(required = true))]
-    pub snippet: Option<Vec<SearchSnippetPiece>>,
-    #[cfg_attr(feature = "api-schema", schema(required = true))]
-    pub project_id: Option<String>,
-    #[cfg_attr(feature = "api-schema", schema(required = true))]
-    pub document_id: Option<String>,
-    #[cfg_attr(feature = "api-schema", schema(required = true))]
-    pub task_id: Option<String>,
-    pub score: f64,
-    pub updated_at: String,
-    pub workspace_id: String,
+pub struct CommentReactionSummary {
+    pub count: usize,
+    pub reacted_by_me: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub struct SearchListResponse {
-    pub items: Vec<SearchItemOutput>,
-    #[cfg_attr(feature = "api-schema", schema(required = true))]
+pub struct CommentOutput {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub document_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+    pub parent_id: Option<Uuid>,
+    pub created_by: Uuid,
+    pub body: String,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub reactions: std::collections::HashMap<String, CommentReactionSummary>,
+    pub other_reaction_count: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentListResponse {
+    pub items: Vec<CommentOutput>,
     pub next_cursor: Option<String>,
 }
 
@@ -1154,4 +1174,47 @@ mod tests {
         assert_eq!(body["name"], "파일.png");
         assert!(body["createdAt"].as_str().unwrap().contains("2026-09-24"));
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchSnippetPiece {
+    pub text: String,
+    pub r#match: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchItemOutput {
+    pub r#type: String,
+    pub id: String,
+    pub title: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub display_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub extract_status: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub chunk_no: Option<i64>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub snippet: Option<Vec<SearchSnippetPiece>>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub project_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub document_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub task_id: Option<String>,
+    pub score: f64,
+    pub updated_at: String,
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchListResponse {
+    pub items: Vec<SearchItemOutput>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub next_cursor: Option<String>,
 }
