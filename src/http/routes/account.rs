@@ -28,9 +28,9 @@ use uuid::Uuid;
 
 use crate::api::dto::{
     DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, EmailChangeBody,
-    ErasureScheduleOutput, IdentitiesOutput, LabelOutput, LoginResponse, MagicLinkBody,
-    MeDashboardResponse, MeLocateResponse, MemberResponse, OkResponse, PasswordChangeBody,
-    ProvidersOutput, TaskListItemOutput, TokenBody, WithdrawBody, WorkspaceStatusOutput,
+    ErasureScheduleOutput, IdentitiesOutput, LabelOutput, MagicLinkBody, MeDashboardResponse,
+    MeLocateResponse, MemberResponse, OkResponse, PasswordChangeBody, ProvidersOutput,
+    TaskListItemOutput, TokenBody, WithdrawBody, WorkspaceStatusOutput,
 };
 use crate::attachments::ObjectStorage;
 use crate::auth::password::{hash_password, verify_password};
@@ -43,7 +43,7 @@ use crate::db::user_export::{self, ExportAttachment, ExportProfile};
 use crate::error::{AppError, ProblemCode};
 use crate::export_zip::{zip_safe_name, ZipStream};
 use crate::http::authz::{require_request_auth, Access, RequestAuth};
-use crate::http::cookie::{clear_session_cookie, set_session_cookie};
+use crate::http::cookie::clear_session_cookie;
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
@@ -445,19 +445,15 @@ async fn consume_magic_link(
     let Some(payload) = consume_magic_token(pool, &token).await.map_err(internal)? else {
         return Err(AppError::from_code(ProblemCode::MagicInvalid));
     };
-    let Some((user_id, session_token)) = account::complete_magic_login(pool, &payload)
+    let Some(issued) = account::complete_magic_login(pool, &payload)
         .await
         .map_err(internal)?
     else {
         return Err(AppError::from_code(ProblemCode::MagicInvalid));
     };
-    let response = Json(LoginResponse {
-        user_id: user_id.to_string(),
-    })
-    .into_response();
-    Ok(with_cookie(
-        response,
-        set_session_cookie(state.cookie_secure, &session_token),
+    Ok(crate::http::routes::auth::issued_response(
+        state.cookie_secure,
+        issued,
     ))
 }
 

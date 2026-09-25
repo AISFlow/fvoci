@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::auth::password::{hash_password, verify_password, Keyring};
 use crate::auth::session::{as_text_scale, as_week_starts_on, SessionUser};
-use crate::auth::token::{new_token, SESSION_TTL_SECS};
+use crate::auth::token::SESSION_TTL_SECS;
 use crate::db::quota::acquire_admission_lock;
 
 const SESSION_SLIDE_THRESHOLD_SECS: i64 = 15 * 24 * 60 * 60;
@@ -407,30 +407,6 @@ pub async fn create_session(
     Ok(())
 }
 
-pub async fn append_auth_login_event(
-    tx: &mut Transaction<'_, Postgres>,
-    event_id: Uuid,
-    user_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
-        .execute(&mut **tx)
-        .await?;
-    append_event(
-        tx,
-        EventAppend {
-            id: event_id,
-            workspace_id: None,
-            actor_user_id: Some(user_id),
-            verb: "auth.login".to_string(),
-            target_type: Some("user".to_string()),
-            target_id: Some(user_id),
-            payload: json!({"userId": user_id.to_string(), "method": "password"}),
-        },
-    )
-    .await?;
-    Ok(())
-}
-
 pub async fn revoke_session(
     pool: &PgPool,
     token_hash: &str,
@@ -719,30 +695,6 @@ pub async fn rehash_password_if_unchanged(
         .execute(pool)
         .await?;
     Ok(())
-}
-
-pub async fn issue_session(pool: &PgPool, user_id: Uuid) -> Result<Option<String>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    lock_sign_in(&mut tx, user_id).await?;
-
-    // Recheck under the row lock: a withdraw (deleted_at) or suspension that
-    // committed after the password check must not receive a new session.
-    let suspended: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT suspended_at FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(user_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if suspended.map(|s| s.0.is_some()).unwrap_or(true) {
-        tx.rollback().await?;
-        return Ok(None);
-    }
-
-    let token = new_token();
-    let expires_at = Utc::now() + Duration::seconds(SESSION_TTL_SECS);
-    create_session(&mut tx, Uuid::now_v7(), user_id, &token.hash, expires_at).await?;
-    append_auth_login_event(&mut tx, Uuid::now_v7(), user_id).await?;
-    tx.commit().await?;
-    Ok(Some(token.token))
 }
 
 pub async fn authenticate_password(

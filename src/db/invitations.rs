@@ -10,7 +10,7 @@ use crate::db::context::{
     set_invitation_token_hash, set_self_user, set_tenant,
 };
 use crate::db::identity::{
-    find_user_id_by_email, issue_session, password_hash_by_id, rehash_password_if_unchanged,
+    find_user_id_by_email, password_hash_by_id, rehash_password_if_unchanged,
 };
 use crate::db::quota::{acquire_admission_lock, require_membership_admission, QuotaError};
 use crate::db::workspace::{
@@ -259,7 +259,7 @@ pub async fn accept_invitation(
     keys: &Keyring,
     raw_token: &str,
     request: AcceptInvitationRequest<'_>,
-) -> Result<Result<(Uuid, String), InvitationDbError>, sqlx::Error> {
+) -> Result<Result<crate::db::mfa::Issued, InvitationDbError>, sqlx::Error> {
     let invitation = match load_invitation_by_token(pool, raw_token).await? {
         Ok(row) => row,
         Err(err) => return Ok(Err(err)),
@@ -336,8 +336,15 @@ pub async fn accept_invitation(
     if let Some((expected, replacement)) = rehash {
         let _ = rehash_password_if_unchanged(pool, user_id, &replacement, &expected).await;
     }
-    match issue_session(pool, user_id).await? {
-        Some(token) => Ok(Ok((user_id, token))),
+    match crate::db::mfa::issue_session_or_challenge(
+        pool,
+        user_id,
+        "invitation",
+        crate::db::mfa::IssueOptions::default(),
+    )
+    .await?
+    {
+        Some(issued) => Ok(Ok(issued)),
         None => Ok(Err(InvitationDbError::Unauthorized)),
     }
 }

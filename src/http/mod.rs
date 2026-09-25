@@ -95,12 +95,23 @@ async fn canonicalize_bearer_path(req: Request, next: Next) -> Response {
 }
 
 pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
+    let identity = std::sync::Arc::new(crate::identity::Identity::disabled(&state.public_origin));
+    router_with_identity(state, static_dir, identity)
+}
+
+/// The full router with MFA / OIDC settings (`ENCRYPTION_KEYS`, `OIDC_*`).
+pub fn router_with_identity(
+    state: AppState,
+    static_dir: Option<PathBuf>,
+    identity: std::sync::Arc<crate::identity::Identity>,
+) -> Router {
     let collab = Router::new()
         .route("/collab", get(collab_entry))
         .with_state(state.clone());
     let api = Router::new()
         .merge(routes::setup::router())
         .merge(routes::auth::router())
+        .merge(routes::mfa::router(identity.clone()))
         .merge(routes::account::router())
         .merge(routes::workspaces::router())
         .merge(routes::invitations::router())

@@ -182,3 +182,25 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_admin_set_instance_admin(uuid, boolean) FRO
 GRANT EXECUTE ON FUNCTION fvoci.app_admin_set_instance_admin(uuid, boolean) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_admin_set_suspended(uuid, boolean) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_admin_set_suspended(uuid, boolean) TO :"app_role";
+
+-- 029 MFA / OIDC.
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.user_mfa TO :"app_role";
+GRANT SELECT, INSERT, DELETE ON fvoci.identity_links TO :"app_role";
+REVOKE UPDATE ON fvoci.identity_links FROM :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.workspace_oidc TO :"app_role";
+REVOKE ALL ON fvoci.mfa_challenges FROM :"app_role";
+REVOKE ALL ON fvoci.oidc_states FROM :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_mfa_challenge_issue(text, uuid, integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_mfa_challenge_issue(text, uuid, integer, timestamptz) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_mfa_challenge_peek(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_mfa_challenge_peek(text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_mfa_challenge_consume(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_mfa_challenge_consume(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_oidc_state_issue(text, text, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_oidc_state_issue(text, text, timestamptz) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_oidc_state_consume(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_oidc_state_consume(text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_auth_ephemeral_purge_expired(timestamptz, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_auth_ephemeral_purge_expired(timestamptz, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_workspace_sso_id_by_slug(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_workspace_sso_id_by_slug(text) TO :"app_role";

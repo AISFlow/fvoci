@@ -18,6 +18,7 @@ use crate::auth::password::hash_password;
 use crate::auth::session::SessionUser;
 use crate::auth::token::new_token;
 use crate::db::identity::FamilyNamePatch;
+use crate::db::mfa::Issued;
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::cookie::{clear_session_cookie, set_session_cookie};
 use crate::http::guard::check_origin;
@@ -74,22 +75,30 @@ async fn login(
         .login(&email, &body.password)
         .await
         .map_err(internal)?;
-    if result.is_none() {
+    let Some(issued) = result else {
         return Err(AppError::from_code(ProblemCode::InvalidEmailOrPassword));
+    };
+    Ok(issued_response(state.cookie_secure, issued))
+}
+
+/// 200 with a session cookie, or `{ userId: null, mfaToken }` without one
+/// (source login / magic-link / invitation responses).
+pub(crate) fn issued_response(cookie_secure: bool, issued: Issued) -> Response {
+    match issued {
+        Issued::Session { user_id, token } => {
+            let mut response =
+                (StatusCode::OK, Json(LoginResponse::session(user_id))).into_response();
+            if let Ok(value) = set_session_cookie(cookie_secure, &token).parse() {
+                response
+                    .headers_mut()
+                    .append(axum::http::header::SET_COOKIE, value);
+            }
+            response
+        }
+        Issued::Challenge { mfa_token } => {
+            (StatusCode::OK, Json(LoginResponse::challenge(mfa_token))).into_response()
+        }
     }
-    let (user_id, token) = result.unwrap();
-    let cookie = set_session_cookie(state.cookie_secure, &token);
-    let mut response = (
-        StatusCode::OK,
-        Json(LoginResponse {
-            user_id: user_id.to_string(),
-        }),
-    )
-        .into_response();
-    response
-        .headers_mut()
-        .append(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
-    Ok(response)
 }
 
 async fn logout(

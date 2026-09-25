@@ -11,6 +11,7 @@ pub mod import;
 pub mod invitations;
 pub mod legal;
 pub mod lookup;
+pub mod mfa;
 pub mod notifications;
 pub mod project_documents;
 pub mod projects;

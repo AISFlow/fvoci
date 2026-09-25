@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
@@ -11,14 +11,13 @@ use uuid::Uuid;
 
 use crate::api::dto::{
     InvitationAcceptBody, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
-    InvitationPublicResponse, LoginResponse,
+    InvitationPublicResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::auth::token::hash_token;
 use crate::db::invitations::InvitationDbError;
 use crate::db::workspace::WorkspaceRole;
 use crate::error::{AppError, ProblemCode};
-use crate::http::cookie::set_session_cookie;
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
@@ -204,20 +203,10 @@ async fn accept_invitation(
     .await
     .map_err(internal)?;
     match result {
-        Ok((user_id, session_token)) => {
-            let cookie = set_session_cookie(state.cookie_secure, &session_token);
-            let mut response = (
-                axum::http::StatusCode::OK,
-                Json(LoginResponse {
-                    user_id: user_id.to_string(),
-                }),
-            )
-                .into_response();
-            response
-                .headers_mut()
-                .append(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
-            Ok(response)
-        }
+        Ok(issued) => Ok(crate::http::routes::auth::issued_response(
+            state.cookie_secure,
+            issued,
+        )),
         Err(err) => Err(map_accept_error(err)),
     }
 }
