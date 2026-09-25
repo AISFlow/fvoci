@@ -1,4 +1,4 @@
-import { t } from "@fvoci/i18n";
+import { t, formatPersonName } from "@fvoci/i18n";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,8 @@ import {
   type TaskListItem,
 } from "./task-edit-payload";
 import { TASK_TYPES, TASK_TYPE_LABELS, isTaskType, type TaskType } from "./task-types";
+import type { MemberOutput } from "@/lib/contracts";
+import type { LabelItem } from "./queries";
 import "@/features/projects/projects.css";
 
 const NONE = "";
@@ -26,6 +28,8 @@ export function TaskDetailForm({
   task,
   statuses,
   parentItems,
+  members,
+  labels,
   readOnly,
   canEdit,
   pending,
@@ -36,6 +40,8 @@ export function TaskDetailForm({
   onPriorityChange,
   onHierarchySave,
   onDueDateBlur,
+  onAssigneesChange,
+  onLabelsChange,
   onArchiveToggle,
   onTrash,
   archivePending,
@@ -46,6 +52,8 @@ export function TaskDetailForm({
   task: TaskDetail;
   statuses: readonly WorkflowStatus[];
   parentItems: readonly Pick<TaskListItem, "id" | "type" | "number" | "title">[];
+  members: readonly MemberOutput[];
+  labels: readonly LabelItem[];
   readOnly: boolean;
   canEdit: boolean;
   pending?: boolean;
@@ -56,6 +64,8 @@ export function TaskDetailForm({
   onPriorityChange: (priority: string) => void | Promise<void>;
   onHierarchySave: (type: string, parentId: string | null) => void | Promise<void>;
   onDueDateBlur: (value: string) => void | Promise<void>;
+  onAssigneesChange: (assigneeIds: string[]) => void | Promise<void>;
+  onLabelsChange: (labelIds: string[]) => void | Promise<void>;
   onArchiveToggle: (archived: boolean) => void | Promise<void>;
   onTrash: () => void | Promise<void>;
   archivePending?: boolean;
@@ -65,6 +75,8 @@ export function TaskDetailForm({
   const archived = task.archivedAt !== null;
   const [draftType, setDraftType] = useState<TaskType>(isTaskType(task.type) ? task.type : "task");
   const [draftParentId, setDraftParentId] = useState<string | null>(task.parentId);
+  const [draftAssigneeIds, setDraftAssigneeIds] = useState<string[]>(() => [...task.assigneeIds]);
+  const [draftLabelIds, setDraftLabelIds] = useState<string[]>(() => [...task.labelIds]);
   const [hierarchyError, setHierarchyError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -266,18 +278,62 @@ export function TaskDetailForm({
             }}
           />
         </div>
-        <div className="task-form__field">
-          <Label>{t("task.assignee")}</Label>
-          <p className="task-home__note" data-testid="task-edit-assignee-disabled">
-            {t("task.field.notYetAvailable")}
-          </p>
-        </div>
-        <div className="task-form__field">
-          <Label>{t("task.filter.labelsShort")}</Label>
-          <p className="task-home__note" data-testid="task-edit-labels-disabled">
-            {t("task.field.notYetAvailable")}
-          </p>
-        </div>
+        <fieldset className="task-form__field" disabled={readOnly} data-testid="task-edit-assignees">
+          <legend>{t("task.assignee")}</legend>
+          <div className="task-form__checks">
+            {members.map((member) => {
+              const checked = draftAssigneeIds.includes(member.userId);
+              return (
+                <label key={member.userId} className="task-form__check">
+                  <input
+                    type="checkbox"
+                    data-testid={`task-edit-assignee-${member.userId}`}
+                    checked={checked}
+                    disabled={readOnly}
+                    onChange={() => {
+                      const next = checked
+                        ? draftAssigneeIds.filter((id) => id !== member.userId)
+                        : [...draftAssigneeIds, member.userId];
+                      setDraftAssigneeIds(next);
+                      void onAssigneesChange(next);
+                    }}
+                  />
+                  <span>{formatPersonName(member)}</span>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+        <fieldset className="task-form__field" disabled={readOnly} data-testid="task-edit-labels">
+          <legend>{t("task.filter.labelsShort")}</legend>
+          <div className="task-form__checks">
+            {labels.length === 0 ? (
+              <p className="task-home__note">{t("task.activity.value.none")}</p>
+            ) : (
+              labels.map((label) => {
+                const checked = draftLabelIds.includes(label.id);
+                return (
+                  <label key={label.id} className="task-form__check">
+                    <input
+                      type="checkbox"
+                      data-testid={`task-edit-label-${label.id}`}
+                      checked={checked}
+                      disabled={readOnly}
+                      onChange={() => {
+                        const next = checked
+                          ? draftLabelIds.filter((id) => id !== label.id)
+                          : [...draftLabelIds, label.id];
+                        setDraftLabelIds(next);
+                        void onLabelsChange(next);
+                      }}
+                    />
+                    <span>{label.name}</span>
+                  </label>
+                );
+              })
+            )}
+          </div>
+        </fieldset>
         <div className="task-form__field">
           <Label>{t("project.milestones")}</Label>
           <p className="task-home__note" data-testid="task-edit-milestone-disabled">

@@ -4,7 +4,7 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch as patch_method, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
@@ -12,11 +12,14 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateTaskBody, MoveTaskBody, OkResponse, PatchTaskBody, TaskChildOutput,
-    TaskChildProgressOutput, TaskListItemOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
-    TaskParentOutput, TaskStatusCountOutput,
+    CreateLabelBody, CreateTaskBody, LabelListResponse, LabelOutput, MoveTaskBody, OkResponse,
+    PatchLabelBody, PatchTaskBody, TaskChildOutput, TaskChildProgressOutput, TaskListItemOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TaskStatusCountOutput,
 };
 use crate::auth::session::SessionUser;
+use crate::db::labels::{
+    create_label, list_project_labels, list_workspace_labels, purge_label, update_label,
+};
 use crate::db::projects::ProjectDbError;
 use crate::db::tasks::{
     create_task, get_task, list_project_tasks, move_task, patch_task_meta, restore_task,
@@ -65,6 +68,18 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/restore",
             post(restore_task_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/labels",
+            get(list_workspace_labels_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels",
+            get(list_project_labels_route).post(create_label_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels/{label_id}",
+            patch_method(update_label_route).delete(delete_label_route),
         )
 }
 
@@ -156,8 +171,8 @@ async fn get_task_route(
             meta: task_meta_output(task.meta),
             content_json: task.content_json,
             can_edit: task.can_edit,
-            assignee_ids: Vec::new(),
-            label_ids: Vec::new(),
+            assignee_ids: uuid_strings(&task.assignee_ids),
+            label_ids: uuid_strings(&task.label_ids),
             dependencies: Vec::new(),
             child_progress: task.child_progress.map(|progress| TaskChildProgressOutput {
                 done: progress.done,
@@ -195,7 +210,7 @@ async fn patch_task_route(
 ) -> Result<Json<TaskMetaOutput>, TaskApiError> {
     let Json(body) = body.map_err(AppError::from)?;
     check_origin(&headers, &state.public_origin)?;
-    if body.assignee_ids.is_some() || body.label_ids.is_some() || body.milestone_id.is_some() {
+    if body.milestone_id.is_some() {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
     let input = parse_patch_body(&body)?;
@@ -339,6 +354,168 @@ async fn restore_task_route(
     }
 }
 
+async fn list_workspace_labels_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<LabelListResponse>, TaskApiError> {
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result =
+        list_workspace_labels(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
+            .await
+            .map_err(internal)?;
+    match result {
+        Ok(labels) => Ok(Json(LabelListResponse {
+            items: labels.into_iter().map(label_output).collect(),
+        })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn list_project_labels_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<LabelListResponse>, TaskApiError> {
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = list_project_labels(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(labels) => Ok(Json(LabelListResponse {
+            items: labels.into_iter().map(label_output).collect(),
+        })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn create_label_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<CreateLabelBody>, JsonRejection>,
+) -> Result<Response, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = create_label(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        &body.name,
+        &body.color,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(label) => Ok((StatusCode::CREATED, Json(label_output(label))).into_response()),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn update_label_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, label_id)): Path<(Uuid, Uuid, Uuid)>,
+    body: Result<Json<PatchLabelBody>, JsonRejection>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = update_label(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        label_id,
+        actor_user_id,
+        session_id,
+        body.name.as_deref(),
+        body.color.as_deref(),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn delete_label_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, label_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = purge_label(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        label_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
 fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiError> {
     if body.expected_dates.is_none()
         && body.task_type.is_none()
@@ -352,6 +529,13 @@ fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiE
         && body.parent_id.is_none()
         && body.recurrence.is_none()
         && body.archived.is_none()
+        && body.assignee_ids.is_none()
+        && body.label_ids.is_none()
+    {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    if body.assignee_ids.as_ref().is_some_and(|ids| ids.len() > 50)
+        || body.label_ids.as_ref().is_some_and(|ids| ids.len() > 50)
     {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
@@ -412,6 +596,8 @@ fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiE
             Some(Some(value)) => FieldUpdate::Set(value.clone()),
         },
         archived: body.archived,
+        assignee_ids: body.assignee_ids.clone(),
+        label_ids: body.label_ids.clone(),
     })
 }
 
@@ -512,9 +698,9 @@ async fn list_tasks(
                 .items
                 .into_iter()
                 .map(|task| TaskListItemOutput {
-                    meta: task_meta_output(task),
-                    assignee_ids: Vec::new(),
-                    label_ids: Vec::new(),
+                    meta: task_meta_output(task.meta),
+                    assignee_ids: uuid_strings(&task.assignee_ids),
+                    label_ids: uuid_strings(&task.label_ids),
                 })
                 .collect(),
             next_cursor: page.next_cursor,
@@ -569,6 +755,19 @@ fn task_meta_output(task: crate::db::tasks::TaskMetaRow) -> TaskMetaOutput {
         created_by: task.created_by.to_string(),
         created_at: task.created_at,
         updated_at: task.updated_at,
+    }
+}
+
+fn uuid_strings(ids: &[Uuid]) -> Vec<String> {
+    ids.iter().map(ToString::to_string).collect()
+}
+
+fn label_output(label: crate::db::labels::LabelRow) -> LabelOutput {
+    LabelOutput {
+        id: label.id.to_string(),
+        project_id: label.project_id.to_string(),
+        name: label.name,
+        color: label.color,
     }
 }
 

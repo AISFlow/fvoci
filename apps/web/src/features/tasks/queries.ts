@@ -7,6 +7,8 @@ export type TaskListItem = components["schemas"]["TaskListItemOutput"];
 export type TaskDetail = components["schemas"]["TaskOutput"];
 export type CreateTaskBody = components["schemas"]["CreateTaskBody"];
 export type TaskListResponse = components["schemas"]["TaskListResponse"];
+export type LabelItem = components["schemas"]["LabelOutput"];
+export type LabelListResponse = components["schemas"]["LabelListResponse"];
 
 export function taskListQuery(workspaceId: string, projectId: string) {
   return infiniteQueryOptions({
@@ -37,6 +39,20 @@ export function taskQuery(workspaceId: string, taskId: string) {
         }),
       ),
     enabled: Boolean(workspaceId) && Boolean(taskId),
+    retry: false,
+  });
+}
+
+export function projectLabelsQuery(workspaceId: string, projectId: string) {
+  return queryOptions({
+    queryKey: ["labels", workspaceId, projectId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels", {
+          params: { path: { workspace_id: workspaceId, project_id: projectId } },
+        }),
+      ),
+    enabled: Boolean(workspaceId) && Boolean(projectId),
     retry: false,
   });
 }

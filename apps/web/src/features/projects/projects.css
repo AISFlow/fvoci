@@ -157,6 +157,22 @@ dialog.project-dialog::backdrop {
   font-size: var(--text-ui-size);
 }
 
+.task-form__checks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.task-form__check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.task-form__check input {
+  margin: 0;
+}
+
 .project-form textarea {
   min-height: 4.5rem;
   resize: vertical;

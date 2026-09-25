@@ -34,6 +34,9 @@ pub enum ProjectDbError {
     WipLimitExceeded,
     InvalidMoveAnchors,
     WorkflowHasNoStatuses,
+    AssigneeIsNotAMember,
+    LabelNotFound,
+    InvalidInput,
 }
 
 #[derive(Debug, Clone)]
