@@ -33,10 +33,12 @@
 //! Reserved for a future room-manager connection lifetime lock:
 //! `pg_advisory_lock(1907007, lockKeyFromUuid(documentId))` — not acquired here.
 
+use std::time::Instant;
+
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::collab::derived_body::PreparedDerivedBody;
@@ -48,6 +50,15 @@ use crate::db::documents::{
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 
 pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollabDbStageTimings {
+    pub pool_wait_us: u64,
+    pub advisory_lock_us: u64,
+    pub row_lock_us: u64,
+    pub stmt_us: u64,
+    pub commit_us: u64,
+}
 
 pub const COLLAB_INIT_LOCK_NAMESPACE: i32 = 1_907_004;
 /// Reserved for a future room-manager session lock held for the connection lifetime.
@@ -734,6 +745,62 @@ pub async fn append_collab_update(
     pool: &PgPool,
     input: AppendCollabInput<'_>,
 ) -> Result<Result<AppendCollabResult, CollabDbError>, sqlx::Error> {
+    append_collab_update_timed(pool, input)
+        .await
+        .map(|(result, _)| result)
+}
+
+/// Same as [`append_collab_update`] with per-phase DB timings for `collab.stage` tracing.
+pub async fn append_collab_update_timed(
+    pool: &PgPool,
+    input: AppendCollabInput<'_>,
+) -> Result<
+    (
+        Result<AppendCollabResult, CollabDbError>,
+        CollabDbStageTimings,
+    ),
+    sqlx::Error,
+> {
+    let mut timings = CollabDbStageTimings::default();
+    if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
+        return Ok((Err(CollabDbError::PayloadTooLarge), timings));
+    }
+    let pool_started = Instant::now();
+    let tx = pool.begin().await?;
+    timings.pool_wait_us = pool_started.elapsed().as_micros() as u64;
+    append_collab_update_in_tx(tx, input, timings).await
+}
+
+/// Append on a room's dedicated session connection (no pool acquire).
+pub async fn append_collab_update_on_conn_timed(
+    conn: &mut PgConnection,
+    input: AppendCollabInput<'_>,
+) -> Result<
+    (
+        Result<AppendCollabResult, CollabDbError>,
+        CollabDbStageTimings,
+    ),
+    sqlx::Error,
+> {
+    let timings = CollabDbStageTimings::default();
+    if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
+        return Ok((Err(CollabDbError::PayloadTooLarge), timings));
+    }
+    let tx = conn.begin().await?;
+    append_collab_update_in_tx(tx, input, timings).await
+}
+
+async fn append_collab_update_in_tx(
+    mut tx: Transaction<'_, Postgres>,
+    input: AppendCollabInput<'_>,
+    mut timings: CollabDbStageTimings,
+) -> Result<
+    (
+        Result<AppendCollabResult, CollabDbError>,
+        CollabDbStageTimings,
+    ),
+    sqlx::Error,
+> {
     let AppendCollabInput {
         workspace_id,
         actor_user_id,
@@ -745,42 +812,61 @@ pub async fn append_collab_update(
         payload,
         client_ip,
     } = input;
-    if payload.is_empty() || payload.len() > MAX_COLLAB_UPDATE_BYTES {
-        return Ok(Err(CollabDbError::PayloadTooLarge));
-    }
-
-    let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let content = match authorize_wiki_collab_write(
-        &mut tx,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-    )
-    .await?
-    {
-        Ok(content) => content,
-        Err(err) => {
-            tx.rollback().await?;
-            return Ok(Err(err));
-        }
+    let advisory_started = Instant::now();
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    timings.advisory_lock_us = advisory_started.elapsed().as_micros() as u64;
+    let row_started = Instant::now();
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok((Err(CollabDbError::Forbidden), timings));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok((Err(CollabDbError::NotFound), timings));
+    }
+    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    if !wiki_can_edit(role) {
+        tx.rollback().await?;
+        return Ok((Err(CollabDbError::Forbidden), timings));
+    }
+    let doc = lock_wiki_document_for_update(&mut tx, workspace_id, document_id).await?;
+    let Some((project_id, status, deleted_at)) = doc else {
+        tx.rollback().await?;
+        return Ok((Err(CollabDbError::NotFound), timings));
     };
+    if deleted_at.is_some() || project_id.is_some() {
+        tx.rollback().await?;
+        return Ok((Err(CollabDbError::NotFound), timings));
+    }
+    if status == "archived" {
+        tx.rollback().await?;
+        return Ok((Err(CollabDbError::Forbidden), timings));
+    }
+    let content: (Value,) = sqlx::query_as(
+        "SELECT content_json FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&mut *tx)
+    .await?;
     match ensure_collab_state_row(&mut tx, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
-            return Ok(Err(err));
+            return Ok((Err(err), timings));
         }
     }
     let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    timings.row_lock_us = row_started.elapsed().as_micros() as u64;
+    let stmt_started = Instant::now();
     let Some(state) = state else {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
+        return Ok((Err(CollabDbError::NotFound), timings));
     };
     if state.2 != writer_generation {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleWriter));
+        return Ok((Err(CollabDbError::StaleWriter), timings));
     }
 
     let incoming_len = payload.len() as i64;
@@ -802,15 +888,18 @@ pub async fn append_collab_update(
             && existing_digest.as_slice() == incoming_digest.as_slice()
             && existing_actor == actor_user_id
         {
+            let commit_started = Instant::now();
             tx.commit().await?;
-            return Ok(Ok(AppendCollabResult::DuplicateAck { seq }));
+            timings.commit_us = commit_started.elapsed().as_micros() as u64;
+            timings.stmt_us = stmt_started.elapsed().as_micros() as u64 - timings.commit_us;
+            return Ok((Ok(AppendCollabResult::DuplicateAck { seq }), timings));
         }
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::OpIdConflict));
+        return Ok((Err(CollabDbError::OpIdConflict), timings));
     }
     if state.4 != expected_tail_seq {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleCutoff));
+        return Ok((Err(CollabDbError::StaleCutoff), timings));
     }
 
     match tail_budget_allows_append(
@@ -826,7 +915,7 @@ pub async fn append_collab_update(
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
-            return Ok(Err(err));
+            return Ok((Err(err), timings));
         }
     }
     let next_seq: Option<(i64,)> = sqlx::query_as(
@@ -846,7 +935,7 @@ pub async fn append_collab_update(
     .await?;
     let Some((seq,)) = next_seq else {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::StaleWriter));
+        return Ok((Err(CollabDbError::StaleWriter), timings));
     };
 
     sqlx::query(
@@ -895,8 +984,11 @@ pub async fn append_collab_update(
     )
     .await?;
 
+    timings.stmt_us = stmt_started.elapsed().as_micros() as u64;
+    let commit_started = Instant::now();
     tx.commit().await?;
-    Ok(Ok(AppendCollabResult::Committed { seq }))
+    timings.commit_us = commit_started.elapsed().as_micros() as u64;
+    Ok((Ok(AppendCollabResult::Committed { seq }), timings))
 }
 
 pub async fn lookup_collab_operation(
@@ -1189,37 +1281,101 @@ pub async fn resolve_collab_admission(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    resolve_collab_admission_timed(pool, workspace_id, actor_user_id, session_id, document_id)
+        .await
+        .map(|(result, _)| result)
+}
+
+/// Same as [`resolve_collab_admission`] with per-phase DB timings for `collab.stage` tracing.
+pub async fn resolve_collab_admission_timed(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<(Result<CollabAdmission, CollabDbError>, CollabDbStageTimings), sqlx::Error> {
+    let mut timings = CollabDbStageTimings::default();
+    let pool_started = Instant::now();
+    let tx = pool.begin().await?;
+    timings.pool_wait_us = pool_started.elapsed().as_micros() as u64;
+    resolve_collab_admission_tx(
+        tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        timings,
+    )
+    .await
+}
+
+/// Admission check on a room's dedicated session connection (no pool acquire).
+pub async fn resolve_collab_admission_on_conn_timed(
+    conn: &mut PgConnection,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<(Result<CollabAdmission, CollabDbError>, CollabDbStageTimings), sqlx::Error> {
+    let tx = conn.begin().await?;
+    resolve_collab_admission_tx(
+        tx,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+        CollabDbStageTimings::default(),
+    )
+    .await
+}
+
+async fn resolve_collab_admission_tx(
+    mut tx: Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    mut timings: CollabDbStageTimings,
+) -> Result<(Result<CollabAdmission, CollabDbError>, CollabDbStageTimings), sqlx::Error> {
     set_tenant(&mut tx, workspace_id).await?;
+    let advisory_started = Instant::now();
     lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    timings.advisory_lock_us = advisory_started.elapsed().as_micros() as u64;
+    let row_started = Instant::now();
     if !recheck_session(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::Forbidden));
+        return Ok((Err(CollabDbError::Forbidden), timings));
     }
     if !workspace_is_live(&mut tx, workspace_id).await? {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
+        return Ok((Err(CollabDbError::NotFound), timings));
     }
     let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
     if !wiki_can_edit(role) {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
+        return Ok((Err(CollabDbError::NotFound), timings));
     }
     let doc = lock_wiki_document_for_update(&mut tx, workspace_id, document_id).await?;
+    timings.row_lock_us = row_started.elapsed().as_micros() as u64;
     let Some((project_id, status, deleted_at)) = doc else {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
+        return Ok((Err(CollabDbError::NotFound), timings));
     };
     if deleted_at.is_some() || project_id.is_some() {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
+        return Ok((Err(CollabDbError::NotFound), timings));
     }
     let archived = status == "archived";
+    let commit_started = Instant::now();
     tx.commit().await?;
-    Ok(Ok(CollabAdmission {
-        read_only: archived,
-        archived,
-    }))
+    timings.commit_us = commit_started.elapsed().as_micros() as u64;
+    Ok((
+        Ok(CollabAdmission {
+            read_only: archived,
+            archived,
+        }),
+        timings,
+    ))
 }
 
 /// Read-only collab load for sync without claiming writer generation.

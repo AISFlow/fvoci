@@ -31,7 +31,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-100}"
+PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-150}"
 
 cid="$(docker run -d --rm \
   --name "$CONTAINER" \

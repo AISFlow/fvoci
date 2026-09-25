@@ -28,16 +28,17 @@ use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
 use crate::collab::validation::{
-    validate_recovery_bundle, validate_snapshot_only, BundleValidation,
+    classify_admission_load, classify_admission_snapshot, validate_recovery_bundle,
+    validate_snapshot_only, BundleValidation, ValidateStageTimings,
 };
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::verify_collab_operation;
 use crate::db::collab::{
-    append_collab_update, claim_writer_and_load, compact_collab_snapshot, load_collab_readonly,
-    project_derived_body, resolve_collab_admission, AppendCollabInput, AppendCollabResult,
-    CollabDbError, CompactCollabInput, ProjectDerivedBodyInput, ProjectDerivedBodyResult,
-    VerifyCollabInput,
+    append_collab_update, append_collab_update_on_conn_timed, claim_writer_and_load,
+    compact_collab_snapshot, load_collab_readonly, project_derived_body, resolve_collab_admission,
+    AppendCollabInput, AppendCollabResult, CollabDbError, CompactCollabInput,
+    ProjectDerivedBodyInput, ProjectDerivedBodyResult, VerifyCollabInput,
 };
 use crate::db::collab_delivery::{check_delivery_admission, DeliveryAdmission};
 use crate::db::identity::LiveSession;
@@ -1904,18 +1905,15 @@ impl RoomActor {
                 }
 
                 let validate_started = std::time::Instant::now();
-                let validation = validate_recovery_bundle(
-                    self.engine.engine_bin().to_path_buf(),
-                    self.engine.limits(),
-                    self.committed.snapshot.clone(),
-                    self.committed.tail_payloads.clone(),
-                    payload.clone(),
-                )
-                .await;
+                let (validation, validate_tx) = self.validate_candidate_on_primary(&payload).await;
                 tracing::info!(
                     target: "collab.stage",
                     stage = "validate",
                     elapsed_us = validate_started.elapsed().as_micros() as u64,
+                    slot_wait_us = validate_tx.slot_wait_us,
+                    spawn_us = validate_tx.spawn_us,
+                    load_us = validate_tx.load_us,
+                    snapshot_us = validate_tx.snapshot_us,
                     document_id = %self.document_id,
                 );
                 if validation == BundleValidation::CapacityPressure {
@@ -1930,7 +1928,6 @@ impl RoomActor {
                     self.reject_candidate(conn_id, routing_key).await;
                     return;
                 }
-
                 #[cfg(feature = "db-tests")]
                 pause_for_append_revoke_barrier(self.document_id).await;
 
@@ -1944,27 +1941,11 @@ impl RoomActor {
                     .get(&conn_id)
                     .map(|c| (c.session.session_id, c.session.user_id))
                     .unwrap_or_default();
-                let auth_started = std::time::Instant::now();
-                match self
-                    .locking_session_auth_by_ids(actor_user_id, session_id, read_only)
-                    .await
-                {
-                    LockingAuth::Allow => {}
-                    LockingAuth::Deny => {
-                        self.reject_candidate(conn_id, routing_key).await;
-                        return;
-                    }
-                    LockingAuth::DbError => {
-                        self.reject_candidate_engine_unavailable(conn_id).await;
-                        return;
-                    }
-                }
-                tracing::info!(
-                    target: "collab.stage",
-                    stage = "auth_tx",
-                    elapsed_us = auth_started.elapsed().as_micros() as u64,
-                    document_id = %self.document_id,
-                );
+                let room_conn = self
+                    .room_guard
+                    .as_mut()
+                    .expect("live room holds session connection")
+                    .connection_mut();
 
                 #[cfg(feature = "db-tests")]
                 pause_for_append_in_tx_reject_barrier(self.document_id).await;
@@ -1973,8 +1954,8 @@ impl RoomActor {
                 let expected_tail = self.committed.tail_seq;
                 let digest = payload_digest(&payload);
                 let append_started = std::time::Instant::now();
-                let append = append_collab_update(
-                    &self.pool,
+                let timed_append = append_collab_update_on_conn_timed(
+                    room_conn,
                     AppendCollabInput {
                         workspace_id: self.workspace_id,
                         actor_user_id,
@@ -1988,21 +1969,34 @@ impl RoomActor {
                     },
                 )
                 .await;
+                let append_tx = timed_append
+                    .as_ref()
+                    .ok()
+                    .map(|(_, timings)| *timings)
+                    .unwrap_or_default();
                 tracing::info!(
                     target: "collab.stage",
                     stage = "append_tx",
                     elapsed_us = append_started.elapsed().as_micros() as u64,
+                    pool_wait_us = append_tx.pool_wait_us,
+                    advisory_lock_us = append_tx.advisory_lock_us,
+                    row_lock_us = append_tx.row_lock_us,
+                    stmt_us = append_tx.stmt_us,
+                    commit_us = append_tx.commit_us,
                     document_id = %self.document_id,
                 );
+                let append = timed_append.map(|(result, _)| result);
 
                 let committed = match append {
                     Ok(Ok(result)) => result,
                     Ok(Err(CollabDbError::StaleWriter)) => {
+                        let _ = self.reload_primary_from_committed().await;
                         self.fatal_writer_stale().await;
                         self.reject_candidate(conn_id, routing_key).await;
                         return;
                     }
                     Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
+                        let _ = self.reload_primary_from_committed().await;
                         self.reject_candidate(conn_id, routing_key).await;
                         return;
                     }
@@ -2020,6 +2014,7 @@ impl RoomActor {
                         {
                             Some(result) => result,
                             None => {
+                                let _ = self.reload_primary_from_committed().await;
                                 self.reject_candidate(conn_id, routing_key).await;
                                 return;
                             }
@@ -2031,6 +2026,7 @@ impl RoomActor {
                     AppendCollabResult::Committed { seq }
                     | AppendCollabResult::DuplicateAck { seq } => {
                         if seq != expected_tail + 1 {
+                            let _ = self.reload_primary_from_committed().await;
                             self.fatal_room_divergence(actor_user_id, session_id).await;
                             self.reject_candidate(conn_id, routing_key).await;
                             return;
@@ -2270,6 +2266,83 @@ impl RoomActor {
             self.reload_primary_from_committed().await?;
         }
         Ok(())
+    }
+
+    /// Pre-commit admission on the room primary (no ephemeral validator spawn).
+    async fn validate_candidate_on_primary(
+        &mut self,
+        payload: &[u8],
+    ) -> (BundleValidation, ValidateStageTimings) {
+        if payload.is_empty() {
+            return (BundleValidation::Rejected, ValidateStageTimings::default());
+        }
+        if !self.engine.engine_bin().is_file() {
+            return (
+                BundleValidation::EngineUnavailable,
+                ValidateStageTimings::default(),
+            );
+        }
+        let apply_started = Instant::now();
+        let apply_report = match self
+            .engine
+            .call(Request::Apply {
+                update_b64: payload.to_vec(),
+                encoding: 1,
+            })
+            .await
+        {
+            Ok(report) => report,
+            Err(BridgeError::Dead) => {
+                return (
+                    BundleValidation::EngineUnavailable,
+                    ValidateStageTimings::default(),
+                );
+            }
+        };
+        let load_us = apply_started.elapsed().as_micros() as u64;
+        if let Err(outcome) = classify_admission_load(&apply_report.outcome) {
+            let _ = self.reload_primary_from_committed().await;
+            return (
+                outcome,
+                ValidateStageTimings {
+                    load_us,
+                    ..ValidateStageTimings::default()
+                },
+            );
+        }
+        let snapshot_started = Instant::now();
+        let snap_report = match self.engine.call(Request::Snapshot).await {
+            Ok(report) => report,
+            Err(BridgeError::Dead) => {
+                let _ = self.reload_primary_from_committed().await;
+                return (
+                    BundleValidation::EngineUnavailable,
+                    ValidateStageTimings {
+                        load_us,
+                        ..ValidateStageTimings::default()
+                    },
+                );
+            }
+        };
+        let snapshot_us = snapshot_started.elapsed().as_micros() as u64;
+        let outcome = match &snap_report.outcome {
+            EngineStatus::Ok {
+                update_b64: Some(bytes_b64),
+                ..
+            } => classify_admission_snapshot(snap_report.outcome.clone(), b64::decode(bytes_b64)),
+            other => classify_admission_snapshot(other.clone(), Ok(Vec::new())),
+        };
+        if outcome != BundleValidation::Ok {
+            let _ = self.reload_primary_from_committed().await;
+        }
+        (
+            outcome,
+            ValidateStageTimings {
+                load_us,
+                snapshot_us,
+                ..ValidateStageTimings::default()
+            },
+        )
     }
 
     async fn maybe_project_derived_body(

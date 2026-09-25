@@ -37,7 +37,7 @@ pub use outcome::{EngineReport, EngineStatus, LimitKind, UnsupportedReason, Work
 pub use process::{
     apply_rlimits_now, max_child_concurrency, max_validator_child_concurrency,
     raise_nofile_to_hard_limit, set_max_child_concurrency, set_max_validator_child_concurrency,
-    sum_live_children_rss_bytes, ChildSlotKind, EngineSession, SpawnRequest,
+    sum_live_children_rss_bytes, ChildSlotKind, EngineSession, SpawnPhaseTimings, SpawnRequest,
 };
 #[cfg(feature = "test-hang")]
 pub use process::{take_last_spawn, SpawnTrace};

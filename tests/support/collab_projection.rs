@@ -451,7 +451,13 @@ pub async fn setup_wiki_doc(harness: &TestDb) -> WikiDocFixture {
 }
 
 pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> (AppState, Arc<CollabHub>) {
-    collab_app_state_with_pool(app_url, cfg, 10).await
+    let max_rooms = cfg.max_rooms;
+    collab_app_state_with_pool(
+        app_url,
+        cfg,
+        fvoci_server::collab::config::derive_app_pool_max_connections(max_rooms),
+    )
+    .await
 }
 
 pub async fn collab_app_state_with_pool(

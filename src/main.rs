@@ -91,8 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env()?;
-
-    let pool = pool::connect_app(&config.app_database_url).await?;
+    let app_pool_max = CollabConfig::from_env()
+        .map(|cfg| fvoci_server::collab::config::derive_app_pool_max_connections(cfg.max_rooms))
+        .unwrap_or(fvoci_server::collab::config::APP_POOL_MAX_CONNECTIONS);
+    let pool = pool::connect_app_with_max(&config.app_database_url, app_pool_max).await?;
     if let Err(message) = migrate::assert_app_role(&pool).await {
         pool.close().await;
         return Err(message.into());

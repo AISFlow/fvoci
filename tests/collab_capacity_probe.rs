@@ -10,10 +10,13 @@ use collab_engine::process::{
     max_child_concurrency, max_validator_child_concurrency, raise_nofile_to_hard_limit,
     sum_live_children_rss_bytes,
 };
+use futures_util::future::join_all;
 use futures_util::{SinkExt, StreamExt};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::new_token;
-use fvoci_server::collab::config::derive_max_child_concurrency;
+use fvoci_server::collab::config::{
+    collab_pg_connections_required, derive_app_pool_max_connections, derive_max_child_concurrency,
+};
 use fvoci_server::collab::hub::CollabHub;
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, WireFrame,
@@ -95,8 +98,8 @@ struct ProbeDoc {
 
 struct RoomPeers {
     routing_key: String,
-    writer: Ws,
-    reader: Ws,
+    writer: Arc<tokio::sync::Mutex<Ws>>,
+    reader: Arc<tokio::sync::Mutex<Ws>>,
 }
 
 fn probe_config(max_rooms: usize, peers: usize) -> fvoci_server::collab::config::CollabConfig {
@@ -250,6 +253,21 @@ async fn writer_alive(ws: &mut Ws, routing_key: &str, marker: &[u8], within: Dur
         return false;
     }
     wait_for_sync_applied(ws, within).await
+}
+
+async fn drain_ws_locked(ws: &Arc<tokio::sync::Mutex<Ws>>, within: Duration) {
+    let mut guard = ws.lock().await;
+    drain_ws(&mut guard, within).await;
+}
+
+async fn writer_alive_locked(
+    ws: &Arc<tokio::sync::Mutex<Ws>>,
+    routing_key: &str,
+    marker: &[u8],
+    within: Duration,
+) -> bool {
+    let mut guard = ws.lock().await;
+    writer_alive(&mut guard, routing_key, marker, within).await
 }
 
 fn probe_open_failure_diag(hub: &Arc<CollabHub>, room_index: usize, reason: &str) {
@@ -413,8 +431,8 @@ async fn open_room_peers(
     });
     RoomPeers {
         routing_key,
-        writer,
-        reader,
+        writer: Arc::new(tokio::sync::Mutex::new(writer)),
+        reader: Arc::new(tokio::sync::Mutex::new(reader)),
     }
 }
 
@@ -427,13 +445,17 @@ fn marker_edit(tick: u64) -> Vec<u8> {
 }
 
 struct SampleEvent {
-    room_index: usize,
     sent_at: Instant,
 }
 
+const LATENCY_WAIT: Duration = Duration::from_secs(5);
+
 fn hostile_sample_indices(max_rooms: usize) -> Vec<usize> {
     if max_rooms >= 64 {
-        return vec![25, 50, 100, 150, 199];
+        return [10, 20, 30, 45, 60]
+            .into_iter()
+            .map(|i| i.min(max_rooms - 1))
+            .collect();
     }
     let mut indices = Vec::new();
     for idx in 1..max_rooms {
@@ -464,14 +486,17 @@ async fn collab_capacity_probe() {
     let mut run = TestRun::new(harness);
     let cfg = probe_config(max_rooms, peers);
     let app_url = run.harness.app_url.clone();
+    let db_pool_size = derive_app_pool_max_connections(max_rooms);
+    let pg_required = collab_pg_connections_required(max_rooms) as u32 + 8;
     let pg_max = std::env::var("FVOCI_TEST_PG_MAX_CONNECTIONS")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(120);
-    let db_pool_size = pg_max
-        .saturating_sub(fvoci_server::collab::config::PG_CONNECTION_RESERVE)
-        .saturating_sub(max_rooms as u32)
-        .clamp(16, 48);
+        .unwrap_or(pg_required.max(150));
+    assert!(
+        pg_max >= collab_pg_connections_required(max_rooms) as u32,
+        "FVOCI_TEST_PG_MAX_CONNECTIONS={pg_max} below collab requirement {}",
+        collab_pg_connections_required(max_rooms)
+    );
     let addr = run
         .spawn_router_with_pool(&app_url, cfg.clone(), db_pool_size)
         .await;
@@ -498,10 +523,9 @@ async fn collab_capacity_probe() {
     );
 
     let open_started = Instant::now();
-    let writers: Arc<tokio::sync::Mutex<Vec<(String, Ws)>>> =
-        Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(max_rooms)));
-    let readers: Arc<tokio::sync::Mutex<Vec<Ws>>> =
-        Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(max_rooms)));
+    let mut writer_rooms: Vec<(String, Arc<tokio::sync::Mutex<Ws>>)> =
+        Vec::with_capacity(max_rooms);
+    let mut reader_rooms: Vec<Arc<tokio::sync::Mutex<Ws>>> = Vec::with_capacity(max_rooms);
     let open_slots = Arc::new(tokio::sync::Semaphore::new(open_concurrency));
     for (index, doc) in docs[..max_rooms].iter().enumerate() {
         let permit = open_slots
@@ -519,11 +543,8 @@ async fn collab_capacity_probe() {
         })
         .await
         .expect("open room task");
-        writers
-            .lock()
-            .await
-            .push((room.routing_key.clone(), room.writer));
-        readers.lock().await.push(room.reader);
+        writer_rooms.push((room.routing_key.clone(), room.writer));
+        reader_rooms.push(room.reader);
         if (index + 1) % 25 == 0 || index + 1 == max_rooms {
             eprintln!(
                 "probe: opened {}/{} rooms (child_rss={})",
@@ -541,15 +562,11 @@ async fn collab_capacity_probe() {
         sum_live_children_rss_bytes()
     );
 
-    {
-        let mut w = writers.lock().await;
-        let mut r = readers.lock().await;
-        for (_, ws) in w.iter_mut() {
-            drain_ws(ws, Duration::from_millis(200)).await;
-        }
-        for ws in r.iter_mut() {
-            drain_ws(ws, Duration::from_millis(200)).await;
-        }
+    for (_, ws) in &writer_rooms {
+        drain_ws_locked(ws, Duration::from_millis(200)).await;
+    }
+    for ws in &reader_rooms {
+        drain_ws_locked(ws, Duration::from_millis(200)).await;
     }
 
     let overflow = &docs[max_rooms];
@@ -562,24 +579,26 @@ async fn collab_capacity_probe() {
     );
 
     let hostile = invalid_utf8_update_candidate();
-    let latency_sample_indices: Vec<usize> = [0, 10, 25, 50, 75, 100, 125, 150, 175, 199]
-        .into_iter()
-        .map(|i| i.min(max_rooms - 1))
-        .collect();
-    let (sample_tx, mut sample_rx) = tokio::sync::mpsc::unbounded_channel::<SampleEvent>();
-    let readers_for_sampler = readers.clone();
-    let sampler = tokio::spawn(async move {
-        let mut latencies_ms = Vec::new();
-        while let Some(event) = sample_rx.recv().await {
-            let mut guard = readers_for_sampler.lock().await;
-            let reader = &mut guard[event.room_index];
-            drain_ws(reader, Duration::from_millis(50)).await;
-            if wait_for_sync_update(reader, Duration::from_millis(800)).await {
-                latencies_ms.push(event.sent_at.elapsed().as_millis() as u64);
+    let mut latency_txs = Vec::with_capacity(max_rooms);
+    let mut latency_joins = Vec::with_capacity(max_rooms);
+    let latency_readers = reader_rooms.clone();
+    for reader in latency_readers {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SampleEvent>();
+        latency_txs.push(tx);
+        latency_joins.push(tokio::spawn(async move {
+            let mut latencies_ms = Vec::new();
+            let mut missed = 0usize;
+            while let Some(event) = rx.recv().await {
+                let mut guard = reader.lock().await;
+                if wait_for_sync_update(&mut guard, LATENCY_WAIT).await {
+                    latencies_ms.push(event.sent_at.elapsed().as_millis() as u64);
+                } else {
+                    missed += 1;
+                }
             }
-        }
-        latencies_ms
-    });
+            (latencies_ms, missed)
+        }));
+    }
 
     let load_started = Instant::now();
     let mut edits = 0u64;
@@ -588,9 +607,14 @@ async fn collab_capacity_probe() {
     while load_started.elapsed() < duration {
         let tick_started = Instant::now();
         let edit = marker_edit(tick);
-        let sample_room = latency_sample_indices[(tick as usize) % latency_sample_indices.len()];
-        let mut guard = writers.lock().await;
-        for (index, (routing_key, writer)) in guard.iter_mut().enumerate() {
+        join_all(
+            reader_rooms
+                .iter()
+                .map(|reader| drain_ws_locked(reader, Duration::from_millis(10))),
+        )
+        .await;
+        for (index, (routing_key, writer)) in writer_rooms.iter().enumerate() {
+            let mut writer = writer.lock().await;
             let sent_at = Instant::now();
             if writer
                 .send(Message::Binary(
@@ -599,7 +623,7 @@ async fn collab_capacity_probe() {
                 .await
                 .is_err()
             {
-                if let Some(code) = read_close_code(writer, Duration::from_millis(200)).await {
+                if let Some(code) = read_close_code(&mut writer, Duration::from_millis(200)).await {
                     if code == 1011 {
                         closes_1011 += 1;
                     }
@@ -607,40 +631,39 @@ async fn collab_capacity_probe() {
                 eprintln!("probe: writer send failed room_index={index}");
                 continue;
             }
-            if index == sample_room {
-                let _ = sample_tx.send(SampleEvent {
-                    room_index: index,
-                    sent_at,
-                });
-            }
+            let _ = latency_txs[index].send(SampleEvent { sent_at });
             edits += 1;
         }
-        drop(guard);
         tick += 1;
         let elapsed = tick_started.elapsed();
         if elapsed < Duration::from_secs(1) {
             tokio::time::sleep(Duration::from_secs(1) - elapsed).await;
         }
     }
-    drop(sample_tx);
-    let latencies_ms = sampler.await.expect("sampler");
+    for tx in latency_txs {
+        drop(tx);
+    }
+    let mut latencies_ms = Vec::new();
+    let mut latency_missed = 0usize;
+    for join in latency_joins {
+        let (room_latencies, room_missed) = join.await.expect("room latency task");
+        latencies_ms.extend(room_latencies);
+        latency_missed += room_missed;
+    }
 
     let mut lost_writers = 0usize;
-    {
-        let mut guard = writers.lock().await;
-        for (index, (routing_key, writer)) in guard.iter_mut().enumerate() {
-            drain_ws(writer, Duration::from_millis(100)).await;
-            if !writer_alive(
-                writer,
-                routing_key,
-                &marker_edit(tick),
-                Duration::from_secs(3),
-            )
-            .await
-            {
-                lost_writers += 1;
-                eprintln!("probe: writer lost after load room_index={index}");
-            }
+    for (index, (routing_key, writer)) in writer_rooms.iter().enumerate() {
+        drain_ws_locked(writer, Duration::from_millis(100)).await;
+        if !writer_alive_locked(
+            writer,
+            routing_key,
+            &marker_edit(tick),
+            Duration::from_secs(3),
+        )
+        .await
+        {
+            lost_writers += 1;
+            eprintln!("probe: writer lost after load room_index={index}");
         }
     }
 
@@ -667,62 +690,58 @@ async fn collab_capacity_probe() {
     let victim_doc = &docs[0];
     let victim_key = room_key(victim_doc.workspace_id, victim_doc.document_id);
     let mut pre_hostile_writer_ok = HashMap::new();
-    {
-        let mut w = writers.lock().await;
-        let mut r = readers.lock().await;
-        for index in &hostile_sample_indices {
-            let index = *index;
-            let (routing_key, writer) = &mut w[index];
-            let ok = writer_alive(
-                writer,
-                routing_key,
-                &marker_edit(tick + 1),
-                Duration::from_secs(3),
-            )
-            .await;
-            pre_hostile_writer_ok.insert(index, ok);
-            eprintln!("probe: pre-hostile room_index={index} writer_alive={ok}");
-        }
+    for index in &hostile_sample_indices {
+        let index = *index;
+        let (routing_key, writer) = &writer_rooms[index];
+        let ok = writer_alive_locked(
+            writer,
+            routing_key,
+            &marker_edit(tick + 1),
+            Duration::from_secs(3),
+        )
+        .await;
+        pre_hostile_writer_ok.insert(index, ok);
+        eprintln!("probe: pre-hostile room_index={index} writer_alive={ok}");
+    }
 
-        let (victim_routing_key, victim_writer) = &mut w[0];
+    {
+        let (victim_routing_key, victim_writer) = &writer_rooms[0];
+        let mut victim_writer = victim_writer.lock().await;
         victim_writer
             .send(Message::Binary(
                 sync_update_frame(victim_routing_key, &hostile).into(),
             ))
             .await
             .unwrap();
-        let _ = wait_for_sync_applied(victim_writer, Duration::from_secs(3)).await;
+        let _ = wait_for_sync_applied(&mut victim_writer, Duration::from_secs(3)).await;
+    }
 
-        for (_, ws) in w.iter_mut() {
-            drain_ws(ws, Duration::from_millis(200)).await;
-        }
-        for ws in r.iter_mut() {
-            drain_ws(ws, Duration::from_millis(200)).await;
-        }
+    for (_, ws) in &writer_rooms {
+        drain_ws_locked(ws, Duration::from_millis(200)).await;
+    }
+    for ws in &reader_rooms {
+        drain_ws_locked(ws, Duration::from_millis(200)).await;
     }
 
     let hostile_started = Instant::now();
     let mut healthy = 0usize;
-    {
-        let mut w = writers.lock().await;
-        for index in &hostile_sample_indices {
-            let index = *index;
-            let (routing_key, writer) = &mut w[index];
-            if writer_alive(
-                writer,
-                routing_key,
-                &marker_edit(tick + 2),
-                Duration::from_secs(3),
-            )
-            .await
-            {
-                healthy += 1;
-            } else {
-                eprintln!(
-                    "probe: hostile sample room_index={index} unhealthy (pre_hostile={})",
-                    pre_hostile_writer_ok.get(&index).copied().unwrap_or(false)
-                );
-            }
+    for index in &hostile_sample_indices {
+        let index = *index;
+        let (routing_key, writer) = &writer_rooms[index];
+        if writer_alive_locked(
+            writer,
+            routing_key,
+            &marker_edit(tick + 2),
+            Duration::from_secs(3),
+        )
+        .await
+        {
+            healthy += 1;
+        } else {
+            eprintln!(
+                "probe: hostile sample room_index={index} unhealthy (pre_hostile={})",
+                pre_hostile_writer_ok.get(&index).copied().unwrap_or(false)
+            );
         }
     }
     let mut recovery_ws = connect_member(addr, &victim_doc.peers[0].token).await;
@@ -759,18 +778,14 @@ async fn collab_capacity_probe() {
     let reuse_doc = &docs[max_rooms];
     let reuse_key = room_key(reuse_doc.workspace_id, reuse_doc.document_id);
     drop(recovery_ws);
-    {
-        let mut w = writers.lock().await;
-        let mut r = readers.lock().await;
-        if let Some((_, writer)) = w.first_mut() {
-            let _ = writer.close(None).await;
-        }
-        if let Some(reader) = r.first_mut() {
-            let _ = reader.close(None).await;
-        }
-        w.remove(0);
-        r.remove(0);
+    if let Some((_, writer)) = writer_rooms.first() {
+        let _ = writer.lock().await.close(None).await;
     }
+    if let Some(reader) = reader_rooms.first() {
+        let _ = reader.lock().await.close(None).await;
+    }
+    writer_rooms.remove(0);
+    reader_rooms.remove(0);
     assert!(
         wait_for_room_slot(&hub, Duration::from_secs(60)).await,
         "hub must free a room slot after leave/eviction"
@@ -790,34 +805,52 @@ async fn collab_capacity_probe() {
         max_rooms + 1
     );
 
-    let mut latencies_ms = latencies_ms;
+    assert_eq!(
+        latency_missed,
+        0,
+        "latency sampler missed {latency_missed} ordinary load edits (expected one sample per edit per room)"
+    );
+    let expected_latency_samples = edits;
+    assert_eq!(
+        latencies_ms.len(),
+        expected_latency_samples as usize,
+        "latency sample count {} != edits {}",
+        latencies_ms.len(),
+        expected_latency_samples
+    );
     latencies_ms.sort_unstable();
     let (threads, fds) = proc_threads_fds();
     let child_rss = sum_live_children_rss_bytes();
+    let p50_apply_broadcast = percentile(&latencies_ms, 50);
     let p95_apply_broadcast = percentile(&latencies_ms, 95);
+    let p99_apply_broadcast = percentile(&latencies_ms, 99);
     assert!(
-        p95_apply_broadcast <= 300 || latencies_ms.is_empty(),
-        "p95 apply->broadcast {} ms exceeds 300 ms bar (p50={} ms, samples={}; server collab.stage steady-state ~10ms validate + ~4ms auth + ~8ms append + sub-ms apply/broadcast; gap is concurrent 64-room queueing and fresh-helper-per-update validation cost)",
+        p95_apply_broadcast <= 300,
+        "p95 apply->broadcast {} ms exceeds 300 ms bar (p50={} p99={} samples={})",
         p95_apply_broadcast,
-        percentile(&latencies_ms, 50),
+        p50_apply_broadcast,
+        p99_apply_broadcast,
         latencies_ms.len()
     );
     eprintln!(
-        "PROBE_SUMMARY rooms={} peers={} duration_s={} edits={} achieved_rate_per_room={:.3} child_rss_bytes={} p95_apply_broadcast_ms={} p50_apply_broadcast_ms={} server_threads={} server_fds={} open_ms={} load_ms={} lost_writers={} closes_1011={}",
+        "PROBE_SUMMARY rooms={} peers={} duration_s={} edits={} achieved_rate_per_room={:.3} child_rss_bytes={} p50_apply_broadcast_ms={} p95_apply_broadcast_ms={} p99_apply_broadcast_ms={} latency_samples={} server_threads={} server_fds={} open_ms={} load_ms={} lost_writers={} closes_1011={} db_pool={}",
         max_rooms,
         peers,
         duration.as_secs(),
         edits,
         achieved_rate,
         child_rss,
+        p50_apply_broadcast,
         p95_apply_broadcast,
-        percentile(&latencies_ms, 50),
+        p99_apply_broadcast,
+        latencies_ms.len(),
         threads,
         fds,
         open_started.elapsed().as_millis(),
         load_started.elapsed().as_millis(),
         lost_writers,
-        closes_1011
+        closes_1011,
+        db_pool_size
     );
     eprintln!(
         "PROBE_STAGE note=see collab.stage tracing lines in this log for validate/auth_tx/append_tx/apply/broadcast breakdown"

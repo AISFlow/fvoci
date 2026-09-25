@@ -1,16 +1,14 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::frame::{read_frame, write_frame, FrameError};
-use crate::limits::{
-    Limits, DEFAULT_MAX_CHILD_CONCURRENCY, MAX_CHILD_STDERR_BYTES, RSS_POLL_MS,
-};
+use crate::limits::{Limits, DEFAULT_MAX_CHILD_CONCURRENCY, MAX_CHILD_STDERR_BYTES, RSS_POLL_MS};
 use crate::outcome::{EngineReport, EngineStatus, LimitKind, WorkerFailureReason};
 use crate::protocol::Request;
 
@@ -179,6 +177,12 @@ impl Drop for SlotGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpawnPhaseTimings {
+    pub slot_wait_us: u64,
+    pub spawn_us: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
     pub engine_bin: PathBuf,
@@ -256,6 +260,12 @@ pub struct EngineSession {
 
 impl EngineSession {
     pub fn spawn(req: SpawnRequest) -> Result<Self, EngineReport> {
+        Self::spawn_with_timings(req).map(|(session, _)| session)
+    }
+
+    pub fn spawn_with_timings(
+        req: SpawnRequest,
+    ) -> Result<(Self, SpawnPhaseTimings), EngineReport> {
         if let Err(detail) = req.limits.validate() {
             return Err(worker_fail(WorkerFailureReason::InvalidLimits, detail));
         }
@@ -271,6 +281,7 @@ impl EngineSession {
 
         #[cfg(target_os = "linux")]
         {
+            let slot_started = Instant::now();
             let slot = match (req.slot_kind, req.slot_wait) {
                 (ChildSlotKind::Primary, _) => SlotGuard::try_acquire(ChildSlotKind::Primary)?,
                 (ChildSlotKind::Validator, Some(wait)) => {
@@ -280,7 +291,17 @@ impl EngineSession {
                     SlotGuard::try_acquire(ChildSlotKind::Validator)?
                 }
             };
-            spawn_child(req, slot)
+            let slot_wait_us = slot_started.elapsed().as_micros() as u64;
+            let spawn_started = Instant::now();
+            let session = spawn_child(req, slot)?;
+            let spawn_us = spawn_started.elapsed().as_micros() as u64;
+            Ok((
+                session,
+                SpawnPhaseTimings {
+                    slot_wait_us,
+                    spawn_us,
+                },
+            ))
         }
     }
 

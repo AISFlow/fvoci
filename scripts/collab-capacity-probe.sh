@@ -10,7 +10,7 @@ export COLLAB_PROBE_DURATION_SECS="${COLLAB_PROBE_DURATION_SECS:-180}"
 export COLLAB_PROBE_OPEN_CONCURRENCY="${COLLAB_PROBE_OPEN_CONCURRENCY:-8}"
 export FVOCI_COLLAB_MAX_ROOMS="${FVOCI_COLLAB_MAX_ROOMS:-64}"
 # Probe-only: each live room holds one PG connection via RoomGuard; raise docker PG for 64+ rooms.
-export FVOCI_TEST_PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-120}"
+export FVOCI_TEST_PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-150}"
 export RUST_LOG="${RUST_LOG:-collab.stage=info}"
 
 LOG_DIR="${FVOCI_EVIDENCE_DIR:-/home/kinesis/orca/fvoci-evidence}"

@@ -6,10 +6,15 @@ use sqlx::PgPool;
 
 pub const DEFAULT_MAX_ROOMS: usize = 64;
 pub const MAX_MAX_ROOMS: usize = 512;
-/// `connect_app` pool size in `src/db/pool.rs`.
+/// Default `connect_app` pool size when collab is disabled.
 pub const APP_POOL_MAX_CONNECTIONS: u32 = 10;
 /// Headroom for migrations, admin tooling, and non-app sessions on the same instance.
 pub const PG_CONNECTION_RESERVE: u32 = 10;
+
+/// App pool connections for concurrent per-room auth/append transactions at steady state.
+pub fn derive_app_pool_max_connections(max_rooms: usize) -> u32 {
+    max_rooms.clamp(16, MAX_MAX_ROOMS) as u32
+}
 /// Default aggregate helper RSS budget (2 GiB). Tune with `FVOCI_COLLAB_MEMORY_BUDGET`.
 pub const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -19,14 +24,16 @@ pub fn derive_max_child_concurrency(max_rooms: usize) -> usize {
     max_rooms + headroom
 }
 
-/// Validator helper pool size (separate from per-room primary children).
+/// Ephemeral validator pool size (compaction and fallback admission paths).
 pub fn derive_validator_child_concurrency(max_rooms: usize) -> usize {
     (max_rooms / 2).max(4)
 }
 
-/// PostgreSQL connections required for collab at steady state: one per live room plus app pool and reserve.
+/// PostgreSQL connections required for collab at steady state: room guards plus app pool and reserve.
 pub fn collab_pg_connections_required(max_rooms: usize) -> u64 {
-    max_rooms as u64 + u64::from(APP_POOL_MAX_CONNECTIONS) + u64::from(PG_CONNECTION_RESERVE)
+    max_rooms as u64
+        + u64::from(derive_app_pool_max_connections(max_rooms))
+        + u64::from(PG_CONNECTION_RESERVE)
 }
 
 pub fn collab_fits_postgres_max_connections(max_rooms: usize, pg_max_connections: i64) -> bool {
@@ -44,7 +51,7 @@ pub async fn assert_collab_fits_postgres(pool: &PgPool, max_rooms: usize) -> Res
         Err(format!(
             "FVOCI_COLLAB_MAX_ROOMS={max_rooms} needs at least {} PostgreSQL max_connections (rooms + app pool {} + reserve {}); server has {}",
             collab_pg_connections_required(max_rooms),
-            APP_POOL_MAX_CONNECTIONS,
+            derive_app_pool_max_connections(max_rooms),
             PG_CONNECTION_RESERVE,
             pg_max
         ))
@@ -253,8 +260,14 @@ mod config_tests {
     }
 
     #[test]
-    fn default_max_rooms_fits_default_postgres() {
-        assert!(collab_fits_postgres_max_connections(DEFAULT_MAX_ROOMS, 100));
+    fn derive_app_pool_tracks_max_rooms() {
+        assert_eq!(derive_app_pool_max_connections(4), 16);
+        assert_eq!(derive_app_pool_max_connections(64), 64);
+    }
+
+    #[test]
+    fn default_max_rooms_fits_probe_postgres() {
+        assert!(collab_fits_postgres_max_connections(DEFAULT_MAX_ROOMS, 150));
         assert!(!collab_fits_postgres_max_connections(200, 100));
     }
 

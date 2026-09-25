@@ -5,8 +5,8 @@ name: fvoci-rust-install
 services:
   postgres:
     image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-    # Default FVOCI_COLLAB_MAX_ROOMS=64 needs rooms + app pool (10) + reserve (10); 120 leaves headroom.
-    command: ["postgres", "-c", "max_connections=120"]
+    # Default FVOCI_COLLAB_MAX_ROOMS=64 needs rooms + app pool (64) + reserve (10); 150 leaves headroom.
+    command: ["postgres", "-c", "max_connections=150"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-fvoci}
       POSTGRES_USER: ${POSTGRES_USER:-fvoci_owner}
