@@ -345,6 +345,15 @@ pub struct RebuildOutcome {
     pub pages: usize,
 }
 
+/// Pool for [`rebuild_search_index`]: the rebuild lock, the per-workspace lock and
+/// one page transaction are held at the same time.
+pub async fn rebuild_pool(url: &str) -> Result<PgPool, sqlx::Error> {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect(url)
+        .await
+}
+
 pub async fn rebuild_search_index(
     pool: &PgPool,
     meili: &MeiliConfig,
@@ -369,15 +378,18 @@ async fn rebuild_search_index_inner(
     workspace_id: Option<Uuid>,
 ) -> Result<RebuildOutcome, SearchIndexError> {
     ensure_meili_index(meili).await?;
+    // Clear before listing so a workspace created meanwhile is still rebuilt.
+    if let Some(wanted) = workspace_id {
+        delete_meili_by_filter(meili, &meili_eq("workspaceId", &wanted.to_string())?).await?;
+    } else {
+        delete_all_meili_documents(meili).await?;
+    }
     let mut ids = list_live_workspace_ids(pool).await?;
     if let Some(wanted) = workspace_id {
         ids.retain(|id| *id == wanted);
         if ids.is_empty() {
             return Err(SearchIndexError::Other("workspace not found".into()));
         }
-        delete_meili_by_filter(meili, &meili_eq("workspaceId", &wanted.to_string())?).await?;
-    } else {
-        delete_all_meili_documents(meili).await?;
     }
     let mut pages = 0usize;
     for id in &ids {

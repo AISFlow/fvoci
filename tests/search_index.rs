@@ -11,7 +11,8 @@ use fvoci_server::outbox::spawn_outbox_dispatcher;
 use fvoci_server::outbox::OutboxDispatcherSettings;
 use fvoci_server::search::chunk::chunk_plain_text;
 use fvoci_server::search::index::{
-    process_search_index_event, rebuild_search_index, search_index_consumer, SEARCH_INDEX_CONSUMER,
+    process_search_index_event, rebuild_pool, rebuild_search_index, search_index_consumer,
+    SEARCH_INDEX_CONSUMER,
 };
 use fvoci_server::search::meili::{
     delete_all_meili_documents, ensure_meili_index, search_meili, search_source_id, MeiliConfig,
@@ -894,9 +895,14 @@ async fn rebuild_from_empty_index_converges() {
     assert!(!before.is_empty());
     delete_all_meili_documents(&meili).await.expect("clear");
     assert!(meili_ids(&meili).await.is_empty());
-    rebuild_search_index(&admin, &meili, None)
+    // The CLI's own pool, so the rebuild's concurrent connection need is exercised.
+    let rebuild = rebuild_pool(&harness.admin_url)
+        .await
+        .expect("rebuild pool");
+    rebuild_search_index(&rebuild, &meili, None)
         .await
         .expect("rebuild");
+    rebuild.close().await;
     let after = meili_ids(&meili).await;
     assert_eq!(before, after);
 

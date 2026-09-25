@@ -552,9 +552,6 @@ pub async fn replace_attachment_chunks(
 pub async fn list_live_workspace_ids(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let previous = set_system(&mut tx).await?;
-    sqlx::query("LOCK TABLE fvoci.workspaces IN SHARE MODE")
-        .execute(&mut *tx)
-        .await?;
     let ids: Vec<Uuid> =
         sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE deleted_at IS NULL ORDER BY id")
             .fetch_all(&mut *tx)

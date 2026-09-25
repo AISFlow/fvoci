@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use fvoci_server::db::migrate;
 use fvoci_server::db::outbox_recover::{parse_recover_outbox_args, recover_outbox};
-use fvoci_server::search::index::rebuild_search_index;
+use fvoci_server::search::index::{rebuild_pool, rebuild_search_index};
 use fvoci_server::search::meili::{ensure_meili_key_file, meili_config_from_env};
 use uuid::Uuid;
 
@@ -55,10 +55,7 @@ async fn rebuild(workspace_id: Option<Uuid>) -> Result<(), Box<dyn std::error::E
     let url = migration_url()?;
     let meili =
         meili_config_from_env()?.ok_or("FVOCI_MEILI_URL is required for --rebuild-search")?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
+    let pool = rebuild_pool(&url).await?;
     migrate::assert_schema_current(&pool)
         .await
         .map_err(|e| e.to_string())?;
