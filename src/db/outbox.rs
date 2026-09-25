@@ -158,19 +158,22 @@ pub async fn advance_cursor_tx(
 pub async fn record_failure(
     pool: &PgPool,
     consumer: &str,
+    owner: Uuid,
     event_id: Uuid,
     error: &str,
     backoff_ms: i32,
     max_attempts: i32,
 ) -> Result<i32, sqlx::Error> {
-    let attempts = sqlx::query_scalar("SELECT fvoci.app_outbox_record_failure($1, $2, $3, $4, $5)")
-        .bind(consumer)
-        .bind(event_id)
-        .bind(error)
-        .bind(backoff_ms.max(1))
-        .bind(max_attempts.max(1))
-        .fetch_one(pool)
-        .await?;
+    let attempts =
+        sqlx::query_scalar("SELECT fvoci.app_outbox_record_failure($1, $2, $3, $4, $5, $6)")
+            .bind(consumer)
+            .bind(owner)
+            .bind(event_id)
+            .bind(error)
+            .bind(backoff_ms.max(1))
+            .bind(max_attempts.max(1))
+            .fetch_one(pool)
+            .await?;
     Ok(attempts)
 }
 
@@ -348,12 +351,14 @@ pub async fn fetch_cursor(
     Ok(row.map(|row| (row.get("last_xact"), row.get("last_seq"))))
 }
 
-pub async fn xid_epoch_mismatch(pool: &PgPool, consumer: &str) -> Result<bool, sqlx::Error> {
-    let mismatched = sqlx::query_scalar("SELECT fvoci.app_outbox_xid_mismatch($1)")
-        .bind(consumer)
-        .fetch_one(pool)
-        .await?;
-    Ok(mismatched)
+pub fn is_outbox_xid_epoch_mismatch(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db) => {
+            db.code().as_deref() == Some("22000")
+                && db.message().contains("outbox xid epoch mismatch")
+        }
+        _ => false,
+    }
 }
 
 pub async fn insert_test_event(

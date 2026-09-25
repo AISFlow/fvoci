@@ -88,8 +88,8 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_read(text, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_read(text, integer) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_advance(text, uuid, xid8, bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_advance(text, uuid, xid8, bigint) TO :"app_role";
-REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, text, integer, integer) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, text, integer, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, uuid, text, integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, uuid, text, integer, integer) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_clear_failure(text, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_clear_failure(text, uuid) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_failure_state(text, uuid) FROM PUBLIC;
@@ -102,5 +102,3 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) FROM PUBL
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) TO :"app_role";
-REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_xid_mismatch(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION fvoci.app_outbox_xid_mismatch(text) TO :"app_role";
