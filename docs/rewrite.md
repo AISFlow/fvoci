@@ -16,7 +16,7 @@
 ## 2. 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Orca Run `run_b01d432a9dee`.
-최신 수락 main `b0d40ea3c41184065d93703fdd97a3751c07c646` (#61까지; 열린 PR은 아래). main CI 성공은
+최신 수락 main `1f243d9` (#67까지; 열린 PR은 아래). main CI 성공은
 전체 포팅 완료나 협업 용량 수락을 뜻하지 않는다.
 
 | PR | merge | 범위 | 수락 근거 |
@@ -76,19 +76,24 @@
 | #62 | d3bf931 | 임시 All-Opus 운영 규칙·TS 데이터 이전 범위 제외 기록 | CI |
 | #58 | cccec45 | 첨부 viewer route·프로젝트 문서 댓글·그룹 멘션(전달 시점 재전개) | E2E, 검토+delta |
 | #61 | b0d40ea | 단일 in-process 유지보수 실행기(021): 삭제 30일 workspace purge(저장소 먼저)·magic token/processed_events GC·만료 ICS token·digest claim/반환 | background_jobs8·workspace_lifecycle, 검토+delta |
+| #60 | 608ec4e | 태스크 activity(022): 변경·반복 회차 기록의 동일 트랜잭션 기록, 변경+댓글 키셋, 그룹 포함 권한, append-only RLS, 공유 댓글 동작 | activity9·E2E 4종, 검토+delta |
+| #63, #65 | 7c10edb, adf1aa5 | S3 저장소(rusty-s3, API 프록시): 단일 ObjectStorage 계약(part·complete·range·추출·GC·purge), part 스트리밍·길이 검증, 유지보수 실행기 안의 중단 업로드 GC(공정 cursor), S3 purge(multipart abort 후 객체·DB), 복구 `--verify-storage`, part 동시 수 상한(사용자별 몫)·본문 deadline | s3 15·attachment 23·jobs 10, 검토+delta×4 |
+| #66 | 17748ea | 문서 가져오기/내보내기(023): md/pdf/docx/pptx 내보내기(프로젝트 경로 포함), markdown-zip 동기·office/notion 비동기 job(영속 payload·lease/fencing·보상·유지보수 sweep·종료 drain), zip·helper 자원 한도, 이미지에 convert helper 포함 | import/export 15·zip bomb·E2E, 검토+delta×2 |
+| #64, #67 | 5a11e7d, 1f243d9 | 문서 기록, collab 테스트의 auth 전 close frame 진단 | CI |
 
 검증 기준: 각 PR의 최종 HEAD에서 원격 Rust/Web/Native/Container install 워크플로가 실제 실행되고
 (PG suite는 `--no-fail-fast`), 별도 세션의 Opus 5.5 medium 검토 차단 사항이 해소된 뒤 기대 HEAD로
 squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있다.
 
 진행 중(미수락, 2026-09-26):
-- #60 태스크 activity(migration 022; 021은 #61 사용): 독립 검토 차단 B1–B4 수정 완료, 최신 main 통합·재검토 대기.
-- #63 S3 저장소(rusty-s3, API 프록시 방식): 독립 검토 B1(part 메모리 버퍼 상한 없음) 수정, 중단 업로드 GC의
-  유지보수 실행기 통합, S3 workspace purge·추출·복구 범위 연결 작업 중. 원본의 presigned part PUT·302 presigned
-  GET·`S3_PUBLIC_ENDPOINT`·bucket CORS 계약은 미착수(프록시 수락과 S3 원본 동등성은 별개).
-- 문서 가져오기/내보내기(branch `fvoci/rust-doc-import-export`, Composer 2.5 구현 c720ae4): 독립 검토 BLOCK
-  (job 상태 RLS no-op, 비영속 async runner, helper timeout·env 전달 한도, zip bomb, 본문 한도, CI·이미지 미포함).
-  미수락.
+- 공유 링크·즐겨찾기·최근(branch `fvoci/rust-share-stars`, migration 024): 독립 검토 ACCEPT(425366c) 후 should-fix
+  반영(578c3d6), `/share/:token/pdf`를 #66 helper에 연결하는 중. 공유 정책 설정(instance settings) 미이식.
+- 계정 생명주기(branch `fvoci/rust-account-lifecycle`, migration 025): 탈퇴·취소·유예 후 익명화(유지보수 sweep),
+  비밀번호·이메일 변경, magic link 로그인, `/me/export`·dashboard·locate. 독립 검토 중. MFA·OIDC·SSO·동의는 미착수.
+- S3의 원본 presigned part PUT·302 presigned GET·`S3_PUBLIC_ENDPOINT`·bucket CORS 계약은 미착수(프록시 수락과
+  별개).
+- 문서 가져오기 잔여: office PDF/DOCX/PPTX/XLSX/ODF, Notion CSV→태스크·자산→첨부·`projectId`, 이벤트 지연 발행.
+  의도적 차이: 비동기 실행은 가져온 사용자의 세션이 살아 있어야 하고, 본문 한도는 JSON ≈85 MiB(디코드 64 MiB).
 
 범위 결정(사용자 확인 2026-09-25): 기존 TypeScript FVOCI 배포가 없으므로 TS 데이터 이전(스키마 변환·사용자/세션/토큰
 이전·문서 corpus 일괄 이전·dual-write·TS 복귀)은 범위 밖이다. 신규 설치·Rust 스키마 migration·Rust 저장 데이터의
@@ -106,23 +111,23 @@ squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있�
 | 기능 | 원본 근거 | 보존할 불변식 | 상태 | 증거 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 설치·로그인·세션·프로필 | identity/routes.ts, core/auth.ts | 활성 사용자, 철회, 본문+이벤트+감사 원자성 | 부분 | #1, #34, #53 | 수락: 비밀번호 재설정(#53). 미착수: OIDC·MFA·계정 생명주기·설정 기반 비밀번호 정책 |
-| 워크스페이스 | domains/workspaces | 현재 역할·철회 경합·RLS·풀 컨텍스트 | 부분 | #4, #39, #56, #61 | 수락: counts·owner 전용 삭제(#56), 30일 purge 실행기(#61, 로컬 저장소). 진행: S3 저장소 purge(#63). 미착수: workspace/guest/storage quota |
+| 워크스페이스 | domains/workspaces | 현재 역할·철회 경합·RLS·풀 컨텍스트 | 부분 | #4, #39, #56, #61 | 수락: counts·owner 전용 삭제(#56), 30일 purge 실행기(#61), S3 저장소 purge(#63). 미착수: workspace/guest/storage quota |
 | 멤버·초대 | invitation.ts, quota.ts, consent.ts | 좌석 한도(모든 billable 경로)·토큰 단일 사용·역할 상한 | 부분 | #21, #53 | 수락: 초대 메일(#53). 미착수: 수락 시 MFA/OIDC, legal consent 428, pending 목록/철회 API, 알림 설정 기본값, 계정 삭제 시 pending 정리, 다른 E2E의 SQL fixture 멤버 |
 | 그룹·권한 통합 | policies.ts effectivePermission, project/document_members(user XOR group) | 리소스별 단일 권한 함수 | 수락 | #23, #39, #50 | 후속: collab 프레임당 권한 재조회 축소·collab_delivery의 그룹 join 사본·설정 UI `canManage` DTO |
 | 프로젝트 | domains/projects | 비공개 접근(workspace admin 제외)·lead/멤버 제거 경합·원자성 | 부분 | #13, #39, #52 | 미착수: 프로젝트 문서 본문(협업)·trash/restore/sort/duplicate route, collection/view 복제 |
-| 태스크 | domains/tasks, core/task.ts, workflow.ts | 권한·버전·WIP·반복 회차 원자성·키셋 커서 | 부분 | #13, #19, #26, #38, #40, #47 | 진행: activity feed(#60). 미착수: 저장된 views(캘린더 view 포함) |
+| 태스크 | domains/tasks, core/task.ts, workflow.ts | 권한·버전·WIP·반복 회차 원자성·키셋 커서 | 부분 | #13, #19, #26, #38, #40, #47, #60 | 수락: activity feed(#60). 미착수: 저장된 views(캘린더 view 포함) |
 | 일정·ICS·휴일 | routes.ts ics/holidays | 일정 의미 | 부분 | #49 | 수락: 휴일·ICS 피드(담당 태스크). 미착수: views 기반 ICS 분기 |
-| 위키 문서 | domains/documents, core/document.ts | 현재 문서 권한·트리 잠금 순서 | 부분 | #5, #23, #39 | 진행(미수락): 가져오기·내보내기. 미착수: 공유·확장 문서 기능, trash 영구 삭제 GC |
+| 위키 문서 | domains/documents, core/document.ts | 현재 문서 권한·트리 잠금 순서 | 부분 | #5, #23, #39 | 수락: 가져오기·내보내기(#66, 잔여는 §2). 진행: 공유 링크. 미착수: 확장 문서 기능, trash 영구 삭제 GC |
 | 리비전 | documents/revisions.ts, core/revision.ts, collab applyRestore | 복원은 room actor의 forward system update, durable 후 broadcast | 수락 | #25 | 리비전 routes의 `document_permission` 통합, writer-stale 후 committed_loaded 재설정(후속) |
 | 댓글 | comments/routes.ts, core/comment.ts | 문서 XOR 태스크·부모 활성·권한 | 부분 | #28, #47, #58 | 수락: 그룹 멘션·프로젝트 문서 댓글(#58; 그룹 멘션은 원본 snapshot과 달리 전달 시점 재전개). 후속: 이중 DELETE 중복 이벤트·resolve 경합·동시 trash된 태스크 댓글 |
 | 협업 | domains/collab, React/Tiptap | provider envelope·철회·CRDT 정본·persist barrier·writer generation·재시작 복원 | 부분(opt-in) | #6, #7, #18, #24, #27, #39, #46 | 수락: room 용량(기본 30, 64 검증; §2). 미검증: 실제 OS IME. 미착수: opt-in 해제 조건 |
-| 첨부 | domains/attachments, packages/storage | 부모 권한·원본 bytes·원자 완료·취소 | 부분 | #10, #39, #58 | 수락: viewer route(#58). 진행: S3 프록시·중단 업로드 GC(#63). 미착수: S3 presigned 계약, 썸네일, 태스크 등 다른 부모, quota·디스크 부족 의미 |
+| 첨부 | domains/attachments, packages/storage | 부모 권한·원본 bytes·원자 완료·취소 | 부분 | #10, #39, #58 | 수락: viewer route(#58), S3 프록시·중단 업로드 GC(#63, #65). 미착수: S3 presigned 계약, 썸네일, 태스크 등 다른 부모, quota·디스크 부족 의미 |
 | HWP/HWPX 추출 | 원본 추출 경로, rhwp e8800c8 | 부분/손상/미지원을 빈 본문 성공으로 바꾸지 않음·자원 한도 | 부분 | #2, #8, #9, #11, #35 | 미착수: 썸네일 연결. 후속: lease 만료·재시도 결과 게시 경계 |
 | 검색·색인·AI | domains/search, packages/search | 검색에서도 인가·철회·색인 복구 | 부분 | #29, #30, #35, #48 | 수락: 워크스페이스·전역 검색, 댓글 hit, outbox 색인, 복구 후 rebuild, 검색 E2E. 미착수: 의미(벡터) 검색, 첨부 viewer route(첨부 hit는 상위 문서로 이동). 후속: 색인 처리량(아래 §5) |
 | 알림·outbox·메일·webhook·연동 | domains/notifications, packages/jobs | 커밋 후 전달·중복/재시도 | 부분 | #31, #35, #45 | 수락: 앱 내 알림, 메일·digest(#53, #61). 미착수: webhook·연동, requeue 운영 API/UI |
 | 공유·즐겨찾기·최근·태그·컬렉션 | 해당 routes | 공유 링크 권한 | 미착수 | — | 전체 |
 | 동의·감사·사용권·관리 | legal, auth.consents, admin.audit, packages/ee | 동의 gate·증거·권한 | 미착수 | 감사 원자 기록만 | 전체 |
-| 제품 MCP·CLI·백업·복구 | init.ts, backup.ts, doctor.ts, MCP | 프로토콜·복원 | 부분 | #32, #31, #35 | 수락: 컨테이너 설치 백업·복구(outbox cursor 재기준·검색 rebuild 포함). 미착수: 제품 MCP·CLI·doctor |
+| 제품 MCP·CLI·백업·복구 | init.ts, backup.ts, doctor.ts, MCP | 프로토콜·복원 | 부분 | #32, #31, #35 | 수락: 컨테이너 설치 백업·복구(outbox cursor 재기준·검색 rebuild 포함), S3는 스크립트 백업 거부·복구 후 `--verify-storage`(#63). 미착수: 제품 MCP·CLI·doctor |
 | 설치·배포 산출물 | infra/app, compose | 비특권 실행·migrate/grant 분리·helper 포함 | 부분 | #17, #20, #29, #32, #35 | 미착수: 운영 TLS/secure cookie 안내, 업그레이드 경로 |
 | 추가 DB·플랫폼 | PR999 packages/db (SQLite/libSQL/Turso) | 원본 제공 범위와 목표 구분 | 미착수 | — | PG 우선; 원본 다중 DB를 완료로 간주하지 않음 |
 | 프론트엔드 | apps/web, packages/editor | 한국어·접근성·기존 흐름 | 부분 | 각 PR E2E | 미착수: 위 미착수 기능의 UI 전체 |
@@ -155,8 +160,12 @@ squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있�
   테스트 harness 수정과 용량 작업에서 함께 다룬다.
 - 실제 OS IME·특정 기기 입력은 미검증이다. 합성 이벤트 성공을 IME 검증으로 표시하지 않는다.
 - 제한기는 프로세스 로컬·직접 socket IP 기준이며 신뢰 프록시·분산 제한은 없다.
-- 첨부 중단 업로드·임시 파일·협업 receipt/이벤트/감사 누적의 보존·정리 정책은 원본 대조 후 관련
-  slice에서 닫는다. 응답 유실을 실패로 간주해 성공한 저장을 지우지 않는다.
+- 협업 receipt/이벤트/감사 누적은 원본과 같이 보존 정책이 없다. 첨부 중단 업로드 정리는 #63·#65로 수락했다.
+- 전역 보안 헤더(원본 nosecone CSP·Referrer-Policy 등)는 미이식이다. 공유 응답만 개별 CSP·no-referrer를 둔다.
+- 가져오기 POST는 요청당 최대 수백 MiB를 버퍼링하며 프로세스 전체 동시 수 상한이 없다(원본도 버퍼링). convert
+  helper는 문서마다 node 2회 실행이며 런타임 이미지를 약 390 MB 키운다. 사전 컴파일·dev 의존성 제외가 후속이다.
+- collab_product `collab_empty_byte_update_is_rejected`가 #66 CI에서 1회 auth 전 close로 실패했다(로컬 7회
+  재현 실패, 재실행 성공). #67로 close code를 남기며 재발 시 원인을 닫는다.
 - 컨테이너 AppArmor docker-default 환경(예: GitHub runner)은 helper의 `oom_score_adj=1000` 쓰기를 거부한다. helper는 그대로 시작하고 서버가 1회 경고를 남기며, 이때 cgroup OOM이 서버 대신 helper를 고른다는 보장은 없다(컨테이너 mem_limit·helper별 AS/RSS 한도가 상한). #46
 - 검색 색인 소비자는 Meili 단건 쓰기마다 작업 완료를 기다려(측정 1.7–2.6 s) 직렬 처리량이 약 0.5 event/s다. 항상
   수렴하지만 부하 시 색인이 지연된다. 배치/비동기 대기 개선이 후속이다.
