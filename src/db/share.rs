@@ -735,6 +735,7 @@ pub struct ShareAttachment {
     pub image: bool,
     pub scan_status: String,
     pub storage_key: String,
+    pub variants: Value,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -759,13 +760,14 @@ pub async fn share_attachment(
         String,
         String,
         String,
+        Value,
         DateTime<Utc>,
         Option<DateTime<Utc>>,
     );
     let row: Option<AttRow> = sqlx::query_as(
         r#"
         SELECT a.id, a.document_id, a.name, a.mime, a.size_bytes, a.image, a.scan_status,
-               a.status, a.storage_key, a.created_at, a.completed_at
+               a.status, a.storage_key, a.variants, a.created_at, a.completed_at
         FROM fvoci.attachments a
         WHERE a.workspace_id = $1 AND a.id = $2
         "#,
@@ -784,6 +786,7 @@ pub async fn share_attachment(
         scan_status,
         status,
         storage_key,
+        variants,
         created_at,
         completed_at,
     )) = row
@@ -814,6 +817,7 @@ pub async fn share_attachment(
         image,
         scan_status,
         storage_key,
+        variants,
         created_at,
         completed_at,
     }))

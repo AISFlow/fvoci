@@ -861,6 +861,13 @@ pub struct AttachmentListOutput {
     pub items: Vec<AttachmentOutput>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AttachmentPreviewHtmlOutput {
+    pub html: String,
+}
+
 /// Session viewer edit capability; public share responses never include it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

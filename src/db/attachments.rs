@@ -62,7 +62,40 @@ pub enum AttachmentParent {
     Task(Uuid),
 }
 
+/// Source `previewVariantOf`: a published preview object and its size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewVariant {
+    pub key: String,
+    pub width: i64,
+    pub height: i64,
+    pub bytes: i64,
+}
+
+pub fn preview_variant_of(variants: &Value) -> Option<PreviewVariant> {
+    let preview = variants.get("preview")?;
+    let key = preview.get("key")?.as_str()?;
+    let positive = |name: &str| {
+        preview
+            .get(name)
+            .and_then(Value::as_i64)
+            .filter(|v| *v > 0 && *v <= 9_007_199_254_740_991)
+    };
+    if key.is_empty() {
+        return None;
+    }
+    Some(PreviewVariant {
+        key: key.to_string(),
+        width: positive("width")?,
+        height: positive("height")?,
+        bytes: positive("bytes")?,
+    })
+}
+
 impl AttachmentRow {
+    pub fn preview(&self) -> Option<PreviewVariant> {
+        preview_variant_of(&self.variants)
+    }
+
     pub fn parent(&self) -> AttachmentParent {
         match (self.document_id, self.task_id) {
             (Some(document_id), _) => AttachmentParent::Document(document_id),
@@ -1143,6 +1176,11 @@ async fn complete_owned_inner(
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     let image = is_image_mime(&mime);
     let extract_status = initial_extract_status(&att_name, &mime);
+    let preview_status = if image && crate::attachments::preview::preview_mime_supported(&mime) {
+        "pending"
+    } else {
+        "skipped"
+    };
 
     #[cfg(feature = "db-tests")]
     test_barrier::wait_pre_mark_stored_barrier(attachment_id).await;
@@ -1179,8 +1217,8 @@ async fn complete_owned_inner(
         r#"
         UPDATE fvoci.attachments
         SET status = 'stored', mime = $3, size_bytes = $4, image = $5,
-            scan_status = 'skipped', extract_status = $6, upload_meta = NULL,
-            completed_at = now()
+            scan_status = 'skipped', extract_status = $6, preview_status = $7,
+            upload_meta = NULL, completed_at = now()
         WHERE workspace_id = $1 AND id = $2 AND status IN ('uploading', 'assembling')
         "#,
     )
@@ -1190,6 +1228,7 @@ async fn complete_owned_inner(
     .bind(size_bytes as i64)
     .bind(image)
     .bind(extract_status)
+    .bind(preview_status)
     .execute(&mut *tx)
     .await?;
     if updated.rows_affected() == 0 {
@@ -1343,6 +1382,26 @@ pub async fn open_download(
     }
     tx.commit().await?;
     Ok(Ok(att))
+}
+
+/// Stored extract text of an attachment the caller already opened through
+/// [`open_download`] (source `att.extractText`).
+pub async fn attachment_extract_text(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let text: Option<String> = sqlx::query_scalar(
+        "SELECT extract_text FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2 AND status = 'stored'",
+    )
+    .bind(workspace_id)
+    .bind(attachment_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(text)
 }
 
 /// Parent kind of an attachment, for API-token scope checks before an

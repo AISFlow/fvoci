@@ -122,6 +122,8 @@ jobs:
             specs: e2e/admin-console-flow.spec.ts
           - flow: collections-flow
             specs: e2e/collections-flow.spec.ts
+          - flow: task-attachments-flow
+            specs: e2e/task-attachments-flow.spec.ts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

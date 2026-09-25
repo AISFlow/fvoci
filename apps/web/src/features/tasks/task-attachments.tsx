@@ -120,11 +120,21 @@ export function TaskAttachmentsPanel({
           <li key={a.id} className="flex items-center justify-between gap-2">
             {a.completedAt ? (
               <a
-                className="min-w-0 truncate break-all underline"
+                className="flex min-w-0 items-center gap-2 underline"
                 href={`/api/v1/workspaces/${workspaceId}/attachments/${a.id}/download`}
                 download={a.name}
               >
-                {a.name}
+                {a.preview ? (
+                  <img
+                    src={`/api/v1/workspaces/${workspaceId}/attachments/${a.id}/download?variant=preview`}
+                    width={a.preview.width}
+                    height={a.preview.height}
+                    alt=""
+                    loading="lazy"
+                    className="h-10 w-auto max-w-16 shrink-0 rounded-sm object-cover"
+                  />
+                ) : null}
+                <span className="truncate break-all">{a.name}</span>
               </a>
             ) : (
               <span className="min-w-0 truncate break-all text-muted-foreground">{a.name}</span>

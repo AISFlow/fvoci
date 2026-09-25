@@ -1060,6 +1060,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/preview-html": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_attachment_preview_html"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload": {
         parameters: {
             query?: never;
@@ -2956,6 +2972,9 @@ export interface components {
             /** Format: int32 */
             partNumber: number;
             url: string;
+        };
+        AttachmentPreviewHtmlOutput: {
+            html: string;
         };
         AttachmentPreviewResponse: {
             /** Format: int32 */
@@ -6865,7 +6884,7 @@ export interface operations {
     download_share_attachment: {
         parameters: {
             query?: {
-                /** @description Omit for original bytes; preview is not stored in this slice */
+                /** @description Omit for original bytes; `preview` for the published WebP preview */
                 variant?: string;
             };
             header?: never;
@@ -6879,7 +6898,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Original bytes */
+            /** @description Original bytes, or the WebP preview for variant=preview */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6887,6 +6906,13 @@ export interface operations {
                 content: {
                     "application/octet-stream": unknown;
                 };
+            };
+            /** @description Preview not modified (If-None-Match) */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Invalid download variant */
             400: {
@@ -6897,7 +6923,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
-            /** @description Outside the share, unknown, expired or revoked */
+            /** @description Outside the share, unknown, expired or revoked, or no preview */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -7912,7 +7938,7 @@ export interface operations {
     download_attachment: {
         parameters: {
             query?: {
-                /** @description Omit for original bytes; preview is not stored in this slice */
+                /** @description Omit for original bytes; `preview` for the published WebP preview (image/webp, inline, ETag) */
                 variant?: string;
             };
             header?: never;
@@ -7926,7 +7952,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Original bytes */
+            /** @description Original bytes, or the WebP preview for variant=preview */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7943,6 +7969,13 @@ export interface operations {
                 content: {
                     "application/octet-stream": unknown;
                 };
+            };
+            /** @description Preview not modified (If-None-Match) */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Invalid download variant */
             400: {
@@ -8207,6 +8240,76 @@ export interface operations {
             };
             /** @description Part too large */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    get_attachment_preview_html: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Attachment id */
+                attachment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Extracted text of an office (or, in server mode, HWP/HWPX) attachment as one escaped <pre> */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentPreviewHtmlOutput"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Attachment failed virus scan */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found, forbidden, or not served in the current attachmentPreview mode */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description preview_not_available: no extracted text */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited (60/min) */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };

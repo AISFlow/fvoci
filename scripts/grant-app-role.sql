@@ -138,6 +138,8 @@ GRANT EXECUTE ON FUNCTION fvoci.app_magic_purge_expired(timestamptz, integer) TO
 
 REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_preview(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_preview(integer) TO :"app_role";
 
 REVOKE ALL ON fvoci.outbox_consumers FROM :"app_role";
 REVOKE ALL ON fvoci.outbox_failures FROM :"app_role";

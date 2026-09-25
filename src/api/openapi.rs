@@ -26,7 +26,7 @@ use crate::api::dto::{
     AdminUserItemOutput, AdminUserListResponse, AdminUserPatchBody, AdminUserPatchOutput,
     AdminWorkspaceItemOutput, AdminWorkspaceListResponse, AncestorsResponse, ApiTokenCreateBody,
     ApiTokenCreatedOutput, ApiTokenListResponse, ApiTokenOutput, AttachmentEditContextOutput,
-    AttachmentListOutput, AttachmentOutput, AttachmentPartUrlResponse,
+    AttachmentListOutput, AttachmentOutput, AttachmentPartUrlResponse, AttachmentPreviewHtmlOutput,
     AttachmentUploadedPartResponse, AuditLogItemOutput, AuditLogListResponse, BodyResponse,
     BrandingOutput, BrandingPatchSchema, CloneProjectBody, CommentListResponse, CommentOutput,
     CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody, ConsentItemBody,
@@ -230,6 +230,7 @@ impl Modify for CookieSecurityAddon {
         create_task_attachment_upload,
         list_task_attachments,
         get_attachment_edit_context,
+        get_attachment_preview_html,
         create_attachment_edit_copy,
         list_document_comments,
         create_document_comment,
@@ -449,6 +450,7 @@ impl Modify for CookieSecurityAddon {
             AttachmentOutput,
             AttachmentListOutput,
             AttachmentEditContextOutput,
+            AttachmentPreviewHtmlOutput,
             PutAttachmentPartResponse,
             CreateCommentBody,
             PatchCommentBody,
@@ -2731,12 +2733,13 @@ fn get_share_attachment() {}
     params(
         ("token" = String, description = "Share token"),
         ("attachment_id" = String, description = "Attachment id"),
-        ("variant" = Option<String>, Query, description = "Omit for original bytes; preview is not stored in this slice"),
+        ("variant" = Option<String>, Query, description = "Omit for original bytes; `preview` for the published WebP preview"),
     ),
     responses(
-        (status = 200, description = "Original bytes", content_type = "application/octet-stream"),
+        (status = 200, description = "Original bytes, or the WebP preview for variant=preview", content_type = "application/octet-stream"),
+        (status = 304, description = "Preview not modified (If-None-Match)"),
         (status = 400, description = "Invalid download variant", body = ProblemResponse),
-        (status = 404, description = "Outside the share, unknown, expired or revoked", body = ProblemResponse),
+        (status = 404, description = "Outside the share, unknown, expired or revoked, or no preview", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
     )
 )]
@@ -3429,11 +3432,12 @@ fn get_attachment_meta() {}
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("attachment_id" = String, description = "Attachment id"),
-        ("variant" = Option<String>, Query, description = "Omit for original bytes; preview is not stored in this slice"),
+        ("variant" = Option<String>, Query, description = "Omit for original bytes; `preview` for the published WebP preview (image/webp, inline, ETag)"),
     ),
     responses(
-        (status = 200, description = "Original bytes", content_type = "application/octet-stream"),
+        (status = 200, description = "Original bytes, or the WebP preview for variant=preview", content_type = "application/octet-stream"),
         (status = 206, description = "Partial content", content_type = "application/octet-stream"),
+        (status = 304, description = "Preview not modified (If-None-Match)"),
         (status = 400, description = "Invalid download variant", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
@@ -3571,6 +3575,27 @@ fn get_attachment_edit_context() {}
     )
 )]
 fn create_attachment_edit_copy() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/preview-html",
+    tag = "attachments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("attachment_id" = String, description = "Attachment id"),
+    ),
+    responses(
+        (status = 200, description = "Extracted text of an office (or, in server mode, HWP/HWPX) attachment as one escaped <pre>", body = AttachmentPreviewHtmlOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Attachment failed virus scan", body = ProblemResponse),
+        (status = 404, description = "Not found, forbidden, or not served in the current attachmentPreview mode", body = ProblemResponse),
+        (status = 413, description = "preview_not_available: no extracted text", body = ProblemResponse),
+        (status = 429, description = "Rate limited (60/min)", body = ProblemResponse),
+    )
+)]
+fn get_attachment_preview_html() {}
 
 #[cfg(feature = "api-schema")]
 pub fn spec_json() -> String {

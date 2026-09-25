@@ -111,11 +111,18 @@ async fn list_storage_keys(pool: &PgPool, workspace_id: Uuid) -> Result<Vec<Stri
     let mut tx = pool.begin().await?;
     let previous = set_system(&mut tx).await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT storage_key FROM fvoci.attachments WHERE workspace_id = $1")
-            .bind(workspace_id)
-            .fetch_all(&mut *tx)
-            .await?;
+    // Originals and their published preview objects.
+    let rows: Vec<(String,)> = sqlx::query_as(
+        r#"
+        SELECT storage_key FROM fvoci.attachments WHERE workspace_id = $1
+        UNION ALL
+        SELECT variants -> 'preview' ->> 'key' FROM fvoci.attachments
+        WHERE workspace_id = $1 AND jsonb_typeof(variants -> 'preview' -> 'key') = 'string'
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
     crate::db::context::restore_system(&mut tx, &previous).await?;
     tx.commit().await?;
     Ok(rows.into_iter().map(|(key,)| key).collect())

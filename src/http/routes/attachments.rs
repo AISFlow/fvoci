@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::api::dto::{
     AttachmentCompletePartBody, AttachmentDownloadQuery, AttachmentEditContextOutput,
-    AttachmentListOutput, AttachmentOutput, AttachmentPartUrlResponse,
+    AttachmentListOutput, AttachmentOutput, AttachmentPartUrlResponse, AttachmentPreviewResponse,
     AttachmentUploadedPartResponse, CompleteAttachmentUploadBody, CreateAttachmentUploadBody,
     CreateAttachmentUploadResponse, OkResponse, PutAttachmentPartResponse,
     ResumeAttachmentUploadResponse,
@@ -60,6 +60,10 @@ pub fn router() -> Router<AppState> {
             get(get_edit_context),
         )
         .route(
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/preview-html",
+            get(get_preview_html),
+        )
+        .route(
             "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/edit-copy",
             post(create_edit_copy),
         )
@@ -95,7 +99,10 @@ pub(crate) fn attachment_output(att: &AttachmentRow) -> AttachmentOutput {
         scan_status: att.scan_status.clone(),
         created_at: att.created_at,
         completed_at: att.completed_at,
-        preview: None,
+        preview: att.preview().map(|p| AttachmentPreviewResponse {
+            width: p.width as i32,
+            height: p.height as i32,
+        }),
     }
 }
 
@@ -126,12 +133,102 @@ fn validate_complete_parts(parts: &[AttachmentCompletePartBody]) -> Result<(), A
     Ok(())
 }
 
-fn original_download_or_error(query: &AttachmentDownloadQuery) -> Result<(), AppError> {
+/// `Ok(true)` for `variant=preview`, `Ok(false)` for the original.
+fn wants_preview(query: &AttachmentDownloadQuery) -> Result<bool, AppError> {
     match query.variant.as_deref() {
-        None => Ok(()),
-        Some("preview") => Err(AppError::from_code(ProblemCode::NotFound)),
+        None => Ok(false),
+        Some("preview") => Ok(true),
         Some(_) => Err(AppError::from_code(ProblemCode::InvalidInput)),
     }
+}
+
+/// Source `PREVIEW_CACHE_CONTROL`: 200 and 304 carry the same cache meaning.
+pub(crate) const PREVIEW_CACHE_CONTROL: &str = "private, max-age=3600";
+
+/// Serves a published preview (source download `variant=preview`): strong
+/// ETag with weak If-None-Match comparison, `image/webp`, `inline`, sandbox
+/// CSP. `ranges` enables the member route's single-range support.
+pub(crate) async fn serve_preview(
+    state: &AppState,
+    headers: &HeaderMap,
+    preview: &crate::db::attachments::PreviewVariant,
+    head_only: bool,
+    ranges: bool,
+) -> Result<Response, AppError> {
+    let etag = crate::attachments::preview::preview_etag(
+        &preview.key,
+        preview.bytes,
+        preview.width,
+        preview.height,
+    );
+    let etag_value = HeaderValue::from_str(&etag).map_err(|_| AppError::internal())?;
+    if let Some(header) = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        if crate::http::routes::share::if_none_matches(header, &etag) {
+            let mut out = HeaderMap::new();
+            out.insert(axum::http::header::ETAG, etag_value);
+            out.insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static(PREVIEW_CACHE_CONTROL),
+            );
+            return Ok((StatusCode::NOT_MODIFIED, out).into_response());
+        }
+    }
+    let size = preview.bytes as u64;
+    let mut out = HeaderMap::new();
+    out.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    out.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    out.insert(axum::http::header::ETAG, etag_value);
+    out.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static(PREVIEW_CACHE_CONTROL),
+    );
+    out.insert(CONTENT_TYPE, HeaderValue::from_static("image/webp"));
+    out.insert(CONTENT_DISPOSITION, HeaderValue::from_static("inline"));
+    let parsed = if ranges {
+        out.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        parse_range(headers.get(RANGE).and_then(|v| v.to_str().ok()), size)
+    } else {
+        ParsedRange::Full
+    };
+    let (status, start, end) = match parsed {
+        ParsedRange::Invalid => {
+            let mut resp = AppError::from_code(ProblemCode::RangeNotSatisfiable).into_response();
+            resp.headers_mut().insert(
+                CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes */{size}"))
+                    .map_err(|_| AppError::internal())?,
+            );
+            return Ok(resp);
+        }
+        ParsedRange::Full => (StatusCode::OK, 0, size.saturating_sub(1)),
+        ParsedRange::Bytes { start, end } => {
+            out.insert(
+                CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{size}"))
+                    .map_err(|_| AppError::internal())?,
+            );
+            (StatusCode::PARTIAL_CONTENT, start, end)
+        }
+    };
+    out.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&(end - start + 1).to_string()).map_err(|_| AppError::internal())?,
+    );
+    if head_only {
+        return Ok((status, out).into_response());
+    }
+    let body = state
+        .storage
+        .open_payload_stream(&preview.key, start, end)
+        .await
+        .map_err(|_| AppError::internal())?;
+    Ok((status, out, Body::from_stream(body)).into_response())
 }
 
 fn part_url(workspace_id: Uuid, attachment_id: Uuid, part_number: i32) -> String {
@@ -699,7 +796,7 @@ async fn serve_download(
     query: &AttachmentDownloadQuery,
     head_only: bool,
 ) -> Result<Response, AppError> {
-    original_download_or_error(query)?;
+    let preview = wants_preview(query)?;
     let auth = require_auth(state, headers, jar, Access::Session, None).await?;
     let (user_id, session_id) = (auth.user_id, auth.credential_id);
     let result = open_download(
@@ -721,6 +818,12 @@ async fn serve_download(
         }
         Err(err) => return Err(map_attachment_error(err)),
     };
+    if preview {
+        let variant = att
+            .preview()
+            .ok_or_else(|| AppError::from_code(ProblemCode::NotFound))?;
+        return serve_preview(state, headers, &variant, head_only, true).await;
+    }
     let size = att.size_bytes.ok_or_else(AppError::internal)?;
     let range_header = headers.get(RANGE).and_then(|v| v.to_str().ok());
     let parsed = parse_range(range_header, size as u64);
@@ -874,6 +977,129 @@ async fn require_target_scope(
     } else {
         Err(AppError::from_code(ProblemCode::NotFound))
     }
+}
+
+/// Source `EXTRACT_PREVIEW_MAX_CHARS` (UTF-16 code units, like `slice`).
+const EXTRACT_PREVIEW_MAX_CHARS: usize = 64_000;
+/// Source `attachment-preview-html` rate preset: 60 per minute.
+const PREVIEW_HTML_PER_MINUTE: u32 = 60;
+
+fn is_office_attachment(name: &str, mime: &str) -> bool {
+    let lower = mime.to_ascii_lowercase();
+    if lower.contains("wordprocessingml.document")
+        || lower.contains("presentationml.presentation")
+        || lower.contains("spreadsheetml.sheet")
+        || lower == "application/vnd.oasis.opendocument.text"
+    {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    [".docx", ".pptx", ".xlsx", ".odt"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
+/// Source `previewHtmlKind`: `client` never serves server text, `auto`
+/// only office documents, `server` also HWP/HWPX.
+fn preview_html_allowed(name: &str, mime: &str, mode: &str) -> bool {
+    match mode {
+        "client" => false,
+        _ if is_office_attachment(name, mime) => true,
+        "server" => crate::attachments::is_hwp_attachment(name, mime),
+        _ => false,
+    }
+}
+
+fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// First `max` UTF-16 code units, never splitting a surrogate pair.
+fn utf16_prefix(text: &str, max: usize) -> &str {
+    let mut units = 0;
+    for (idx, c) in text.char_indices() {
+        units += c.len_utf16();
+        if units > max {
+            return &text[..idx];
+        }
+    }
+    text
+}
+
+/// Source `GET /attachments/:id/preview-html`: the search-chunk text of an
+/// office or (server mode) HWP attachment as one escaped `<pre>`. The text
+/// is the one the extract job stored; the source's on-demand parse of a
+/// not-yet-extracted file is not ported, so an empty text answers 413
+/// `preview_not_available` like the source's over-limit case.
+async fn get_preview_html(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, attachment_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<crate::api::dto::AttachmentPreviewHtmlOutput>, AppError> {
+    let auth = require_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
+    require_target_scope(&state, &auth, workspace_id, attachment_id, false).await?;
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow_window(
+            &format!("attachment_preview_html:{}", auth.user_id),
+            PREVIEW_HTML_PER_MINUTE,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after));
+    }
+    let att = open_download(
+        &state.auth.db.pool,
+        workspace_id,
+        attachment_id,
+        auth.user_id,
+        auth.credential_id,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_attachment_error)?;
+    let mode = crate::settings::attachment_preview_mode(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
+    if !preview_html_allowed(&att.name, &att.mime, &mode) {
+        return Err(AppError::from_code(ProblemCode::NotFound));
+    }
+    let not_available = || {
+        AppError::problem(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ProblemCode::PreviewNotAvailable,
+        )
+    };
+    let text = crate::db::attachments::attachment_extract_text(
+        &state.auth.db.pool,
+        workspace_id,
+        attachment_id,
+    )
+    .await
+    .map_err(internal)?
+    .unwrap_or_default();
+    if text.is_empty() {
+        return Err(not_available());
+    }
+    Ok(Json(crate::api::dto::AttachmentPreviewHtmlOutput {
+        html: format!(
+            "<pre>{}</pre>",
+            escape_html(utf16_prefix(&text, EXTRACT_PREVIEW_MAX_CHARS))
+        ),
+    }))
 }
 
 pub(crate) fn map_attachment_error(err: AttachmentDbError) -> AppError {
