@@ -147,6 +147,16 @@ type DocumentRow = (
     Value,
 );
 
+/// Days a trashed document (or project) stays restorable before the maintenance
+/// sweep purges it (source `TRASH_GC_AFTER_MS`, 30 days).
+pub const TRASH_RETENTION_DAYS: i64 = 30;
+
+/// Trash rows at or before this instant are expired: the purge sweep may already
+/// have deleted their attachment objects, so restore treats them as gone.
+pub fn trash_retention_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - chrono::Duration::days(TRASH_RETENTION_DAYS)
+}
+
 pub fn empty_document_json() -> Value {
     json!({"type":"doc","content":[{"type":"paragraph"}]})
 }
@@ -1124,9 +1134,19 @@ pub fn resolve_reorder_sort_key(
     between(None, first_key).map_err(|_| DocumentDbError::InvalidSortKey)
 }
 
-async fn list_live_siblings(
+pub(crate) async fn list_live_siblings(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
+    parent_id: Option<Uuid>,
+) -> Result<Vec<TreeNode>, sqlx::Error> {
+    list_live_siblings_in(tx, workspace_id, None, parent_id).await
+}
+
+/// Live children of `parent_id` in the wiki (`project_id = None`) or one project.
+pub(crate) async fn list_live_siblings_in(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Option<Uuid>,
     parent_id: Option<Uuid>,
 ) -> Result<Vec<TreeNode>, sqlx::Error> {
     let rows = sqlx::query_as::<
@@ -1150,12 +1170,13 @@ async fn list_live_siblings(
         WHERE workspace_id = $1
           AND parent_id IS NOT DISTINCT FROM $2
           AND deleted_at IS NULL
-          AND project_id IS NULL
+          AND project_id IS NOT DISTINCT FROM $3
         ORDER BY sort_key COLLATE "C"
         "#,
     )
     .bind(workspace_id)
     .bind(parent_id)
+    .bind(project_id)
     .fetch_all(&mut **tx)
     .await?;
     Ok(rows
@@ -1263,7 +1284,7 @@ pub(crate) async fn move_subtree(
     Ok(())
 }
 
-async fn trash_document_row(
+pub(crate) async fn trash_document_row(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_id: Uuid,
@@ -1773,21 +1794,38 @@ pub async fn list_trashed_wiki_documents(
         r#"
         SELECT id, title, deleted_at, project_id
         FROM fvoci.documents
-        WHERE workspace_id = $1 AND deleted_at IS NOT NULL
+        WHERE workspace_id = $1 AND deleted_at IS NOT NULL AND deleted_at > $2
         ORDER BY deleted_at DESC, id DESC
         "#,
     )
     .bind(workspace_id)
+    .bind(trash_retention_cutoff(Utc::now()))
     .fetch_all(&mut *tx)
     .await?;
 
+    // Source `listTrashedDocuments`: wiki rows by document permission, project
+    // rows by the live project's permission (a trashed project hides its rows).
+    let mut project_permissions: std::collections::HashMap<Uuid, Option<ProjectPermission>> =
+        std::collections::HashMap::new();
     let mut visible = Vec::new();
     for (id, title, deleted_at, project_id) in rows {
-        if project_id.is_some() {
-            continue;
-        }
-        let permission =
-            document_permission(&mut tx, workspace_id, actor_user_id, id, false).await?;
+        let permission = match project_id {
+            Some(project_id) => match project_permissions.get(&project_id) {
+                Some(cached) => cached.unwrap_or(ProjectPermission::None),
+                None => {
+                    let permission = crate::db::projects::project_permission_by_id(
+                        &mut tx,
+                        workspace_id,
+                        actor_user_id,
+                        project_id,
+                    )
+                    .await?;
+                    project_permissions.insert(project_id, permission);
+                    permission.unwrap_or(ProjectPermission::None)
+                }
+            },
+            None => document_permission(&mut tx, workspace_id, actor_user_id, id, false).await?,
+        };
         if permission_can_view(permission) {
             visible.push(TrashNode {
                 id,
@@ -1838,7 +1876,8 @@ pub async fn restore_wiki_document(
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     };
-    if deleted_at.is_none() || project_id.is_some() {
+    let expired = deleted_at.is_some_and(|at| at <= trash_retention_cutoff(Utc::now()));
+    if deleted_at.is_none() || project_id.is_some() || expired {
         tx.rollback().await?;
         return Ok(Err(DocumentDbError::NotFound));
     }

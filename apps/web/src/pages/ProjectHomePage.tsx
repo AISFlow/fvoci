@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
+import { useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { t } from "@fvoci/i18n";
 import { loadErrorMessage } from "@/components/query-status";
 import { ProjectHomeView } from "@/features/projects/project-home-view";
 import {
@@ -11,7 +13,7 @@ import {
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk } from "@/lib/api";
-import { canonicalizeProjectKey } from "@/lib/href";
+import { canonicalizeProjectKey, projectsPath } from "@/lib/href";
 
 export function ProjectHomePage() {
   const { ref } = useParams<{ ref: string }>();
@@ -24,6 +26,49 @@ export function ProjectHomePage() {
   const documents = useQuery(
     projectDocumentsQuery(workspace?.id ?? "", projectItem?.id ?? ""),
   );
+  const navigate = useNavigate();
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+
+  const lifecycle = useMutation({
+    mutationFn: async (action: "archive" | "unarchive" | "delete") => {
+      if (!workspace?.id || !projectItem?.id) throw new Error("missing project");
+      const path = { workspace_id: workspace.id, project_id: projectItem.id };
+      if (action === "delete") {
+        return ensureOk(
+          await api.DELETE("/api/v1/workspaces/{workspace_id}/projects/{project_id}", {
+            params: { path },
+          }),
+        );
+      }
+      return ensureOk(
+        action === "archive"
+          ? await api.POST("/api/v1/workspaces/{workspace_id}/projects/{project_id}/archive", {
+              params: { path },
+            })
+          : await api.POST("/api/v1/workspaces/{workspace_id}/projects/{project_id}/unarchive", {
+              params: { path },
+            }),
+      );
+    },
+    onSuccess: async (_data, action) => {
+      setLifecycleError(null);
+      if (action === "delete") {
+        await navigate(projectsPath(slug));
+      }
+      await queryClient.invalidateQueries({ queryKey: ["projects", workspace?.id] });
+      await queryClient.invalidateQueries({ queryKey: ["project", workspace?.id, projectItem?.id] });
+      await queryClient.invalidateQueries({ queryKey: ["trash", workspace?.id] });
+    },
+    onError: (error: unknown, action) => {
+      setLifecycleError(
+        action === "archive"
+          ? t("project.archive.failed")
+          : action === "unarchive"
+            ? t("project.unarchive.failed")
+            : loadErrorMessage(error),
+      );
+    },
+  });
 
   const createDocument = useMutation({
     mutationFn: async () => {
@@ -81,6 +126,10 @@ export function ProjectHomePage() {
           onCreateDocument={() => {
             void createDocument.mutate();
           }}
+          canManage={projectItem?.canEdit ?? false}
+          lifecyclePending={lifecycle.isPending}
+          lifecycleError={lifecycleError}
+          onLifecycle={(action) => lifecycle.mutate(action)}
         />
       ) : loading ? null : (
         <p role="alert" className="task-form__alert">{error ?? "not found"}</p>

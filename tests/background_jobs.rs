@@ -14,9 +14,10 @@ use fvoci_server::auth::token::hash_token;
 use fvoci_server::db::magic::issue_password_reset_token;
 use fvoci_server::db::outbox::mark_processed;
 use fvoci_server::jobs::{
-    run_daily_sweep, run_ics_token_gc, run_magic_token_gc, run_notification_gc, run_processed_gc,
-    run_stale_upload_gc, run_stale_upload_sweep, run_workspace_purge, spawn_maintenance, JobClaim,
-    MaintenanceSettings, JOB_KEY_DAILY, JOB_KEY_UPLOADS,
+    run_daily_sweep, run_document_trash_purge, run_ics_token_gc, run_magic_token_gc,
+    run_notification_gc, run_processed_gc, run_stale_upload_gc, run_stale_upload_sweep,
+    run_workspace_purge, spawn_maintenance, JobClaim, MaintenanceSettings, JOB_KEY_DAILY,
+    JOB_KEY_UPLOADS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{admin_pool, app_pool, json_request, setup_session, TestDb};
@@ -981,6 +982,269 @@ async fn upload_gc_cursor_does_not_starve_rows_behind_a_stuck_one() {
     let freed = run(None).await;
     assert_eq!(freed.purged, 1);
     assert!(!attachment_exists(&admin, ids[0]).await);
+
+    let _ = std::fs::remove_dir_all(&root);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+async fn create_wiki_doc(app: &axum::Router, cookie: &str, ws: Uuid, parent: Option<Uuid>) -> Uuid {
+    let (status, doc) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents"),
+        Some(json!({"title": "휴지통 문서", "parentId": parent})),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{doc:?}");
+    Uuid::parse_str(doc["id"].as_str().unwrap()).unwrap()
+}
+
+async fn trash_wiki(app: &axum::Router, cookie: &str, ws: Uuid, id: Uuid) {
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents/{id}/trash"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body:?}");
+}
+
+async fn age_trash(admin: &PgPool, ids: &[Uuid], days: i32) {
+    sqlx::query(
+        "UPDATE fvoci.documents SET deleted_at = now() - make_interval(days => $2) WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(days)
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+async fn document_exists(admin: &PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.documents WHERE id = $1")
+        .bind(id)
+        .fetch_one(admin)
+        .await
+        .unwrap()
+        > 0
+}
+
+#[tokio::test]
+async fn document_trash_purge_removes_storage_then_rows_after_retention() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let (root, storage) = temp_storage();
+
+    let parent = create_wiki_doc(&app, &cookie, ws, None).await;
+    let child = create_wiki_doc(&app, &cookie, ws, Some(parent)).await;
+    let fresh = create_wiki_doc(&app, &cookie, ws, None).await;
+    let restored = create_wiki_doc(&app, &cookie, ws, None).await;
+    let parent_key = Uuid::now_v7().to_string();
+    let child_key = Uuid::now_v7().to_string();
+    write_object(&root, &parent_key);
+    write_object(&root, &child_key);
+    let parent_att = insert_attachment_with_key(&admin, ws, parent, owner_id, &parent_key).await;
+    insert_attachment_with_key(&admin, ws, child, owner_id, &child_key).await;
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (id, workspace_id, target_kind, target_id, y_snapshot,
+                                     content_json, text, reason)
+        VALUES ($1, $2, 'document', $3, '\x00', '{}'::jsonb, '', 'manual')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws)
+    .bind(parent)
+    .execute(&admin)
+    .await
+    .unwrap();
+    trash_wiki(&app, &cookie, ws, parent).await;
+    trash_wiki(&app, &cookie, ws, fresh).await;
+    trash_wiki(&app, &cookie, ws, restored).await;
+    age_trash(&admin, &[parent, child, restored], 31).await;
+    sqlx::query("UPDATE fvoci.documents SET deleted_at = NULL WHERE id = $1")
+        .bind(restored)
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    let stats = run_document_trash_purge(&pool, &storage, Utc::now(), &cancel)
+        .await
+        .expect("purge");
+    // Deepest first: the child goes, then its parent in the same run.
+    assert_eq!(stats.purged, 2, "{stats:?}");
+    assert_eq!(stats.storage_deleted, 2);
+    assert!(!document_exists(&admin, parent).await);
+    assert!(!document_exists(&admin, child).await);
+    assert!(!object_exists(&root, &parent_key));
+    assert!(!object_exists(&root, &child_key));
+    assert!(!attachment_exists(&admin, parent_att).await);
+    let revisions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.revisions WHERE target_id = $1")
+            .bind(parent)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(revisions, 0);
+    assert!(document_exists(&admin, fresh).await, "inside retention");
+    assert!(
+        document_exists(&admin, restored).await,
+        "restored rows are never purged"
+    );
+    let purged_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.events WHERE workspace_id = $1 AND verb = 'document.purged'",
+    )
+    .bind(ws)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(purged_events, 2);
+
+    let again = run_document_trash_purge(&pool, &storage, Utc::now(), &cancel)
+        .await
+        .expect("idempotent");
+    assert_eq!(again.purged, 0);
+
+    let _ = std::fs::remove_dir_all(&root);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// Storage first: a storage failure keeps every row (including the document)
+/// for the next sweep; an object already gone (crash after storage, before the
+/// DB delete) counts as deleted.
+#[tokio::test]
+async fn document_trash_purge_keeps_rows_when_storage_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let (root, storage) = temp_storage();
+
+    let doc = create_wiki_doc(&app, &cookie, ws, None).await;
+    let key = Uuid::now_v7().to_string();
+    write_object(&root, &key);
+    let att = insert_attachment_with_key(&admin, ws, doc, owner_id, &key).await;
+    let crashed = create_wiki_doc(&app, &cookie, ws, None).await;
+    let missing_key = Uuid::now_v7().to_string();
+    let crashed_att = insert_attachment_with_key(&admin, ws, crashed, owner_id, &missing_key).await;
+    trash_wiki(&app, &cookie, ws, doc).await;
+    trash_wiki(&app, &cookie, ws, crashed).await;
+    age_trash(&admin, &[doc, crashed], 31).await;
+
+    // The object directory cannot be removed: storage error.
+    let object_dir = root.join("objects").join(&key);
+    std::fs::set_permissions(&object_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let cancel = CancellationToken::new();
+    let failed = run_document_trash_purge(&pool, &storage, Utc::now(), &cancel)
+        .await
+        .expect("sweep");
+    std::fs::set_permissions(&object_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(failed.failed, 1, "{failed:?}");
+    assert_eq!(
+        failed.purged, 1,
+        "the document whose object is already gone is purged"
+    );
+    assert!(document_exists(&admin, doc).await);
+    assert!(attachment_exists(&admin, att).await);
+    assert!(!document_exists(&admin, crashed).await);
+    assert!(!attachment_exists(&admin, crashed_att).await);
+
+    let retry = run_document_trash_purge(&pool, &storage, Utc::now(), &cancel)
+        .await
+        .expect("retry");
+    assert_eq!(retry.purged, 1, "{retry:?}");
+    assert!(!document_exists(&admin, doc).await);
+    assert!(!object_exists(&root, &key));
+
+    let _ = std::fs::remove_dir_all(&root);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A restore racing the purge waits on the workspace tree lock the purge holds
+/// across its storage phase, then finds the row gone (no restored document
+/// with deleted attachment objects).
+#[tokio::test]
+async fn document_trash_purge_and_concurrent_restore_do_not_interleave() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let (root, storage) = temp_storage();
+
+    let doc = create_wiki_doc(&app, &cookie, ws, None).await;
+    let key = Uuid::now_v7().to_string();
+    write_object(&root, &key);
+    insert_attachment_with_key(&admin, ws, doc, owner_id, &key).await;
+    trash_wiki(&app, &cookie, ws, doc).await;
+    // Exactly at the edge of retention for the purge's cutoff.
+    age_trash(&admin, &[doc], 30).await;
+    let now = Utc::now() + ChronoDuration::seconds(5);
+
+    let (reached, proceed) = fvoci_server::db::document_purge::test_hooks::arm_before_storage(doc);
+    let purge = tokio::spawn({
+        let pool = pool.clone();
+        let storage = storage.clone();
+        async move {
+            run_document_trash_purge(&pool, &storage, now, &CancellationToken::new())
+                .await
+                .unwrap()
+        }
+    });
+    reached.await.expect("purge reached storage phase");
+    let restore = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/documents/{doc}/restore"),
+                None,
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    // Restore is parked on the tree lock while the purge is mid-flight.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%pg_advisory_xact_lock%'",
+        )
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+        assert!(!restore.is_finished(), "restore must wait for the purge");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restore never blocked"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    proceed.send(()).unwrap();
+    let stats = purge.await.unwrap();
+    assert_eq!(stats.purged, 1, "{stats:?}");
+    let (status, _) = restore.await.unwrap();
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    assert!(!document_exists(&admin, doc).await);
+    assert!(!object_exists(&root, &key));
 
     let _ = std::fs::remove_dir_all(&root);
     admin.close().await;

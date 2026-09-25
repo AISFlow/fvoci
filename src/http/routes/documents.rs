@@ -100,8 +100,8 @@ struct BodyQuery {
 }
 
 #[derive(Deserialize)]
-struct TrashQuery {
-    children: Option<String>,
+pub(crate) struct TrashQuery {
+    pub(crate) children: Option<String>,
 }
 
 pub(crate) enum DocumentApiError {
@@ -738,7 +738,9 @@ pub(crate) fn meta_response(meta: &DocumentMeta, include_display_id: bool) -> Do
     }
 }
 
-fn parse_trash_children(value: Option<&str>) -> Result<TrashChildrenMode, DocumentApiError> {
+pub(crate) fn parse_trash_children(
+    value: Option<&str>,
+) -> Result<TrashChildrenMode, DocumentApiError> {
     match value {
         None => Ok(TrashChildrenMode::Trash),
         Some("trash") => Ok(TrashChildrenMode::Trash),

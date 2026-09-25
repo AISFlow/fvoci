@@ -8,6 +8,7 @@ pub mod collab_delivery;
 pub mod comments;
 pub mod context;
 pub mod dashboard;
+pub mod document_purge;
 pub mod documents;
 pub mod group_grants;
 pub mod groups;

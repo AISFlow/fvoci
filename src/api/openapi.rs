@@ -141,6 +141,15 @@ impl Modify for CookieSecurityAddon {
         get_project_document,
         patch_project_document,
         move_project_document,
+        get_project_document_body,
+        delete_project,
+        archive_project,
+        unarchive_project,
+        restore_project,
+        delete_project_document,
+        trash_project_document,
+        restore_project_document,
+        sort_project_document,
         list_project_members,
         add_project_member,
         patch_project_member,
@@ -1352,7 +1361,10 @@ fn revoke_me_api_token() {}
     path = "/api/v1/workspaces/{workspace_id}/projects",
     tag = "projects",
     security(("fvoci_session" = [])),
-    params(("workspace_id" = String, description = "Workspace id")),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("deleted" = Option<String>, Query, description = "true lists restorable deleted projects (workspace admins)"),
+    ),
     responses(
         (status = 200, description = "Projects visible to caller", body = ProjectListResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
@@ -2729,6 +2741,170 @@ fn patch_project_document() {}
     )
 )]
 fn move_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/body",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Project document body", body = BodyResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_project_document_body() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}",
+    tag = "projects",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project and its documents moved to trash", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn delete_project() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/archive",
+    tag = "projects",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Archived", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn archive_project() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/unarchive",
+    tag = "projects",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Unarchived", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn unarchive_project() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/restore",
+    tag = "projects",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Restored project", body = ProjectOutput),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn restore_project() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+        ("children" = Option<String>, Query, description = "trash or reparent"),
+    ),
+    responses(
+        (status = 200, description = "Trashed", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 400, description = "Project root document", body = ProblemResponse),
+    )
+)]
+fn delete_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/trash",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+        ("children" = Option<String>, Query, description = "trash or reparent"),
+    ),
+    responses(
+        (status = 200, description = "Trashed", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 400, description = "Project root document", body = ProblemResponse),
+    )
+)]
+fn trash_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/restore",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Restored", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Parent trashed", body = ProblemResponse),
+    )
+)]
+fn restore_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/sort",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = SortDocumentBody,
+    responses(
+        (status = 200, description = "Reordered project document", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn sort_project_document() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
