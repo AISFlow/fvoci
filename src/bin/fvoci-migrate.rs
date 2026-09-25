@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use fvoci_server::db::migrate;
+use fvoci_server::db::outbox_recover::{parse_recover_outbox_args, recover_outbox};
 use fvoci_server::search::index::rebuild_search_index;
 use fvoci_server::search::meili::{ensure_meili_key_file, meili_config_from_env};
 use uuid::Uuid;
@@ -35,9 +36,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let workspace_id = Uuid::parse_str(workspace).map_err(|_| "invalid workspace ID")?;
             rebuild(Some(workspace_id)).await?;
         }
+        [flag, rest @ ..] if flag == "--recover-outbox" => {
+            let url = migration_url()?;
+            let opts = parse_recover_outbox_args(rest)?;
+            let report = recover_outbox(&url, opts).await?;
+            println!("{}", serde_json::to_string(&report)?);
+        }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id]]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
             );
         }
     }

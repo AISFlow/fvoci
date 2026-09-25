@@ -348,6 +348,14 @@ pub async fn fetch_cursor(
     Ok(row.map(|row| (row.get("last_xact"), row.get("last_seq"))))
 }
 
+pub async fn xid_epoch_mismatch(pool: &PgPool, consumer: &str) -> Result<bool, sqlx::Error> {
+    let mismatched = sqlx::query_scalar("SELECT fvoci.app_outbox_xid_mismatch($1)")
+        .bind(consumer)
+        .fetch_one(pool)
+        .await?;
+    Ok(mismatched)
+}
+
 pub async fn insert_test_event(
     pool: &PgPool,
     verb: &str,

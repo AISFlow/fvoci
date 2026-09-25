@@ -7,14 +7,14 @@ use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::db::outbox::{
     advance_cursor, claim_retries, clear_failure, fetch_event_by_id, fetch_failure_state,
     is_processed, lease_consumer, mark_processed, read_events, record_failure, release_consumer,
-    OutboxEvent, OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_MS, OUTBOX_LEASE_SECS,
-    OUTBOX_MAX_ATTEMPTS,
+    xid_epoch_mismatch, OutboxEvent, OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_MS,
+    OUTBOX_LEASE_SECS, OUTBOX_MAX_ATTEMPTS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,8 @@ pub trait OutboxConsumer: Send + Sync {
 
     /// Deliver one event. For `PgOnly`, implementations must apply their effect
     /// and advance the cursor in the same transaction via `advance_cursor_tx`.
+    /// `advance_cursor_tx` is idempotent when the cursor is already at or past
+    /// the event and clears that event's failure row in the same transaction.
     /// `External` implementations must be idempotent: a duplicate delivery after
     /// a crash or overlapping lease must converge to the same side effect.
     fn deliver<'a>(
@@ -192,6 +194,14 @@ async fn process_consumer_cycle(
 ) -> Result<bool, sqlx::Error> {
     let ttl_secs = settings.lease_ttl.as_secs().clamp(1, 3600) as i64;
     if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
+        return Ok(false);
+    }
+
+    if xid_epoch_mismatch(pool, consumer.name()).await? {
+        error!(
+            consumer = consumer.name(),
+            "outbox xid epoch mismatch; refuse to advance; run fvoci-migrate --recover-outbox"
+        );
         return Ok(false);
     }
 

@@ -102,3 +102,5 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) FROM PUBL
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_xid_mismatch(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_xid_mismatch(text) TO :"app_role";

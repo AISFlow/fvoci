@@ -252,6 +252,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         storage: fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
         upload: config.upload.clone(),
         collab: collab.clone(),
+        meili: config.meili.clone(),
     };
 
     let deadline = config.shutdown_deadline;

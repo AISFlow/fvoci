@@ -50,6 +50,7 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   task_hierarchy_violation: "task hierarchy violation",
   invalid_recurrence_preset: "invalid recurrence preset",
   task_archived: "task is archived — read-only",
+  search_unavailable: "search unavailable",
   status_not_in_project_workflow: "status not in project workflow",
 };
 
