@@ -10,8 +10,8 @@ use crate::db::context::{
 };
 use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
-use crate::db::labels::{assignee_filter_member_exists, label_is_visible};
-use crate::db::milestones::{milestone_is_visible, project_milestone_exists};
+use crate::db::labels::{assignee_filter_member_exists, project_label_exists};
+use crate::db::milestones::project_milestone_exists;
 use crate::db::projects::{lock_project, project_permission, ProjectDbError};
 use crate::projects::ProjectPermission;
 use crate::tasks::dependency::{
@@ -1254,13 +1254,13 @@ pub async fn list_project_tasks(
         return Ok(Err(ProjectDbError::NotFound));
     }
     if let Some(label_id) = query.view.filters.label_id {
-        if !label_is_visible(&mut tx, workspace_id, actor_user_id, label_id).await? {
+        if !project_label_exists(&mut tx, workspace_id, project_id, label_id).await? {
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::InvalidInput));
         }
     }
     if let Some(milestone_id) = query.view.filters.milestone_id {
-        if !milestone_is_visible(&mut tx, workspace_id, actor_user_id, milestone_id).await? {
+        if !project_milestone_exists(&mut tx, workspace_id, project_id, milestone_id).await? {
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::InvalidInput));
         }
