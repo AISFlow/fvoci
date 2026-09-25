@@ -2816,7 +2816,11 @@ export interface components {
         };
         /** @description `item: null` when the readable document/task is in no collection. */
         CollectionItemLookupResponse: {
+            /** @description Whether the actor may write this item's values now (Rust addition). */
+            canEdit: boolean;
             item: components["schemas"]["CollectionItemOutput"] | null;
+            /** @description Field id → value of this item (Rust addition; `{}` when not in a collection). */
+            values: Record<string, never>;
         };
         CollectionItemOutput: {
             collectionId: string;

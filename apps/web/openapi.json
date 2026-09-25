@@ -16431,9 +16431,15 @@
         "type": "object",
         "description": "`item: null` when the readable document/task is in no collection.",
         "required": [
-          "item"
+          "item",
+          "values",
+          "canEdit"
         ],
         "properties": {
+          "canEdit": {
+            "type": "boolean",
+            "description": "Whether the actor may write this item's values now (Rust addition)."
+          },
           "item": {
             "oneOf": [
               {
@@ -16443,6 +16449,10 @@
                 "type": "null"
               }
             ]
+          },
+          "values": {
+            "type": "object",
+            "description": "Field id → value of this item (Rust addition; `{}` when not in a collection)."
           }
         }
       },

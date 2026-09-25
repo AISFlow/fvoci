@@ -831,6 +831,8 @@ pub async fn patch_field(
 /// Resolved attach/value target: its project and the actor's level on it.
 pub(crate) struct TargetInfo {
     pub project_id: Option<Uuid>,
+    /// The actor could write this target now (level, project and task live).
+    pub can_edit: bool,
 }
 
 /// Source `requirePermission(target, need)` plus the root/archival checks.
@@ -904,7 +906,10 @@ pub(crate) async fn require_target(
             return Ok(Err(CollectionDbError::TaskArchived));
         }
     }
-    Ok(Ok(TargetInfo { project_id }))
+    Ok(Ok(TargetInfo {
+        project_id,
+        can_edit: permission.at_least(ProjectPermission::Edit) && !archived && !task_archived,
+    }))
 }
 
 type TaskScopeTuple = (Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
@@ -1589,22 +1594,46 @@ pub async fn remove_view(
     Ok(Ok(()))
 }
 
-/// Source `getCollectionItem`: `None` when the readable target is not in any collection.
+#[derive(Debug, Clone)]
+pub struct ItemLookup {
+    pub item: Option<ItemRow>,
+    /// Field id → value JSON of the item (empty when not in a collection).
+    pub values: Vec<(Uuid, Value)>,
+    pub can_edit: bool,
+}
+
+/// Source `getCollectionItem`: `item: None` when the readable target is not in
+/// any collection. Also returns the item's values and whether the actor may
+/// write them, so a detail page needs no collection query (Rust addition).
 pub async fn item_for_target(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     actor: &Actor,
     target: AttachTarget,
-) -> DbResult<Option<ItemRow>> {
+) -> DbResult<ItemLookup> {
     let mut tx = pool.begin().await?;
     let role = check!(tx, begin_member(&mut tx, workspace_id, actor, false).await?);
-    check!(
+    let info = check!(
         tx,
         require_target(&mut tx, workspace_id, actor, role, target, Need::Read).await?
     );
     let item = find_item_by_target(&mut tx, workspace_id, target).await?;
+    let values = match &item {
+        Some(item) => {
+            crate::db::collection_query::load_item_values(&mut tx, workspace_id, &[item.id])
+                .await?
+                .into_iter()
+                .map(|(_, field_id, value)| (field_id, value))
+                .collect()
+        }
+        None => Vec::new(),
+    };
     tx.commit().await?;
-    Ok(Ok(item))
+    Ok(Ok(ItemLookup {
+        item,
+        values,
+        can_edit: info.can_edit,
+    }))
 }
 
 pub async fn project_collection(

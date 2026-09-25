@@ -702,12 +702,14 @@ async fn item_lookup(
         None,
     )
     .await?;
-    let item = item_for_target(&state.auth.db.pool, workspace_id, &actor, target)
+    let lookup = item_for_target(&state.auth.db.pool, workspace_id, &actor, target)
         .await
         .map_err(internal)?
         .map_err(map_error)?;
     Ok(Json(CollectionItemLookupResponse {
-        item: item.map(item_output),
+        item: lookup.item.map(item_output),
+        values: values_object(lookup.values),
+        can_edit: lookup.can_edit,
     }))
 }
 

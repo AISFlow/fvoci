@@ -26,6 +26,7 @@ import { RevisionPanel } from "./revision-panel";
 import { DocumentExportMenu } from "./document-export-menu";
 import { ShareDialog } from "@/features/share/share-dialog";
 import { StarToggle } from "@/features/share/star-toggle";
+import { DocumentTagsBar } from "./document-tags-bar";
 import "./document-shell.css";
 
 type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
@@ -352,6 +353,12 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
               />
             ) : null}
           </div>
+          <DocumentTagsBar
+            workspaceId={workspaceId}
+            documentId={documentId}
+            projectId={null}
+            readOnly={readOnly}
+          />
           <DocumentExportMenu
             workspaceId={workspaceId}
             documentId={documentId}

@@ -1,7 +1,7 @@
 import { t } from "@fvoci/i18n";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { ProjectGroupsSection } from "@/features/projects/project-groups";
 import { ProjectMilestonesSection } from "@/features/projects/project-milestones";
@@ -12,13 +12,25 @@ import {
   workflowQuery,
 } from "@/features/projects/queries";
 import { TaskCreateDialog } from "@/features/tasks/task-create-dialog";
+import { ProjectViewNav } from "@/features/collections/project-view-nav";
+import { TaskFilters } from "@/features/tasks/task-filters";
 import { TaskList } from "@/features/tasks/task-list";
-import { taskListQuery, type CreateTaskBody } from "@/features/tasks/queries";
+import { ProjectTaskSavedViews, viewConfigOf } from "@/features/tasks/task-saved-views";
+import {
+  projectLabelsQuery,
+  projectMilestonesQuery,
+  taskListQuery,
+  type CreateTaskBody,
+} from "@/features/tasks/queries";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
+import { FALLBACK_TZ } from "@/lib/datetime";
 import { formatDisplayId, itemPath, parseRef, projectPath, projectsPath } from "@/lib/href";
+import { membersQuery, meQuery } from "@/lib/queries";
+import { collectionFieldsQuery, projectCollectionQuery } from "@/lib/queries/collections";
+import { encodeViewQueryParam, parseViewQueryParam, type ViewQuery } from "@/lib/view-query";
 import "@/features/projects/projects.css";
 
 function roleAtLeast(role: string, minimum: string): boolean {
@@ -34,11 +46,35 @@ export function ProjectTasksPage() {
   const parsed = parseRef(ref ?? "");
   const projectKey = parsed?.kind === "project" ? parsed.key : null;
   const [createStatusId, setCreateStatusId] = useState<string | null>(null);
+  const [search, setSearch] = useSearchParams();
+  const rawQuery = search.get("query");
+  const parsedQuery = parseViewQueryParam(rawQuery);
+  const viewQuery: ViewQuery = parsedQuery ?? { filters: {}, sort: [] };
+  const encodedQuery = encodeViewQueryParam(viewQuery);
+  const selectedViewId = search.get("view");
 
   const projects = useQuery(projectsQuery(workspace?.id ?? ""));
   const project = findProjectByKey(projects.data?.items, projectKey ?? "");
   const workflow = useQuery(workflowQuery(workspace?.id ?? "", project?.id ?? ""));
-  const tasks = useInfiniteQuery(taskListQuery(workspace?.id ?? "", project?.id ?? ""));
+  const tasks = useInfiniteQuery(
+    taskListQuery(workspace?.id ?? "", project?.id ?? "", encodedQuery),
+  );
+  const me = useQuery(meQuery);
+  const members = useQuery(membersQuery(workspace?.id ?? ""));
+  const labels = useQuery(projectLabelsQuery(workspace?.id ?? "", project?.id ?? ""));
+  const milestones = useQuery(projectMilestonesQuery(workspace?.id ?? "", project?.id ?? ""));
+  const collection = useQuery(projectCollectionQuery(workspace?.id ?? "", project?.id ?? ""));
+  const fields = useQuery(collectionFieldsQuery(workspace?.id ?? "", collection.data?.id ?? ""));
+
+  function applyQuery(next: ViewQuery, viewId: string | null | undefined = selectedViewId) {
+    const params = new URLSearchParams(search);
+    const encoded = encodeViewQueryParam(next);
+    if (encoded) params.set("query", encoded);
+    else params.delete("query");
+    if (viewId) params.set("view", viewId);
+    else params.delete("view");
+    setSearch(params, { replace: true });
+  }
   const taskPages = mergeTaskListPages(tasks.data?.pages ?? []);
   const firstPageFailed = tasks.isError && !tasks.isFetchNextPageError;
 
@@ -101,6 +137,31 @@ export function ProjectTasksPage() {
           <div className="task-home__head">
             <h1 className="task-home__title">{project.name}</h1>
           </div>
+          <ProjectViewNav slug={slug} projectKey={project.key} active="tasks" />
+          <ProjectTaskSavedViews
+            workspaceId={workspace.id}
+            projectId={project.id}
+            query={viewQuery}
+            selectedId={selectedViewId}
+            onSelect={(view) =>
+              view ? applyQuery(viewConfigOf(view), view.id) : applyQuery(viewQuery, null)
+            }
+          />
+          <TaskFilters
+            query={viewQuery}
+            statuses={workflow.data?.statuses ?? []}
+            labels={labels.data?.items ?? []}
+            milestones={milestones.data?.items ?? []}
+            members={members.data?.items ?? []}
+            fields={fields.data?.items ?? []}
+            timeZone={me.data?.timezone ?? FALLBACK_TZ}
+            onChange={(next) => applyQuery(next)}
+          />
+          {parsedQuery === null ? (
+            <p role="alert" className="task-form__alert">
+              {t("task.filter.lastValidResults")}
+            </p>
+          ) : null}
           {workflow.isLoading || tasks.isLoading ? <QueryLoading /> : null}
           {workflow.isError || firstPageFailed ? (
             <QueryError

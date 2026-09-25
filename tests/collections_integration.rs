@@ -785,6 +785,30 @@ async fn task_collection_fields_values_and_permissions() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    // The item lookup carries the item's values and the caller's edit right.
+    let (_, lookup) = call(
+        &app,
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/tasks/{task}/collection-item"),
+        None,
+        &viewer.cookie,
+    )
+    .await;
+    assert_eq!(
+        lookup["values"][note["id"].as_str().unwrap()],
+        json!({"text": "메모 😀"})
+    );
+    assert_eq!(lookup["canEdit"], false);
+    let (_, lookup) = call(
+        &app,
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/tasks/{task}/collection-item"),
+        None,
+        &owner,
+    )
+    .await;
+    assert_eq!(lookup["canEdit"], true);
+
     // Values are visible in the query; clearing with null removes the row.
     let (status, result) = query(&app, &viewer.cookie, ws, &cid, json!({"config": {}})).await;
     assert_eq!(status, StatusCode::OK, "{result}");
@@ -1353,7 +1377,8 @@ async fn wiki_document_collection_attach_guest_and_tenant_isolation() {
         &owner,
     )
     .await;
-    assert_eq!(lookup, json!({"item": null}));
+    assert_eq!(lookup["item"], Value::Null);
+    assert_eq!(lookup["values"], json!({}));
 
     // Guests only see wiki collections through a document they can read.
     let (_, list) = call(&app, "GET", &base, None, &guest.cookie).await;

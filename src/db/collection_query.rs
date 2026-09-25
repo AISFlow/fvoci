@@ -112,6 +112,23 @@ fn sha256_hex(value: &str) -> String {
 }
 
 /// Value JSON per (item, field), same shapes as the `collectionValue` union.
+/// Values of the given items as `(item_id, field_id, value)`.
+pub(crate) async fn load_item_values(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid, Value)>, sqlx::Error> {
+    let rows: Vec<(Uuid, Uuid, Option<Value>)> = sqlx::query_as(&values_sql("$2"))
+        .bind(workspace_id)
+        .bind(ids)
+        .fetch_all(&mut **tx)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(item, field, value)| value.map(|value| (item, field, value)))
+        .collect())
+}
+
 fn values_sql(ids_ph: &str) -> String {
     format!(
         r#"

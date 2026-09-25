@@ -175,6 +175,11 @@ pub struct CollectionItemOutput {
 pub struct CollectionItemLookupResponse {
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
     pub item: Option<CollectionItemOutput>,
+    /// Field id → value of this item (Rust addition; `{}` when not in a collection).
+    #[cfg_attr(feature = "api-schema", schema(value_type = Object))]
+    pub values: Value,
+    /// Whether the actor may write this item's values now (Rust addition).
+    pub can_edit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
