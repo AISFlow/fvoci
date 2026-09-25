@@ -9,6 +9,8 @@ pub mod documents;
 pub mod error;
 pub mod http;
 pub mod ics;
+pub mod jobs;
+pub mod mail;
 pub mod import_job;
 pub mod notifications;
 pub mod outbox;

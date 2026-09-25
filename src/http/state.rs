@@ -22,4 +22,5 @@ pub struct AppState {
     pub document_convert: Option<ConvertClient>,
     pub import_settings: Option<ImportJobSettings>,
     pub import_queue: ImportQueue,
+    pub mailer: std::sync::Arc<crate::mail::Mailer>,
 }

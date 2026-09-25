@@ -1,16 +1,19 @@
-import { t } from "@fvoci/i18n";
-import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { formatPersonName, t } from "@fvoci/i18n";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { ensureOk, ProblemError, api } from "@/lib/api";
 import { commentsQuery, type CommentsTargetKind } from "@/lib/queries/comments";
+import { groupsQuery, membersQuery } from "@/lib/queries";
 import { nextReplyTarget } from "./comment-drafts";
+import { mentionTargetsFromBody } from "./group-mentions";
 import { buildCommentTree, type CommentNode } from "./comment-tree";
 import "./comments.css";
 
 const REACTIONS = ["👍", "❤️", "🎉"] as const;
+const NONE = "";
 
 interface CommentPanelProps {
   workspaceId: string;
@@ -18,6 +21,93 @@ interface CommentPanelProps {
   targetId: string;
   currentUserId: string;
   readOnly?: boolean;
+  projectId?: string | null;
+}
+
+function commentPostBody(
+  text: string,
+  parentId: string | null | undefined,
+  members: ReadonlyArray<{ userId: string; name: string }>,
+  groups: ReadonlyArray<{ id: string; name: string }>,
+) {
+  const mentions = mentionTargetsFromBody(text, members, groups);
+  return {
+    body: text,
+    parentId: parentId ?? undefined,
+    mentionedUserIds: mentions.mentionedUserIds,
+    mentionedGroupIds: mentions.mentionedGroupIds,
+  };
+}
+
+function appendGroupMention(body: string, name: string): string {
+  const prefix = body.length === 0 || body.endsWith(" ") || body.endsWith("\n") ? "" : " ";
+  return `${body}${prefix}@${name} `;
+}
+
+function CommentCompose({
+  pending,
+  groups,
+  draft,
+  onDraftChange,
+  onSubmit,
+  testAttr,
+}: {
+  pending: boolean;
+  groups: ReadonlyArray<{ id: string; name: string }>;
+  draft: string;
+  onDraftChange: (body: string) => void;
+  onSubmit: (body: string) => void;
+  testAttr: "data-comment-compose" | "data-comment-reply";
+}) {
+  const attrs = { [testAttr]: "" };
+  return (
+    <form
+      {...attrs}
+      className="comment-thread__compose"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const text = draft.trim();
+        if (!text) return;
+        onSubmit(text);
+      }}
+    >
+      <textarea
+        className="comment-thread__input"
+        value={draft}
+        aria-label={t("comment.placeholder")}
+        placeholder={t("comment.placeholder")}
+        disabled={pending}
+        onChange={(event) => onDraftChange(event.target.value)}
+      />
+      <div className="comment-thread__compose-row">
+        {groups.length > 0 ? (
+          <select
+            className="comment-thread__mention"
+            aria-label={t("group.mention")}
+            value={NONE}
+            disabled={pending}
+            onChange={(event) => {
+              const groupId = event.target.value;
+              event.target.value = NONE;
+              const group = groups.find((item) => item.id === groupId);
+              if (!group) return;
+              onDraftChange(appendGroupMention(draft, group.name));
+            }}
+          >
+            <option value={NONE}>{t("group.mention")}</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        <Button type="submit" size="sm" disabled={pending || draft.trim() === ""}>
+          {t("comment.submit")}
+        </Button>
+      </div>
+    </form>
+  );
 }
 
 export function CommentPanel({
@@ -26,9 +116,12 @@ export function CommentPanel({
   targetId,
   currentUserId,
   readOnly = false,
+  projectId = null,
 }: CommentPanelProps) {
   const queryClient = useQueryClient();
-  const list = useInfiniteQuery(commentsQuery(workspaceId, kind, targetId));
+  const project = projectId && projectId.length > 0 ? projectId : null;
+  const list = useInfiniteQuery(commentsQuery(workspaceId, kind, targetId, project));
+  const groupsList = useQuery(groupsQuery(workspaceId));
   const [draft, setDraft] = useState("");
   const [replyDraft, setReplyDraft] = useState("");
   const [replyToId, setReplyToId] = useState<string | null>(null);
@@ -42,30 +135,62 @@ export function CommentPanel({
   );
   const roots = useMemo(() => buildCommentTree(items), [items]);
   const testId = kind === "document" ? "document-comments" : "task-comments";
+  const groups = groupsList.error instanceof ProblemError ? [] : (groupsList.data?.items ?? []);
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["comments", workspaceId, kind, targetId] });
   };
 
   const create = useMutation({
-    mutationFn: async (body: { text: string; parentId?: string | null }) =>
-      ensureOk(
+    mutationFn: async (body: { text: string; parentId?: string | null }) => {
+      let members: ReadonlyArray<{ userId: string; name: string }> = [];
+      let mentionGroups: ReadonlyArray<{ id: string; name: string }> = [];
+      if (body.text.includes("@")) {
+        const [membersResult, groupsResult] = await Promise.allSettled([
+          queryClient.fetchQuery(membersQuery(workspaceId)),
+          queryClient.fetchQuery(groupsQuery(workspaceId)),
+        ]);
+        if (membersResult.status === "fulfilled") {
+          members = membersResult.value.items.map((member) => ({
+            userId: member.userId,
+            name: formatPersonName(member),
+          }));
+        } else if (!(membersResult.reason instanceof ProblemError)) {
+          throw membersResult.reason;
+        }
+        if (groupsResult.status === "fulfilled") {
+          mentionGroups = groupsResult.value.items;
+        } else if (!(groupsResult.reason instanceof ProblemError)) {
+          throw groupsResult.reason;
+        }
+      }
+      const payload = commentPostBody(body.text, body.parentId, members, mentionGroups);
+      return ensureOk(
         kind === "document"
-          ? await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments", {
-              params: { path: { workspace_id: workspaceId, document_id: targetId } },
-              body: {
-                body: body.text,
-                parentId: body.parentId ?? undefined,
-              },
-            })
+          ? project
+            ? await api.POST(
+                "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments",
+                {
+                  params: {
+                    path: {
+                      workspace_id: workspaceId,
+                      project_id: project,
+                      document_id: targetId,
+                    },
+                  },
+                  body: payload,
+                },
+              )
+            : await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments", {
+                params: { path: { workspace_id: workspaceId, document_id: targetId } },
+                body: payload,
+              })
           : await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments", {
               params: { path: { workspace_id: workspaceId, task_id: targetId } },
-              body: {
-                body: body.text,
-                parentId: body.parentId ?? undefined,
-              },
+              body: payload,
             }),
-      ),
+      );
+    },
     onSuccess: async () => {
       setDraft("");
       setReplyDraft("");
@@ -265,27 +390,16 @@ export function CommentPanel({
           </form>
         ) : null}
         {replyToId === comment.id && !readOnly ? (
-          <form
-            data-comment-reply=""
-            className="comment-thread__compose"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const text = replyDraft.trim();
-              if (!text) return;
+          <CommentCompose
+            pending={pending}
+            groups={groups}
+            draft={replyDraft}
+            onDraftChange={setReplyDraft}
+            onSubmit={(text) => {
               void create.mutateAsync({ text, parentId: comment.id });
             }}
-          >
-            <textarea
-              className="comment-thread__input"
-              value={replyDraft}
-              aria-label={t("comment.placeholder")}
-              disabled={pending}
-              onChange={(event) => setReplyDraft(event.target.value)}
-            />
-            <Button type="submit" size="sm" disabled={pending || replyDraft.trim() === ""}>
-              {t("comment.submit")}
-            </Button>
-          </form>
+            testAttr="data-comment-reply"
+          />
         ) : null}
         {node.children.length > 0 ? (
           <ul className="comment-thread__list">
@@ -336,28 +450,16 @@ export function CommentPanel({
         </Button>
       ) : null}
       {!readOnly ? (
-        <form
-          data-comment-compose=""
-          className="comment-thread__compose"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const text = draft.trim();
-            if (!text) return;
+        <CommentCompose
+          pending={pending}
+          groups={groups}
+          draft={draft}
+          onDraftChange={setDraft}
+          onSubmit={(text) => {
             void create.mutateAsync({ text, parentId: null });
           }}
-        >
-          <textarea
-            className="comment-thread__input"
-            value={draft}
-            aria-label={t("comment.placeholder")}
-            placeholder={t("comment.placeholder")}
-            disabled={pending}
-            onChange={(event) => setDraft(event.target.value)}
-          />
-          <Button type="submit" disabled={pending || draft.trim() === ""}>
-            {t("comment.submit")}
-          </Button>
-        </form>
+          testAttr="data-comment-compose"
+        />
       ) : null}
     </section>
   );

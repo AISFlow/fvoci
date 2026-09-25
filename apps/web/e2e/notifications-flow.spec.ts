@@ -54,7 +54,8 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
     data: { key: "NTF", name: "알림", visibility: "workspace" },
   });
   expect(projRes.status()).toBe(201);
-  const projectId = (await projRes.json()).id;
+  const project = await projRes.json();
+  const projectId = project.id;
   const taskRes = await page.request.post(
     `/api/v1/workspaces/${workspace.id}/projects/${projectId}/tasks`,
     { data: { title: "알림 수신 확인 태스크" } },
@@ -65,6 +66,22 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
     data: { assigneeIds: [memberId] },
   });
   expect(assignRes.status()).toBe(200);
+
+  const groupRes = await page.request.post(`/api/v1/workspaces/${workspace.id}/groups`, {
+    data: { name: "알림팀" },
+  });
+  expect(groupRes.status(), await groupRes.text()).toBe(201);
+  const groupId = (await groupRes.json()).id;
+  const addRes = await page.request.post(
+    `/api/v1/workspaces/${workspace.id}/groups/${groupId}/members`,
+    { data: { userId: memberId } },
+  );
+  expect(addRes.status(), await addRes.text()).toBe(201);
+  const docCommentRes = await page.request.post(
+    `/api/v1/workspaces/${workspace.id}/projects/${projectId}/documents/${project.rootDocumentId}/comments`,
+    { data: { body: "@알림팀 확인", mentionedGroupIds: [groupId] } },
+  );
+  expect(docCommentRes.status(), await docCommentRes.text()).toBe(201);
 
   await logout(page);
   await login(page, member.email, member.password);
@@ -79,6 +96,7 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
     { exact: true },
   );
   await expect(item).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("문서에 새 댓글이 달렸습니다", { exact: true })).toBeVisible();
   await item.click();
   await expect(page).toHaveURL(new RegExp(`/w/${owner.workspaceSlug}/[A-Z0-9-]+-\\d+$`));
 
@@ -96,3 +114,4 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
     timeout: 15_000,
   });
 });
+

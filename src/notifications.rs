@@ -179,6 +179,19 @@ async fn can_view_document(
     user_id: Uuid,
     document_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
+    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((project_id,)) = row else {
+        return Ok(false);
+    };
+    if let Some(project_id) = project_id {
+        return can_view_project(tx, workspace_id, user_id, project_id).await;
+    }
     Ok(
         document_permission(tx, workspace_id, user_id, document_id, true)
             .await?
@@ -480,7 +493,7 @@ async fn load_comment(
 ) -> Result<Option<CommentSnap>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT id, document_id, task_id, parent_id, created_by
+        SELECT id, document_id, task_id, parent_id, created_by, body
         FROM fvoci.comments
         WHERE workspace_id = $1 AND id = $2
         "#,
@@ -495,6 +508,7 @@ async fn load_comment(
         task_id: row.get("task_id"),
         parent_id: row.get("parent_id"),
         created_by: row.get("created_by"),
+        body: row.get("body"),
     }))
 }
 
@@ -504,6 +518,7 @@ struct CommentSnap {
     task_id: Option<Uuid>,
     parent_id: Option<Uuid>,
     created_by: Uuid,
+    body: String,
 }
 
 async fn comment_created_audience(
@@ -513,6 +528,20 @@ async fn comment_created_audience(
     comment: &CommentSnap,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut candidates = payload_uuid_array(&event.payload, "mentionedUserIds");
+    for group_id in payload_uuid_array(&event.payload, "mentionedGroupIds") {
+        let members: Vec<(Uuid,)> = sqlx::query_as(
+            r#"
+            SELECT user_id
+            FROM fvoci.group_members
+            WHERE workspace_id = $1 AND group_id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(group_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        candidates.extend(members.into_iter().map(|(id,)| id));
+    }
     if let Some(parent_id) = comment.parent_id {
         if let Some(parent) = load_comment(tx, workspace_id, parent_id).await? {
             candidates.push(parent.created_by);
@@ -648,4 +677,110 @@ pub async fn notify_for_event(
         _ => Vec::new(),
     };
     keep_by_prefs(tx, workspace_id, rows).await
+}
+
+#[derive(Debug, Clone)]
+pub struct OutboundMail {
+    pub to: String,
+    pub subject: String,
+    pub text: String,
+}
+
+fn format_person_name_ko(given_name: &str, family_name: Option<&str>) -> String {
+    match family_name.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(family) => format!("{family}{given_name}"),
+        None => given_name.to_string(),
+    }
+}
+
+/// Immediate comment mail: source `listImmediateCommentMails`. Default
+/// `mailImmediate` is true when the recipient has no prefs row.
+pub async fn list_immediate_comment_mails(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &OutboxEvent,
+) -> Result<Vec<OutboundMail>, sqlx::Error> {
+    if event.verb != "comment.created" {
+        return Ok(Vec::new());
+    }
+    let Some(workspace_id) = event.workspace_id else {
+        return Ok(Vec::new());
+    };
+    let Some(comment_id) = payload_uuid(&event.payload, "commentId") else {
+        return Ok(Vec::new());
+    };
+    let Some(comment) = load_comment(tx, workspace_id, comment_id).await? else {
+        return Ok(Vec::new());
+    };
+    let recipients = comment_created_audience(tx, event, workspace_id, &comment).await?;
+    let actor_name = if let Some(actor_id) = event.actor_user_id {
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT given_name, family_name FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(actor_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        row.map(|(given, family)| format_person_name_ko(&given, family.as_deref()))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let subject = crate::mail::templates::COMMENT_SUBJECT;
+    let text = crate::mail::templates::comment_text(&actor_name, &comment.body);
+    let mut mails = Vec::new();
+    for user_id in recipients {
+        let prefs = resolved_store_prefs(find_prefs_tx(tx, workspace_id, user_id).await?);
+        if !prefs.mail_immediate {
+            continue;
+        }
+        let user: Option<(String,)> =
+            sqlx::query_as("SELECT email FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL")
+                .bind(user_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        let Some((email,)) = user else {
+            continue;
+        };
+        mails.push(OutboundMail {
+            to: email,
+            subject: subject.to_string(),
+            text: text.clone(),
+        });
+    }
+    Ok(mails)
+}
+
+pub async fn identity_mail_for_event(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &OutboxEvent,
+) -> Result<Option<OutboundMail>, sqlx::Error> {
+    let (subject, text_fn): (&str, fn(&str) -> String) = match event.verb.as_str() {
+        "identity.linked" => (
+            crate::mail::templates::IDENTITY_LINKED_SUBJECT,
+            crate::mail::templates::identity_linked_text,
+        ),
+        "identity.unlinked" => (
+            crate::mail::templates::IDENTITY_UNLINKED_SUBJECT,
+            crate::mail::templates::identity_unlinked_text,
+        ),
+        _ => return Ok(None),
+    };
+    let Some(actor_id) = event.actor_user_id else {
+        return Ok(None);
+    };
+    let Some(provider) = event.payload.get("provider").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let user: Option<(String,)> =
+        sqlx::query_as("SELECT email FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(actor_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some((email,)) = user else {
+        return Ok(None);
+    };
+    Ok(Some(OutboundMail {
+        to: email,
+        subject: subject.to_string(),
+        text: text_fn(provider),
+    }))
 }

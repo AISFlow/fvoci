@@ -58,16 +58,15 @@ pub const MAX_PROJECT_NODES: u32 = 100_000;
 /// Maximum UTF-8 bytes of one text run or string attribute during Project.
 pub const MAX_PROJECT_STRING_BYTES: u64 = MAX_PROJECT_JSON_BYTES;
 
-/// Modest global live-child cap. Distinct document rooms may run together.
-/// Per-document uniqueness is the future parent room map, not this crate.
-/// Admission is immediate [`crate::outcome::EngineStatus::ResourceLimit`], not a wait.
-pub const MAX_CHILD_CONCURRENCY: usize = 8;
+/// Default live-child cap when the parent has not configured a runtime limit.
+/// Product derives the limit from `FVOCI_COLLAB_MAX_ROOMS` plus headroom.
+pub const DEFAULT_MAX_CHILD_CONCURRENCY: usize = 8;
 
-/// Host RSS budget if every live child sits at [`MAX_OBSERVED_RSS_BYTES`]:
-/// 8 × 512 MiB = 4 GiB. The parent room map should treat this as the ceiling
-/// for concurrent native engines on one host, not a per-document uniqueness cap.
-pub const MAX_LIVE_CHILDREN_RSS_BUDGET_BYTES: u64 =
-    (MAX_CHILD_CONCURRENCY as u64) * MAX_OBSERVED_RSS_BYTES;
+/// Minimum per-room memory reservation for aggregate admission.
+pub const MIN_ROOM_MEMORY_RESERVATION_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Observed decode RSS multiplier for persisted collab bytes (29.5 MiB → 413 MiB).
+pub const PERSISTED_STATE_MEMORY_FACTOR: u64 = 14;
 
 /// Cumulative `RLIMIT_CPU` ceiling: `ceil(timeout_ms/1000) * max_ops`.
 /// Per-request wall time stays [`DEFAULT_TIMEOUT_MS`] and is not this budget.
@@ -254,6 +253,13 @@ impl Limits {
     }
 }
 
+/// Reservation for one room start: `max(16 MiB, factor × persisted bytes)`.
+pub fn room_memory_reservation_bytes(persisted_bytes: u64) -> u64 {
+    persisted_bytes
+        .saturating_mul(PERSISTED_STATE_MEMORY_FACTOR)
+        .max(MIN_ROOM_MEMORY_RESERVATION_BYTES)
+}
+
 #[cfg(test)]
 mod validate_tests {
     use super::*;
@@ -264,7 +270,7 @@ mod validate_tests {
         assert!(limits.validate().is_ok());
         assert_eq!(limits.max_child_as_bytes, 1024 * 1024 * 1024);
         assert_eq!(limits.max_observed_rss_bytes, 512 * 1024 * 1024);
-        assert_eq!(MAX_LIVE_CHILDREN_RSS_BUDGET_BYTES, 4 * 1024 * 1024 * 1024);
+        assert_eq!(MIN_ROOM_MEMORY_RESERVATION_BYTES, 16 * 1024 * 1024);
         assert_eq!(limits.cpu_budget_secs(), 8 * 256);
         assert_eq!(limits.timeout_ms, DEFAULT_TIMEOUT_MS);
     }

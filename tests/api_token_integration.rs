@@ -161,6 +161,7 @@ async fn app_state(app_url: &str) -> AppState {
         document_convert: None,
         import_settings: None,
         import_queue: fvoci_server::import_job::ImportQueue::new(),
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
 

@@ -82,10 +82,19 @@ async fn create_invitation(
     match result {
         Ok(created) => {
             let origin = state.public_origin.trim_end_matches('/');
+            let accept_url = format!("{origin}/invite/{}", created.accept_path_token);
+            let mail_delayed = match state.mailer.send_invite(&email, &accept_url).await {
+                Ok(()) => None,
+                Err(_) => {
+                    tracing::warn!(message = "invitation: invite mail", "mail.send_failed");
+                    Some(true)
+                }
+            };
             Ok((
                 axum::http::StatusCode::CREATED,
                 Json(InvitationCreateResponse {
-                    accept_url: format!("{origin}/invite/{}", created.accept_path_token),
+                    accept_url,
+                    mail_delayed,
                 }),
             ))
         }

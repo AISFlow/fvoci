@@ -17,6 +17,7 @@ use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
+use fvoci_server::jobs::{spawn_maintenance, MaintenanceHandle, MaintenanceSettings};
 use fvoci_server::import_job::{spawn_import_job, ImportJobSettings, ImportQueue};
 use fvoci_server::outbox::{
     spawn_outbox_dispatcher, OutboxDispatcherHandle, OutboxDispatcherSettings,
@@ -87,17 +88,21 @@ struct DrainOutcome {
     hub: HubOutcome,
     extract: Result<(), String>,
     outbox: Result<(), String>,
+    maintenance: Result<(), String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    collab_engine::process::raise_nofile_to_hard_limit();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("fvoci_server=info".parse()?))
         .init();
 
     let config = Config::from_env()?;
-
-    let pool = pool::connect_app(&config.app_database_url).await?;
+    let app_pool_max = CollabConfig::from_env()
+        .map(|cfg| fvoci_server::collab::config::derive_app_pool_max_connections(cfg.max_rooms))
+        .unwrap_or(fvoci_server::collab::config::APP_POOL_MAX_CONNECTIONS);
+    let pool = pool::connect_app_with_max(&config.app_database_url, app_pool_max).await?;
     if let Err(message) = migrate::assert_app_role(&pool).await {
         pool.close().await;
         return Err(message.into());
@@ -210,7 +215,19 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let public_origin =
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
 
-    let collab = CollabConfig::from_env().map(|cfg| Arc::new(CollabHub::new(cfg, pool.clone())));
+    let collab = match CollabConfig::from_env() {
+        Some(cfg) => {
+            if let Err(message) =
+                fvoci_server::collab::config::assert_collab_fits_postgres(&pool, cfg.max_rooms)
+                    .await
+            {
+                pool.close().await;
+                return Err(message.into());
+            }
+            Some(Arc::new(CollabHub::new(cfg, pool.clone())))
+        }
+        None => None,
+    };
     let extract_job = match ExtractJobSettings::from_env()? {
         Some(settings) => {
             tracing::info!(
@@ -228,8 +245,15 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             None
         }
     };
+    let mailer = std::sync::Arc::new(fvoci_server::mail::Mailer::from_smtp(config.smtp.clone()));
+    if mailer.enabled() {
+        tracing::info!("smtp mailer enabled");
+    } else {
+        tracing::info!("smtp mailer disabled (SMTP_HOST/SMTP_PORT/SMTP_FROM unset)");
+    }
     let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
     consumers.push(fvoci_server::notifications::notifications_consumer());
+    consumers.push(fvoci_server::mail::mail_consumer(mailer.clone()));
     if let Some(meili) = config.meili.clone() {
         consumers.push(fvoci_server::search::index::search_index_consumer(meili));
     }
@@ -243,6 +267,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("outbox dispatcher idle (no consumers registered)");
     }
+    let maintenance = Some(spawn_maintenance(
+        MaintenanceSettings::from_env(),
+        pool.clone(),
+        fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
+        mailer.clone(),
+    ));
     let document_convert = ConvertClient::from_env();
     if document_convert.is_some() {
         tracing::info!("document convert helper enabled");
@@ -267,6 +297,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         upload: config.upload.clone(),
         collab: collab.clone(),
         meili: config.meili.clone(),
+        mailer,
         document_convert,
         import_settings,
         import_queue,
@@ -277,10 +308,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
     let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
+    let maintenance_task = Arc::new(tokio::sync::Mutex::new(maintenance));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
     let outbox_task_for_signal = outbox_task.clone();
+    let maintenance_task_for_signal = maintenance_task.clone();
 
     let serve = announce_after_first_pending_poll(
         axum::serve(
@@ -298,6 +331,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             if let Some(job) = outbox_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
                 tracing::info!("outbox dispatcher shutdown started concurrently with HTTP drain");
+            }
+            if let Some(job) = maintenance_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
+                tracing::info!(
+                    "maintenance scheduler shutdown started concurrently with HTTP drain"
+                );
             }
             if let Some(hub) = collab_for_signal {
                 hub.begin_shutdown();
@@ -337,12 +376,14 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
+                    let maintenance = join_maintenance_finished(&maintenance_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve: map_serve_result(serve_result),
                         hub,
                         extract,
                         outbox,
+                        maintenance,
                     }
                 },
                 Some(started),
@@ -366,12 +407,14 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
+                    let maintenance = join_maintenance_finished(&maintenance_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve,
                         hub,
                         extract,
                         outbox,
+                        maintenance,
                     }
                 },
                 started,
@@ -407,6 +450,16 @@ async fn join_outbox_finished(
     outbox_task: &tokio::sync::Mutex<Option<OutboxDispatcherHandle>>,
 ) -> Result<(), String> {
     if let Some(job) = outbox_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await?;
+    }
+    Ok(())
+}
+
+async fn join_maintenance_finished(
+    maintenance_task: &tokio::sync::Mutex<Option<MaintenanceHandle>>,
+) -> Result<(), String> {
+    if let Some(job) = maintenance_task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;
     }
@@ -478,6 +531,7 @@ where
                 .or_else(|| hub_failure_error(outcome.hub))
                 .or_else(|| extract_failure_error(outcome.extract))
                 .or_else(|| extract_failure_error(outcome.outbox))
+                .or_else(|| extract_failure_error(outcome.maintenance))
             {
                 return Err(error);
             }
@@ -594,6 +648,7 @@ mod shutdown_outcome_tests {
                         hub: HubOutcome::Clean,
                         extract: Ok(()),
                         outbox: Ok(()),
+                        maintenance: Ok(()),
                     }
                 },
                 Some(Instant::now()),

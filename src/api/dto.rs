@@ -126,6 +126,7 @@ use utoipa::ToSchema;
 pub struct SetupStatusResponse {
     pub needed: bool,
     pub branding: BrandingOutput,
+    pub mail_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +168,21 @@ pub struct LoginBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct LoginResponse {
     pub user_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PasswordResetBody {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PasswordResetConfirmBody {
+    pub token: String,
+    pub new_password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +476,8 @@ pub struct InvitationCreateBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct InvitationCreateResponse {
     pub accept_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail_delayed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -862,6 +880,23 @@ pub struct CreateProjectBody {
     pub description: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
+    pub lead_user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CloneProjectBody {
+    pub key: String,
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
+    pub visibility: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub icon: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_uuid")]
     pub lead_user_id: Option<Uuid>,
 }

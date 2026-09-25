@@ -66,6 +66,15 @@ export const invitationAcceptInput = z.object({
   password: optionalPassword,
 });
 
+export const passwordResetInput = z.object({
+  email: z.string().trim().email("i18n:form.email"),
+});
+
+export const passwordResetConfirmInput = z.object({
+  token: z.string().min(1, "i18n:form.too_small"),
+  newPassword: z.string().min(10, "i18n:form.too_small"),
+});
+
 export const apiTokenScope = z.enum([
   "documents.read",
   "documents.write",

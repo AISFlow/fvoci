@@ -5,6 +5,9 @@ name: fvoci-rust-install
 services:
   postgres:
     image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+    # Compose sets FVOCI_COLLAB_MAX_ROOMS=64 (the verified configuration): 64 room fences
+    # (detached, outside the app pool) + app pool 64 + reserve 10 = 138; 150 leaves headroom.
+    command: ["postgres", "-c", "max_connections=150"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-fvoci}
       POSTGRES_USER: ${POSTGRES_USER:-fvoci_owner}
@@ -54,6 +57,7 @@ services:
 
   server:
     image: ${FVOCI_IMAGE:?FVOCI_IMAGE is required}
+    mem_limit: ${FVOCI_SERVER_MEM_LIMIT:-4g}
     ports:
       - "${FVOCI_PUBLISH_ADDR:-127.0.0.1}:${FVOCI_PUBLISH_PORT:-0}:8080"
     environment:
@@ -66,11 +70,17 @@ services:
       FVOCI_STORAGE_DIR: /data/storage
       FVOCI_STATIC_DIR: /opt/fvoci/static
       FVOCI_COLLAB_ENGINE: /opt/fvoci/bin/collab-engine
+      FVOCI_COLLAB_MAX_ROOMS: ${FVOCI_COLLAB_MAX_ROOMS:-64}
+      FVOCI_COLLAB_MEMORY_BUDGET: ${FVOCI_COLLAB_MEMORY_BUDGET:-2147483648}
       FVOCI_EXTRACTOR_BIN: /opt/fvoci/bin/document-extract
       FVOCI_EXTRACT_POLL_SECS: ${FVOCI_EXTRACT_POLL_SECS:-2}
       FVOCI_SHUTDOWN_DEADLINE_MS: ${FVOCI_SHUTDOWN_DEADLINE_MS:-30000}
+      RUST_LOG: ${RUST_LOG:-}
       FVOCI_MEILI_URL: http://meilisearch:7700
       FVOCI_MEILI_KEY_FILE: /run/fvoci/meili/api_key
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_FROM: ${SMTP_FROM:-}
     volumes:
       - storage:/data/storage
       - meili_key:/run/fvoci/meili:ro

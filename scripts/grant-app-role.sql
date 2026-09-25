@@ -84,6 +84,16 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.notification_prefs TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.workspace_holidays TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.ics_tokens TO :"app_role";
 
+REVOKE ALL ON fvoci.magic_tokens FROM :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_magic_issue(text, text, uuid, integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_magic_issue(text, text, uuid, integer, timestamptz) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_magic_consume(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_magic_consume(text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_magic_purge_expired(timestamptz, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_magic_purge_expired(timestamptz, integer) TO :"app_role";
+
 REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() TO :"app_role";
 
@@ -115,3 +125,5 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) FROM PUBL
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_gc_processed(text, integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_gc_processed(text, integer, integer) TO :"app_role";

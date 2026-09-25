@@ -164,6 +164,7 @@ pub async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> App
         document_convert: None,
         import_settings: None,
         import_queue: fvoci_server::import_job::ImportQueue::new(),
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
 

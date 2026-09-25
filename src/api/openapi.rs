@@ -9,32 +9,32 @@ use utoipa::{Modify, OpenApi};
 use crate::api::dto::{
     AddProjectMemberBody, AncestorsResponse, ApiTokenCreateBody, ApiTokenCreatedOutput,
     ApiTokenListResponse, ApiTokenOutput, AttachmentOutput, AttachmentPartUrlResponse,
-    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
-    CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
-    CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
-    CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody, CreateMilestoneBody,
-    CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
-    DeleteWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody, GroupListResponse,
-    GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
-    IcsTokenResponse, ImportJobResponse, InvitationAcceptBody, InvitationConsentItem,
+    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CloneProjectBody,
+    CommentListResponse, CommentOutput, CommentReactionBody, CommentReactionSummary,
+    CompleteAttachmentUploadBody, CreateAttachmentUploadBody, CreateAttachmentUploadResponse,
+    CreateCommentBody, CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody,
+    CreateMilestoneBody, CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody,
+    CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody,
+    GroupListResponse, GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput,
+    HolidaysListResponse, IcsTokenResponse, ImportJobResponse, InvitationAcceptBody, InvitationConsentItem,
     InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
     InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
     LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
     MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
     NotificationItemOutput, NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
-    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PatchCommentBody,
-    PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody, PatchProjectBody,
-    PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
-    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
-    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
-    ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
-    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
-    SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, SortDocumentBody, StartImportBody, TaskChildOutput,
-    TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse,
-    TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse,
-    TreeResponse, WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse,
-    WorkspaceMetaResponse,
+    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PasswordResetBody,
+    PasswordResetConfirmBody, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
+    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
+    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
+    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
+    PutAttachmentPartResponse, ResumeAttachmentUploadResponse, RevisionCreateResponse,
+    RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
+    RevisionRestoreResponse, SearchItemOutput, SearchListResponse, SearchSnippetPiece,
+    SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, SortDocumentBody,
+    StartImportBody, TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
+    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -75,6 +75,8 @@ impl Modify for CookieSecurityAddon {
         logout,
         me_get,
         me_patch,
+        password_reset,
+        confirm_password_reset,
         list_my_workspaces,
         personal_workspace,
         create_workspace,
@@ -95,8 +97,14 @@ impl Modify for CookieSecurityAddon {
         revoke_me_api_token,
         list_projects,
         create_project,
+        clone_project,
         get_project,
         patch_project,
+        list_project_documents,
+        create_project_document,
+        get_project_document,
+        patch_project_document,
+        move_project_document,
         list_project_members,
         add_project_member,
         patch_project_member,
@@ -157,6 +165,8 @@ impl Modify for CookieSecurityAddon {
         download_attachment,
         list_document_comments,
         create_document_comment,
+        list_project_document_comments,
+        create_project_document_comment,
         list_task_comments,
         create_task_comment,
         patch_comment,
@@ -185,6 +195,8 @@ impl Modify for CookieSecurityAddon {
             SetupResponse,
             LoginBody,
             LoginResponse,
+            PasswordResetBody,
+            PasswordResetConfirmBody,
             SessionUserOutput,
             PatchMeBody,
             WorkspaceListResponse,
@@ -212,6 +224,7 @@ impl Modify for CookieSecurityAddon {
             DeleteWorkspaceBody,
             MemberRoleBody,
             CreateProjectBody,
+            CloneProjectBody,
             PatchProjectBody,
             ProjectOutput,
             ProjectListResponse,
@@ -308,7 +321,7 @@ pub struct ApiDoc;
     get,
     path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("document_id" = String, description = "Document id"),
@@ -328,7 +341,7 @@ fn list_document_comments() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("document_id" = String, description = "Document id"),
@@ -345,9 +358,50 @@ fn create_document_comment() {}
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
     get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size"),
+    ),
+    responses(
+        (status = 200, description = "Project document comments", body = CommentListResponse),
+        (status = 400, description = "Invalid cursor", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_document_comments() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = CreateCommentBody,
+    responses(
+        (status = 201, description = "Created comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_project_document_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
     path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("task_id" = String, description = "Task id"),
@@ -367,7 +421,7 @@ fn list_task_comments() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("task_id" = String, description = "Task id"),
@@ -386,7 +440,7 @@ fn create_task_comment() {}
     patch,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -405,7 +459,7 @@ fn patch_comment() {}
     delete,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -422,7 +476,7 @@ fn delete_comment() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/resolve",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -440,7 +494,7 @@ fn resolve_comment() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/unresolve",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -458,7 +512,7 @@ fn unresolve_comment() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/reactions",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -674,6 +728,34 @@ fn me_get() {}
     )
 )]
 fn me_patch() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/password-reset",
+    tag = "auth",
+    request_body = PasswordResetBody,
+    responses(
+        (status = 202, description = "Accepted", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn password_reset() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/password-reset/confirm",
+    tag = "auth",
+    request_body = PasswordResetConfirmBody,
+    responses(
+        (status = 200, description = "Password reset", body = OkResponse),
+        (status = 400, description = "Invalid or expired token", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn confirm_password_reset() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -996,6 +1078,26 @@ fn list_projects() {}
     )
 )]
 fn create_project() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/clone",
+    tag = "projects",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Source project id"),
+    ),
+    request_body = CloneProjectBody,
+    responses(
+        (status = 201, description = "Cloned project", body = ProjectOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Key taken", body = ProblemResponse),
+    )
+)]
+fn clone_project() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -1876,6 +1978,99 @@ fn get_ics_feed() {}
     )
 )]
 fn create_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project document tree", body = TreeResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_documents() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = CreateDocumentBody,
+    responses(
+        (status = 201, description = "Created project document", body = DocumentMetaResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Project document metadata", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = PatchDocumentBody,
+    responses(
+        (status = 200, description = "Updated project document", body = DocumentMetaResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn patch_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/move",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = MoveDocumentBody,
+    responses(
+        (status = 200, description = "Moved project document", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn move_project_document() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

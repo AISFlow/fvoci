@@ -33,6 +33,8 @@ fn spawn(limits: Limits) -> EngineSession {
     EngineSession::spawn(SpawnRequest {
         engine_bin: bin(),
         limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
@@ -635,6 +637,8 @@ fn missing_binary_is_worker_failure() {
     let report = EngineSession::spawn(SpawnRequest {
         engine_bin: PathBuf::from("/no/such/collab-engine"),
         limits: Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,

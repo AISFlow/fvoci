@@ -368,6 +368,10 @@ pub fn test_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig 
         engine_bin: fvoci_server::collab::config::require_collab_engine_for_tests(),
         limits: collab_engine::Limits::for_tests(),
         max_rooms,
+        max_child_concurrency: fvoci_server::collab::config::derive_max_child_concurrency(
+            max_rooms,
+        ),
+        memory_budget_bytes: fvoci_server::collab::config::DEFAULT_MEMORY_BUDGET_BYTES,
         max_collab_sockets: max_rooms * 16,
         max_collab_sockets_per_session: 4,
         max_connections_per_room: 16,
@@ -387,6 +391,40 @@ pub fn test_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig 
         client_id_ttl_ms: 60_000,
         rpc_timeout_ms: 5_000,
     }
+}
+
+pub async fn setup_wiki_doc_batch(harness: &TestDb, count: usize) -> Vec<WikiDocFixture> {
+    let session = setup_owner_session(harness).await;
+    let mut docs = Vec::with_capacity(count);
+    for index in 0..count {
+        let title = format!("Collab capacity doc {index}");
+        let created = documents::create_wiki_document(
+            &session.pool,
+            session.workspace_id,
+            session.user_id,
+            session.session_id,
+            CreateDocumentInput {
+                parent_id: None,
+                title: &title,
+                icon: None,
+            },
+            None,
+        )
+        .await
+        .expect("create doc")
+        .expect("created");
+        docs.push(WikiDocFixture {
+            session: SessionFixture {
+                pool: session.pool.clone(),
+                user_id: session.user_id,
+                session_id: session.session_id,
+                workspace_id: session.workspace_id,
+                session_token: session.session_token.clone(),
+            },
+            document_id: created.id,
+        });
+    }
+    docs
 }
 
 pub async fn setup_wiki_doc(harness: &TestDb) -> WikiDocFixture {
@@ -413,7 +451,25 @@ pub async fn setup_wiki_doc(harness: &TestDb) -> WikiDocFixture {
 }
 
 pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> (AppState, Arc<CollabHub>) {
-    let pool = pool::connect_app(app_url).await.expect("app pool");
+    let max_rooms = cfg.max_rooms;
+    collab_app_state_with_pool(
+        app_url,
+        cfg,
+        fvoci_server::collab::config::derive_app_pool_max_connections(max_rooms),
+    )
+    .await
+}
+
+pub async fn collab_app_state_with_pool(
+    app_url: &str,
+    cfg: CollabConfig,
+    max_connections: u32,
+) -> (AppState, Arc<CollabHub>) {
+    let pool = PgPoolOptions::new()
+        .max_connections(max_connections)
+        .connect(app_url)
+        .await
+        .expect("app pool");
     let hub = Arc::new(CollabHub::new(cfg, pool));
     let storage_root =
         std::env::temp_dir().join(format!("fvoci-collab-proj-store-{}", Uuid::now_v7()));
@@ -438,6 +494,7 @@ pub async fn collab_app_state(app_url: &str, cfg: CollabConfig) -> (AppState, Ar
         document_convert: None,
         import_settings: None,
         import_queue: fvoci_server::import_job::ImportQueue::new(),
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     };
     (state, hub)
 }
@@ -450,6 +507,10 @@ pub struct TestServer {
 }
 
 impl TestServer {
+    pub fn hub(&self) -> Arc<CollabHub> {
+        self.hub.clone()
+    }
+
     pub async fn shutdown(mut self) -> Result<(), String> {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
@@ -461,6 +522,7 @@ impl TestServer {
             None => Ok(()),
         };
         self.hub.shutdown().await;
+        self.hub.pool().close().await;
         server_result
     }
 }
@@ -478,8 +540,25 @@ impl TestRun {
         }
     }
 
+    pub fn hub(&self) -> Arc<CollabHub> {
+        self.servers
+            .last()
+            .expect("spawn_router before hub()")
+            .hub()
+    }
+
     pub async fn spawn_router(&mut self, app_url: &str, cfg: CollabConfig) -> SocketAddr {
         let (state, hub) = collab_app_state(app_url, cfg).await;
+        self.spawn_router_state(state, hub).await
+    }
+
+    pub async fn spawn_router_with_pool(
+        &mut self,
+        app_url: &str,
+        cfg: CollabConfig,
+        max_connections: u32,
+    ) -> SocketAddr {
+        let (state, hub) = collab_app_state_with_pool(app_url, cfg, max_connections).await;
         self.spawn_router_state(state, hub).await
     }
 
