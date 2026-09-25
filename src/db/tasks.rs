@@ -1251,6 +1251,10 @@ pub async fn list_project_tasks(
         }
     }
     let mut tx = pool.begin().await?;
+    // Bounds the correlated filter/sort subqueries of a user-built view query.
+    sqlx::query("SET LOCAL statement_timeout = '15s'")
+        .execute(&mut *tx)
+        .await?;
     set_tenant(&mut tx, workspace_id).await?;
     if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;

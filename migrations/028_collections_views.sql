@@ -409,7 +409,13 @@ CREATE TRIGGER tasks_collection_item
     AFTER INSERT ON fvoci.tasks
     FOR EACH ROW EXECUTE FUNCTION fvoci.attach_task_collection_item();
 
--- Backfill existing projects and tasks (migration owner bypasses RLS).
+-- Backfill existing projects and tasks. projects/tasks are FORCE RLS with a
+-- tenant-only policy, which hides every row from a migration owner that is
+-- not a superuser (or BYPASSRLS). Lift FORCE for the backfill only; the
+-- owner then reads all rows, and FORCE is restored in the same transaction.
+ALTER TABLE fvoci.projects NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE fvoci.tasks NO FORCE ROW LEVEL SECURITY;
+
 INSERT INTO fvoci.collections (id, workspace_id, project_id, kind, name, created_at, updated_at)
 SELECT gen_random_uuid(), p.workspace_id, p.id, 'task', p.name, p.created_at, p.created_at
 FROM fvoci.projects p;
@@ -419,6 +425,9 @@ SELECT gen_random_uuid(), t.workspace_id, c.id, t.id, t.created_at, t.created_at
 FROM fvoci.tasks t
 INNER JOIN fvoci.collections c
     ON c.workspace_id = t.workspace_id AND c.project_id = t.project_id AND c.kind = 'task';
+
+ALTER TABLE fvoci.projects FORCE ROW LEVEL SECURITY;
+ALTER TABLE fvoci.tasks FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE fvoci.document_tags ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fvoci.document_tags FORCE ROW LEVEL SECURITY;

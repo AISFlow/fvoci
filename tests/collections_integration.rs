@@ -1823,3 +1823,225 @@ async fn project_saved_views_task_list_clone_and_ics() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+async fn seed_project_with_tasks(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    key: &str,
+    project_deleted: bool,
+) -> (Uuid, Uuid, Vec<Uuid>) {
+    let project_id = Uuid::now_v7();
+    let workflow_id = Uuid::now_v7();
+    let status_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fvoci.projects (id, workspace_id, key, name, visibility, created_by, deleted_at)
+         VALUES ($1, $2, $3, $3, 'workspace', $4, CASE WHEN $5 THEN now() END)",
+    )
+    .bind(project_id)
+    .bind(workspace_id)
+    .bind(key)
+    .bind(user_id)
+    .bind(project_deleted)
+    .execute(admin)
+    .await
+    .expect("project");
+    sqlx::query("INSERT INTO fvoci.workflows (id, workspace_id, project_id) VALUES ($1, $2, $3)")
+        .bind(workflow_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .execute(admin)
+        .await
+        .expect("workflow");
+    sqlx::query(
+        "INSERT INTO fvoci.statuses (id, workspace_id, project_id, workflow_id, name, category, sort_key)
+         VALUES ($1, $2, $3, $4, 'Todo', 'todo', 'V')",
+    )
+    .bind(status_id)
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(workflow_id)
+    .execute(admin)
+    .await
+    .expect("status");
+    let mut tasks = Vec::new();
+    // live, archived and soft-deleted tasks all get an item, as in the source backfill
+    for (number, archived, deleted) in [(1, false, false), (2, true, false), (3, false, true)] {
+        let task_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fvoci.tasks (id, workspace_id, project_id, number, title, status_id, created_by,
+                content_json, archived_at, deleted_at)
+             VALUES ($1, $2, $3, $4, 'Seeded', $5, $6, '{\"type\":\"doc\",\"content\":[]}'::jsonb,
+                CASE WHEN $7 THEN now() END, CASE WHEN $8 THEN now() END)",
+        )
+        .bind(task_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(number)
+        .bind(status_id)
+        .bind(user_id)
+        .bind(archived)
+        .bind(deleted)
+        .execute(admin)
+        .await
+        .expect("task");
+        tasks.push(task_id);
+    }
+    (project_id, status_id, tasks)
+}
+
+/// Review B1: projects/tasks are FORCE RLS with a tenant-only policy, so the
+/// 028 backfill must also work when the schema owner is not a superuser.
+#[tokio::test]
+async fn upgrade_to_028_backfills_as_a_non_superuser_schema_owner() {
+    let db = TestDb::bootstrap_through(27).await;
+    let admin = admin_pool(&db).await;
+    let user_id = Uuid::now_v7();
+    let workspace_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'Owner')")
+        .bind(user_id)
+        .bind(format!("owner-{}@example.com", user_id.simple()))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, 'ws')")
+        .bind(workspace_id)
+        .bind(format!("u{}", &user_id.simple().to_string()[..16]))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let (live_project, live_status, live_tasks) =
+        seed_project_with_tasks(&admin, workspace_id, user_id, "UPA", false).await;
+    let (deleted_project, _, deleted_tasks) =
+        seed_project_with_tasks(&admin, workspace_id, user_id, "UPB", true).await;
+
+    // Hand every schema object to a NOSUPERUSER NOBYPASSRLS owner and migrate as it.
+    let owner = format!("fvoci_owner_{}", Uuid::now_v7().simple());
+    sqlx::query(&format!(
+        "CREATE ROLE \"{owner}\" LOGIN PASSWORD 'owner-pass' NOSUPERUSER NOBYPASSRLS"
+    ))
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        r#"DO $$
+        DECLARE r record;
+        BEGIN
+            EXECUTE format('ALTER SCHEMA fvoci OWNER TO %I', '{owner}');
+            EXECUTE format('GRANT CREATE ON SCHEMA public TO %I', '{owner}');
+            FOR r IN SELECT c.oid::regclass AS rel, c.relkind FROM pg_class c
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = 'fvoci' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+            LOOP
+                EXECUTE format('ALTER TABLE %s OWNER TO %I', r.rel, '{owner}');
+            END LOOP;
+            FOR r IN SELECT c.oid::regclass AS rel FROM pg_class c
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = 'fvoci' AND c.relkind = 'S'
+                       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype IN ('a', 'i'))
+            LOOP
+                EXECUTE format('ALTER SEQUENCE %s OWNER TO %I', r.rel, '{owner}');
+            END LOOP;
+            FOR r IN SELECT p.oid::regprocedure AS fn FROM pg_proc p
+                     JOIN pg_namespace n ON n.oid = p.pronamespace
+                     WHERE n.nspname IN ('fvoci', 'public')
+                       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+            LOOP
+                EXECUTE format('ALTER ROUTINE %s OWNER TO %I', r.fn, '{owner}');
+            END LOOP;
+            FOR r IN SELECT t.oid::regtype AS ty FROM pg_type t
+                     JOIN pg_namespace n ON n.oid = t.typnamespace
+                     WHERE n.nspname = 'fvoci' AND t.typtype IN ('e', 'd', 'c')
+                       AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid)
+            LOOP
+                EXECUTE format('ALTER TYPE %s OWNER TO %I', r.ty, '{owner}');
+            END LOOP;
+        END $$"#
+    ))
+    .execute(&admin)
+    .await
+    .expect("reassign schema objects");
+    let mut owner_url = url::Url::parse(&db.admin_url).unwrap();
+    owner_url.set_username(&owner).unwrap();
+    owner_url.set_password(Some("owner-pass")).unwrap();
+    fvoci_server::db::migrate::run_migrations_through(owner_url.as_str(), 28)
+        .await
+        .expect("migrate 28 as a non-superuser owner");
+
+    // Exactly one task collection per project and one item per task.
+    for project in [live_project, deleted_project] {
+        let collections: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM fvoci.collections WHERE project_id = $1 AND kind = 'task'",
+        )
+        .bind(project)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(collections, 1, "project {project}");
+    }
+    for task in live_tasks.iter().chain(deleted_tasks.iter()) {
+        let items: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM fvoci.collection_items WHERE task_id = $1")
+                .bind(task)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        assert_eq!(items, 1, "task {task}");
+    }
+    // FORCE RLS is back on both tables after the backfill.
+    let forced: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT relname::text, relforcerowsecurity FROM pg_class
+         WHERE oid IN ('fvoci.projects'::regclass, 'fvoci.tasks'::regclass) ORDER BY relname",
+    )
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        forced,
+        vec![("projects".to_string(), true), ("tasks".to_string(), true)]
+    );
+    // A task created after the upgrade attaches to the backfilled collection.
+    let new_task = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fvoci.tasks (id, workspace_id, project_id, number, title, status_id, created_by, content_json)
+         VALUES ($1, $2, $3, 4, 'After upgrade', $4, $5, '{\"type\":\"doc\",\"content\":[]}'::jsonb)",
+    )
+    .bind(new_task)
+    .bind(workspace_id)
+    .bind(live_project)
+    .bind(live_status)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .expect("task insert after upgrade");
+    let attached: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.collection_items WHERE task_id = $1")
+            .bind(new_task)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(attached, 1);
+
+    admin.close().await;
+    let mut server_url = url::Url::parse(&db.admin_url).unwrap();
+    server_url.set_path("/postgres");
+    db.cleanup().await;
+    let server = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(server_url.as_str())
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP ROLE IF EXISTS \"{owner}\""))
+        .execute(&server)
+        .await
+        .expect("drop owner role");
+    server.close().await;
+}

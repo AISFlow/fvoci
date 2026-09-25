@@ -15,7 +15,8 @@ pub(crate) struct CloneCatalog {
     pub labels: HashMap<Uuid, Uuid>,
     pub milestones: HashMap<Uuid, Uuid>,
     pub fields: HashMap<Uuid, Uuid>,
-    pub options: HashMap<Uuid, Uuid>,
+    /// Per option-type field (source `optionsByField`): old option → new option.
+    pub options_by_field: HashMap<Uuid, HashMap<Uuid, Uuid>>,
 }
 
 impl CloneCatalog {
@@ -36,12 +37,18 @@ impl CloneCatalog {
         for item in &mut f.custom {
             let old_field = item.field_id;
             item.field_id = *self.fields.get(&old_field)?;
-            if let CustomOperator::Equals(CustomValue::Text(raw)) = &mut item.operator {
-                if let Ok(option) = Uuid::parse_str(raw) {
-                    if let Some(new_option) = self.options.get(&option) {
-                        *raw = new_option.to_string();
-                    }
+            // Source `remapCustom`: on an option field anything but `empty` must
+            // be a copied option of that same field, otherwise uncopyable.
+            let Some(options) = self.options_by_field.get(&old_field) else {
+                continue;
+            };
+            match &mut item.operator {
+                CustomOperator::Empty => {}
+                CustomOperator::Equals(CustomValue::Text(raw)) => {
+                    let option = Uuid::parse_str(raw).ok()?;
+                    *raw = options.get(&option)?.to_string();
                 }
+                CustomOperator::Equals(_) => return None,
             }
         }
         for entry in &mut out.sort {
@@ -233,4 +240,73 @@ async fn lock_projects(
     .fetch_all(&mut **tx)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::list_query::CustomFilter;
+
+    fn query_with(filters: Vec<CustomFilter>) -> ViewQuery {
+        let mut query = ViewQuery::default();
+        query.filters.custom = filters;
+        query
+    }
+
+    #[test]
+    fn option_filters_must_name_a_copied_option_of_the_same_field() {
+        let (select, other_select, text) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (kept, deleted, other_option) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let mut catalog = CloneCatalog::default();
+        for field in [select, other_select, text] {
+            catalog.fields.insert(field, Uuid::now_v7());
+        }
+        let new_kept = Uuid::now_v7();
+        catalog
+            .options_by_field
+            .insert(select, HashMap::from([(kept, new_kept)]));
+        catalog.options_by_field.insert(
+            other_select,
+            HashMap::from([(other_option, Uuid::now_v7())]),
+        );
+        let equals = |field, value: String| CustomFilter {
+            field_id: field,
+            operator: CustomOperator::Equals(CustomValue::Text(value)),
+        };
+
+        let remapped = catalog
+            .remap_view_query(&query_with(vec![
+                equals(select, kept.to_string()),
+                CustomFilter {
+                    field_id: select,
+                    operator: CustomOperator::Empty,
+                },
+                equals(text, deleted.to_string()),
+            ]))
+            .expect("copyable");
+        assert_eq!(
+            remapped.filters.custom[0].operator,
+            CustomOperator::Equals(CustomValue::Text(new_kept.to_string()))
+        );
+        assert_eq!(remapped.filters.custom[1].operator, CustomOperator::Empty);
+        // Text fields keep their literal value, even if it looks like an id.
+        assert_eq!(
+            remapped.filters.custom[2].operator,
+            CustomOperator::Equals(CustomValue::Text(deleted.to_string()))
+        );
+        // A deleted option, another field's option, or a non-text value is uncopyable.
+        for filter in [
+            equals(select, deleted.to_string()),
+            equals(select, other_option.to_string()),
+            equals(select, "not-an-id".to_string()),
+            CustomFilter {
+                field_id: select,
+                operator: CustomOperator::Equals(CustomValue::Bool(true)),
+            },
+        ] {
+            assert!(catalog
+                .remap_view_query(&query_with(vec![filter]))
+                .is_none());
+        }
+    }
 }

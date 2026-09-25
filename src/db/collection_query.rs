@@ -172,6 +172,10 @@ pub async fn query_collection(
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await?;
+    // Bounds the correlated filter/sort subqueries of one user-built query.
+    sqlx::query("SET LOCAL statement_timeout = '15s'")
+        .execute(&mut *tx)
+        .await?;
     let result = run(&mut tx, workspace_id, actor, collection_id, q, cursor).await?;
     match result {
         Ok(out) => {

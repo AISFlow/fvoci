@@ -1398,6 +1398,23 @@ pub async fn list_views(
     }))
 }
 
+/// Row lock on a collection view before its owner/visibility checks, so a
+/// concurrent visibility change cannot slip between the check and the write.
+async fn lock_view(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    view_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT 1 FROM fvoci.collection_views WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .bind(view_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Create (`view_id` None) or compare-and-swap update a collection view.
 pub async fn save_view(
     pool: &sqlx::PgPool,
@@ -1475,6 +1492,8 @@ pub async fn save_view(
             .await?,
         ),
         Some(view_id) => {
+            // Lock first so owner/visibility checks see the row the write changes.
+            lock_view(&mut tx, workspace_id, view_id).await?;
             let views = visible_views(&mut tx, workspace_id, collection_id, actor.user_id).await?;
             let Some(old) = views.into_iter().find(|view| view.id == view_id) else {
                 bail!(tx, CollectionDbError::NotFound);
@@ -1556,6 +1575,8 @@ pub async fn remove_view(
     if access.archived {
         bail!(tx, CollectionDbError::ProjectArchived);
     }
+    // Lock first so owner/visibility checks see the row the delete removes.
+    lock_view(&mut tx, workspace_id, view_id).await?;
     let views = visible_views(&mut tx, workspace_id, collection_id, actor.user_id).await?;
     let Some(old) = views.into_iter().find(|view| view.id == view_id) else {
         bail!(tx, CollectionDbError::NotFound);
@@ -1733,14 +1754,24 @@ pub(crate) async fn copy_task_collection(
         }
         let new_id = Uuid::now_v7();
         remap.fields.insert(field.id, new_id);
+        let mut option_map = matches!(
+            field.field_type,
+            FieldType::Select | FieldType::MultiSelect | FieldType::Checkboxes
+        )
+        .then(std::collections::HashMap::new);
         let mut options = Vec::new();
         for option in field.options.iter().filter(|o| o.deleted_at.is_none()) {
             let option_id = Uuid::now_v7();
-            remap.options.insert(option.id, option_id);
+            if let Some(map) = option_map.as_mut() {
+                map.insert(option.id, option_id);
+            }
             options.push(OptionRow {
                 id: option_id,
                 ..option.clone()
             });
+        }
+        if let Some(map) = option_map {
+            remap.options_by_field.insert(field.id, map);
         }
         let copy = FieldRow {
             id: new_id,
