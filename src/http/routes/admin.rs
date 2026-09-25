@@ -338,6 +338,9 @@ async fn post_legal(
 ) -> Result<Response, AppError> {
     check_origin(&headers, &state.public_origin)?;
     let auth = session(&state, &headers, &jar).await?;
+    // Refuse non-admins before any helper process is spawned for the body;
+    // `publish_legal` rechecks inside its transaction.
+    require_admin_read(&state, auth.user_id).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let title = body.title.trim().to_string();
     let effective_at = parse_iso_datetime(&body.effective_at);
@@ -434,6 +437,9 @@ async fn get_instance_settings(
     )
     .await
     .map_err(internal)?;
+    // A demotion that committed while the snapshot loaded must not still see
+    // admin-only values.
+    require_admin_read(&state, auth.user_id).await?;
     Ok(Json(admin_settings_output(&state, &snapshot)))
 }
 

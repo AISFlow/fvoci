@@ -1313,6 +1313,9 @@ async fn legal_publish_consent_gate_and_consent_records() {
         "/api/v1/workspaces",
         "/api/v1/instance",
         "/api/v1/admin/system",
+        // The collaboration upgrade is gated too; the gate answers before the
+        // handler, so no collab runtime is needed here.
+        "/collab",
     ] {
         let gated = get(&h.app, path, Some(&member)).await;
         assert_eq!(gated.status, StatusCode::PRECONDITION_REQUIRED, "{path}");
@@ -1742,5 +1745,83 @@ async fn demotion_committed_while_a_settings_write_waits_is_seen_in_its_transact
     .unwrap();
     assert_eq!(audits, 0);
     admin.close().await;
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn share_policy_setting_governs_share_links() {
+    let h = harness().await;
+    let ws = h.acme_id().await;
+    let doc = with_json(
+        &h.app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents"),
+        json!({"parentId": null, "title": "공유 문서"}),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(doc.status, StatusCode::CREATED, "{}", doc.json);
+    let doc_id = doc.json["id"].as_str().unwrap().to_string();
+    let links = format!("/api/v1/workspaces/{ws}/documents/{doc_id}/share-links");
+    let created = with_json(&h.app, "POST", &links, json!({}), Some(&h.admin_cookie)).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.json);
+    let url = created.json["url"].as_str().unwrap();
+    let token = url.rsplit('/').next().unwrap().to_string();
+    let public = format!("/api/v1/share/{token}");
+    assert_eq!(get(&h.app, &public, None).await.status, StatusCode::OK);
+
+    let patch = |body: Value| {
+        with_json(
+            &h.app,
+            "PATCH",
+            "/api/v1/admin/instance-settings",
+            body,
+            Some(&h.admin_cookie),
+        )
+    };
+    // Disabled: every public route is 404 and new links are refused.
+    let off =
+        patch(json!({"share": {"enabled": false, "defaultExpiresDays": 7, "maxExpiresDays": 365}}))
+            .await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.json);
+    assert_eq!(
+        get(&h.app, &public, None).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&h.app, &format!("{public}/tree"), None).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let refused = with_json(&h.app, "POST", &links, json!({}), Some(&h.admin_cookie)).await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.json);
+
+    // Re-enabled with a narrower window: the default and the maximum apply.
+    let narrow =
+        patch(json!({"share": {"enabled": true, "defaultExpiresDays": 3, "maxExpiresDays": 30}}))
+            .await;
+    assert_eq!(narrow.status, StatusCode::OK, "{}", narrow.json);
+    assert_eq!(get(&h.app, &public, None).await.status, StatusCode::OK);
+    let too_long = with_json(
+        &h.app,
+        "POST",
+        &links,
+        json!({"expiresInDays": 31}),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(
+        too_long.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        too_long.json
+    );
+    let defaulted = with_json(&h.app, "POST", &links, json!({}), Some(&h.admin_cookie)).await;
+    assert_eq!(defaulted.status, StatusCode::CREATED, "{}", defaulted.json);
+    let expires =
+        chrono::DateTime::parse_from_rfc3339(defaulted.json["expiresAt"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+    let days = (expires - chrono::Utc::now()).num_hours();
+    assert!((71..=72).contains(&days), "default 3 days, got {days} h");
     h.finish().await;
 }
