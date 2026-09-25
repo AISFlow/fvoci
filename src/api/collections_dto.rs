@@ -326,3 +326,128 @@ pub struct ProjectViewOutput {
 pub struct ProjectViewListResponse {
     pub items: Vec<ProjectViewOutput>,
 }
+
+// Request bodies below document the JSON shapes that `crate::collections`
+// parses strictly (the handlers read `serde_json::Value`).
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionCreateBody {
+    pub name: String,
+    /// `document` (task collections are created with their project)
+    pub kind: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionFieldCreateBody {
+    pub name: String,
+    pub key: Option<String>,
+    pub r#type: String,
+    pub description: Option<String>,
+    pub options: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionOptionPatch {
+    pub id: Option<String>,
+    pub label: String,
+    pub deleted: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionFieldPatchBody {
+    pub expected_version: i32,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub deleted: Option<bool>,
+    pub options: Option<Vec<CollectionOptionPatch>>,
+}
+
+/// Exactly one of `documentId` / `taskId`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionAttachBody {
+    pub document_id: Option<String>,
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionValueBody {
+    pub field_id: String,
+    pub expected_version: i32,
+    pub expected_field_version: i32,
+    /// `null` or one of `{text}`, `{number}`, `{date}`, `{datetime}`,
+    /// `{checkbox}`, `{options: uuid[]}`, `{users: uuid[]}`.
+    #[cfg_attr(feature = "api-schema", schema(value_type = Object, nullable = true))]
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionQueryWindow {
+    pub from: String,
+    pub to: String,
+    pub time_zone: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionQueryBody {
+    /// `{ query: ViewQuery, groupBy, dateBy }`
+    #[cfg_attr(feature = "api-schema", schema(value_type = Object))]
+    pub config: Value,
+    pub group: Option<String>,
+    pub day: Option<String>,
+    pub window: Option<CollectionQueryWindow>,
+    pub cursor: Option<String>,
+    pub limit: Option<i32>,
+}
+
+/// `expectedVersion` is required on update and rejected on create.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CollectionViewBody {
+    pub name: String,
+    pub r#type: String,
+    pub visibility: String,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Object))]
+    pub config: Value,
+    pub expected_version: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectViewCreateBody {
+    pub name: String,
+    pub r#type: String,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Object))]
+    pub config: Value,
+}
+
+/// A `config` change requires the `expectedConfig` last read (compare-and-swap).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectViewPatchBody {
+    pub name: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Option<Object>))]
+    pub config: Option<Value>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Option<Object>))]
+    pub expected_config: Option<Value>,
+}
