@@ -569,6 +569,17 @@ async fn handle_socket(
                                         .await;
                                         break;
                                     }
+                                    AuthAttempt::RetryLater => {
+                                        send_close(
+                                            &mut sender,
+                                            1013,
+                                            "try again later",
+                                            send_deadline,
+                                            max_frame_bytes,
+                                        )
+                                        .await;
+                                        break;
+                                    }
                                     AuthAttempt::Unavailable => {
                                         send_close(
                                             &mut sender,
@@ -624,6 +635,17 @@ async fn handle_socket(
                                         &mut sender,
                                         1013,
                                         "pre-auth outbound exhausted",
+                                        send_deadline,
+                                        max_frame_bytes,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                                FirstRoom::RetryLater => {
+                                    send_close(
+                                        &mut sender,
+                                        1013,
+                                        "try again later",
                                         send_deadline,
                                         max_frame_bytes,
                                     )
@@ -734,6 +756,7 @@ async fn first_room_from_frame(
                 routing: routing_key,
             },
             AuthAttempt::Closed => FirstRoom::Closed,
+            AuthAttempt::RetryLater => FirstRoom::RetryLater,
             AuthAttempt::Unavailable => FirstRoom::Unavailable,
             AuthAttempt::Restarting => FirstRoom::Restarting,
         }
@@ -758,6 +781,8 @@ enum FirstRoom {
     },
     None,
     Closed,
+    /// Room count, helper child cap, or memory budget exhausted. Close 1013.
+    RetryLater,
     Unavailable,
     Restarting,
 }
@@ -769,10 +794,12 @@ enum AuthAttempt {
     },
     Denied,
     Closed,
-    /// Operational join failure (`EngineUnavailable`, `WriterStale`, `RoomFull`,
-    /// or `DbError`). Close 1011 `"collab unavailable"` with no auth frame so a
-    /// Hocuspocus 4.6 provider reconnects (`onClose` + `shouldConnect`) instead
-    /// of emitting `authenticationFailed`.
+    /// Capacity refusal: room count, helper cap, or memory budget. Close 1013.
+    RetryLater,
+    /// Operational join failure (`EngineUnavailable`, `WriterStale`, or `DbError`).
+    /// Close 1011 `"collab unavailable"` with no auth frame so a Hocuspocus 4.6
+    /// provider reconnects (`onClose` + `shouldConnect`) instead of emitting
+    /// `authenticationFailed`.
     Unavailable,
     /// Hub is shutting down. Close 1012 so an unauthenticated socket releases
     /// its permit instead of waiting out `auth_wait_ms`.
@@ -896,18 +923,18 @@ async fn try_authenticate(
             }
             AuthAttempt::Denied
         }
-        Err(
-            JoinError::EngineUnavailable
-            | JoinError::WriterStale
-            | JoinError::RoomFull
-            | JoinError::DbError,
-        ) if hub.is_shutting_down() => AuthAttempt::Restarting,
-        Err(
-            JoinError::EngineUnavailable
-            | JoinError::WriterStale
-            | JoinError::RoomFull
-            | JoinError::DbError,
-        ) => AuthAttempt::Unavailable,
+        Err(JoinError::RoomFull | JoinError::CapacityRetry) if hub.is_shutting_down() => {
+            AuthAttempt::Restarting
+        }
+        Err(JoinError::RoomFull | JoinError::CapacityRetry) => AuthAttempt::RetryLater,
+        Err(JoinError::EngineUnavailable | JoinError::WriterStale | JoinError::DbError)
+            if hub.is_shutting_down() =>
+        {
+            AuthAttempt::Restarting
+        }
+        Err(JoinError::EngineUnavailable | JoinError::WriterStale | JoinError::DbError) => {
+            AuthAttempt::Unavailable
+        }
     }
 }
 

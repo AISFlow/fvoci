@@ -46,6 +46,10 @@ impl RoomGuard {
         }
     }
 
+    pub fn connection_mut(&mut self) -> &mut PgConnection {
+        &mut self.conn
+    }
+
     pub async fn release(mut self) {
         if self.held {
             let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")

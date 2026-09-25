@@ -47,6 +47,13 @@ test("project create payload matches source NFKC, reserved, KEY-n, and blank-to-
     },
   });
   assert.equal("leadUserId" in (fullwidth.ok ? fullwidth.body : {}), false);
+  const withLead = projectCreatePayload({
+    key: "LAB",
+    name: "Lab",
+    visibility: "workspace",
+    leadUserId: "0199a1c2-3b4d-7e8f-9012-3456789abcdf",
+  });
+  assert.equal(withLead.ok && withLead.body.leadUserId, "0199a1c2-3b4d-7e8f-9012-3456789abcdf");
 
   assert.deepEqual(
     projectCreatePayload({ key: "WIKI", name: "Wiki", visibility: "private" }),

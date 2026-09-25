@@ -174,8 +174,52 @@ cargo build --bin collab-engine --features worker
 export FVOCI_COLLAB_ENGINE="$PWD/target/debug/collab-engine"
 ```
 
-Optional tuning: `FVOCI_COLLAB_MAX_ROOMS` (default 4), `FVOCI_COLLAB_MAX_CONNECTIONS`,
-`FVOCI_COLLAB_IDLE_MS`, `FVOCI_COLLAB_REVOKE_POLL_MS`.
+Optional tuning:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `FVOCI_COLLAB_MAX_ROOMS` | 30 (clamp 1–512) | Hub room slots; immediate refusal when full. Default fits stock PostgreSQL `max_connections=100`; the 64-room capacity probe sets `64` and needs a higher Postgres limit. |
+| `FVOCI_COLLAB_MAX_CHILDREN` | primary + validator headroom | Bounds the validator helper pool only. Primary cap is `max_rooms + 4` for offline revision capture headroom. |
+| `FVOCI_COLLAB_MEMORY_BUDGET` | 2 GiB | Aggregate admission: sum live helper VmRSS plus `max(16 MiB, 14× persisted bytes)` per room start |
+| `FVOCI_COLLAB_MAX_CONNECTIONS` | 32 | Per-room WebSocket members |
+| `FVOCI_COLLAB_IDLE_MS` | 30000 | Idle room eviction |
+| `FVOCI_COLLAB_REVOKE_POLL_MS` | 5000 | ACL revoke poll |
+
+Capacity refusals close WebSocket clients with **1013** “try again later” (retryable).
+Per-child limits stay unchanged (AS 1 GiB, observed RSS kill 512 MiB, 8 s wall, 256-op recycle).
+Helpers try to set `oom_score_adj=1000` so cgroup OOM prefers a helper over `fvoci-server`; where the container profile denies it (e.g. AppArmor docker-default), the helper still starts without it.
+The server raises soft `RLIMIT_NOFILE` to the hard limit at startup.
+
+Heavy load probe (not in default CI; Linux + PostgreSQL via `scripts/start-test-postgres.sh`):
+
+```sh
+# Merge bar: 64 rooms × 2 distinct-user peers, 180s (~1 edit/s/room), release helper
+./scripts/collab-capacity-probe.sh
+
+# Shorter local smoke (still records PROBE_SUMMARY lines; duration floor is 180s):
+COLLAB_PROBE_ROOMS=5 ./scripts/collab-capacity-probe.sh
+```
+
+Environment: `COLLAB_PROBE_ROOMS`, `COLLAB_PROBE_PEERS`, `COLLAB_PROBE_DURATION_SECS` (minimum 180),
+`COLLAB_PROBE_OPEN_CONCURRENCY`, `FVOCI_COLLAB_MAX_ROOMS`, `FVOCI_COLLAB_ENGINE`,
+`RUST_LOG` (default `collab.stage=info` for per-stage breakdown),
+`FVOCI_TEST_PG_MAX_CONNECTIONS` (probe script only; default 150 — each live room holds one PG
+connection via `RoomGuard`, so docker Postgres must exceed room count plus app pool and reserve).
+`scripts/start-test-postgres.sh` defaults to `max_connections=150` when unset; ordinary DB tests
+that do not set `FVOCI_TEST_PG_MAX_CONNECTIONS` inherit that value.
+
+PostgreSQL coupling at server startup: with collab enabled, `FVOCI_COLLAB_MAX_ROOMS` must fit
+`max_connections` together with the app pool (`max(16, max_rooms)`) and a 10-connection reserve;
+the server refuses to start when the sum exceeds `SHOW max_connections`. The default 30 rooms need
+70 connections (30 + 30 + 10). The verified 64-room probe needs 138 (`64 + 64 + 10`); compose sets
+Postgres `max_connections=150`.
+
+The probe checks achieved rate ≥ 0.95 edits/s/room, zero writer loss, zero **1011** closes under
+load, room-capacity **1013**, slot reuse after idle eviction, exact hostile 5/5 isolation with
+victim recovery, and prints `PROBE_SUMMARY` plus `collab.stage` tracing lines for validate /
+auth_tx / append_tx / apply / broadcast timings. Full logs are saved under
+`${FVOCI_EVIDENCE_DIR:-target/collab-probe-logs}/collab-capacity-probe-<timestamp>.log`
+(set `FVOCI_EVIDENCE_DIR` for a custom directory).
 
 `FVOCI_SHUTDOWN_DEADLINE_MS` sets the whole server shutdown deadline (default
 30000, positive milliseconds). SIGTERM/Ctrl+C stops collaboration admission

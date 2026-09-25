@@ -176,7 +176,7 @@ fn utf16_len(value: &str) -> usize {
     value.encode_utf16().count()
 }
 
-fn depth_of(path: &str) -> i32 {
+pub(crate) fn depth_of(path: &str) -> i32 {
     path.split('.').count() as i32
 }
 
@@ -347,7 +347,7 @@ pub async fn workspace_is_live(
     Ok(row.map(|(live,)| live).unwrap_or(false))
 }
 
-async fn record_document_event_and_audit(
+pub(crate) async fn record_document_event_and_audit(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -386,7 +386,7 @@ async fn record_document_event_and_audit(
     Ok(())
 }
 
-fn row_to_meta(row: DocumentRow, with_display_id: bool) -> DocumentMeta {
+pub(crate) fn row_to_meta(row: DocumentRow, with_display_id: bool) -> DocumentMeta {
     let (
         id,
         workspace_id,
@@ -866,7 +866,7 @@ pub async fn update_wiki_document_meta(
     }
 }
 
-async fn fetch_document_row(
+pub(crate) async fn fetch_document_row(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_id: Uuid,
@@ -940,7 +940,7 @@ fn midpoint(a: &str, b: &str) -> String {
     }
 }
 
-async fn subtree_ids(
+pub(crate) async fn subtree_ids(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     root_id: Uuid,
@@ -969,7 +969,7 @@ async fn subtree_ids(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
-async fn is_descendant(
+pub(crate) async fn is_descendant(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     ancestor_id: Uuid,
@@ -1005,7 +1005,7 @@ async fn is_descendant(
     Ok(row.map(|(v,)| v).unwrap_or(false))
 }
 
-async fn lock_document_rows(
+pub(crate) async fn lock_document_rows(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_ids: &[Uuid],
@@ -1151,7 +1151,7 @@ async fn renumber_subtree_for_project(
     Ok(())
 }
 
-async fn move_subtree(
+pub(crate) async fn move_subtree(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     document_id: Uuid,
