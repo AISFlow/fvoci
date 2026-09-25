@@ -194,6 +194,7 @@ export function TaskDetailPage() {
             <p className="task-home__note">{projectDocument.displayId}</p>
             <h1>{projectDocument.title}</h1>
           </header>
+          <p className="task-home__note">{t("task.document.unsupported")}</p>
           {me.data ? (
             <CommentPanel
               workspaceId={workspace.id}
