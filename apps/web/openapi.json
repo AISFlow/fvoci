@@ -1076,6 +1076,349 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/comments/{comment_id}": {
+      "delete": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "delete_comment",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "description": "Comment id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted comment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "patch_comment",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "description": "Comment id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchCommentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated comment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/reactions": {
+      "post": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "react_comment",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "description": "Comment id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommentReactionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated reactions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Reaction conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/resolve": {
+      "post": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "resolve_comment",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "description": "Comment id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolved comment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/unresolve": {
+      "post": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "unresolve_comment",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "comment_id",
+            "in": "path",
+            "description": "Comment id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unresolved comment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/documents": {
       "post": {
         "tags": [
@@ -1358,6 +1701,163 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BodyResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments": {
+      "get": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "list_document_comments",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Document comments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "create_document_comment",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCommentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created comment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
                 }
               }
             }
@@ -3381,6 +3881,163 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments": {
+      "get": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "list_task_comments",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task comments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "comments"
+        ],
+        "operationId": "create_task_comment",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCommentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created comment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommentOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move": {
       "post": {
         "tags": [
@@ -3890,6 +4547,137 @@
           }
         }
       },
+      "CommentListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommentOutput"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CommentOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "createdBy",
+          "body",
+          "reactions",
+          "otherReactionCount",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "createdBy": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "documentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "otherReactionCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "parentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reactions": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CommentReactionSummary"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "resolvedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "CommentReactionBody": {
+        "type": "object",
+        "required": [
+          "emoji",
+          "on"
+        ],
+        "properties": {
+          "emoji": {
+            "type": "string"
+          },
+          "on": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CommentReactionSummary": {
+        "type": "object",
+        "required": [
+          "count",
+          "reactedByMe"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reactedByMe": {
+            "type": "boolean"
+          }
+        }
+      },
       "CompleteAttachmentUploadBody": {
         "type": "object",
         "required": [
@@ -3950,6 +4738,45 @@
             }
           }
         }
+      },
+      "CreateCommentBody": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "mentionedGroupIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "mentionedUserIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "parentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
       },
       "CreateDocumentBody": {
         "type": "object",
@@ -4515,6 +5342,18 @@
             "type": "boolean"
           }
         }
+      },
+      "PatchCommentBody": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "PatchDocumentBody": {
         "type": "object",
@@ -5840,6 +6679,10 @@
     {
       "name": "attachments",
       "description": "Wiki document attachments"
+    },
+    {
+      "name": "comments",
+      "description": "Document and task comments"
     }
   ]
 }
