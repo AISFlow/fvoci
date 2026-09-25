@@ -105,7 +105,7 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_MEILI_URL: http://127.0.0.1:${{ job.services.meilisearch.ports['7700'] }}
           FVOCI_MEILI_KEY: ci-ephemeral-meili-master
-        run: cargo test --locked --offline --no-fail-fast --features db-tests --test db_integration --test document_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration --test task_labels_integration --test group_integration --test task_milestones_integration --test notification_integration --test schedule_ics_integration --test invitation_integration --test search_meili --test comment_integration --test api_token_integration --test search_query --test outbox_integration --test search_index
+        run: cargo test --locked --offline --no-fail-fast --features db-tests --test db_integration --test document_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration --test task_labels_integration --test group_integration --test task_milestones_integration --test notification_integration --test schedule_ics_integration --test workspace_lifecycle --test invitation_integration --test search_meili --test comment_integration --test api_token_integration --test search_query --test outbox_integration --test search_index
 
   collaboration:
     name: ${{ matrix.check }}

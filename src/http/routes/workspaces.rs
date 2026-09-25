@@ -10,8 +10,9 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateWorkspaceBody, MemberResponse, MemberRoleBody, MembersResponse, OkResponse,
-    PatchWorkspaceBody, WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+    CreateWorkspaceBody, DeleteWorkspaceBody, MemberResponse, MemberRoleBody, MembersResponse,
+    OkResponse, PatchWorkspaceBody, WorkspaceListItemResponse, WorkspaceListResponse,
+    WorkspaceMetaResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::db::workspace::{WorkspaceDbError, WorkspaceRole};
@@ -28,7 +29,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/workspaces", post(create_workspace))
         .route(
             "/api/v1/workspaces/{workspace_id}",
-            get(get_workspace).patch(patch_workspace),
+            get(get_workspace)
+                .patch(patch_workspace)
+                .delete(delete_workspace),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/members",
@@ -56,8 +59,6 @@ async fn list_my_workspaces(
     let listed = crate::db::workspace::list_workspaces_for_user(&state.auth.db.pool, user_id)
         .await
         .map_err(internal)?;
-    // documentCount/assignedCount are interim constants (0) until documents/tasks slices
-    // exist; source computes them from those domains and they are not aggregate parity.
     let items = listed
         .into_iter()
         .map(|w| WorkspaceListItemResponse {
@@ -66,8 +67,8 @@ async fn list_my_workspaces(
             slug: w.slug,
             role: w.role.as_str().to_string(),
             kind: w.kind,
-            document_count: 0,
-            assigned_count: 0,
+            document_count: w.document_count,
+            assigned_count: w.assigned_count,
         })
         .collect();
     Ok(Json(WorkspaceListResponse { items }))
@@ -325,6 +326,45 @@ async fn remove_member(
     }
 }
 
+async fn delete_workspace(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    body: Result<Json<DeleteWorkspaceBody>, JsonRejection>,
+) -> Result<Json<OkResponse>, AppError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let confirm_slug = normalize_slug(&body.confirm_slug)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::WorkspaceManage),
+        Some(workspace_id),
+    )
+    .await?;
+    let ip = peer_ip(peer.ip());
+    let result = crate::db::workspace::trash_workspace(
+        &state.auth.db.pool,
+        workspace_id,
+        user_id,
+        session_id,
+        &confirm_slug,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(WorkspaceDbError::Forbidden) => {
+            Err(AppError::from_code(ProblemCode::InsufficientPermissions))
+        }
+        Err(err) => Err(map_workspace_error(err, false)),
+    }
+}
+
 fn meta_response(meta: crate::db::workspace::WorkspaceMeta) -> WorkspaceMetaResponse {
     WorkspaceMetaResponse {
         id: meta.id.to_string(),
@@ -352,6 +392,7 @@ fn map_workspace_error(err: WorkspaceDbError, create_route: bool) -> AppError {
         WorkspaceDbError::LastProjectLead => AppError::from_code(ProblemCode::Conflict),
         WorkspaceDbError::SeatLimit => AppError::from_code(ProblemCode::LimitSeats),
         WorkspaceDbError::GuestLimit => AppError::from_code(ProblemCode::LimitGuests),
+        WorkspaceDbError::InvalidInput => AppError::from_code(ProblemCode::InvalidInput),
     }
 }
 

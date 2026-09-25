@@ -126,6 +126,17 @@ async fn actor_is_active(
     Ok(live.map(|(v,)| v).unwrap_or(false))
 }
 
+pub(crate) async fn remove_by_workspace(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM fvoci.api_tokens WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn create_api_token(
     pool: &PgPool,
     workspace_id: Uuid,
