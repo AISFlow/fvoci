@@ -28,9 +28,12 @@ use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
 use crate::collab::validation::{
-    classify_admission_load, classify_admission_snapshot, validate_recovery_bundle,
-    validate_snapshot_only, BundleValidation, ValidateStageTimings,
+    classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
+    ValidateStageTimings,
 };
+
+const MAX_REJECTED_CANDIDATES_PER_CONN: usize = 8;
+const REJECTED_CANDIDATE_WINDOW: Duration = Duration::from_secs(30);
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::verify_collab_operation;
@@ -923,6 +926,7 @@ struct ConnectionState {
     pending_persist: VecDeque<PersistBarrier>,
     in_flight: bool,
     revoked: bool,
+    rejected_candidates: VecDeque<Instant>,
 }
 
 struct PersistBarrier {
@@ -979,6 +983,8 @@ struct RoomActor {
     shutting_down: bool,
     pending_awareness: VecDeque<Vec<u8>>,
     flushing_awareness: bool,
+    /// Set when the dedicated fence connection is lost; actor exits once empty.
+    fence_lost: bool,
 }
 
 pub async fn spawn_room(
@@ -1032,6 +1038,7 @@ pub async fn spawn_room(
         shutting_down: false,
         pending_awareness: VecDeque::new(),
         flushing_awareness: false,
+        fence_lost: false,
     };
     tokio::spawn(async move {
         let mut actor = actor;
@@ -1172,6 +1179,9 @@ impl RoomActor {
                 }
             }
             self.publish_live_conns();
+            if self.fence_lost && self.connections.is_empty() {
+                break;
+            }
             if self.connections.is_empty() && self.shutting_down {
                 break;
             }
@@ -1384,6 +1394,9 @@ impl RoomActor {
         if self.shutting_down {
             return Err(JoinError::EngineUnavailable);
         }
+        if self.fence_lost {
+            return Err(JoinError::EngineUnavailable);
+        }
         #[cfg(feature = "db-tests")]
         pause_for_join_barrier(self.document_id).await;
         if self.connections.len() >= self.config.max_connections_per_room {
@@ -1498,6 +1511,7 @@ impl RoomActor {
                 pending_persist: VecDeque::new(),
                 in_flight: false,
                 revoked: false,
+                rejected_candidates: VecDeque::new(),
             },
         );
         self.publish_live_conns();
@@ -1535,6 +1549,51 @@ impl RoomActor {
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
             self.close_connection(conn_id, code, reason).await;
         }
+    }
+
+    async fn fatal_fence_lost(&mut self) {
+        self.fence_lost = true;
+        self.writer_generation = None;
+        self.primary_loaded = false;
+        self.primary_dirty = true;
+        self.room_guard = None;
+        self.close_all_connections(1013, "try again later").await;
+    }
+
+    async fn reload_primary_or_close_room(&mut self) -> bool {
+        match self.reload_primary_from_committed().await {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::error!(
+                    document_id = %self.document_id,
+                    error = ?err,
+                    "primary reload failed; closing room"
+                );
+                self.fatal_fence_lost().await;
+                false
+            }
+        }
+    }
+
+    fn connection_reject_limit_exceeded(&mut self, conn_id: Uuid) -> bool {
+        let Some(conn) = self.connections.get_mut(&conn_id) else {
+            return true;
+        };
+        let now = Instant::now();
+        conn.rejected_candidates
+            .retain(|t| now.duration_since(*t) < REJECTED_CANDIDATE_WINDOW);
+        conn.rejected_candidates.len() >= MAX_REJECTED_CANDIDATES_PER_CONN
+    }
+
+    fn record_rejected_candidate(&mut self, conn_id: Uuid) -> bool {
+        let Some(conn) = self.connections.get_mut(&conn_id) else {
+            return true;
+        };
+        let now = Instant::now();
+        conn.rejected_candidates
+            .retain(|t| now.duration_since(*t) < REJECTED_CANDIDATE_WINDOW);
+        conn.rejected_candidates.push_back(now);
+        conn.rejected_candidates.len() >= MAX_REJECTED_CANDIDATES_PER_CONN
     }
 
     async fn recover_primary_after_engine_fault(&mut self) -> bool {
@@ -1865,8 +1924,8 @@ impl RoomActor {
             }
             SyncStep::Step2 | SyncStep::Update => {
                 if payload.is_empty() {
-                    if self.primary_dirty {
-                        let _ = self.reload_primary_from_committed().await;
+                    if self.primary_dirty && !self.reload_primary_or_close_room().await {
+                        return;
                     }
                     if let Some(c) = self.connections.get_mut(&conn_id) {
                         c.in_flight = false;
@@ -1891,6 +1950,11 @@ impl RoomActor {
                     self.send_sync_status(conn_id, routing_key, false).await;
                     return;
                 }
+                if self.connection_reject_limit_exceeded(conn_id) {
+                    self.close_connection_ordered(conn_id, 1008, "update rejected")
+                        .await;
+                    return;
+                }
                 if let Some(c) = self.connections.get_mut(&conn_id) {
                     c.in_flight = true;
                 }
@@ -1901,6 +1965,11 @@ impl RoomActor {
                     }
                     self.close_connection(conn_id, 1011, "engine unavailable")
                         .await;
+                    return;
+                }
+
+                if self.writer_generation.is_none() {
+                    self.reject_candidate(conn_id, routing_key).await;
                     return;
                 }
 
@@ -1931,21 +2000,21 @@ impl RoomActor {
                 #[cfg(feature = "db-tests")]
                 pause_for_append_revoke_barrier(self.document_id).await;
 
-                let writer_generation = self.writer_generation;
-                let Some(writer_generation) = writer_generation else {
-                    self.reject_candidate(conn_id, routing_key).await;
-                    return;
-                };
+                let writer_generation = self.writer_generation.expect("checked above");
                 let (session_id, actor_user_id) = self
                     .connections
                     .get(&conn_id)
                     .map(|c| (c.session.session_id, c.session.user_id))
                     .unwrap_or_default();
-                let room_conn = self
-                    .room_guard
-                    .as_mut()
-                    .expect("live room holds session connection")
-                    .connection_mut();
+                let Some(room_guard) = self.room_guard.as_mut() else {
+                    tracing::error!(
+                        document_id = %self.document_id,
+                        "room fence connection missing during append"
+                    );
+                    self.fatal_fence_lost().await;
+                    return;
+                };
+                let room_conn = room_guard.connection_mut();
 
                 #[cfg(feature = "db-tests")]
                 pause_for_append_in_tx_reject_barrier(self.document_id).await;
@@ -1985,22 +2054,37 @@ impl RoomActor {
                     commit_us = append_tx.commit_us,
                     document_id = %self.document_id,
                 );
-                let append = timed_append.map(|(result, _)| result);
+                let append = match timed_append {
+                    Err(err) => {
+                        tracing::error!(
+                            document_id = %self.document_id,
+                            error = %err,
+                            "room fence connection lost during append"
+                        );
+                        self.fatal_fence_lost().await;
+                        return;
+                    }
+                    Ok((result, _timings)) => result,
+                };
 
                 let committed = match append {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(CollabDbError::StaleWriter)) => {
-                        let _ = self.reload_primary_from_committed().await;
+                    Ok(result) => result,
+                    Err(CollabDbError::StaleWriter) => {
+                        if !self.reload_primary_or_close_room().await {
+                            return;
+                        }
                         self.fatal_writer_stale().await;
                         self.reject_candidate(conn_id, routing_key).await;
                         return;
                     }
-                    Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
-                        let _ = self.reload_primary_from_committed().await;
+                    Err(err) if Self::is_definite_append_rejection(&err) => {
+                        if !self.reload_primary_or_close_room().await {
+                            return;
+                        }
                         self.reject_candidate(conn_id, routing_key).await;
                         return;
                     }
-                    Ok(Err(CollabDbError::StaleCutoff)) | Ok(Err(_)) | Err(_) => {
+                    Err(CollabDbError::StaleCutoff) | Err(_) => {
                         match self
                             .reconcile_ambiguous_append(
                                 actor_user_id,
@@ -2014,7 +2098,9 @@ impl RoomActor {
                         {
                             Some(result) => result,
                             None => {
-                                let _ = self.reload_primary_from_committed().await;
+                                if !self.reload_primary_or_close_room().await {
+                                    return;
+                                }
                                 self.reject_candidate(conn_id, routing_key).await;
                                 return;
                             }
@@ -2026,7 +2112,9 @@ impl RoomActor {
                     AppendCollabResult::Committed { seq }
                     | AppendCollabResult::DuplicateAck { seq } => {
                         if seq != expected_tail + 1 {
-                            let _ = self.reload_primary_from_committed().await;
+                            if !self.reload_primary_or_close_room().await {
+                                return;
+                            }
                             self.fatal_room_divergence(actor_user_id, session_id).await;
                             self.reject_candidate(conn_id, routing_key).await;
                             return;
@@ -2043,7 +2131,10 @@ impl RoomActor {
                 let op_prefix = self.fifo_seq;
 
                 let apply_started = std::time::Instant::now();
-                let primary_ok = self.integrate_committed_update(&payload).await.is_ok();
+                let primary_ok = self
+                    .integrate_committed_update(&payload, true)
+                    .await
+                    .is_ok();
                 tracing::info!(
                     target: "collab.stage",
                     stage = "apply",
@@ -2108,8 +2199,8 @@ impl RoomActor {
     }
 
     async fn reject_candidate_capacity_pressure(&mut self, conn_id: Uuid) {
-        if self.primary_dirty {
-            let _ = self.reload_primary_from_committed().await;
+        if self.primary_dirty && !self.reload_primary_or_close_room().await {
+            return;
         }
         if let Some(c) = self.connections.get_mut(&conn_id) {
             c.in_flight = false;
@@ -2119,8 +2210,8 @@ impl RoomActor {
     }
 
     async fn reject_candidate_engine_unavailable(&mut self, conn_id: Uuid) {
-        if self.primary_dirty {
-            let _ = self.reload_primary_from_committed().await;
+        if self.primary_dirty && !self.reload_primary_or_close_room().await {
+            return;
         }
         if let Some(c) = self.connections.get_mut(&conn_id) {
             c.in_flight = false;
@@ -2130,8 +2221,9 @@ impl RoomActor {
     }
 
     async fn reject_candidate(&mut self, conn_id: Uuid, routing_key: &str) {
-        if self.primary_dirty {
-            let _ = self.reload_primary_from_committed().await;
+        let _limit_exceeded = self.record_rejected_candidate(conn_id);
+        if self.primary_dirty && !self.reload_primary_or_close_room().await {
+            return;
         }
         if let Some(c) = self.connections.get_mut(&conn_id) {
             c.in_flight = false;
@@ -2293,6 +2385,12 @@ impl RoomActor {
         {
             Ok(report) => report,
             Err(BridgeError::Dead) => {
+                if !self.reload_primary_or_close_room().await {
+                    return (
+                        BundleValidation::EngineUnavailable,
+                        ValidateStageTimings::default(),
+                    );
+                }
                 return (
                     BundleValidation::EngineUnavailable,
                     ValidateStageTimings::default(),
@@ -2300,46 +2398,26 @@ impl RoomActor {
             }
         };
         let load_us = apply_started.elapsed().as_micros() as u64;
-        if let Err(outcome) = classify_admission_load(&apply_report.outcome) {
-            let _ = self.reload_primary_from_committed().await;
+        let outcome = match classify_admission_load(&apply_report.outcome) {
+            Ok(()) => {
+                self.primary_dirty = true;
+                BundleValidation::Ok
+            }
+            Err(outcome) => outcome,
+        };
+        if outcome != BundleValidation::Ok && !self.reload_primary_or_close_room().await {
             return (
-                outcome,
+                BundleValidation::EngineUnavailable,
                 ValidateStageTimings {
                     load_us,
                     ..ValidateStageTimings::default()
                 },
             );
         }
-        let snapshot_started = Instant::now();
-        let snap_report = match self.engine.call(Request::Snapshot).await {
-            Ok(report) => report,
-            Err(BridgeError::Dead) => {
-                let _ = self.reload_primary_from_committed().await;
-                return (
-                    BundleValidation::EngineUnavailable,
-                    ValidateStageTimings {
-                        load_us,
-                        ..ValidateStageTimings::default()
-                    },
-                );
-            }
-        };
-        let snapshot_us = snapshot_started.elapsed().as_micros() as u64;
-        let outcome = match &snap_report.outcome {
-            EngineStatus::Ok {
-                update_b64: Some(bytes_b64),
-                ..
-            } => classify_admission_snapshot(snap_report.outcome.clone(), b64::decode(bytes_b64)),
-            other => classify_admission_snapshot(other.clone(), Ok(Vec::new())),
-        };
-        if outcome != BundleValidation::Ok {
-            let _ = self.reload_primary_from_committed().await;
-        }
         (
             outcome,
             ValidateStageTimings {
                 load_us,
-                snapshot_us,
                 ..ValidateStageTimings::default()
             },
         )
@@ -2605,9 +2683,22 @@ impl RoomActor {
         !Self::manual_persist_derived_ok(outcome)
     }
 
-    async fn integrate_committed_update(&mut self, payload: &[u8]) -> Result<(), JoinError> {
+    async fn integrate_committed_update(
+        &mut self,
+        payload: &[u8],
+        admission_applied: bool,
+    ) -> Result<(), JoinError> {
         if self.engine.needs_recycle() {
             return self.reload_primary_from_committed().await;
+        }
+        if admission_applied {
+            #[cfg(feature = "db-tests")]
+            if consume_force_primary_apply_fail(self.document_id).await {
+                return self.reload_primary_from_committed().await;
+            }
+            self.primary_dirty = false;
+            self.primary_loaded = true;
+            return Ok(());
         }
         self.primary_dirty = true;
         if self.apply_primary(payload).await {
@@ -3096,7 +3187,11 @@ impl RoomActor {
         self.committed.tail_seq = seq;
         self.fifo_seq += 1;
 
-        if self.integrate_committed_update(&payload).await.is_err() {
+        if self
+            .integrate_committed_update(&payload, false)
+            .await
+            .is_err()
+        {
             self.fatal_primary_unhealthy(actor_user_id, session_id)
                 .await;
             return Err(RevisionRestoreError::Unavailable);

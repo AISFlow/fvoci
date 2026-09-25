@@ -72,3 +72,65 @@ Attempts to enable warm validators on the hot path (lazy spawn, cap raised to 64
 ### ARM64 `collab_operational_project_failure_recovers_primary` flake
 
 `collab_operational_project_failure_recovers_primary` passed 5/5 locally with `--test-threads=4` (matching CI parallelism). No branch change targets projection persist-failed timing; primary admission does not alter project-helper caps. If ARM64 CI still flakes, suspect pre-existing helper-slot contention under parallel `collab_projection` rather than this slice.
+
+## 2026-09-25 — advisor capacity-3 gate fixes and re-verification
+
+Evidence log: `/home/kinesis/orca/fvoci-evidence/collab-capacity-probe-20260925T074123Z.log`  
+Branch: `fvoci/rust-collab-engine-capacity` (post-fix commit pending)
+
+### Advisor gate changes (room.rs)
+
+| Issue | Fix |
+| --- | --- |
+| `writer_generation` None after primary Apply | Check before `validate_candidate_on_primary` |
+| `room_guard` `.expect()` panic | Fatal fence loss: close 1013, drop guard, actor exits when empty |
+| Ignored reload failures on reject paths | `reload_primary_or_close_room` → 1013 room close; post-commit unhealthy paths still 1011 |
+| Redundant per-edit Snapshot | Dropped; `Apply` already enforces `complete_v1` cap |
+| Double Apply after commit | `integrate_committed_update(..., admission_applied=true)` skips re-apply unless recycle |
+| Hostile reload amplification | Per-connection reject counter (8 / 30 s) closes offender 1008 |
+| Fence connection I/O error | SQLx error on room PG conn → fatal fence loss + actor exit |
+| Cold-restart proof | `collab_cold_reload_fragmented_document_fits_rlimits` (48-tail bundle) |
+
+**Op budget recycling:** hot path now **1 engine op/edit** (admission Apply only; integrate is metadata). Prior path was ~3 ops/edit (Apply + Snapshot + integrate Apply) → recycle threshold moves from ~85 edits to **~256** per primary child (`MAX_OPS=256`).
+
+### New regression tests (collab_product.rs)
+
+- `collab_reject_reload_failure_closes_room_without_serving_rejected_to_peer` — forced reload fail after reject closes 1013; peer SyncStep2 never contains hostile bytes
+- `collab_room_fence_connection_loss_closes_room_and_recovers` — `pg_terminate_backend` on room fence conn; reconnect resumes edits
+- `collab_cold_reload_fragmented_document_fits_rlimits` — fresh child cold Load of fragmented snapshot+tail
+
+Probe harness: **mass reconnect** phase (drop all 128 sockets, idle-evict, reopen 64 rooms, verify writers).
+
+### Client latency (64 rooms × 180 s load, post-fix)
+
+| Percentile | ms |
+| --- | ---: |
+| p50 | 68 |
+| p95 | 103 |
+| p99 | 160 |
+
+Merge bar: p95 ≤ 300 ms, rate ≥ 0.95/s/room (achieved **1.000**), 0 writer loss, 0×1011, hostile 5/5 + victim recovery, mass reconnect 64/64, room 65→1013, slot reuse — **pass**.
+
+### Server `collab.stage` percentiles (scripted; n ≈ 11,659)
+
+| Stage | p50 ms | p95 ms | p99 ms |
+| --- | ---: | ---: | ---: |
+| validate | 1.2 | 6.9 | 11.8 |
+| append_tx | 33.8 | 54.9 | 77.0 |
+| apply | 0.0 | 0.0 | 0.0 |
+| broadcast | 0.0 | 0.0 | 0.1 |
+
+`snapshot_us` p50 = 0 (Snapshot removed from admission). `apply` p50 = 0 (integrate no longer re-applies).
+
+### CI / integration (local, `--test-threads=4` where noted)
+
+| Suite | Result |
+| --- | --- |
+| `cargo fmt --check`, `clippy --all-targets --features db-tests,api-schema -D warnings` | pass |
+| `collab_projection` (19 tests) | pass — ARM64 child-cap flake **unchanged** by this branch |
+| `revision_integration` (8 tests) | pass |
+| `collab_lifecycle` (20), `collab_shutdown` (7), `document_collab_lifecycle` (3) | pass |
+| `collab-engine` crate tests | pass |
+| New `collab_product` gate tests (3) | pass |
+
+SIGTERM drain at 64 live rooms: covered by existing `collab_shutdown` process tests (normal SIGTERM exit 0, guard release); not duplicated inside the capacity probe.

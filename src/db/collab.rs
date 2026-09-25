@@ -45,7 +45,7 @@ use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::{
     document_permission, empty_document_json, lock_membership_users, membership_role_for_update,
-    recheck_session, workspace_is_live,
+    recheck_session, wiki_can_edit, workspace_is_live,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::projects::ProjectPermission;
@@ -1365,7 +1365,7 @@ async fn resolve_collab_admission_tx(
     let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
     if role.is_none() {
         tx.rollback().await?;
-        return Ok(Err(CollabDbError::NotFound));
+        return Ok((Err(CollabDbError::NotFound), timings));
     }
     let permission =
         document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;

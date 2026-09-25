@@ -34,13 +34,16 @@ use fvoci_server::collab::wire::{
 };
 use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
-use fvoci_server::db::collab::{load_collab_document, resolve_collab_admission};
+use fvoci_server::db::collab::{
+    load_collab_document, resolve_collab_admission, COLLAB_ROOM_SESSION_LOCK_NAMESPACE,
+};
 use fvoci_server::db::collab_delivery::{
     arm_delivery_read_barrier, arm_force_delivery_read_fail, arm_force_delivery_tx_error,
     check_delivery_admission, delivery_read_count, disarm_delivery_read_barrier,
     disarm_force_delivery_read_fail, disarm_force_delivery_tx_error, reset_delivery_read_count,
     DeliveryAdmission,
 };
+use fvoci_server::db::context::lock_key_from_uuid;
 use fvoci_server::db::documents::{empty_document_json, CreateDocumentInput};
 use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::workspace;
@@ -5024,4 +5027,223 @@ async fn collab_authenticated_peer_fanout_records_observed_delivery() {
     );
     server.shutdown().await;
     harness.cleanup().await;
+}
+
+fn invalid_utf8_update_candidate() -> Vec<u8> {
+    let mut bytes = engine_fixture("utf8_korean.v1");
+    let marker = [0xEC, 0x95, 0x88];
+    let pos = bytes
+        .windows(3)
+        .position(|w| w == marker)
+        .expect("안녕 utf8 marker in utf8_korean.v1 fixture");
+    bytes[pos] = 0xFF;
+    bytes
+}
+
+async fn room_fence_backend_pid(pool: &PgPool, document_id: Uuid) -> Option<i32> {
+    let lock_key = lock_key_from_uuid(document_id);
+    sqlx::query_scalar(
+        "SELECT l.pid FROM pg_locks l
+         WHERE l.locktype = 'advisory'
+           AND l.classid = $1
+           AND l.objid = $2
+           AND l.granted = true
+         LIMIT 1",
+    )
+    .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
+    .bind(lock_key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tokio::test]
+async fn collab_reject_reload_failure_closes_room_without_serving_rejected_to_peer() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let good = sample_hi_update();
+    let hostile = invalid_utf8_update_candidate();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 501).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &good).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(3)).await,
+        "baseline edit must apply"
+    );
+
+    let mut reader = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut reader, &routing_key, 502).await;
+
+    arm_force_primary_load_fail(wiki.document_id).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &hostile).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1013, Duration::from_secs(5), false).await;
+    disarm_force_primary_load_fail(wiki.document_id).await;
+
+    let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut recovery, &routing_key, 503).await;
+    recovery
+        .send(Message::Binary(
+            sync_step1_frame(&routing_key, &[0, 0]).into(),
+        ))
+        .await
+        .unwrap();
+    let mut step2_payload = None;
+    for _ in 0..12 {
+        if let Some(WireFrame::Document {
+            message:
+                DocumentMessage::Sync(SyncMessage {
+                    step: SyncStep::Step2,
+                    y_protocol,
+                    ..
+                }),
+            ..
+        }) = recv_document_frame(&mut recovery, 1).await
+        {
+            step2_payload = Some(
+                parse_sync_payload(&y_protocol, 4 * 1024 * 1024)
+                    .expect("step2")
+                    .1,
+            );
+            break;
+        }
+    }
+    let step2 = step2_payload.expect("peer must receive SyncStep2 after room reload failure close");
+    assert_ne!(
+        step2, hostile,
+        "peer SyncStep2 must not contain the rejected hostile candidate"
+    );
+    let load = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(load.tail.len(), 1);
+    assert_eq!(load.tail[0].payload, good);
+
+    let _ = reader.close(None).await;
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_room_fence_connection_loss_closes_room_and_recovers() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 601).await;
+    let fence_pid = room_fence_backend_pid(&wiki.session.pool, wiki.document_id)
+        .await
+        .expect("live room must hold session advisory lock on dedicated connection");
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(fence_pid)
+        .execute(&wiki.session.pool)
+        .await
+        .expect("terminate room fence backend");
+
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1013, Duration::from_secs(5), false).await;
+
+    let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut recovery, &routing_key, 602).await;
+    recovery
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut recovery, Duration::from_secs(5)).await,
+        "room must recover edits after fence connection loss and client reconnect"
+    );
+
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_cold_reload_fragmented_document_fits_rlimits() {
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin: engine_bin(),
+        limits: collab_engine::Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .expect("spawn primary for fragmented cold reload");
+    let mut tail = Vec::new();
+    for i in 0..48usize {
+        let update = engine_fixture(&format!("pending_u{}.v1", (i % 2) + 1));
+        let apply = session.call(&Request::Apply {
+            update_b64: update.clone(),
+            encoding: 1,
+        });
+        assert!(
+            apply.outcome.is_applied_ok(),
+            "fragmented apply {i} must succeed before cold reload, got {:?}",
+            apply.outcome
+        );
+        tail.push(update);
+    }
+    let snap = session.call(&Request::Snapshot);
+    let snapshot = match snap.outcome {
+        EngineStatus::Ok {
+            update_b64: Some(bytes_b64),
+            ..
+        } => collab_engine::b64::decode(&bytes_b64).expect("snapshot bytes"),
+        other => panic!("snapshot before cold reload failed: {other:?}"),
+    };
+    session.kill_and_reap();
+    let mut cold = EngineSession::spawn(SpawnRequest {
+        engine_bin: engine_bin(),
+        limits: collab_engine::Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .expect("spawn fresh primary for cold reload");
+    let load = cold.call(&Request::Load {
+        snapshot_b64: Some(snapshot),
+        tail_b64: tail,
+        encoding: 1,
+    });
+    assert!(
+        load.outcome.is_applied_ok(),
+        "cold reload of fragmented document must fit helper rlimits, got {:?}",
+        load.outcome
+    );
 }

@@ -775,9 +775,73 @@ async fn collab_capacity_probe() {
         hostile_sample_indices.len()
     );
 
+    let _ = recovery_ws.close(None).await;
+
+    let mass_reconnect_started = Instant::now();
+    for (_, writer) in &writer_rooms {
+        let mut guard = writer.lock().await;
+        let _ = guard.close(None).await;
+    }
+    for reader in &reader_rooms {
+        let mut guard = reader.lock().await;
+        let _ = guard.close(None).await;
+    }
+    writer_rooms.clear();
+    reader_rooms.clear();
+    let slot_deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < slot_deadline {
+        if hub.available_room_slots() >= max_rooms {
+            break;
+        }
+        for doc in &docs[..max_rooms] {
+            let key = (doc.workspace_id, doc.document_id);
+            let _ = hub.execute_idle_evict_if_eligible(key).await;
+        }
+        tokio::task::yield_now();
+    }
+    assert!(
+        hub.available_room_slots() >= max_rooms,
+        "hub must free all room slots before mass reconnect (available={})",
+        hub.available_room_slots()
+    );
+    let mass_open_slots = Arc::new(tokio::sync::Semaphore::new(open_concurrency));
+    for (index, doc) in docs[..max_rooms].iter().enumerate() {
+        let permit = mass_open_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("mass reconnect open semaphore");
+        let room = open_room_peers(addr, doc, peers, index, hub.clone()).await;
+        drop(permit);
+        writer_rooms.push((room.routing_key.clone(), room.writer));
+        reader_rooms.push(room.reader);
+    }
+    let mut mass_lost = 0usize;
+    for (index, (routing_key, writer)) in writer_rooms.iter().enumerate() {
+        if !writer_alive_locked(
+            writer,
+            routing_key,
+            &marker_edit(tick + 100),
+            Duration::from_secs(5),
+        )
+        .await
+        {
+            mass_lost += 1;
+            eprintln!("probe: mass reconnect writer lost room_index={index}");
+        }
+    }
+    assert_eq!(
+        mass_lost, 0,
+        "mass reconnect must restore every room writer without loss"
+    );
+    eprintln!(
+        "probe: mass reconnect {} rooms in {:?}",
+        max_rooms,
+        mass_reconnect_started.elapsed()
+    );
+
     let reuse_doc = &docs[max_rooms];
     let reuse_key = room_key(reuse_doc.workspace_id, reuse_doc.document_id);
-    drop(recovery_ws);
     if let Some((_, writer)) = writer_rooms.first() {
         let _ = writer.lock().await.close(None).await;
     }
