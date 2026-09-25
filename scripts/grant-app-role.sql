@@ -87,6 +87,18 @@ GRANT SELECT, INSERT ON fvoci.task_activity TO :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.task_activity FROM :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.stars TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_tags TO :"app_role";
+GRANT SELECT, INSERT, DELETE ON fvoci.document_tag_assignments TO :"app_role";
+REVOKE UPDATE ON fvoci.document_tag_assignments FROM :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.collections TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.collection_items TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.collection_fields TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.collection_options TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.collection_values TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.collection_choices TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.collection_people TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.collection_views TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.views TO :"app_role";
 -- share_links.token_hash is write-only for the app role: lookups go through
 -- fvoci.app_share_link_by_token_hash, and rows are never updated in place.
 GRANT INSERT, DELETE ON fvoci.share_links TO :"app_role";

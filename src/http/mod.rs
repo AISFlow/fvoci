@@ -60,6 +60,9 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::ics::router())
         .merge(routes::stars::router())
         .merge(routes::share::router())
+        .merge(routes::collections::router())
+        .merge(routes::document_tags::router())
+        .merge(routes::project_views::router())
         .merge(collab)
         .layer(middleware::from_fn(canonicalize_bearer_path))
         .with_state(state);

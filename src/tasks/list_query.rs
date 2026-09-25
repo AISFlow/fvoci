@@ -8,7 +8,8 @@ const TITLE_MAX: usize = 1_000;
 const CURSOR_MAX: usize = 1_024;
 const TASK_TYPES: &[&str] = &["task", "bug", "story", "epic", "subtask"];
 const PRIORITIES: &[&str] = &["none", "low", "medium", "high", "urgent"];
-const UNSUPPORTED_FILTER_KEYS: &[&str] = &["custom", "dueBefore"];
+const CUSTOM_FILTERS_MAX: usize = 25;
+const SORT_MAX: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct ParsedTaskListQuery {
@@ -37,6 +38,28 @@ pub struct ViewFilters {
     pub assignee_id: Option<AssigneeFilter>,
     pub label_id: Option<Uuid>,
     pub milestone_id: Option<Uuid>,
+    pub due_before: Option<NaiveDate>,
+    /// Conjunctive filters on collection field values (source `customFieldFilter`).
+    pub custom: Vec<CustomFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomFilter {
+    pub field_id: Uuid,
+    pub operator: CustomOperator,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CustomOperator {
+    Empty,
+    Equals(CustomValue),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CustomValue {
+    Text(String),
+    Number(f64),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +84,8 @@ pub enum SortField {
     Title,
     Status,
     Number,
+    /// A collection field id (scalar field types only; checked against the catalog).
+    Field(Uuid),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +179,11 @@ fn parse_optional_date(raw: Option<&str>) -> Result<Option<NaiveDate>, TaskListQ
 
 fn parse_view_query(raw: &str) -> Result<ViewQuery, TaskListQueryError> {
     let value: Value = serde_json::from_str(raw).map_err(|_| TaskListQueryError::InvalidInput)?;
+    parse_view_query_value(&value)
+}
+
+/// Source `viewQuery` (strict object, defaults `filters: {}` and `sort: []`).
+pub fn parse_view_query_value(value: &Value) -> Result<ViewQuery, TaskListQueryError> {
     let root = value.as_object().ok_or(TaskListQueryError::InvalidInput)?;
     reject_unknown_keys(root, &["filters", "sort"])?;
 
@@ -183,13 +213,10 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
             "assigneeId",
             "labelId",
             "milestoneId",
+            "dueBefore",
+            "custom",
         ],
     )?;
-    for key in UNSUPPORTED_FILTER_KEYS {
-        if object.contains_key(*key) {
-            return Err(TaskListQueryError::InvalidInput);
-        }
-    }
 
     let task_type = match object.get("type") {
         None => None,
@@ -223,6 +250,19 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
         None => None,
         Some(value) => Some(parse_uuid(value, "milestoneId")?),
     };
+    let due_before = match object.get("dueBefore") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .and_then(crate::tasks::parse_iso_date)
+                .ok_or(TaskListQueryError::InvalidInput)?,
+        ),
+    };
+    let custom = match object.get("custom") {
+        None => Vec::new(),
+        Some(value) => parse_custom_filters(value)?,
+    };
 
     Ok(ViewFilters {
         task_type,
@@ -233,12 +273,61 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
         assignee_id,
         label_id,
         milestone_id,
+        due_before,
+        custom,
     })
+}
+
+fn parse_custom_filters(value: &Value) -> Result<Vec<CustomFilter>, TaskListQueryError> {
+    let array = value.as_array().ok_or(TaskListQueryError::InvalidInput)?;
+    if array.len() > CUSTOM_FILTERS_MAX {
+        return Err(TaskListQueryError::InvalidInput);
+    }
+    let mut out = Vec::with_capacity(array.len());
+    for entry in array {
+        let object = entry.as_object().ok_or(TaskListQueryError::InvalidInput)?;
+        let field_id = parse_uuid(
+            object
+                .get("fieldId")
+                .ok_or(TaskListQueryError::InvalidInput)?,
+            "fieldId",
+        )?;
+        let operator = match object.get("operator").and_then(Value::as_str) {
+            Some("empty") => {
+                reject_unknown_keys(object, &["fieldId", "operator"])?;
+                CustomOperator::Empty
+            }
+            Some("equals") => {
+                reject_unknown_keys(object, &["fieldId", "operator", "value"])?;
+                let value = match object.get("value") {
+                    Some(Value::String(text)) => {
+                        if text.contains('\0') || text.chars().count() > TITLE_MAX {
+                            return Err(TaskListQueryError::InvalidInput);
+                        }
+                        CustomValue::Text(text.clone())
+                    }
+                    Some(Value::Bool(flag)) => CustomValue::Bool(*flag),
+                    Some(Value::Number(number)) => {
+                        let number = number.as_f64().ok_or(TaskListQueryError::InvalidInput)?;
+                        if !number.is_finite() {
+                            return Err(TaskListQueryError::InvalidInput);
+                        }
+                        CustomValue::Number(number)
+                    }
+                    _ => return Err(TaskListQueryError::InvalidInput),
+                };
+                CustomOperator::Equals(value)
+            }
+            _ => return Err(TaskListQueryError::InvalidInput),
+        };
+        out.push(CustomFilter { field_id, operator });
+    }
+    Ok(out)
 }
 
 fn parse_view_sort(value: &Value) -> Result<Vec<ViewSort>, TaskListQueryError> {
     let array = value.as_array().ok_or(TaskListQueryError::InvalidInput)?;
-    if array.len() > 3 {
+    if array.len() > SORT_MAX {
         return Err(TaskListQueryError::InvalidInput);
     }
     let mut sort = Vec::with_capacity(array.len());
@@ -286,6 +375,9 @@ fn parse_title(value: &Value) -> Result<String, TaskListQueryError> {
 
 fn parse_uuid(value: &Value, _field: &str) -> Result<Uuid, TaskListQueryError> {
     let raw = value.as_str().ok_or(TaskListQueryError::InvalidInput)?;
+    if raw.len() != 36 {
+        return Err(TaskListQueryError::InvalidInput);
+    }
     Uuid::parse_str(raw).map_err(|_| TaskListQueryError::InvalidInput)
 }
 
@@ -302,8 +394,10 @@ fn parse_assignee_id(value: &Value) -> Result<AssigneeFilter, TaskListQueryError
 
 fn parse_sort_field(value: &Value) -> Result<SortField, TaskListQueryError> {
     let raw = value.as_str().ok_or(TaskListQueryError::InvalidInput)?;
-    if Uuid::parse_str(raw).is_ok() {
-        return Err(TaskListQueryError::InvalidInput);
+    if raw.len() == 36 {
+        if let Ok(id) = Uuid::parse_str(raw) {
+            return Ok(SortField::Field(id));
+        }
     }
     match raw {
         "priority" => Ok(SortField::Priority),
@@ -361,13 +455,10 @@ pub fn filter_fingerprint(
                 "assigneeId": assignee_id,
                 "labelId": query.view.filters.label_id.map(|id| id.to_string()),
                 "milestoneId": query.view.filters.milestone_id.map(|id| id.to_string()),
+                "dueBefore": query.view.filters.due_before,
+                "custom": view_query_to_json(&query.view)["filters"]["custom"].clone(),
             },
-            "sort": query.view.sort.iter().map(|sort| {
-                serde_json::json!({
-                    "field": sort_field_name(sort.field),
-                    "direction": if sort.direction == SortDirection::Asc { "asc" } else { "desc" },
-                })
-            }).collect::<Vec<_>>(),
+            "sort": view_query_to_json(&query.view)["sort"].clone(),
         },
         "archived": query.archived,
         "from": query.from,
@@ -387,7 +478,7 @@ pub fn encode_cursor(cursor: &TaskListCursor) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
 }
 
-fn decode_cursor(raw: &str) -> Result<TaskListCursor, TaskListQueryError> {
+pub fn decode_cursor(raw: &str) -> Result<TaskListCursor, TaskListQueryError> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(raw)
@@ -433,8 +524,90 @@ fn is_lower_hex_64(value: &str) -> bool {
             .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
 }
 
+/// Canonical JSON of a parsed view query: the stored and returned `config`.
+/// Defaults are made explicit and absent optional filters are omitted, so equal
+/// queries always serialise to equal JSON (saved-view CAS compares it).
+pub fn view_query_to_json(query: &ViewQuery) -> Value {
+    let f = &query.filters;
+    let mut filters = Map::new();
+    if let Some(value) = &f.task_type {
+        filters.insert("type".into(), Value::String(value.clone()));
+    }
+    if let Some(value) = f.status_id {
+        filters.insert("statusId".into(), Value::String(value.to_string()));
+    }
+    if let Some(value) = &f.assignee_id {
+        let raw = match value {
+            AssigneeFilter::Me => "me".to_string(),
+            AssigneeFilter::User(id) => id.to_string(),
+        };
+        filters.insert("assigneeId".into(), Value::String(raw));
+    }
+    if let Some(value) = &f.priority {
+        filters.insert("priority".into(), Value::String(value.clone()));
+    }
+    if let Some(value) = f.label_id {
+        filters.insert("labelId".into(), Value::String(value.to_string()));
+    }
+    if let Some(value) = f.milestone_id {
+        filters.insert("milestoneId".into(), Value::String(value.to_string()));
+    }
+    if f.open_only {
+        filters.insert("openOnly".into(), Value::Bool(true));
+    }
+    if let Some(value) = f.due_before {
+        filters.insert("dueBefore".into(), Value::String(value.to_string()));
+    }
+    if let Some(value) = &f.title {
+        filters.insert("title".into(), Value::String(value.clone()));
+    }
+    if !f.custom.is_empty() {
+        let custom = f
+            .custom
+            .iter()
+            .map(|item| match &item.operator {
+                CustomOperator::Empty => serde_json::json!({
+                    "fieldId": item.field_id.to_string(),
+                    "operator": "empty",
+                }),
+                CustomOperator::Equals(value) => serde_json::json!({
+                    "fieldId": item.field_id.to_string(),
+                    "operator": "equals",
+                    "value": match value {
+                        CustomValue::Text(text) => Value::String(text.clone()),
+                        CustomValue::Bool(flag) => Value::Bool(*flag),
+                        CustomValue::Number(number) => serde_json::Number::from_f64(*number)
+                            .map(Value::Number)
+                            .unwrap_or(Value::Null),
+                    },
+                }),
+            })
+            .collect();
+        filters.insert("custom".into(), Value::Array(custom));
+    }
+    let sort = query
+        .sort
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "field": sort_field_key(entry.field),
+                "direction": if entry.direction == SortDirection::Asc { "asc" } else { "desc" },
+            })
+        })
+        .collect();
+    serde_json::json!({ "filters": Value::Object(filters), "sort": Value::Array(sort) })
+}
+
+pub fn sort_field_key(field: SortField) -> String {
+    match field {
+        SortField::Field(id) => id.to_string(),
+        other => sort_field_name(other).to_string(),
+    }
+}
+
 pub fn sort_field_name(field: SortField) -> &'static str {
     match field {
+        SortField::Field(_) => "field",
         SortField::Priority => "priority",
         SortField::Due => "due",
         SortField::Updated => "updated",
@@ -459,15 +632,20 @@ pub fn cursor_key_for_row(
     status_sort_key: &str,
     due_date: Option<NaiveDate>,
     due_at: Option<DateTime<Utc>>,
+    custom_tokens: &[(Uuid, Option<String>)],
 ) -> String {
     let sort = effective_sort_entries(sort);
     let mut parts = Vec::with_capacity(sort.len() + 1);
     for entry in sort {
-        parts.push(format!(
-            "{}:{}",
-            sort_field_name(entry.field),
-            sort_value_token(
-                entry.field,
+        let token = match entry.field {
+            SortField::Field(id) => custom_tokens
+                .iter()
+                .find(|(field, _)| *field == id)
+                .and_then(|(_, value)| value.as_ref())
+                .map(|value| format!("v:{value}"))
+                .unwrap_or_else(|| "null".to_string()),
+            field => sort_value_token(
+                field,
                 created_at,
                 updated_at,
                 number,
@@ -477,8 +655,9 @@ pub fn cursor_key_for_row(
                 status_sort_key,
                 due_date,
                 due_at,
-            )
-        ));
+            ),
+        };
+        parts.push(format!("{}:{}", sort_field_key(entry.field), token));
     }
     parts.push(format!("id:{id}"));
     sha256_hex(parts.join("\0"))
@@ -530,6 +709,8 @@ pub fn sort_value_token(
         SortField::Due => effective_due_date(due_date, due_at)
             .map(|date| date.to_string())
             .unwrap_or_else(|| "null".to_string()),
+        // Field tokens come from the row's collection value (see cursor_key_for_row).
+        SortField::Field(_) => "null".to_string(),
     }
 }
 
@@ -554,9 +735,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accepts_due_before_custom_and_field_sort() {
+        let parsed = parse_task_list_query(
+            Some(
+                r#"{"filters":{"dueBefore":"2026-01-01","custom":[{"fieldId":"550e8400-e29b-41d4-a716-446655440000","operator":"equals","value":3},{"fieldId":"550e8400-e29b-41d4-a716-446655440001","operator":"empty"}]},"sort":[{"field":"550e8400-e29b-41d4-a716-446655440000","direction":"desc"}]}"#,
+            ),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("valid query");
+        assert_eq!(parsed.view.filters.custom.len(), 2);
+        assert!(matches!(parsed.view.sort[0].field, SortField::Field(_)));
+        let json = view_query_to_json(&parsed.view);
+        assert_eq!(json["filters"]["dueBefore"], "2026-01-01");
+        assert_eq!(json["filters"]["custom"][0]["value"], 3.0);
+        let reparsed = parse_view_query_value(&json).unwrap();
+        assert_eq!(view_query_to_json(&reparsed), json);
+    }
+
+    #[test]
+    fn rejects_bad_custom_filters() {
+        for raw in [
+            r#"{"filters":{"custom":[{"fieldId":"550e8400-e29b-41d4-a716-446655440000","operator":"empty","value":1}]}}"#,
+            r#"{"filters":{"custom":[{"fieldId":"550e8400-e29b-41d4-a716-446655440000","operator":"equals"}]}}"#,
+            r#"{"filters":{"custom":[{"fieldId":"550e8400-e29b-41d4-a716-446655440000","operator":"equals","value":null}]}}"#,
+            r#"{"filters":{"custom":[{"fieldId":"x","operator":"empty"}]}}"#,
+            r#"{"filters":{"dueBefore":"2026-1-1"}}"#,
+        ] {
+            assert_eq!(
+                parse_task_list_query(Some(raw), None, None, None, None, None).unwrap_err(),
+                TaskListQueryError::InvalidInput,
+                "{raw}"
+            );
+        }
+        let many = (0..26)
+            .map(|_| r#"{"fieldId":"550e8400-e29b-41d4-a716-446655440000","operator":"empty"}"#)
+            .collect::<Vec<_>>()
+            .join(",");
+        let raw = format!(r#"{{"filters":{{"custom":[{many}]}}}}"#);
+        assert!(parse_task_list_query(Some(&raw), None, None, None, None, None).is_err());
+    }
+
+    #[test]
     fn rejects_unknown_filter_keys() {
         let err = parse_task_list_query(
-            Some(r#"{"filters":{"dueBefore":"2026-01-01"}}"#),
+            Some(r#"{"filters":{"dueAfter":"2026-01-01"}}"#),
             None,
             None,
             None,

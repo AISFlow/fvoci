@@ -1,7 +1,9 @@
 pub mod api_tokens;
 pub mod attachments;
 pub mod auth;
+pub mod collections;
 pub mod comments;
+pub mod document_tags;
 pub mod documents;
 pub mod groups;
 pub mod ics;
@@ -10,6 +12,7 @@ pub mod invitations;
 pub mod lookup;
 pub mod notifications;
 pub mod project_documents;
+pub mod project_views;
 pub mod projects;
 pub mod revisions;
 pub mod search;

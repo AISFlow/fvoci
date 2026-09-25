@@ -15,6 +15,10 @@ use crate::db::labels::{assignee_filter_member_exists, project_label_exists};
 use crate::db::milestones::project_milestone_exists;
 use crate::db::projects::{lock_project, project_permission, ProjectDbError};
 use crate::db::task_activity::{record_task_activity, task_activity_snapshot};
+use crate::db::view_query::{
+    compile_view_query, scalar_value_sql, value_column, CompileOptions, RootKind, SqlArgs,
+    ViewScope,
+};
 use crate::projects::ProjectPermission;
 use crate::tasks::activity::{patch_activity_fields, ActivitySnapshot};
 use crate::tasks::dependency::{
@@ -1287,7 +1291,51 @@ pub async fn list_project_tasks(
         }
     }
 
-    let (base_conditions, base_binds) = task_list_filter_conditions(query, actor_user_id);
+    let (mut base_conditions, mut base_binds) = task_list_filter_conditions(query, actor_user_id);
+    // Collection-backed parts of the view query (custom field filters,
+    // dueBefore, field sorts) come from the shared compiler.
+    let mut compiled_args = SqlArgs::starting_at(base_binds.len() + 3);
+    let compiled = match compile_view_query(
+        &mut tx,
+        ViewScope {
+            workspace_id,
+            project_id: Some(project_id),
+            collection_id: None,
+            kind: RootKind::Task,
+        },
+        &query.view,
+        &CompileOptions {
+            actor_user_id,
+            time_zone: "UTC",
+            standard_filters: false,
+        },
+        "t",
+        &mut compiled_args,
+    )
+    .await?
+    {
+        Ok(compiled) => compiled,
+        Err(_) => {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::InvalidInput));
+        }
+    };
+    base_conditions.extend(compiled.conditions.iter().cloned());
+    base_binds.extend(compiled_args.values.iter().cloned());
+    let custom_sorts: HashMap<Uuid, String> = compiled
+        .order
+        .iter()
+        .filter_map(|term| match term.field {
+            SortField::Field(id) => Some((id, term.sql("{root}"))),
+            _ => None,
+        })
+        .collect();
+    let custom_fields: Vec<(Uuid, &'static str)> = compiled
+        .catalog
+        .iter()
+        .filter(|field| custom_sorts.contains_key(&field.id))
+        .filter_map(|field| value_column(&field.field_type).map(|column| (field.id, column)))
+        .collect();
     let mut conditions = base_conditions.clone();
     let mut binds = base_binds.clone();
     let sort = effective_sort_entries(&query.view.sort);
@@ -1329,6 +1377,8 @@ pub async fn list_project_tasks(
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::InvalidCursor));
         };
+        let anchor_tokens =
+            load_custom_sort_tokens(&mut tx, workspace_id, id, &custom_fields).await?;
         let key = cursor_key_for_row(
             &sort,
             id,
@@ -1341,13 +1391,14 @@ pub async fn list_project_tasks(
             &status_sort_key,
             due_date,
             due_at,
+            &anchor_tokens,
         );
         if key != cursor.key {
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::InvalidCursor));
         }
         let bind_start = binds.len() + 3;
-        conditions.push(cursor_clause(&sort, bind_start));
+        conditions.push(cursor_clause(&sort, bind_start, &custom_sorts));
         for entry in &sort {
             binds.push(cursor_bind_value(
                 entry.field,
@@ -1367,7 +1418,7 @@ pub async fn list_project_tasks(
 
     let list_where_sql = conditions.join(" AND ");
     let count_where_sql = base_conditions.join(" AND ");
-    let order_sql = order_clause(&sort);
+    let order_sql = order_clause(&sort, &custom_sorts);
     let limit = query.limit + 1;
     let list_sql = format!(
         r#"
@@ -1438,6 +1489,8 @@ pub async fn list_project_tasks(
         let due_date: Option<NaiveDate> = last.try_get("due_date")?;
         let due_at: Option<DateTime<Utc>> = last.try_get("due_at")?;
         let status_sort_key: String = last.try_get("status_sort_key")?;
+        let tokens =
+            load_custom_sort_tokens(&mut tx, workspace_id, record.id, &custom_fields).await?;
         let key = cursor_key_for_row(
             &sort,
             record.id,
@@ -1450,6 +1503,7 @@ pub async fn list_project_tasks(
             &status_sort_key,
             due_date,
             due_at,
+            &tokens,
         );
         Some(encode_cursor(&TaskListCursor {
             id: record.id,
@@ -1578,9 +1632,43 @@ fn escape_ilike_pattern(input: &str) -> String {
     out
 }
 
+/// Text of each field-sort value on one task (cursor key input).
+async fn load_custom_sort_tokens(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    fields: &[(Uuid, &'static str)],
+) -> Result<Vec<(Uuid, Option<String>)>, sqlx::Error> {
+    let mut out = Vec::with_capacity(fields.len());
+    for (field_id, column) in fields {
+        let expr = scalar_value_sql(RootKind::Task, "t", "$3", column);
+        let value: Option<Option<String>> = sqlx::query_scalar(&format!(
+            "SELECT ({expr})::text FROM fvoci.tasks t WHERE t.workspace_id = $1 AND t.id = $2"
+        ))
+        .bind(workspace_id)
+        .bind(task_id)
+        .bind(field_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await?;
+        out.push((*field_id, value.flatten()));
+    }
+    Ok(out)
+}
+
+fn term_sql(field: SortField, custom: &HashMap<Uuid, String>) -> String {
+    match field {
+        SortField::Field(id) => custom
+            .get(&id)
+            .map(|template| template.replace("{root}", "t"))
+            .unwrap_or_else(|| "NULL".to_string()),
+        other => sort_expression_sql(other).to_string(),
+    }
+}
+
 /// Due-date sort uses UTC; the source uses the request time zone.
 fn sort_expression_sql(field: SortField) -> &'static str {
     match field {
+        SortField::Field(_) => "NULL",
         SortField::Priority => {
             "CASE t.priority WHEN 'none' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'urgent' THEN 4 END"
         }
@@ -1601,14 +1689,16 @@ fn sort_anchor_ref(field: SortField, bind_index: usize) -> String {
         SortField::Created | SortField::Updated => format!("${bind_index}::timestamptz"),
         SortField::Number | SortField::Priority => format!("${bind_index}::int"),
         SortField::Due => format!("NULLIF(${bind_index}, 'null')::date"),
-        SortField::Title | SortField::Rank | SortField::Status => format!("${bind_index}"),
+        SortField::Title | SortField::Rank | SortField::Status | SortField::Field(_) => {
+            format!("${bind_index}")
+        }
     }
 }
 
-fn order_clause(sort: &[ViewSort]) -> String {
+fn order_clause(sort: &[ViewSort], custom: &HashMap<Uuid, String>) -> String {
     let mut parts = Vec::new();
     for entry in sort {
-        let column = sort_expression_sql(entry.field);
+        let column = term_sql(entry.field, custom);
         let dir = if entry.direction == SortDirection::Asc {
             "ASC"
         } else {
@@ -1620,40 +1710,78 @@ fn order_clause(sort: &[ViewSort]) -> String {
     parts.join(", ")
 }
 
-fn cursor_clause(sort: &[ViewSort], bind_start: usize) -> String {
+fn cursor_clause(sort: &[ViewSort], bind_start: usize, custom: &HashMap<Uuid, String>) -> String {
     let id_bind = bind_start + sort.len();
     let mut branches = Vec::with_capacity(sort.len() + 1);
     for (index, entry) in sort.iter().enumerate() {
         let mut parts = Vec::with_capacity(index + 1);
         for (prior_index, prior) in sort[..index].iter().enumerate() {
-            parts.push(sort_equality_sql(prior.field, bind_start + prior_index));
+            parts.push(sort_equality_sql(
+                prior.field,
+                bind_start + prior_index,
+                id_bind,
+                custom,
+            ));
         }
         parts.push(sort_strict_after_sql(
             entry.field,
             bind_start + index,
             entry.direction,
+            id_bind,
+            custom,
         ));
         branches.push(format!("({})", parts.join(" AND ")));
     }
     let mut equal_parts: Vec<String> = sort
         .iter()
         .enumerate()
-        .map(|(index, entry)| sort_equality_sql(entry.field, bind_start + index))
+        .map(|(index, entry)| sort_equality_sql(entry.field, bind_start + index, id_bind, custom))
         .collect();
     equal_parts.push(format!("t.id > ${id_bind}::uuid"));
     branches.push(format!("({})", equal_parts.join(" AND ")));
     format!("({})", branches.join(" OR "))
 }
 
-fn sort_equality_sql(field: SortField, bind_index: usize) -> String {
-    let expr = sort_expression_sql(field);
-    let anchor = sort_anchor_ref(field, bind_index);
+/// Field sorts compare against the anchor row's own value (re-evaluated in
+/// SQL); built-in sorts compare against the bound anchor token.
+fn anchor_sql(
+    field: SortField,
+    bind_index: usize,
+    id_bind: usize,
+    custom: &HashMap<Uuid, String>,
+) -> String {
+    match field {
+        SortField::Field(id) => match custom.get(&id) {
+            Some(template) => format!(
+                "(SELECT {} FROM fvoci.tasks a WHERE a.workspace_id = $1 AND a.id = ${id_bind}::uuid)",
+                template.replace("{root}", "a")
+            ),
+            None => "NULL".to_string(),
+        },
+        other => sort_anchor_ref(other, bind_index),
+    }
+}
+
+fn sort_equality_sql(
+    field: SortField,
+    bind_index: usize,
+    id_bind: usize,
+    custom: &HashMap<Uuid, String>,
+) -> String {
+    let expr = term_sql(field, custom);
+    let anchor = anchor_sql(field, bind_index, id_bind, custom);
     format!("{expr} IS NOT DISTINCT FROM {anchor}")
 }
 
-fn sort_strict_after_sql(field: SortField, bind_index: usize, direction: SortDirection) -> String {
-    let expr = sort_expression_sql(field);
-    let anchor = sort_anchor_ref(field, bind_index);
+fn sort_strict_after_sql(
+    field: SortField,
+    bind_index: usize,
+    direction: SortDirection,
+    id_bind: usize,
+    custom: &HashMap<Uuid, String>,
+) -> String {
+    let expr = term_sql(field, custom);
+    let anchor = anchor_sql(field, bind_index, id_bind, custom);
     let op = if direction == SortDirection::Asc {
         ">"
     } else {

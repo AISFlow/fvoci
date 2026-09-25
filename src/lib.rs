@@ -2,6 +2,7 @@ pub mod api;
 pub mod attachments;
 pub mod auth;
 pub mod collab;
+pub mod collections;
 pub mod config;
 pub mod db;
 pub mod display_id;
