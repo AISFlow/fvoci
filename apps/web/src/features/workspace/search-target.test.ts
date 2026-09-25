@@ -19,13 +19,10 @@ test("searchItemHref sends comments to the parent display id with the comments a
   assert.equal(searchItemHref("Acme", { type: "comment", id: "c1" }), null);
 });
 
-test("searchItemHref opens attachments on the viewer path and keeps chunk query", () => {
+test("searchItemHref opens attachment hits on the parent document", () => {
   assert.equal(
-    searchItemHref("Acme", { type: "attachment", id: "a1", chunkNo: 3 }),
-    "/w/acme/a/a1/view?chunk=3",
+    searchItemHref("Acme", { type: "attachment", id: "a1", displayId: "LAB-7", chunkNo: 3 }),
+    "/w/acme/LAB-7",
   );
-  assert.equal(
-    searchItemHref("Acme", { type: "attachment", id: "a1", chunkNo: null }),
-    "/w/acme/a/a1/view",
-  );
+  assert.equal(searchItemHref("Acme", { type: "attachment", id: "a1", chunkNo: null }), null);
 });
