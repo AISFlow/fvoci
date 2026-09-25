@@ -7,6 +7,8 @@ pub mod comments;
 pub mod context;
 pub mod documents;
 pub mod groups;
+pub mod holidays;
+pub mod ics;
 pub mod identity;
 pub mod invitations;
 pub mod labels;

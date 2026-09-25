@@ -5,6 +5,7 @@ import { useState } from "react";
 import { WorkspaceGroupsSection } from "@/features/settings/workspace-groups";
 import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity";
 import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
+import { WorkspaceCalendarSection } from "@/features/settings/workspace-calendar";
 import { WorkspaceTokensSection } from "@/features/settings/workspace-tokens";
 import { NotificationPrefsSection } from "@/features/notifications/notification-prefs";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
@@ -99,6 +100,7 @@ export function WorkspaceSettingsPage() {
         {roleAtLeast(workspace.role, "member") ? (
           <NotificationPrefsSection workspaceId={workspace.id} />
         ) : null}
+        <WorkspaceCalendarSection workspaceId={workspace.id} />
         {canManage ? <WorkspaceTokensSection workspaceId={workspace.id} /> : null}
       </div>
     </WorkspaceShell>

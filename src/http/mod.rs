@@ -55,6 +55,7 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::attachments::router())
         .merge(routes::comments::router())
         .merge(routes::api_tokens::router())
+        .merge(routes::ics::router())
         .merge(collab)
         .layer(middleware::from_fn(canonicalize_bearer_path))
         .with_state(state);
