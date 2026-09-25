@@ -18,6 +18,18 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_optional_non_null_i32<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i32>, D::Error> {
+    match Option::<i32>::deserialize(deserializer)? {
+        Some(value) => Ok(Some(value)),
+        None => Err(serde::de::Error::invalid_type(
+            serde::de::Unexpected::Unit,
+            &"integer",
+        )),
+    }
+}
+
 fn deserialize_optional_non_null_string<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -46,6 +58,12 @@ fn strict_date<E: serde::de::Error>(value: String) -> Result<NaiveDate, E> {
     crate::tasks::parse_iso_date(&value).ok_or_else(|| {
         serde::de::Error::invalid_value(serde::de::Unexpected::Str(&value), &"YYYY-MM-DD date")
     })
+}
+
+fn deserialize_required_date<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<NaiveDate, D::Error> {
+    strict_date(String::deserialize(deserializer)?)
 }
 
 fn deserialize_optional_non_null_date<'de, D: Deserializer<'de>>(
@@ -228,6 +246,29 @@ pub struct OkResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateHolidayBody {
+    #[serde(deserialize_with = "deserialize_required_date")]
+    pub date: NaiveDate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct HolidaysListResponse {
+    pub can_edit: bool,
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct IcsTokenResponse {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct NotificationItemOutput {
@@ -382,6 +423,14 @@ pub struct CreateWorkspaceBody {
 pub struct PatchWorkspaceBody {
     #[cfg_attr(feature = "api-schema", schema(required = true, nullable = false))]
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DeleteWorkspaceBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = false))]
+    pub confirm_slug: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -855,6 +904,7 @@ pub struct ProjectListItemOutput {
     pub updated_at: DateTime<Utc>,
     pub task_count: i64,
     pub open_task_count: i64,
+    pub can_edit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1274,6 +1324,8 @@ pub struct CreateTaskDependencyBody {
     #[serde(default, deserialize_with = "deserialize_present_string")]
     #[serde(rename = "type")]
     pub dependency_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_i32")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub lag_days: Option<i32>,
 }
 

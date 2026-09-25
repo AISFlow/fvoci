@@ -714,3 +714,76 @@ async fn milestones_force_rls_and_pat_scopes() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn add_dependency_rejects_null_lag_days() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAG", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let a = create_task(app.clone(), &cookie, workspace_id, project_id, "A").await;
+    let b = create_task(app.clone(), &cookie, workspace_id, project_id, "B").await;
+    let a_id = a["id"].as_str().unwrap();
+    let b_id = b["id"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{a_id}/dependencies"),
+        Some(json!({"blockedId": b_id, "lagDays": null})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert_eq!(body["code"], "invalid_input");
+
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn remove_dependency_returns_task_archived_before_missing_blocked() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "RMV", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let a = create_task(app.clone(), &cookie, workspace_id, project_id, "A").await;
+    let b = create_task(app.clone(), &cookie, workspace_id, project_id, "B").await;
+    let a_id = a["id"].as_str().unwrap();
+    let b_id = b["id"].as_str().unwrap();
+
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{a_id}/dependencies"),
+        Some(json!({"blockedId": b_id})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{a_id}"),
+        Some(json!({"archived": true})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_request(
+        app,
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/tasks/{a_id}/dependencies/{}",
+            Uuid::now_v7()
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
+    assert_eq!(body["code"], "task_archived");
+
+    harness.cleanup().await;
+}

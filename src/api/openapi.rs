@@ -12,15 +12,16 @@ use crate::api::dto::{
     AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
     CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
-    CreateDocumentBody, CreateGroupBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody,
-    CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody, DocumentMetaResponse,
-    ExpectedDatesBody, GroupListResponse, GroupMemberBody, GroupMemberListResponse,
-    GroupMemberOutput, GroupOutput, InvitationAcceptBody, InvitationConsentItem,
-    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
-    InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
-    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
-    MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
-    NotificationItemOutput, NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
+    CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody, CreateMilestoneBody,
+    CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
+    DeleteWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody, GroupListResponse,
+    GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
+    IcsTokenResponse, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
+    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LabelListResponse,
+    LabelOutput, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
+    MeApiTokenCreateBody, MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse,
+    MilestoneOutput, MoveDocumentBody, MoveTaskBody, NotificationItemOutput,
+    NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
     NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PatchCommentBody,
     PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody, PatchProjectBody,
     PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
@@ -78,6 +79,7 @@ impl Modify for CookieSecurityAddon {
         create_workspace,
         get_workspace,
         patch_workspace,
+        delete_workspace,
         list_members,
         patch_member,
         remove_member,
@@ -112,6 +114,7 @@ impl Modify for CookieSecurityAddon {
         remove_document_group_grant,
         get_project_workflow,
         lookup_display_id,
+        global_search,
         workspace_search,
         list_tasks,
         create_task,
@@ -161,6 +164,11 @@ impl Modify for CookieSecurityAddon {
         get_notification_prefs,
         put_notification_prefs,
         list_me_notifications,
+        list_workspace_holidays,
+        create_workspace_holiday,
+        delete_workspace_holiday,
+        create_ics_token,
+        get_ics_feed,
     ),
     components(
         schemas(
@@ -175,6 +183,9 @@ impl Modify for CookieSecurityAddon {
             WorkspaceListResponse,
             WorkspaceListItemResponse,
             WorkspaceMetaResponse,
+            CreateHolidayBody,
+            HolidaysListResponse,
+            IcsTokenResponse,
             OkResponse,
             MemberResponse,
             MembersResponse,
@@ -191,6 +202,7 @@ impl Modify for CookieSecurityAddon {
             InvitationConsentItem,
             CreateWorkspaceBody,
             PatchWorkspaceBody,
+            DeleteWorkspaceBody,
             MemberRoleBody,
             CreateProjectBody,
             PatchProjectBody,
@@ -277,6 +289,7 @@ impl Modify for CookieSecurityAddon {
         (name = "attachments", description = "Wiki document attachments"),
         (name = "comments", description = "Document and task comments"),
         (name = "notifications", description = "In-app notifications"),
+        (name = "schedule", description = "Holidays and ICS calendar feeds"),
     )
 )]
 pub struct ApiDoc;
@@ -722,6 +735,25 @@ fn get_workspace() {}
     )
 )]
 fn patch_workspace() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}",
+    tag = "workspaces",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = DeleteWorkspaceBody,
+    responses(
+        (status = 200, description = "Workspace deleted", body = OkResponse),
+        (status = 400, description = "Invalid confirmation slug", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Insufficient permissions", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Personal workspace is immutable", body = ProblemResponse),
+    )
+)]
+fn delete_workspace() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -1359,6 +1391,30 @@ fn lookup_display_id() {}
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
     get,
+    path = "/api/v1/search",
+    tag = "search",
+    security(("fvoci_session" = [])),
+    params(
+        ("q" = String, Query, description = "Search query"),
+        ("type" = Option<String>, Query, description = "Result kind filter"),
+        ("tag" = Option<String>, Query, description = "Optional tag filter"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size 1-50"),
+        ("mode" = Option<String>, Query, description = "lexical or hybrid; global search stays lexical"),
+    ),
+    responses(
+        (status = 200, description = "Cross-workspace search hits", body = SearchListResponse),
+        (status = 400, description = "Invalid input or cursor", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Search unavailable", body = ProblemResponse),
+    )
+)]
+fn global_search() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
     path = "/api/v1/workspaces/{workspace_id}/search",
     tag = "search",
     security(("fvoci_session" = [])),
@@ -1539,6 +1595,7 @@ fn list_project_labels() {}
         (status = 201, description = "Created label", body = LabelOutput),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn create_label() {}
@@ -1559,6 +1616,7 @@ fn create_label() {}
         (status = 200, description = "Label updated", body = OkResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn update_label() {}
@@ -1577,6 +1635,7 @@ fn update_label() {}
     responses(
         (status = 200, description = "Label deleted", body = OkResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn delete_label() {}
@@ -1613,6 +1672,7 @@ fn list_project_milestones() {}
         (status = 201, description = "Created milestone", body = MilestoneOutput),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn create_milestone() {}
@@ -1633,6 +1693,7 @@ fn create_milestone() {}
         (status = 200, description = "Milestone updated", body = OkResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn update_milestone() {}
@@ -1651,6 +1712,7 @@ fn update_milestone() {}
     responses(
         (status = 200, description = "Milestone deleted", body = OkResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
     )
 )]
 fn delete_milestone() {}
@@ -1687,6 +1749,7 @@ fn list_project_dependencies() {}
         (status = 200, description = "Dependency added", body = OkResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project or task archived", body = ProblemResponse),
     )
 )]
 fn add_task_dependency() {}
@@ -1705,9 +1768,89 @@ fn add_task_dependency() {}
     responses(
         (status = 200, description = "Dependency removed", body = OkResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Project or task archived", body = ProblemResponse),
     )
 )]
 fn remove_task_dependency() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/holidays",
+    tag = "schedule",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace holidays", body = HolidaysListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_workspace_holidays() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/holidays",
+    tag = "schedule",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = CreateHolidayBody,
+    responses(
+        (status = 201, description = "Holiday added", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_workspace_holiday() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/holidays/{date}",
+    tag = "schedule",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("date" = String, description = "Holiday date YYYY-MM-DD"),
+    ),
+    responses(
+        (status = 200, description = "Holiday removed", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn delete_workspace_holiday() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ics-token",
+    tag = "schedule",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 201, description = "ICS feed URL", body = IcsTokenResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_ics_token() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/ics/{token}",
+    tag = "schedule",
+    params(("token" = String, description = "Hashed-at-rest feed token")),
+    responses(
+        (status = 200, description = "ICS calendar", content_type = "text/calendar"),
+        (status = 404, description = "Not found or expired", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn get_ics_feed() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

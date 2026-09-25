@@ -195,7 +195,7 @@ pub async fn finish_extract(
     .execute(&mut *tx)
     .await?;
 
-    let chunks = if finish.status == "ok" {
+    let chunks = if finish.status == "ok" || finish.status == "partial" {
         chunk_plain_text(&finish.text)
     } else {
         Vec::new()

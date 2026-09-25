@@ -1,10 +1,11 @@
 import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Navigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import { WorkspaceGroupsSection } from "@/features/settings/workspace-groups";
 import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity";
 import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
+import { WorkspaceCalendarSection } from "@/features/settings/workspace-calendar";
 import { WorkspaceTokensSection } from "@/features/settings/workspace-tokens";
 import { NotificationPrefsSection } from "@/features/notifications/notification-prefs";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
@@ -18,8 +19,10 @@ function roleAtLeast(role: string, minimum: string): boolean {
 }
 
 export function WorkspaceSettingsPage() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [nameError, setNameError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const me = useQuery(meQuery);
   const { slug, workspace } = useWorkspaceContext();
 
@@ -33,6 +36,26 @@ export function WorkspaceSettingsPage() {
         }),
       ),
     retry: false,
+  });
+
+  const remove = useMutation({
+    mutationFn: async (confirmSlug: string) =>
+      ensureOk(
+        await api.DELETE("/api/v1/workspaces/{workspace_id}", {
+          params: { path: { workspace_id: workspace!.id } },
+          body: { confirmSlug },
+        }),
+      ),
+    onSuccess: async () => {
+      setDeleteError(null);
+      // Leave `/w/:slug` before invalidating the workspace list. Invalidating
+      // first makes WorkspaceLayout treat the deleted slug as denied.
+      await navigate("/", { replace: true });
+      await queryClient.invalidateQueries({ queryKey: ["me", "workspaces"] });
+    },
+    onError: (err: unknown) => {
+      setDeleteError(err instanceof ProblemError ? err.title : t("error.network"));
+    },
   });
 
   const rename = useMutation({
@@ -66,6 +89,7 @@ export function WorkspaceSettingsPage() {
   }
 
   const canManage = roleAtLeast(workspace.role, "admin");
+  const isOwner = workspace.role === "owner";
 
   return (
     <WorkspaceShell
@@ -80,10 +104,16 @@ export function WorkspaceSettingsPage() {
           workspaceSlug={metaQuery.data?.slug ?? workspace.slug}
           workspaceKind={workspace.kind}
           canManage={canManage}
+          isOwner={isOwner}
           namePending={rename.isPending}
           nameError={nameError}
           onSaveName={async (name) => {
             await rename.mutateAsync(name);
+          }}
+          deletePending={remove.isPending}
+          deleteError={deleteError}
+          onDelete={async (confirmSlug) => {
+            await remove.mutateAsync(confirmSlug);
           }}
         />
         {roleAtLeast(workspace.role, "member") ? (
@@ -99,6 +129,7 @@ export function WorkspaceSettingsPage() {
         {roleAtLeast(workspace.role, "member") ? (
           <NotificationPrefsSection workspaceId={workspace.id} />
         ) : null}
+        <WorkspaceCalendarSection workspaceId={workspace.id} />
         {canManage ? <WorkspaceTokensSection workspaceId={workspace.id} /> : null}
       </div>
     </WorkspaceShell>

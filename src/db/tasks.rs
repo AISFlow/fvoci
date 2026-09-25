@@ -9,6 +9,7 @@ use crate::db::context::{
     lock_key_from_uuid, lock_membership_users, recheck_session, session_is_live, set_tenant,
 };
 use crate::db::documents::{between, empty_document_json, DOCUMENT_SCHEMA_VERSION};
+use crate::db::holidays::list_holiday_dates;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::labels::{assignee_filter_member_exists, project_label_exists};
 use crate::db::milestones::project_milestone_exists;
@@ -2896,7 +2897,7 @@ async fn assert_dependency_dates_ok(
     {
         return Ok(Ok(()));
     }
-    let holidays = HashSet::new();
+    let holidays = list_holiday_dates(tx, workspace_id).await?;
     let merged = merged_schedule_ends(record, input);
     let edges = list_task_dependency_edges(tx, workspace_id, record.id).await?;
     for edge in edges {
@@ -3089,7 +3090,7 @@ pub async fn add_task_dependency(
         })
         .unwrap_or(DependencyType::Fs);
     let lag_days = requested_lag.or(existing.map(|(_, lag)| lag)).unwrap_or(0);
-    let holidays = HashSet::new();
+    let holidays = list_holiday_dates(&mut tx, workspace_id).await?;
     if required_dates_present(dep_type, blocker_ends, blocked_ends)
         && violates_inequality(dep_type, lag_days, blocker_ends, blocked_ends, &holidays)
     {
@@ -3166,6 +3167,10 @@ pub async fn remove_task_dependency(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
+    if blocker_archived.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::TaskArchived));
+    }
     let Some((blocked_project_id, blocked_archived, _)) =
         load_task_schedule(&mut tx, workspace_id, blocked_id).await?
     else {
@@ -3176,7 +3181,7 @@ pub async fn remove_task_dependency(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::DependencyNotFound));
     }
-    if blocker_archived.is_some() || blocked_archived.is_some() {
+    if blocked_archived.is_some() {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::TaskArchived));
     }

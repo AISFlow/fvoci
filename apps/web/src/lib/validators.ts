@@ -31,6 +31,10 @@ export const workspaceNameInput = z.object({
   name: z.string().trim().min(1, "i18n:form.too_small"),
 });
 
+export const workspaceDeleteInput = z.object({
+  confirmSlug: slugSchema,
+});
+
 export const invitationCreateInput = z.object({
   email: z.string().trim().email("i18n:form.email"),
   role: z.enum(["owner", "admin", "member", "guest"]),
