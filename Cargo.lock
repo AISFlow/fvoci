@@ -784,6 +784,7 @@ dependencies = [
  "rand 0.9.5",
  "regex",
  "reqwest",
+ "ring",
  "rusty-s3",
  "serde",
  "serde_json",
