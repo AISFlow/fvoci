@@ -414,7 +414,7 @@ async fn get_workflow(
         &state,
         &headers,
         &jar,
-        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsRead),
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
         Some(workspace_id),
     )
     .await?;

@@ -1017,3 +1017,57 @@ async fn me_routes_are_session_only_and_member_cannot_manage_tokens() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn project_workflow_requires_tasks_read_scope_like_the_source() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _) = setup_session(&harness).await;
+    let admin = harness.admin().await;
+    let ws = acme_id(&admin).await;
+    let (status, project, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects"),
+        Some(json!({"key": "WFS", "name": "Workflow scope", "visibility": "workspace"})),
+        Some(&cookie),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let project_id = project["id"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/workspaces/{ws}/projects/{project_id}/workflow");
+
+    let (_, projects_only) = create_token(
+        app.clone(),
+        &cookie,
+        ws,
+        "projects",
+        &["projects.read"],
+        json!({}),
+    )
+    .await;
+    let (status, _) =
+        bearer_get(app.clone(), &path, projects_only["token"].as_str().unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "workflow is a tasks.read resource"
+    );
+
+    let (_, tasks_read) = create_token(
+        app.clone(),
+        &cookie,
+        ws,
+        "tasks",
+        &["tasks.read"],
+        json!({}),
+    )
+    .await;
+    let (status, body) =
+        bearer_get(app.clone(), &path, tasks_read["token"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
