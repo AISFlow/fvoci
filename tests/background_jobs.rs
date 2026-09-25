@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 struct CapturedMail {
     to: String,
+    data: String,
 }
 
 struct SmtpSink {
@@ -62,6 +63,17 @@ impl SmtpSink {
 
     fn count(&self) -> usize {
         self.mails.lock().expect("mails").len()
+    }
+
+    /// Decoded plain body of the last captured mail.
+    fn last_text(&self) -> String {
+        let mails = self.mails.lock().expect("mails");
+        let Some(mail) = mails.last() else {
+            return String::new();
+        };
+        mailparse::parse_mail(mail.data.as_bytes())
+            .and_then(|parsed| parsed.get_body())
+            .unwrap_or_default()
     }
 }
 
@@ -102,17 +114,19 @@ async fn serve_smtp(
             writer.write_all(b"250 ok\r\n").await?;
         } else if upper == "DATA" {
             writer.write_all(b"354 go\r\n").await?;
+            let mut data = String::new();
             loop {
                 let mut data_line = String::new();
                 reader.read_line(&mut data_line).await?;
                 if data_line == ".\r\n" || data_line == ".\n" {
                     break;
                 }
+                data.push_str(&data_line);
             }
-            captured
-                .lock()
-                .expect("mails")
-                .push(CapturedMail { to: rcpt.clone() });
+            captured.lock().expect("mails").push(CapturedMail {
+                to: rcpt.clone(),
+                data,
+            });
             writer.write_all(b"250 ok\r\n").await?;
         } else if upper == "QUIT" {
             writer.write_all(b"221 bye\r\n").await?;
@@ -510,9 +524,10 @@ async fn digest_claim_sends_once_across_two_runners() {
     .unwrap();
 
     let now = Utc::now();
+    let cancel = CancellationToken::new();
     let (a, b) = tokio::join!(
-        send_due_digests(&pool, &mailer, now),
-        send_due_digests(&pool, &mailer, now)
+        send_due_digests(&pool, &mailer, now, &cancel),
+        send_due_digests(&pool, &mailer, now, &cancel)
     );
     let sent = a.expect("a") + b.expect("b");
     assert_eq!(sent, 1, "exactly one runner should send");
@@ -522,7 +537,7 @@ async fn digest_claim_sends_once_across_two_runners() {
     }
     assert_eq!(sink.count(), 1);
 
-    let again = send_due_digests(&pool, &mailer, now)
+    let again = send_due_digests(&pool, &mailer, now, &CancellationToken::new())
         .await
         .expect("idempotent");
     assert_eq!(again, 0);
@@ -645,6 +660,102 @@ async fn two_workspace_purge_runners_converge() {
     assert!(!object_exists(&root, &key));
 
     let _ = std::fs::remove_dir_all(&root);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// A failed send hands the recipient's window back (source keeps lastDigestAt),
+/// so the next sweep sends the digest with the original count.
+#[tokio::test]
+async fn failed_digest_send_is_retried_with_the_same_window() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let prev = Utc::now() - chrono::Duration::days(3);
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.notification_prefs (
+            workspace_id, user_id, in_app, mail_immediate, mail_digest, last_digest_at
+        ) VALUES ($1, $2, true, true, true, $3)
+        ON CONFLICT (workspace_id, user_id) DO UPDATE
+        SET mail_digest = true, last_digest_at = $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(owner_id)
+    .bind(prev)
+    .execute(&admin)
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.notifications (
+                id, workspace_id, user_id, event_id, verb, payload
+            ) VALUES ($1, $2, $3, $4, 'task.updated', '{}'::jsonb)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(owner_id)
+        .bind(Uuid::now_v7())
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
+
+    // SMTP down: nothing listens on this port.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let now = Utc::now();
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(dead_port),
+        now,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("sweep with failing smtp");
+    assert_eq!(sent, 0);
+    let restored: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT last_digest_at FROM fvoci.notification_prefs WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(owner_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        restored.map(|t| t.timestamp_micros()),
+        Some(prev.timestamp_micros()),
+        "failed send must hand the window back"
+    );
+
+    let sink = SmtpSink::spawn().await;
+    let later = now + chrono::Duration::minutes(1);
+    let sent = send_due_digests(
+        &pool,
+        &mailer_for(sink.port),
+        later,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("retry sweep");
+    assert_eq!(sent, 1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while sink.count() < 1 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(sink.count(), 1);
+    assert!(
+        sink.last_text().contains('3'),
+        "digest counts the 3 notifications of the original window: {}",
+        sink.last_text()
+    );
+
     admin.close().await;
     pool.close().await;
     harness.cleanup().await;

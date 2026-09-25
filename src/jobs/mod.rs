@@ -238,7 +238,7 @@ async fn run_daily_jobs(
     }
 
     if !cancel.is_cancelled() {
-        match crate::mail::send_due_digests(pool, mailer, now).await {
+        match crate::mail::send_due_digests(pool, mailer, now, cancel).await {
             Ok(sent) => {
                 info!(sent, "maintenance.digest");
                 stats.digests_sent = sent;

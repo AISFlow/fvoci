@@ -27,24 +27,64 @@ pub async fn send_due_digests(
     pool: &PgPool,
     mailer: &Mailer,
     now: DateTime<Utc>,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<u32, DigestError> {
     let before =
         now - chrono::Duration::from_std(DIGEST_INTERVAL).unwrap_or(chrono::Duration::days(1));
     let due = claim_digest_due(pool, before, now).await?;
     let mut sent = 0u32;
-    for (workspace_id, user_id, prev_last) in due {
+    let mut pending = due.into_iter();
+    while let Some((workspace_id, user_id, prev_last)) = pending.next() {
+        if cancel.is_cancelled() {
+            // Hand the unsent claims back so the next sweep sends them.
+            restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
+            for (ws, user, prev) in pending.by_ref() {
+                restore_claim(pool, ws, user, prev, now).await?;
+            }
+            break;
+        }
         match send_claimed(pool, mailer, workspace_id, user_id, prev_last).await {
             Ok(true) => sent += 1,
             Ok(false) => {}
             Err(err) => {
+                // Source keeps lastDigestAt on failure so the window is retried.
+                restore_claim(pool, workspace_id, user_id, prev_last, now).await?;
                 tracing::warn!(
-                    message = %format!("digest: recipient skipped ({err})"),
+                    message = %format!("digest: recipient deferred to the next sweep ({err})"),
                     "mail.send_failed"
                 );
             }
         }
     }
     Ok(sent)
+}
+
+/// Undo a claim that did not send: put back the previous `last_digest_at`
+/// unless another claim has moved it since (guarded by the claim's `now`).
+async fn restore_claim(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    prev_last: Option<DateTime<Utc>>,
+    claimed_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_system(&mut tx).await?;
+    sqlx::query(
+        r#"
+        UPDATE fvoci.notification_prefs
+        SET last_digest_at = $3, updated_at = now()
+        WHERE workspace_id = $1 AND user_id = $2 AND last_digest_at = $4
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(prev_last)
+    .bind(claimed_at)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn claim_digest_due(
