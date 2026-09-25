@@ -1414,6 +1414,10 @@ async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
     let app = pool::connect_app(&harness.app_url)
         .await
         .expect("app after recover");
+    // Rewritten events carry the recovery xid; they become readable once every
+    // transaction older than it has ended (xids are cluster-wide, so parallel
+    // tests' transactions count). The read itself must never report a mismatch.
+    wait_until_readable(&app, "search-index", old).await;
     let visible = read_events(&app, "search-index", 100)
         .await
         .expect("read after recover");
@@ -1603,4 +1607,179 @@ async fn r9_epoch_guard_has_no_false_positive_under_concurrent_writes() {
         (0, 0),
         "R9 iterations={ITERATIONS} xid_mismatch_true={mismatch} read_errors={read_err}"
     );
+}
+
+/// R10: owner A applies a requeued skipped retry and has not committed when its
+/// lease expires. Owner B's steal must wait for A, so B never applies it again.
+#[tokio::test]
+async fn r10_requeued_retry_is_not_reapplied_across_a_lease_steal() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    sqlx::query("CREATE TABLE fvoci.r10_effects (event_id uuid NOT NULL)")
+        .execute(&admin)
+        .await
+        .expect("effects table");
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT ON fvoci.r10_effects TO \"{}\"",
+        harness.role_name.replace('"', "\"\"")
+    ))
+    .execute(&admin)
+    .await
+    .expect("grant effects");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let e = insert_test_event(&app, "E", json!({})).await.expect("E");
+    ensure_consumer(&app, "r10").await.expect("ensure");
+    wait_until_readable(&app, "r10", e).await;
+
+    // Dead-letter E and skip it (as handle_failure does), then requeue.
+    let a = Uuid::now_v7();
+    assert!(lease_consumer(&app, "r10", a, 30).await.expect("lease a"));
+    let event = read_events(&app, "r10", 10)
+        .await
+        .expect("read")
+        .into_iter()
+        .next()
+        .expect("E");
+    assert_eq!(
+        record_failure(&app, "r10", a, e, "boom", 50, 1)
+            .await
+            .expect("dead"),
+        1
+    );
+    assert!(advance_cursor(&app, "r10", a, &event.xact, event.seq)
+        .await
+        .expect("skip"));
+    assert!(requeue(&app, "r10", e).await.expect("requeue"));
+    assert!(lease_consumer(&app, "r10", a, 1)
+        .await
+        .expect("short lease a"));
+    assert_eq!(
+        claim_retries(&app, "r10", 10).await.expect("claim a").len(),
+        1
+    );
+
+    let mut tx_a = app.begin().await.expect("tx a");
+    sqlx::query("INSERT INTO fvoci.r10_effects (event_id) VALUES ($1)")
+        .bind(e)
+        .execute(&mut *tx_a)
+        .await
+        .expect("effect a");
+    assert!(
+        advance_cursor_tx(&mut tx_a, "r10", a, &event.xact, event.seq)
+            .await
+            .expect("advance a")
+    );
+
+    // Read-only, bounded: wait until A's lease has expired by the DB clock.
+    wait_until(DISPATCHER_WAIT, || {
+        let admin = admin.clone();
+        Box::pin(async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT lease_until < clock_timestamp() FROM fvoci.outbox_consumers WHERE consumer = 'r10'",
+            )
+            .fetch_one(&admin)
+            .await
+            .unwrap_or(false)
+        })
+    })
+    .await;
+
+    let b = Uuid::now_v7();
+    let app_b = app.clone();
+    let (xact, seq) = (event.xact.clone(), event.seq);
+    let owner_b = tokio::spawn(async move {
+        if !lease_consumer(&app_b, "r10", b, 30).await.expect("lease b") {
+            return (false, 0usize);
+        }
+        let claimed = claim_retries(&app_b, "r10", 10).await.expect("claim b");
+        for retry in &claimed {
+            let mut tx_b = app_b.begin().await.expect("tx b");
+            sqlx::query("INSERT INTO fvoci.r10_effects (event_id) VALUES ($1)")
+                .bind(retry.event_id)
+                .execute(&mut *tx_b)
+                .await
+                .expect("effect b");
+            if advance_cursor_tx(&mut tx_b, "r10", b, &xact, seq)
+                .await
+                .expect("advance b")
+            {
+                tx_b.commit().await.expect("commit b");
+            } else {
+                tx_b.rollback().await.expect("rollback b");
+            }
+        }
+        (true, claimed.len())
+    });
+
+    // Read-only, bounded: B's steal is blocked behind A's lock on the lease row.
+    wait_until(DISPATCHER_WAIT, || {
+        let admin = admin.clone();
+        Box::pin(async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation \
+                 WHERE NOT l.granted AND c.relname = 'outbox_consumers') \
+                 OR EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND locktype = 'transactionid')",
+            )
+            .fetch_one(&admin)
+            .await
+            .unwrap_or(false)
+        })
+    })
+    .await;
+    tx_a.commit().await.expect("commit a");
+    let (b_leased, b_claimed) = owner_b.await.expect("owner b");
+
+    let effects: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.r10_effects WHERE event_id = $1")
+            .bind(e)
+            .fetch_one(&admin)
+            .await
+            .expect("count effects");
+    assert!(b_leased, "B takes over once A's expired lease is released");
+    assert_eq!(b_claimed, 0, "A's resolution is visible to B");
+    assert_eq!(effects, 1, "requeued PgOnly effect applied {effects} times");
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// R11: requeue only acts on a row the dispatcher already skipped past; a
+/// requeue between the dead record and the skip would strand the event.
+#[tokio::test]
+async fn r11_requeue_waits_for_the_skip_and_then_redelivers() {
+    let harness = TestDb::bootstrap().await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let e = insert_test_event(&app, "E", json!({})).await.expect("E");
+    ensure_consumer(&app, "r11").await.expect("ensure");
+    wait_until_readable(&app, "r11", e).await;
+    let a = Uuid::now_v7();
+    assert!(lease_consumer(&app, "r11", a, 30).await.expect("lease"));
+    let event = read_events(&app, "r11", 10)
+        .await
+        .expect("read")
+        .into_iter()
+        .next()
+        .expect("E");
+    assert_eq!(
+        record_failure(&app, "r11", a, e, "boom", 0, 1)
+            .await
+            .expect("dead"),
+        1
+    );
+    assert!(!requeue(&app, "r11", e).await.expect("requeue before skip"));
+    assert!(advance_cursor(&app, "r11", a, &event.xact, event.seq)
+        .await
+        .expect("skip advance"));
+    assert!(requeue(&app, "r11", e).await.expect("requeue after skip"));
+    let claimed = claim_retries(&app, "r11", 10).await.expect("claim");
+    assert_eq!(claimed.len(), 1, "requeued event is delivered again");
+    assert_eq!(claimed[0].event_id, e);
+
+    app.close().await;
+    harness.cleanup().await;
 }
