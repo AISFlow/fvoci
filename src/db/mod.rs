@@ -8,6 +8,7 @@ pub mod identity;
 pub mod invitations;
 pub mod lookup;
 pub mod migrate;
+pub mod outbox;
 pub mod pool;
 pub mod projects;
 pub mod quota;

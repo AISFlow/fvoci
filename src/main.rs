@@ -16,6 +16,9 @@ use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
+use fvoci_server::outbox::{
+    spawn_outbox_dispatcher, OutboxDispatcherHandle, OutboxDispatcherSettings,
+};
 
 #[derive(Debug)]
 struct ShutdownDeadlineExceeded {
@@ -81,6 +84,7 @@ struct DrainOutcome {
     serve: Result<(), std::io::Error>,
     hub: HubOutcome,
     extract: Result<(), String>,
+    outbox: Result<(), String>,
 }
 
 #[tokio::main]
@@ -201,6 +205,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             None
         }
     };
+    let outbox_dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings::from_env(),
+        pool.clone(),
+        Vec::new(),
+    );
+    tracing::info!("outbox dispatcher started");
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
@@ -219,9 +229,11 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let (signaled_tx, signaled_rx) = tokio::sync::oneshot::channel::<Instant>();
     let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
+    let outbox_task = Arc::new(tokio::sync::Mutex::new(Some(outbox_dispatcher)));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
+    let outbox_task_for_signal = outbox_task.clone();
 
     let serve = announce_after_first_pending_poll(
         axum::serve(
@@ -235,6 +247,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             if let Some(job) = extract_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
                 tracing::info!("attachment extract shutdown started concurrently with HTTP drain");
+            }
+            if let Some(job) = outbox_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
+                tracing::info!("outbox dispatcher shutdown started concurrently with HTTP drain");
             }
             if let Some(hub) = collab_for_signal {
                 hub.begin_shutdown();
@@ -273,11 +289,13 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
+                    let outbox = join_outbox_finished(&outbox_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve: map_serve_result(serve_result),
                         hub,
                         extract,
+                        outbox,
                     }
                 },
                 Some(started),
@@ -300,11 +318,13 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
+                    let outbox = join_outbox_finished(&outbox_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve,
                         hub,
                         extract,
+                        outbox,
                     }
                 },
                 started,
@@ -330,6 +350,16 @@ async fn join_extract_finished(
     extract_task: &tokio::sync::Mutex<Option<ExtractJobHandle>>,
 ) -> Result<(), String> {
     if let Some(job) = extract_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await?;
+    }
+    Ok(())
+}
+
+async fn join_outbox_finished(
+    outbox_task: &tokio::sync::Mutex<Option<OutboxDispatcherHandle>>,
+) -> Result<(), String> {
+    if let Some(job) = outbox_task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;
     }
@@ -400,6 +430,7 @@ where
             if let Some(error) = hub_failure_error(joined)
                 .or_else(|| hub_failure_error(outcome.hub))
                 .or_else(|| extract_failure_error(outcome.extract))
+                .or_else(|| extract_failure_error(outcome.outbox))
             {
                 return Err(error);
             }
@@ -515,6 +546,7 @@ mod shutdown_outcome_tests {
                         serve: Ok(()),
                         hub: HubOutcome::Clean,
                         extract: Ok(()),
+                        outbox: Ok(()),
                     }
                 },
                 Some(Instant::now()),

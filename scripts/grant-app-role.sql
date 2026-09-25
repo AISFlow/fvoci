@@ -70,3 +70,28 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.invitations TO :"app_role";
 
 REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() TO :"app_role";
+
+REVOKE ALL ON fvoci.outbox_consumers FROM :"app_role";
+REVOKE ALL ON fvoci.outbox_failures FROM :"app_role";
+REVOKE ALL ON fvoci.processed_events FROM :"app_role";
+
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_ensure_consumer(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_ensure_consumer(text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_lease(text, uuid, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_lease(text, uuid, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_release(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_release(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_read(text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_read(text, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_advance(text, uuid, xid8, bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_advance(text, uuid, xid8, bigint) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, text, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_clear_failure(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_clear_failure(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_claim_retries(text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_claim_retries(text, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) TO :"app_role";
