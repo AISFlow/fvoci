@@ -100,7 +100,8 @@ function retryAfterMillis(res: Response): number | null {
   if (header === null) return null;
   const seconds = Number(header);
   if (!Number.isFinite(seconds) || seconds < 0) return null;
-  return Math.min(seconds, 30) * 1000;
+  // At least 1 s so a zero value still spends the capacity budget.
+  return Math.max(1, Math.min(seconds, 30)) * 1000;
 }
 
 async function putPart(

@@ -244,6 +244,39 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     assert.deepEqual(delays.slice(0, 5), [2000, 2000, 2000, 2000, 2000]);
   });
 
+  await t.test("capacity 503 with Retry-After 0 still ends within the wait budget", async () => {
+    let partCalls = 0;
+    let waitedMs = 0;
+    installFetch((url, init) => {
+      if (url.endsWith("/uploads") && init?.method === "POST") {
+        return jsonResponse(createOutput(1), 201);
+      }
+      if (url.includes("/parts/")) {
+        partCalls += 1;
+        return new Response(JSON.stringify({ code: "upload_capacity_exceeded" }), {
+          status: 503,
+          headers: { "Content-Type": "application/problem+json", "Retry-After": "0" },
+        });
+      }
+      if (url.includes(`/attachments/${ATT}`)) {
+        return new Response("gone", { status: 404 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const bridge = await loadBridge({
+      delay: (ms) => {
+        waitedMs += ms;
+        return Promise.resolve();
+      },
+    });
+    const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
+    await assert.rejects(bridge.upload(file, () => undefined));
+    // 120 one-second capacity waits per putPart round at most, then the
+    // transport retries; the whole upload must give up.
+    assert.ok(partCalls < 1000, `part calls ${partCalls}`);
+    assert.ok(waitedMs > 0);
+  });
+
   await t.test("abort during part retry delay stops the upload", async () => {
     let partCalls = 0;
     installFetch((url, init) => {
