@@ -76,7 +76,7 @@ FVOCI_COOKIE_SECURE=false
 FVOCI_PUBLISH_PORT=${HOST_PORT}
 FVOCI_EXTRACT_POLL_SECS=2
 # Collab debug logs are printed only if the smoke fails.
-RUST_LOG=fvoci_server::collab=debug
+RUST_LOG=fvoci_server::collab=debug,collab.stage=info
 MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
 EOF
 

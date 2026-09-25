@@ -1038,7 +1038,9 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         unsafe {
             cmd.pre_exec(move || {
                 apply_rlimits_now(as_bytes, cpu_secs, stack_bytes)?;
-                apply_child_oom_score_adj()?;
+                // Best effort: container profiles (e.g. AppArmor docker-default)
+                // may deny writing oom_score_adj; the helper must still start.
+                let _ = apply_child_oom_score_adj();
                 Ok(())
             });
         }
