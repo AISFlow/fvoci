@@ -2842,6 +2842,34 @@ impl RoomActor {
     }
 
     async fn run_persist_for(&mut self, conn_id: Uuid, request_id: Uuid) -> String {
+        let started = std::time::Instant::now();
+        let result = self.run_persist_steps(conn_id, request_id, started).await;
+        tracing::info!(
+            target: "collab.stage",
+            stage = "persist",
+            elapsed_us = started.elapsed().as_micros() as u64,
+            ok = result.starts_with("persisted:"),
+            document_id = %self.document_id,
+        );
+        result
+    }
+
+    fn persist_step(&self, step: &'static str, started: std::time::Instant) {
+        tracing::info!(
+            target: "collab.stage",
+            stage = "persist_step",
+            step,
+            elapsed_us = started.elapsed().as_micros() as u64,
+            document_id = %self.document_id,
+        );
+    }
+
+    async fn run_persist_steps(
+        &mut self,
+        conn_id: Uuid,
+        request_id: Uuid,
+        started: std::time::Instant,
+    ) -> String {
         let Some(conn) = self.connections.get(&conn_id) else {
             return format!("persist-failed:{request_id}");
         };
@@ -2866,6 +2894,7 @@ impl RoomActor {
             return format!("persist-failed:{request_id}");
         }
 
+        self.persist_step("allowed", started);
         let snapshot_report = match self.engine.call(Request::Snapshot).await {
             Ok(report) => report,
             Err(BridgeError::Dead) => {
@@ -2892,6 +2921,7 @@ impl RoomActor {
                 return format!("persist-failed:{request_id}");
             }
         };
+        self.persist_step("snapshot", started);
         if !validate_snapshot_only(
             self.engine.engine_bin().to_path_buf(),
             self.engine.limits(),
@@ -2903,6 +2933,7 @@ impl RoomActor {
             self.compact_retry_at_tail_len = Some(self.committed.tail_payloads.len());
             return format!("persist-failed:{request_id}");
         }
+        self.persist_step("validated", started);
         if let Some(writer_generation) = self.writer_generation {
             let cutoff = self.committed.tail_seq;
             let compact = compact_collab_snapshot(
@@ -2920,6 +2951,7 @@ impl RoomActor {
                 },
             )
             .await;
+            self.persist_step("compacted", started);
             match compact {
                 Ok(Ok(load)) => {
                     self.compact_unhealthy = false;
