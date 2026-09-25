@@ -37,6 +37,8 @@ jobs:
             specs: e2e/workspace-wiki-lifecycle.spec.ts
           - flow: comments-flow
             specs: e2e/comments-flow.spec.ts
+          - flow: api-token-flow
+            specs: e2e/api-token-flow.spec.ts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

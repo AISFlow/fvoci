@@ -23,8 +23,8 @@ use crate::db::documents::{
     trash_wiki_document, update_wiki_document_meta, CreateDocumentInput, DocumentDbError,
     DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
 };
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
-use crate::http::guard::{check_origin, reject_bearer};
+use crate::error::{AppError, ProblemCode};
+use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 
@@ -139,7 +139,6 @@ async fn create_document(
     body: Result<Json<CreateDocumentBody>, JsonRejection>,
 ) -> Result<Response, DocumentApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let title = body.title.trim();
     if !crate::db::documents::title_is_valid(title) {
@@ -157,8 +156,14 @@ async fn create_document(
         RequiredNullable::Null => None,
         RequiredNullable::Value(id) => Some(id),
     };
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let result = create_wiki_document(
         &state.auth.db.pool,
@@ -186,9 +191,14 @@ async fn get_document(
     jar: CookieJar,
     Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
+        Some(workspace_id),
+    )
+    .await?;
     let result = get_wiki_document(
         &state.auth.db.pool,
         workspace_id,
@@ -213,7 +223,6 @@ async fn patch_document(
     body: Result<Json<PatchDocumentBody>, JsonRejection>,
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if let Some(title) = body.title.as_ref() {
         if !crate::db::documents::title_is_valid(title) {
@@ -230,8 +239,14 @@ async fn patch_document(
             return Err(AppError::from_code(ProblemCode::InvalidInput).into());
         }
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let title = body.title.as_deref().map(str::trim);
     let result = update_wiki_document_meta(
@@ -262,12 +277,17 @@ async fn list_tree(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<TreeResponse>, DocumentApiError> {
-    reject_bearer(&headers)?;
     if query.tag.is_some() {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
+        Some(workspace_id),
+    )
+    .await?;
     let result = list_wiki_tree(&state.auth.db.pool, workspace_id, user_id, session_id)
         .await
         .map_err(internal)?;
@@ -299,9 +319,14 @@ async fn get_ancestors(
     jar: CookieJar,
     Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<AncestorsResponse>, DocumentApiError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
+        Some(workspace_id),
+    )
+    .await?;
     let result = list_wiki_ancestors(
         &state.auth.db.pool,
         workspace_id,
@@ -338,10 +363,15 @@ async fn move_document(
     body: Result<Json<MoveDocumentBody>, JsonRejection>,
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let result = move_wiki_document(
         &state.auth.db.pool,
@@ -369,10 +399,15 @@ async fn sort_document(
     body: Result<Json<SortDocumentBody>, JsonRejection>,
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let result = reorder_wiki_document(
         &state.auth.db.pool,
@@ -399,11 +434,16 @@ async fn trash_document(
     Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<TrashQuery>,
 ) -> Result<Json<OkResponse>, DocumentApiError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let children = parse_trash_children(query.children.as_deref())?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let result = trash_wiki_document(
         &state.auth.db.pool,
@@ -429,10 +469,15 @@ async fn restore_document(
     jar: CookieJar,
     Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<OkResponse>, DocumentApiError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let ip = peer_ip(peer.ip());
     let result = restore_wiki_document(
         &state.auth.db.pool,
@@ -456,9 +501,14 @@ async fn list_trash(
     jar: CookieJar,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Json<TrashListResponse>, DocumentApiError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
+        Some(workspace_id),
+    )
+    .await?;
     let result =
         list_trashed_wiki_documents(&state.auth.db.pool, workspace_id, user_id, session_id)
             .await
@@ -486,12 +536,17 @@ async fn get_body(
     Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<BodyQuery>,
 ) -> Result<Json<BodyResponse>, DocumentApiError> {
-    reject_bearer(&headers)?;
     if query.format.is_some() {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
+        Some(workspace_id),
+    )
+    .await?;
     let result = get_wiki_document(
         &state.auth.db.pool,
         workspace_id,
@@ -594,25 +649,14 @@ fn map_document_error(err: DocumentDbError) -> DocumentApiError {
 
 async fn require_session(
     state: &AppState,
+    headers: &HeaderMap,
     jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
-}
-
-fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
-    Uuid::parse_str(value).map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))
+    access: crate::http::authz::Access,
+    workspace_id: Option<Uuid>,
+) -> Result<(SessionUser, Uuid, Uuid), AppError> {
+    let auth =
+        crate::http::authz::require_request_auth(state, headers, jar, access, workspace_id).await?;
+    Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
 fn internal(err: sqlx::Error) -> AppError {

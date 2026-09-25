@@ -15,7 +15,7 @@ use crate::auth::session::SessionUser;
 use crate::db::identity::FamilyNamePatch;
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::cookie::{clear_session_cookie, set_session_cookie};
-use crate::http::guard::{check_origin, reject_bearer};
+use crate::http::guard::check_origin;
 use crate::http::json_input::parse_patch_me;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
@@ -114,8 +114,7 @@ async fn me(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<SessionUserOutput>, AppError> {
-    reject_bearer(&headers)?;
-    let user = require_session(&state, &jar).await?;
+    let user = require_session(&state, &headers, &jar).await?;
     Ok(Json(SessionUserOutput::from(user)))
 }
 
@@ -126,13 +125,12 @@ async fn patch_me(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<SessionUserOutput>, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let token = jar
         .get(SESSION_COOKIE)
         .map(|c| c.value().to_string())
         .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    require_session(&state, &jar).await?;
+    require_session(&state, &headers, &jar).await?;
 
     let patch = parse_patch_me(body)?;
     validate_given_name(&patch.given_name)?;
@@ -185,18 +183,20 @@ async fn patch_me(
     }
 }
 
-async fn require_session(state: &AppState, jar: &CookieJar) -> Result<SessionUser, AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok(user)
+async fn require_session(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Result<SessionUser, AppError> {
+    let auth = crate::http::authz::require_request_auth(
+        state,
+        headers,
+        jar,
+        crate::http::authz::Access::Session,
+        None,
+    )
+    .await?;
+    Ok(auth.user)
 }
 
 fn internal(err: sqlx::Error) -> AppError {

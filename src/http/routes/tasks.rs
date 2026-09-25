@@ -22,8 +22,8 @@ use crate::db::tasks::{
     create_task, get_task, list_project_tasks, move_task, patch_task_meta, restore_task,
     trash_task, CreateTaskInput,
 };
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
-use crate::http::guard::{check_origin, reject_bearer};
+use crate::error::{AppError, ProblemCode};
+use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
@@ -77,7 +77,6 @@ async fn create_task_route(
     body: Result<Json<CreateTaskBody>, JsonRejection>,
 ) -> Result<Response, TaskApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if !title_is_valid(&body.title) {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
@@ -91,7 +90,14 @@ async fn create_task_route(
     if body.milestone_id.is_some() {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = create_task(
@@ -127,8 +133,14 @@ async fn get_task_route(
     jar: CookieJar,
     Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<TaskOutput>, TaskApiError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = get_task(
         &state.auth.db.pool,
@@ -182,13 +194,19 @@ async fn patch_task_route(
     body: Result<Json<PatchTaskBody>, JsonRejection>,
 ) -> Result<Json<TaskMetaOutput>, TaskApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if body.assignee_ids.is_some() || body.label_ids.is_some() || body.milestone_id.is_some() {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
     let input = parse_patch_body(&body)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = patch_task_meta(
@@ -217,12 +235,18 @@ async fn move_task_route(
     body: Result<Json<MoveTaskBody>, JsonRejection>,
 ) -> Result<Json<TaskMetaOutput>, TaskApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if body.before_id.is_some() && body.after_id.is_some() {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = move_task(
@@ -254,9 +278,15 @@ async fn trash_task_route(
     jar: CookieJar,
     Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<OkResponse>, TaskApiError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = trash_task(
@@ -282,9 +312,15 @@ async fn restore_task_route(
     jar: CookieJar,
     Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<OkResponse>, TaskApiError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = restore_task(
@@ -441,7 +477,6 @@ async fn list_tasks(
     Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
     query: Result<Query<TaskListQueryParams>, QueryRejection>,
 ) -> Result<Json<TaskListResponse>, TaskApiError> {
-    reject_bearer(&headers)?;
     let Query(params) = query.map_err(AppError::from)?;
     let parsed = parse_task_list_query(
         params.query.as_deref(),
@@ -452,7 +487,14 @@ async fn list_tasks(
         params.to.as_deref(),
     )
     .map_err(map_task_list_query_error)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_project_tasks(
         &state.auth.db.pool,
@@ -573,21 +615,14 @@ impl IntoResponse for TaskApiError {
 
 async fn require_session(
     state: &AppState,
+    headers: &HeaderMap,
     jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
+    access: crate::http::authz::Access,
+    workspace_id: Option<Uuid>,
+) -> Result<(SessionUser, Uuid, Uuid), AppError> {
+    let auth =
+        crate::http::authz::require_request_auth(state, headers, jar, access, workspace_id).await?;
+    Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
 fn parse_user_id(value: &str) -> Result<Uuid, AppError> {

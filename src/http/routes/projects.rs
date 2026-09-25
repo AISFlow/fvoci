@@ -21,8 +21,8 @@ use crate::db::projects::{
     list_projects, remove_project_member, update_project, update_project_member_role,
     CreateProjectInput, ProjectDbError, UpdateProjectInput,
 };
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
-use crate::http::guard::{check_origin, reject_bearer};
+use crate::error::{AppError, ProblemCode};
+use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::projects::{
@@ -63,7 +63,6 @@ async fn create_project_route(
     body: Result<Json<CreateProjectBody>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let key = normalize_project_key(&body.key).map_err(map_key_error)?;
     if !name_is_valid(&body.name) {
@@ -75,7 +74,14 @@ async fn create_project_route(
     if !description_is_valid(body.description.as_deref()) || !icon_is_valid(body.icon.as_deref()) {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = create_project(
@@ -109,8 +115,14 @@ async fn list_projects_route(
     jar: CookieJar,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Json<ProjectListResponse>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsRead),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_projects(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
         .await
@@ -147,8 +159,14 @@ async fn get_project_route(
     jar: CookieJar,
     Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ProjectOutput>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsRead),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = get_project(
         &state.auth.db.pool,
@@ -174,7 +192,6 @@ async fn patch_project_route(
     body: Result<Json<PatchProjectBody>, JsonRejection>,
 ) -> Result<Json<ProjectOutput>, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if let Some(name) = body.name.as_deref() {
         if !name_is_valid(name) {
@@ -196,7 +213,14 @@ async fn patch_project_route(
             return Err(AppError::from_code(ProblemCode::InvalidInput));
         }
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let description = body.description.as_ref().map(|value| value.as_deref());
@@ -230,8 +254,14 @@ async fn list_members(
     jar: CookieJar,
     Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ProjectMembersResponse>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsRead),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_project_members(
         &state.auth.db.pool,
@@ -268,11 +298,17 @@ async fn add_member(
     body: Result<Json<AddProjectMemberBody>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let role = ProjectMemberRole::parse(&body.role)
         .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput))?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = add_project_member(
@@ -302,11 +338,17 @@ async fn patch_member(
     body: Result<Json<crate::api::dto::MemberRoleBody>, JsonRejection>,
 ) -> Result<Json<OkResponse>, AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let role = ProjectMemberRole::parse(&body.role)
         .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput))?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = update_project_member_role(
@@ -334,9 +376,15 @@ async fn delete_member(
     jar: CookieJar,
     Path((workspace_id, project_id, target_user_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<Json<OkResponse>, AppError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = remove_project_member(
@@ -362,8 +410,14 @@ async fn get_workflow(
     jar: CookieJar,
     Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<WorkflowOutput>, AppError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = get_project_workflow(
         &state.auth.db.pool,
@@ -480,21 +534,14 @@ pub fn map_project_error(err: ProjectDbError) -> AppError {
 
 async fn require_session(
     state: &AppState,
+    headers: &HeaderMap,
     jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
+    access: crate::http::authz::Access,
+    workspace_id: Option<Uuid>,
+) -> Result<(SessionUser, Uuid, Uuid), AppError> {
+    let auth =
+        crate::http::authz::require_request_auth(state, headers, jar, access, workspace_id).await?;
+    Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
 fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
