@@ -41,6 +41,18 @@ pub enum Request {
         #[serde(default = "encoding_v1")]
         encoding: u8,
     },
+    /// Yrs Snapshot (state vector + delete set). Product revision capture.
+    /// Does not mutate the Doc. Bytes are returned in `update_b64`.
+    RevisionSnapshot,
+    /// Compute a forward updateV1 that replaces the live `prosemirror` fragment
+    /// with the fragment reconstructed from a Yrs Snapshot. Does not mutate the
+    /// live Doc; the parent persists then applies the returned update.
+    RestoreFromSnapshot {
+        #[serde(with = "b64")]
+        snap_b64: Vec<u8>,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
 }
 
 fn encoding_v1() -> u8 {
@@ -53,19 +65,25 @@ impl Request {
             Self::Load { encoding, .. }
             | Self::Apply { encoding, .. }
             | Self::Sync { encoding, .. }
-            | Self::Project { encoding } => *encoding,
-            Self::Ping | Self::Snapshot | Self::Inspect => 1,
+            | Self::Project { encoding }
+            | Self::RestoreFromSnapshot { encoding, .. } => *encoding,
+            Self::Ping | Self::Snapshot | Self::Inspect | Self::RevisionSnapshot => 1,
         }
     }
 
     /// Binary payload size before JSON/base64 expansion.
     pub fn payload_bytes(&self) -> u64 {
         match self {
-            Self::Ping | Self::Snapshot | Self::Inspect | Self::Project { .. } => 0,
+            Self::Ping
+            | Self::Snapshot
+            | Self::Inspect
+            | Self::Project { .. }
+            | Self::RevisionSnapshot => 0,
             Self::Apply { update_b64, .. } => update_b64.len() as u64,
             Self::Sync {
                 state_vector_b64, ..
             } => state_vector_b64.len() as u64,
+            Self::RestoreFromSnapshot { snap_b64, .. } => snap_b64.len() as u64,
             Self::Load {
                 snapshot_b64,
                 tail_b64,
@@ -165,6 +183,9 @@ pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatu
         }
         if let Some(s) = obj.get("state_vector_b64").and_then(Value::as_str) {
             cap_b64_field("state_vector_b64", s, limits)?;
+        }
+        if let Some(s) = obj.get("snap_b64").and_then(Value::as_str) {
+            cap_b64_field("snap_b64", s, limits)?;
         }
         return Ok(());
     }

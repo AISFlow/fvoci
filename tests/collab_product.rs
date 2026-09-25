@@ -354,6 +354,7 @@ fn test_collab_config_with_revoke(
         idle_evict_ms,
         revoke_poll_ms,
         client_id_ttl_ms: 60_000,
+        rpc_timeout_ms: 5_000,
     }
 }
 
