@@ -268,7 +268,14 @@ async fn put_upload_part(
         ),
     )
     .await
-    .map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?
+    .map_err(|_| {
+        tracing::info!(
+            attachment_id = %attachment_id,
+            part_number,
+            "attachment.part_body_deadline"
+        );
+        AppError::from_code(ProblemCode::InvalidInput)
+    })?
     .map_err(map_storage_error)?;
     #[cfg(feature = "db-tests")]
     crate::db::attachments::test_barrier::wait_pre_publish_barrier(attachment_id).await;

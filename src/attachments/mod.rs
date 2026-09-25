@@ -44,6 +44,7 @@ pub struct PartPutSlots {
     per_user: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, u32>>>,
     body_base: std::time::Duration,
     body_min_bytes_per_sec: u64,
+    body_margin: std::time::Duration,
 }
 
 /// One admitted part PUT; releases its global and per-user share on drop.
@@ -72,6 +73,10 @@ impl Drop for PartPutSlot {
 pub const PART_BODY_BASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 /// Slowest accepted average inbound rate for a whole part body.
 pub const PART_BODY_MIN_BYTES_PER_SEC: u64 = 64 * 1024;
+/// Slack over a storage driver's own deadline at the same rate (the S3
+/// response-header timeout plus scheduling margin), so a stall on the storage
+/// side ends as that driver's logged server error rather than a client 400.
+pub const PART_BODY_OUTER_MARGIN: std::time::Duration = std::time::Duration::from_secs(35);
 
 impl PartPutSlots {
     pub fn new(max: u32) -> Self {
@@ -90,13 +95,15 @@ impl PartPutSlots {
             per_user: Default::default(),
             body_base: PART_BODY_BASE_DEADLINE,
             body_min_bytes_per_sec: PART_BODY_MIN_BYTES_PER_SEC,
+            body_margin: PART_BODY_OUTER_MARGIN,
         }
     }
 
-    /// Shorter body deadlines for tests.
+    /// Exact body deadline (no storage-driver margin), for tests.
     pub fn with_body_deadline(mut self, base: std::time::Duration, min_bytes_per_sec: u64) -> Self {
         self.body_base = base;
         self.body_min_bytes_per_sec = min_bytes_per_sec.max(1);
+        self.body_margin = std::time::Duration::ZERO;
         self
     }
 
@@ -111,6 +118,7 @@ impl PartPutSlots {
     /// Deadline for receiving and staging a part body of `len` bytes.
     pub fn body_deadline(&self, len: u64) -> std::time::Duration {
         self.body_base
+            + self.body_margin
             + std::time::Duration::from_secs_f64(len as f64 / self.body_min_bytes_per_sec as f64)
     }
 
@@ -194,5 +202,14 @@ mod part_slot_tests {
         assert_eq!(slots.per_user_max(), 2);
         let slots = slots.with_body_deadline(std::time::Duration::from_secs(1), 1024);
         assert_eq!(slots.body_deadline(2048), std::time::Duration::from_secs(3));
+        // The default leaves room for the S3 driver's own deadline to fire
+        // first at the same rate.
+        let defaults = PartPutSlots::new(4);
+        assert_eq!(
+            defaults.body_deadline(64 * 1024),
+            super::PART_BODY_BASE_DEADLINE
+                + super::PART_BODY_OUTER_MARGIN
+                + std::time::Duration::from_secs(1)
+        );
     }
 }
