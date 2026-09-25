@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use fvoci_server::db::migrate;
+use fvoci_server::db::outbox_recover::{parse_recover_outbox_args, recover_outbox};
 use fvoci_server::search::meili::ensure_meili_key_file;
 
 #[tokio::main]
@@ -26,9 +27,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         [flag, path] if flag == "--ensure-meili-key" => {
             ensure_meili_key_file(&PathBuf::from(path)).await?;
         }
+        [flag, rest @ ..] if flag == "--recover-outbox" => {
+            let url = migration_url()?;
+            let opts = parse_recover_outbox_args(rest)?;
+            let report = recover_outbox(&url, opts).await?;
+            println!("{}", serde_json::to_string(&report)?);
+        }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file>]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
             );
         }
     }

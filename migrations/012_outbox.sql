@@ -150,6 +150,18 @@ BEGIN
         RETURN;
     END IF;
 
+    IF v_last_xact >= v_xmin
+       OR EXISTS (
+            SELECT 1
+            FROM fvoci.events AS e
+            WHERE e.xact >= pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())
+       )
+    THEN
+        PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
+        RAISE EXCEPTION 'outbox xid epoch mismatch; run fvoci-migrate --recover-outbox'
+            USING ERRCODE = 'data_exception';
+    END IF;
+
     RETURN QUERY
     SELECT
         v_xmin,
@@ -187,25 +199,49 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     advanced boolean;
+    already_applied boolean;
     v_xmin xid8;
+    v_xmax xid8;
     v_prev text;
+    v_event_id uuid;
 BEGIN
     v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
     PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
     SELECT pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()) INTO v_xmin;
+    SELECT pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot()) INTO v_xmax;
 
-    IF p_xact >= v_xmin THEN
+    IF p_xact >= v_xmin
+       OR EXISTS (SELECT 1 FROM fvoci.events AS e WHERE e.xact >= v_xmax)
+    THEN
         PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
         RETURN false;
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1
-        FROM fvoci.events AS e
-        WHERE e.xact = p_xact AND e.seq = p_seq
-    ) THEN
+    SELECT e.id
+    INTO v_event_id
+    FROM fvoci.events AS e
+    WHERE e.xact = p_xact AND e.seq = p_seq;
+
+    IF v_event_id IS NULL THEN
         PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
         RETURN false;
+    END IF;
+
+    SELECT true
+    INTO already_applied
+    FROM fvoci.outbox_consumers AS c
+    WHERE c.consumer = p_consumer
+      AND c.lease_owner = p_owner
+      AND c.lease_until > pg_catalog.now()
+      AND c.last_xact < v_xmin
+      AND (p_xact, p_seq) <= (c.last_xact, c.last_seq);
+
+    IF already_applied THEN
+        DELETE FROM fvoci.outbox_failures AS f
+        WHERE f.consumer = p_consumer
+          AND f.event_id = v_event_id;
+        PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
+        RETURN true;
     END IF;
 
     UPDATE fvoci.outbox_consumers AS c
@@ -216,6 +252,7 @@ BEGIN
     WHERE c.consumer = p_consumer
       AND c.lease_owner = p_owner
       AND c.lease_until > pg_catalog.now()
+      AND c.last_xact < v_xmin
       AND (p_xact, p_seq) > (c.last_xact, c.last_seq)
     RETURNING true INTO advanced;
 
@@ -349,6 +386,7 @@ DECLARE
 BEGIN
     UPDATE fvoci.outbox_failures AS f
     SET
+        attempts = 1,
         dead_at = NULL,
         next_attempt_at = pg_catalog.now(),
         updated_at = pg_catalog.now()
@@ -435,6 +473,37 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION fvoci.app_outbox_xid_mismatch(p_consumer text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    v_xmin xid8;
+    v_xmax xid8;
+    v_last xid8;
+    v_prev text;
+    mismatched boolean;
+BEGIN
+    v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
+    PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
+    SELECT pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()) INTO v_xmin;
+    SELECT pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot()) INTO v_xmax;
+
+    SELECT c.last_xact
+    INTO v_last
+    FROM fvoci.outbox_consumers AS c
+    WHERE c.consumer = p_consumer;
+
+    mismatched := COALESCE(v_last >= v_xmin, false)
+        OR EXISTS (SELECT 1 FROM fvoci.events AS e WHERE e.xact >= v_xmax);
+
+    PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
+    RETURN mismatched;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION fvoci.app_outbox_ensure_consumer(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_lease(text, uuid, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_release(text, uuid) FROM PUBLIC;
@@ -447,3 +516,4 @@ REVOKE ALL ON FUNCTION fvoci.app_outbox_requeue(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_claim_retries(text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fvoci.app_outbox_xid_mismatch(text) FROM PUBLIC;

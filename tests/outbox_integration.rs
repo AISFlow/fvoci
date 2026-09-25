@@ -9,8 +9,9 @@ use std::time::Duration;
 use fvoci_server::db::outbox::{
     advance_cursor, advance_cursor_tx, claim_retries, ensure_consumer, fetch_cursor,
     fetch_failure_state, insert_test_event, lease_consumer, read_events, record_failure,
-    release_consumer, requeue, OUTBOX_MAX_ATTEMPTS,
+    release_consumer, requeue, xid_epoch_mismatch, OUTBOX_MAX_ATTEMPTS,
 };
+use fvoci_server::db::outbox_recover::{recover_outbox, RecoverOutboxOptions};
 use fvoci_server::db::{migrate, pool};
 use fvoci_server::outbox::{
     spawn_outbox_dispatcher, DeliveryMode, OutboxConsumer, OutboxDispatcherSettings,
@@ -315,6 +316,32 @@ async fn wait_until_readable(app: &PgPool, consumer: &str, event_id: Uuid) {
 }
 
 const DISPATCHER_WAIT: Duration = Duration::from_secs(15);
+
+async fn wait_for_client_backends_gone(admin_url: &str, db_name: &str) {
+    let server = server_db_url(admin_url);
+    let observer = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&server)
+        .await
+        .expect("observer");
+    let name = db_name.to_string();
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = observer.clone();
+        let name = name.clone();
+        Box::pin(async move {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND backend_type = 'client backend'",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(1);
+            n == 0
+        })
+    })
+    .await;
+    observer.close().await;
+}
 
 fn run_dispatcher(
     pool: PgPool,
@@ -672,6 +699,7 @@ async fn dead_letter_after_max_failures_and_sweep_retry() {
     assert!(lease_consumer(&app, consumer_name, owner, 30)
         .await
         .expect("lease"));
+    wait_until_readable(&app, consumer_name, event_id).await;
 
     for _ in 0..OUTBOX_MAX_ATTEMPTS {
         let attempts = record_failure(
@@ -762,6 +790,7 @@ async fn dead_letter_after_max_failures_and_sweep_retry() {
         .expect("requeued")
         .expect("row");
     assert!(requeued.dead_at.is_none());
+    assert_eq!(requeued.attempts, 1);
 
     admin.close().await;
     app.close().await;
@@ -794,6 +823,7 @@ async fn dispatcher_shutdown_drains_within_deadline() {
 struct SelectiveFailPgOnly {
     name: String,
     fail_id: Mutex<Option<Uuid>>,
+    fail_forever: AtomicBool,
 }
 
 impl OutboxConsumer for SelectiveFailPgOnly {
@@ -815,7 +845,9 @@ impl OutboxConsumer for SelectiveFailPgOnly {
             {
                 let mut guard = self.fail_id.lock().expect("fail_id");
                 if *guard == Some(event.id) {
-                    *guard = None;
+                    if !self.fail_forever.load(Ordering::SeqCst) {
+                        *guard = None;
+                    }
                     return Err(OutboxProcessError::Delivery("fail once".into()));
                 }
             }
@@ -860,6 +892,7 @@ async fn pg_only_head_of_line_failure_does_not_skip_later_event() {
     let consumer = Arc::new(SelectiveFailPgOnly {
         name: "r1".into(),
         fail_id: Mutex::new(Some(a)),
+        fail_forever: AtomicBool::new(false),
     });
     let dispatcher = run_dispatcher(app.clone(), consumer, 20);
     wait_until(DISPATCHER_WAIT, || {
@@ -1086,5 +1119,273 @@ async fn spawn_without_consumers_is_idle() {
             .is_none()
     );
     app.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn pg_only_requeue_applies_after_dead_letter() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    install_delivery_table(&admin, &harness.role_name).await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let a = insert_test_event(&app, "A", json!({})).await.expect("A");
+    let b = insert_test_event(&app, "B", json!({})).await.expect("B");
+    let consumer = Arc::new(SelectiveFailPgOnly {
+        name: "r5".into(),
+        fail_id: Mutex::new(Some(a)),
+        fail_forever: AtomicBool::new(true),
+    });
+    let dispatcher = run_dispatcher(app.clone(), consumer.clone(), 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        Box::pin(async move { delivery_count(&pool, "r5").await == 1 })
+    })
+    .await;
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            fetch_failure_state(&pool, "r5", a)
+                .await
+                .expect("state")
+                .is_some_and(|row| row.dead_at.is_some())
+        })
+    })
+    .await;
+
+    let delivered_b: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM fvoci.outbox_test_deliveries WHERE event_id = $1")
+            .bind(b)
+            .fetch_one(&admin)
+            .await
+            .expect("delivered b");
+    assert_eq!(delivered_b, 1);
+
+    consumer.fail_forever.store(false, Ordering::SeqCst);
+    *consumer.fail_id.lock().expect("fail_id") = None;
+    assert!(requeue(&app, "r5", a).await.expect("requeue"));
+    let requeued = fetch_failure_state(&app, "r5", a)
+        .await
+        .expect("requeued")
+        .expect("row");
+    assert!(requeued.dead_at.is_none());
+    assert_eq!(requeued.attempts, 1);
+
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        Box::pin(async move { delivery_count(&pool, "r5").await == 2 })
+    })
+    .await;
+    let delivered_a: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fvoci.outbox_test_deliveries WHERE consumer = 'r5' AND event_id = $1",
+    )
+    .bind(a)
+    .fetch_one(&admin)
+    .await
+    .expect("delivered a");
+    assert_eq!(delivered_a, 1);
+    assert!(fetch_failure_state(&app, "r5", a)
+        .await
+        .expect("cleared")
+        .is_none());
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn pg_only_already_applied_failure_is_idempotent() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    install_delivery_table(&admin, &harness.role_name).await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let a = insert_test_event(&app, "A", json!({})).await.expect("A");
+    let consumer = Arc::new(PgOnlyTestConsumer::new("r6"));
+    let dispatcher = run_dispatcher(app.clone(), consumer, 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        Box::pin(async move { delivery_count(&pool, "r6").await == 1 })
+    })
+    .await;
+
+    record_failure(
+        &app,
+        "r6",
+        a,
+        "advance rejected in pg-only tx",
+        50,
+        OUTBOX_MAX_ATTEMPTS,
+    )
+    .await
+    .expect("stale failure");
+
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            fetch_failure_state(&pool, "r6", a)
+                .await
+                .expect("state")
+                .is_none()
+        })
+    })
+    .await;
+    assert_eq!(delivery_count(&admin, "r6").await, 1);
+    assert!(fetch_failure_state(&app, "r6", a)
+        .await
+        .expect("gone")
+        .is_none());
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    install_delivery_table(&admin, &harness.role_name).await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let old = insert_test_event(&app, "old", json!({}))
+        .await
+        .expect("old");
+    ensure_consumer(&app, "search-index").await.expect("ensure");
+    wait_until_readable(&app, "search-index", old).await;
+    let owner = Uuid::now_v7();
+    assert!(lease_consumer(&app, "search-index", owner, 30)
+        .await
+        .expect("lease"));
+    let event = read_events(&app, "search-index", 1)
+        .await
+        .expect("read")
+        .into_iter()
+        .next()
+        .expect("old event");
+    assert_eq!(event.id, old);
+    assert!(
+        advance_cursor(&app, "search-index", owner, &event.xact, event.seq)
+            .await
+            .expect("advance old")
+    );
+    assert!(release_consumer(&app, "search-index", owner)
+        .await
+        .expect("release"));
+
+    sqlx::query("UPDATE fvoci.events SET xact = '100000000000'::xid8")
+        .execute(&admin)
+        .await
+        .expect("stale event xact");
+    sqlx::query("UPDATE fvoci.outbox_consumers SET last_xact = '100000000000'::xid8, last_seq = 1")
+        .execute(&admin)
+        .await
+        .expect("stale cursor");
+
+    assert!(xid_epoch_mismatch(&app, "search-index")
+        .await
+        .expect("mismatch"));
+    let read_err = read_events(&app, "search-index", 10)
+        .await
+        .expect_err("read must fail closed");
+    assert!(
+        read_err.to_string().contains("recover-outbox"),
+        "{read_err}"
+    );
+    assert!(lease_consumer(&app, "search-index", owner, 30)
+        .await
+        .expect("lease after mismatch"));
+    assert!(
+        !advance_cursor(&app, "search-index", owner, "100000000000", 1)
+            .await
+            .expect("advance refused")
+    );
+    assert!(release_consumer(&app, "search-index", owner)
+        .await
+        .expect("release after mismatch"));
+
+    let later = insert_test_event(&app, "later", json!({}))
+        .await
+        .expect("later");
+    assert_eq!(delivery_count(&admin, "search-index").await, 0);
+
+    let bounds: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT now() - interval '2 hours', now()")
+            .fetch_one(&admin)
+            .await
+            .expect("recovery bounds");
+    let since = bounds
+        .0
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let snapshot_at = bounds
+        .1
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+
+    app.close().await;
+    admin.close().await;
+    wait_for_client_backends_gone(&harness.admin_url, &harness.db_name).await;
+    let report = recover_outbox(
+        &harness.admin_url,
+        RecoverOutboxOptions {
+            since: since.clone(),
+            snapshot_at: snapshot_at.clone(),
+            apply: true,
+            reason: Some("test logical restore rebase".into()),
+            acknowledge_external_replay: true,
+        },
+    )
+    .await
+    .expect("recover");
+    assert!(report.applied);
+    assert!(report.eligible >= 2, "{report:?}");
+    assert_eq!(report.consumers_rebased, 1);
+
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin after recover");
+    let app = pool::connect_app(&harness.app_url)
+        .await
+        .expect("app after recover");
+    assert!(!xid_epoch_mismatch(&app, "search-index")
+        .await
+        .expect("aligned"));
+    let visible = read_events(&app, "search-index", 100)
+        .await
+        .expect("read after recover");
+    let ids: Vec<Uuid> = visible.iter().map(|event| event.id).collect();
+    assert!(ids.contains(&old), "retained window must replay {ids:?}");
+    assert!(
+        ids.contains(&later),
+        "new cluster event must be visible {ids:?}"
+    );
+
+    let consumer = Arc::new(PgOnlyTestConsumer::new("search-index"));
+    let dispatcher = run_dispatcher(app.clone(), consumer, 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        Box::pin(async move { delivery_count(&pool, "search-index").await >= 2 })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join after recover");
+
+    app.close().await;
+    admin.close().await;
     harness.cleanup().await;
 }
