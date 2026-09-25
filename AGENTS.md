@@ -7,8 +7,14 @@
 | 코디네이터 | Claude Code / Opus 5.5 / medium | 인계, 계획, 공통 파일, task 배정, 통합, 수락, 원격 push·PR·머지 |
 | 독립 자문·검토 | 코디네이터와 별도의 Claude Code 세션 / Opus 5.5 / medium | 고정 SHA의 읽기 전용 설계·보안·데이터·동시성·원본 계약 검토 |
 | 상시 코디네이터 자문 | 별도 Claude Code 세션 / Opus 5.5 / medium | 우선순위·설계·위험 질의에 읽기 전용 자문(결정은 코디네이터), PR 수락 검토자가 아님 |
-| 구현 워커 | cursor-agent / Composer 2.5 | 제품 구현과 관련 테스트 |
-| 조사·검증 및 독립 구현 워커 | cursor-agent / Grok 4.6 | 원본 계약, 호환성 재현, 교차 검증, 배정된 구현 |
+| 구현·조사·검증 워커 | Claude Code / Opus 5.5 / medium | 제품 구현, 원본 계약 조사, 회귀·실패 분석 |
+
+**임시 All-Opus (2026-09-25 사용자 지시, 사용자가 바꿀 때까지 유지):** 코디네이터·자문·독립 검토·
+워커·하위 agent·재위임 모두 Claude Code Opus 5.5 medium(`claude-opus-5-5`)만 새로 호출한다.
+codex/Astra, Fable, cursor-agent Composer/Grok, 다른 모델·Auto/Fast는 새로 호출하지 않는다.
+dispatch마다 요청·유효 model/effort를 receipt로 확인하고, 쓸 수 없으면 대체 없이 차단으로 기록한다.
+워커 spec은 다른 모델의 하위 agent 사용을 금지한다. 구현 세션과 독립 검토 세션은 계속 분리한다.
+과거 Composer/Grok/Fable/Astra 작업 기록의 모델명은 사실대로 보존한다.
 
 2026-09-24 사용자 지시로 코디네이터를 codex Astra에서 Claude Code Opus5.5 medium
 (`claude-opus-5-5`)으로 교체했다. Astra로 되돌리지 않고 Fable 조건부 전환 규칙도 쓰지 않는다.

@@ -123,3 +123,11 @@ dispatch `ctx_cd611507a373`, Claude Code `claude-opus-5-5` medium(requested/effe
 코디네이터가 dispatch로 질문을 보내고 필요하면 terminal로 깨운다. 답은 Run 메일(`ADVICE:`)과
 `/tmp/fvoci-advisor/*.md`. 워커·검토자 완료 전송은 반드시 `/home/kinesis/.local/bin/orca-ide`
 절대 경로로 한다(PATH의 bare `orca`는 빈 파일이라 메시지가 조용히 유실된다).
+
+## 2026-09-25 임시 All-Opus 실행 체제
+
+사용자 지시로 모든 신규 AI dispatch는 Claude Code Opus 5.5 medium이다. Orca
+`worker-start --agent claude --model claude-opus-5-5 --effort medium`의 launch receipt에서
+requested/effective 모두 `claude-opus-5-5`/`medium`임을 확인했다(예: ctx_a7cca29eeb44).
+진행 중이던 cursor Composer(가져오기·내보내기)·Grok(S3) 작업은 WIP 커밋·인계 기록 후
+종료하고 Opus 워커가 같은 브랜치에서 이어받는다. 과거 실행 기록은 수정하지 않는다.

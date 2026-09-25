@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -14,6 +14,7 @@ use crate::db::documents::{
     assert_document_writable, document_permission, lock_membership_users, recheck_session,
     session_is_live, workspace_is_live, DocumentDbError,
 };
+use crate::db::groups::list_group_member_user_ids;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission};
 use crate::projects::ProjectPermission;
@@ -71,6 +72,13 @@ pub struct CreateCommentInput<'a> {
     pub body: &'a str,
     pub parent_id: Option<Uuid>,
     pub mentioned_user_ids: &'a [Uuid],
+    pub mentioned_group_ids: &'a [Uuid],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentWriteKind {
+    Document,
+    Task,
 }
 
 pub struct PatchCommentInput<'a> {
@@ -122,13 +130,38 @@ fn normalize_mentions(ids: &[Uuid]) -> Result<Vec<Uuid>, CommentDbError> {
     let unique: Vec<Uuid> = ids
         .iter()
         .copied()
-        .collect::<HashSet<_>>()
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
     if unique.len() > MENTION_MAX {
         return Err(CommentDbError::InvalidInput);
     }
     Ok(unique)
+}
+
+async fn expand_mentioned_user_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    mentioned_user_ids: &[Uuid],
+    mentioned_group_ids: &[Uuid],
+) -> Result<Result<Vec<Uuid>, CommentDbError>, sqlx::Error> {
+    let direct = match normalize_mentions(mentioned_user_ids) {
+        Ok(value) => value,
+        Err(err) => return Ok(Err(err)),
+    };
+    let group_ids = match normalize_mentions(mentioned_group_ids) {
+        Ok(value) => value,
+        Err(err) => return Ok(Err(err)),
+    };
+    if group_ids.is_empty() {
+        return Ok(Ok(direct));
+    }
+    let mut expanded = direct.into_iter().collect::<BTreeSet<_>>();
+    for group_id in group_ids {
+        let members = list_group_member_user_ids(tx, workspace_id, group_id).await?;
+        expanded.extend(members);
+    }
+    Ok(Ok(expanded.into_iter().collect()))
 }
 
 fn comment_scope(workspace_id: Uuid, kind: &str, target_id: Uuid) -> String {
@@ -193,6 +226,7 @@ async fn fetch_comment(
 
 struct DocumentTarget {
     document_id: Uuid,
+    project_id: Option<Uuid>,
 }
 
 struct TaskTarget {
@@ -210,15 +244,18 @@ async fn document_target(
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<DocumentTarget, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
-        "SELECT deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT project_id, deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut **tx)
     .await?;
     match row {
-        Some((None,)) => Ok(DocumentTarget { document_id }),
+        Some((project_id, None)) => Ok(DocumentTarget {
+            document_id,
+            project_id,
+        }),
         _ => Err(sqlx::Error::RowNotFound),
     }
 }
@@ -270,24 +307,64 @@ fn map_document_error(_err: DocumentDbError) -> CommentDbError {
     CommentDbError::NotFound
 }
 
-async fn require_document_access(
+async fn require_wiki_document_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
-    document_id: Uuid,
+    document: &DocumentTarget,
     min: ProjectPermission,
     writable: bool,
 ) -> Result<(), CommentDbError> {
+    if document.project_id.is_some() {
+        return Err(CommentDbError::NotFound);
+    }
     // Single wiki document permission path (db::documents::document_permission).
-    // Project documents resolve to None there, as on every other document path.
-    let permission = document_permission(tx, workspace_id, actor_user_id, document_id, true)
-        .await
-        .map_err(|_| CommentDbError::NotFound)?;
+    let permission =
+        document_permission(tx, workspace_id, actor_user_id, document.document_id, true)
+            .await
+            .map_err(|_| CommentDbError::NotFound)?;
     if !permission.at_least(min) || permission == ProjectPermission::None {
         return Err(CommentDbError::NotFound);
     }
     if writable {
-        let writable = assert_document_writable(tx, workspace_id, document_id)
+        let writable = assert_document_writable(tx, workspace_id, document.document_id)
+            .await
+            .map_err(|_| CommentDbError::NotFound)?;
+        writable.map_err(map_document_error)?;
+    }
+    Ok(())
+}
+
+async fn require_project_document_access(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    expected_project_id: Option<Uuid>,
+    document: &DocumentTarget,
+    min: ProjectPermission,
+    writable: bool,
+) -> Result<(), CommentDbError> {
+    let Some(project_id) = document.project_id else {
+        return Err(CommentDbError::NotFound);
+    };
+    if expected_project_id.is_some_and(|expected| expected != project_id) {
+        return Err(CommentDbError::NotFound);
+    }
+    let locked = lock_project(tx, workspace_id, project_id)
+        .await
+        .map_err(|_| CommentDbError::NotFound)?
+        .ok_or(CommentDbError::NotFound)?;
+    let permission = project_permission(tx, workspace_id, actor_user_id, &locked)
+        .await
+        .map_err(|_| CommentDbError::NotFound)?;
+    if !permission.at_least(min) {
+        return Err(CommentDbError::NotFound);
+    }
+    if writable {
+        if locked.status == "archived" {
+            return Err(CommentDbError::ProjectArchived);
+        }
+        let writable = assert_document_writable(tx, workspace_id, document.document_id)
             .await
             .map_err(|_| CommentDbError::NotFound)?;
         writable.map_err(map_document_error)?;
@@ -334,15 +411,21 @@ async fn require_parent_access(
 ) -> Result<(), CommentDbError> {
     match target {
         ParentTarget::Document(doc) => {
-            require_document_access(
-                tx,
-                workspace_id,
-                actor_user_id,
-                doc.document_id,
-                min,
-                writable,
-            )
-            .await
+            if doc.project_id.is_some() {
+                require_project_document_access(
+                    tx,
+                    workspace_id,
+                    actor_user_id,
+                    None,
+                    doc,
+                    min,
+                    writable,
+                )
+                .await
+            } else {
+                require_wiki_document_access(tx, workspace_id, actor_user_id, doc, min, writable)
+                    .await
+            }
         }
         ParentTarget::Task(task) => {
             require_task_access(tx, workspace_id, actor_user_id, task, min, writable).await
@@ -579,7 +662,14 @@ async fn insert_comment(
         Ok(value) => value,
         Err(err) => return Ok(Err(err)),
     };
-    let mentioned_user_ids = match normalize_mentions(input.mentioned_user_ids) {
+    let mentioned_user_ids = match expand_mentioned_user_ids(
+        tx,
+        workspace_id,
+        input.mentioned_user_ids,
+        input.mentioned_group_ids,
+    )
+    .await?
+    {
         Ok(value) => value,
         Err(err) => return Ok(Err(err)),
     };
@@ -621,6 +711,14 @@ async fn insert_comment(
             "documentId": document_id.map(|id| id.to_string()),
             "taskId": task_id.map(|id| id.to_string()),
             "mentionedUserIds": mentioned_user_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            "mentionedGroupIds": input
+                .mentioned_group_ids
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
             "parentId": input.parent_id.map(|id| id.to_string()),
         }),
         client_ip,
@@ -672,11 +770,11 @@ pub async fn list_document_comments(
         return Ok(Err(CommentDbError::NotFound));
     }
     let target = comment_result!(document_target(&mut tx, workspace_id, document_id).await);
-    match require_parent_access(
+    match require_wiki_document_access(
         &mut tx,
         workspace_id,
         actor_user_id,
-        &ParentTarget::Document(target),
+        &target,
         ProjectPermission::View,
         false,
     )
@@ -745,11 +843,11 @@ pub async fn create_document_comment(
     let mut tx =
         commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
     let target = comment_result!(document_target(&mut tx, workspace_id, document_id).await);
-    match require_parent_access(
+    match require_wiki_document_access(
         &mut tx,
         workspace_id,
         actor_user_id,
-        &ParentTarget::Document(target),
+        &target,
         ProjectPermission::Edit,
         true,
     )
@@ -774,6 +872,125 @@ pub async fn create_document_comment(
     };
     tx.commit().await?;
     Ok(Ok(created))
+}
+
+pub async fn list_project_document_comments(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    project_id: Uuid,
+    document_id: Uuid,
+    query: CommentListQuery,
+) -> Result<Result<CommentListPage, CommentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(CommentDbError::NotFound));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(CommentDbError::NotFound));
+    }
+    let target = comment_result!(document_target(&mut tx, workspace_id, document_id).await);
+    match require_project_document_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        Some(project_id),
+        &target,
+        ProjectPermission::View,
+        false,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(err) => return Ok(Err(err)),
+    }
+    let page = match comment_page(&mut tx, workspace_id, "document", document_id, query).await {
+        Ok(value) => value,
+        Err(err) => return Ok(Err(err)),
+    };
+    tx.commit().await?;
+    Ok(Ok(page))
+}
+
+pub async fn create_project_document_comment(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    project_and_document: (Uuid, Uuid),
+    input: CreateCommentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    let (project_id, document_id) = project_and_document;
+    let mut tx =
+        commit_comment!(begin_write_tx(pool, workspace_id, actor_user_id, session_id).await?);
+    let target = comment_result!(document_target(&mut tx, workspace_id, document_id).await);
+    match require_project_document_access(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        Some(project_id),
+        &target,
+        ProjectPermission::Edit,
+        true,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(err) => return Ok(Err(err)),
+    }
+    let created = match insert_comment(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        Some(document_id),
+        None,
+        input,
+        client_ip,
+    )
+    .await?
+    {
+        Ok(value) => value,
+        Err(err) => return Ok(Err(err)),
+    };
+    tx.commit().await?;
+    Ok(Ok(created))
+}
+
+pub async fn comment_write_kind(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    comment_id: Uuid,
+) -> Result<Result<CommentWriteKind, CommentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(CommentDbError::NotFound));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(CommentDbError::NotFound));
+    }
+    let comment = comment_result!(fetch_comment(&mut tx, workspace_id, comment_id).await);
+    let Some(comment) = comment else {
+        return Ok(Err(CommentDbError::NotFound));
+    };
+    let kind = if comment.document_id.is_some() {
+        CommentWriteKind::Document
+    } else if comment.task_id.is_some() {
+        CommentWriteKind::Task
+    } else {
+        return Ok(Err(CommentDbError::NotFound));
+    };
+    tx.commit().await?;
+    Ok(Ok(kind))
 }
 
 pub async fn create_task_comment(

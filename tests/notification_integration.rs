@@ -453,6 +453,107 @@ async fn comment_mention_notifies_member_not_actor() {
     harness.cleanup().await;
 }
 
+#[tokio::test]
+async fn group_mention_on_project_document_respects_access_at_delivery() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let app_db = app_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "viewer").await;
+    let outsider = add_workspace_user(&admin, workspace_id, "member", "outsider").await;
+
+    let (status, group) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "랩팀"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group:?}");
+    let group_id = group["id"].as_str().unwrap();
+    for user_id in [member.user_id, outsider.user_id] {
+        let (status, added) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+            Some(json!({"userId": user_id.to_string()})),
+            Some(&owner_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{added:?}");
+    }
+
+    let hid = create_project(app.clone(), &owner_cookie, workspace_id, "HID", "private").await;
+    let project_id = hid["id"].as_str().unwrap();
+    let document_id = hid["rootDocumentId"].as_str().expect("root document");
+    let (status, granted) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+        Some(json!({"userId": member.user_id.to_string(), "role": "member"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{granted:?}");
+
+    let (status, comment) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments"
+        ),
+        Some(json!({
+            "body": "@랩팀",
+            "mentionedGroupIds": [group_id]
+        })),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{comment:?}");
+    drain_notifications(&app_db).await;
+
+    let (status, member_listed) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/notifications"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{member_listed:?}");
+    assert!(
+        member_listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["verb"] == "comment.created"),
+        "{member_listed:?}"
+    );
+
+    let (status, outsider_listed) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/notifications"),
+        None,
+        Some(&outsider.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{outsider_listed:?}");
+    assert!(
+        outsider_listed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["verb"] != "comment.created"),
+        "{outsider_listed:?}"
+    );
+
+    admin.close().await;
+    app_db.close().await;
+    harness.cleanup().await;
+}
+
 /// Upgrading an existing install must not notify users about past events: the
 /// notifications consumer starts after the events recorded before migration 018.
 #[tokio::test]

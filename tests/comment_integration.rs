@@ -8,7 +8,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use project_harness::{
     add_workspace_user, admin_pool, count_rows, create_project, drop_insert_fail_trigger,
-    install_insert_fail_trigger, json_request, setup_session, test_peer, TestDb,
+    http_request, install_insert_fail_trigger, json_request, setup_session, test_peer, TestDb,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -280,30 +280,93 @@ async fn private_project_viewer_can_list_but_not_create_task_comment() {
 }
 
 #[tokio::test]
-async fn mentioned_group_ids_returns_400() {
+async fn mentioned_group_ids_expand_into_event() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _, workspace_id) = setup_session(&harness).await;
-    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
-    let project_id = lab["id"].as_str().unwrap();
-    let (status, task) = json_request(
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "groupmate").await;
+    let (status, group) = json_request(
         app.clone(),
         "POST",
-        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
-        Some(json!({"title": "T"})),
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "랩팀"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group:?}");
+    let group_id = group["id"].as_str().unwrap();
+    let (status, added) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": member.user_id.to_string()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{added:?}");
+
+    let (status, doc) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"parentId": null, "title": "그룹 멘션"})),
         Some(&cookie),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let task_id = task["id"].as_str().unwrap();
-    let (status, _) = json_request(
+    let document_id = doc["id"].as_str().unwrap();
+    let (status, created) = json_request(
         app.clone(),
         "POST",
-        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments"),
-        Some(json!({"body": "그룹", "mentionedGroupIds": [Uuid::now_v7().to_string()]})),
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments"),
+        Some(json!({
+            "body": "@랩팀",
+            "mentionedGroupIds": [group_id]
+        })),
         Some(&cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+
+    let payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM fvoci.events WHERE verb = 'comment.created' ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("comment.created payload");
+    let mentioned_users = payload["mentionedUserIds"]
+        .as_array()
+        .expect("mentionedUserIds");
+    assert!(
+        mentioned_users
+            .iter()
+            .any(|id| id.as_str() == Some(&member.user_id.to_string())),
+        "{payload:?}"
+    );
+    let mentioned_groups = payload["mentionedGroupIds"]
+        .as_array()
+        .expect("mentionedGroupIds");
+    assert!(
+        mentioned_groups
+            .iter()
+            .any(|id| id.as_str() == Some(group_id)),
+        "{payload:?}"
+    );
+
+    let (status, unknown) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments"),
+        Some(json!({
+            "body": "없는 그룹",
+            "mentionedGroupIds": [Uuid::now_v7().to_string()]
+        })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{unknown:?}");
+
+    admin.close().await;
     harness.cleanup().await;
 }
 
@@ -653,41 +716,34 @@ async fn resolve_and_unresolve_reject_cross_origin() {
 }
 
 #[tokio::test]
-async fn project_document_comment_routes_return_not_found() {
+async fn project_document_comments_use_project_permission() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
     let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
     let project_id = lab["id"].as_str().unwrap();
     let document_id = lab["rootDocumentId"]
         .as_str()
         .expect("project root document");
+    let comments = format!(
+        "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments"
+    );
 
-    let (status, listed) = json_request(
-        app.clone(),
-        "GET",
-        &format!(
-            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments"
-        ),
-        None,
-        Some(&cookie),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(listed["code"], "not_found");
-    assert_ne!(listed["code"], "internal_error");
+    let (status, listed) = json_request(app.clone(), "GET", &comments, None, Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{listed:?}");
+    assert_eq!(listed["items"].as_array().unwrap().len(), 0);
 
     let (status, created) = json_request(
         app.clone(),
         "POST",
-        &format!(
-            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments"
-        ),
+        &comments,
         Some(json!({"body": "프로젝트 문서"})),
         Some(&cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(created["code"], "not_found");
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    assert_eq!(created["body"], "프로젝트 문서");
+    assert_eq!(created["documentId"], document_id);
 
     let (status, wiki) = json_request(
         app.clone(),
@@ -699,6 +755,175 @@ async fn project_document_comment_routes_return_not_found() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(wiki["code"], "not_found");
+
+    let hid = create_project(app.clone(), &cookie, workspace_id, "HID", "private").await;
+    let private_project_id = hid["id"].as_str().unwrap();
+    let private_document_id = hid["rootDocumentId"].as_str().expect("private root");
+    let private_comments = format!(
+        "/api/v1/workspaces/{workspace_id}/projects/{private_project_id}/documents/{private_document_id}/comments"
+    );
+    let outsider = add_workspace_user(&admin, workspace_id, "member", "outsider").await;
+    let (status, denied) = json_request(
+        app.clone(),
+        "GET",
+        &private_comments,
+        None,
+        Some(&outsider.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{denied:?}");
+
+    json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{private_project_id}/members"),
+        Some(json!({"userId": outsider.user_id.to_string(), "role": "viewer"})),
+        Some(&cookie),
+    )
+    .await;
+    let (status, viewer_list) = json_request(
+        app.clone(),
+        "GET",
+        &private_comments,
+        None,
+        Some(&outsider.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{viewer_list:?}");
+    let (status, viewer_create) = json_request(
+        app.clone(),
+        "POST",
+        &private_comments,
+        Some(json!({"body": "뷰어는 불가"})),
+        Some(&outsider.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{viewer_create:?}");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn comment_pat_scopes_match_parent_kind() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let (status, doc) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"parentId": null, "title": "PAT 문서"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let document_id = doc["id"].as_str().unwrap();
+    let comments = format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments");
+
+    let (status, read_token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "doc-read", "scopes": ["documents.read"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{read_token:?}");
+    let read_secret = read_token["token"].as_str().unwrap().to_string();
+    let read_auth = format!("Bearer {read_secret}");
+    let (status, listed, _) = http_request(
+        app.clone(),
+        "GET",
+        &comments,
+        None,
+        None,
+        None,
+        &[("authorization", read_auth.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed:?}");
+    let (status, denied, _) = http_request(
+        app.clone(),
+        "POST",
+        &comments,
+        Some(json!({"body": "읽기만"}).to_string().into_bytes()),
+        Some("application/json"),
+        None,
+        &[("authorization", read_auth.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{denied:?}");
+
+    let (status, write_token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "doc-write", "scopes": ["documents.write"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{write_token:?}");
+    let write_secret = write_token["token"].as_str().unwrap().to_string();
+    let write_auth = format!("Bearer {write_secret}");
+    let (status, created, _) = http_request(
+        app.clone(),
+        "POST",
+        &comments,
+        Some(json!({"body": "쓰기"}).to_string().into_bytes()),
+        Some("application/json"),
+        None,
+        &[("authorization", write_auth.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+
+    let lab = create_project(app.clone(), &cookie, workspace_id, "PAT", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "PAT 태스크"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = task["id"].as_str().unwrap();
+    let task_comments = format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments");
+    let (status, task_denied, _) = http_request(
+        app.clone(),
+        "POST",
+        &task_comments,
+        Some(json!({"body": "문서 토큰"}).to_string().into_bytes()),
+        Some("application/json"),
+        None,
+        &[("authorization", write_auth.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{task_denied:?}");
+
+    let (status, task_token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "task-write", "scopes": ["tasks.write"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task_token:?}");
+    let task_secret = task_token["token"].as_str().unwrap().to_string();
+    let task_auth = format!("Bearer {task_secret}");
+    let (status, task_created, _) = http_request(
+        app.clone(),
+        "POST",
+        &task_comments,
+        Some(json!({"body": "태스크"}).to_string().into_bytes()),
+        Some("application/json"),
+        None,
+        &[("authorization", task_auth.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task_created:?}");
 
     harness.cleanup().await;
 }
