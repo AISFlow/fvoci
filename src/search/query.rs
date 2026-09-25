@@ -173,10 +173,10 @@ struct VisibleWorkspaceAcl {
 }
 
 #[derive(Debug, Clone)]
-struct SearchAcl {
-    project_ids: Vec<Uuid>,
-    include_wiki: bool,
-    wiki_document_ids: Vec<Uuid>,
+pub(crate) struct SearchAcl {
+    pub(crate) project_ids: Vec<Uuid>,
+    pub(crate) include_wiki: bool,
+    pub(crate) wiki_document_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -424,7 +424,7 @@ fn prepare_query(
     }))
 }
 
-async fn load_search_acl(
+pub(crate) async fn load_search_acl(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -1448,7 +1448,7 @@ async fn visible_after_hydrate(
     }
 }
 
-async fn load_live_project(
+pub(crate) async fn load_live_project(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,

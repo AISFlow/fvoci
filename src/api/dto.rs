@@ -1669,3 +1669,164 @@ pub struct SearchListResponse {
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub next_cursor: Option<String>,
 }
+
+/// POST /auth/withdraw. Source `withdrawInput`: a non-null `currentPassword`
+/// wins; otherwise `emailLocalPart` (password-less accounts).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WithdrawBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub current_password: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub email_local_part: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ErasureScheduleOutput {
+    pub ok: bool,
+    pub cancel_token: String,
+    pub erase_at: DateTime<Utc>,
+    pub mail_sent: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TokenBody {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct EmailChangeBody {
+    pub new_email: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PasswordChangeBody {
+    /// `null` only for password-less accounts.
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub current_password: Option<String>,
+    pub new_password: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MagicLinkBody {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProviderOutput {
+    pub provider: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProvidersOutput {
+    pub providers: Vec<ProviderOutput>,
+    pub magic_link: bool,
+    pub workspace_sso: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct IdentityOutput {
+    pub provider: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub email: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct IdentitiesOutput {
+    pub items: Vec<IdentityOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DashboardRecentItemOutput {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub project_id: Option<String>,
+    pub number: i32,
+    pub updated_at: DateTime<Utc>,
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceStatusOutput {
+    pub id: String,
+    pub workflow_id: String,
+    pub project_id: String,
+    pub name: String,
+    pub sort_key: String,
+    pub category: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub wip_limit: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DashboardProjectOutput {
+    pub id: String,
+    pub workspace_id: String,
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DashboardWorkspaceOutput {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub role: String,
+    pub kind: String,
+    pub document_count: i32,
+    pub assigned_count: i32,
+    pub unread_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MeDashboardResponse {
+    pub assigned: Vec<TaskListItemOutput>,
+    pub recent: Vec<DashboardRecentItemOutput>,
+    pub labels: Vec<LabelOutput>,
+    pub statuses: Vec<WorkspaceStatusOutput>,
+    pub projects: Vec<DashboardProjectOutput>,
+    pub members: Vec<MemberResponse>,
+    pub workspaces: Vec<DashboardWorkspaceOutput>,
+    pub unread_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MeLocateResponse {
+    pub workspace_id: String,
+}

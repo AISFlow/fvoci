@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod display_id;
 pub mod error;
+pub mod export_zip;
 pub mod http;
 pub mod ics;
 pub mod jobs;

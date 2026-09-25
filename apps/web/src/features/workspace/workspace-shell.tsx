@@ -135,6 +135,9 @@ export function WorkspaceShell({
           )}
           <SearchCommand slug={slug} workspaceId={workspaceId} />
           <NotificationBell slug={slug} workspaceId={workspaceId} />
+          <Link to="/settings/account" className="text-ui underline underline-offset-2">
+            {t("settings.account")}
+          </Link>
           <Button
             type="button"
             size="sm"

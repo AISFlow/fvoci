@@ -15,6 +15,7 @@ mod claim;
 mod retention;
 mod tokens;
 mod uploads;
+mod withdrawn;
 mod workspace;
 
 use std::sync::Arc;
@@ -39,6 +40,7 @@ pub use retention::{
 };
 pub use tokens::{run_ics_token_gc, run_magic_token_gc, TOKEN_GC_BATCH};
 pub use uploads::{run_stale_upload_gc, StaleUploadGcStats, UPLOAD_GC_BATCH};
+pub use withdrawn::run_withdrawn_anonymize;
 pub use workspace::{
     run_workspace_purge, WorkspacePurgeStats, WORKSPACE_PURGE_AFTER_DAYS, WORKSPACE_PURGE_BATCH,
 };
@@ -220,6 +222,7 @@ pub async fn run_stale_upload_sweep(
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DailySweepStats {
+    pub withdrawn_anonymized: u32,
     pub workspace: WorkspacePurgeStats,
     pub ics_deleted: u32,
     pub magic_deleted: u32,
@@ -253,6 +256,18 @@ async fn run_daily_jobs(
 ) -> Result<DailySweepStats, sqlx::Error> {
     let now = Utc::now();
     let mut stats = DailySweepStats::default();
+
+    // Source order: anonymize withdrawn users first so their personal
+    // workspace is marked deleted before the purge below removes it.
+    if !cancel.is_cancelled() {
+        match run_withdrawn_anonymize(pool, now, cancel).await {
+            Ok(erased) => {
+                info!(erased, "maintenance.withdrawn_anonymize");
+                stats.withdrawn_anonymized = erased;
+            }
+            Err(err) => warn!(error = %err, "maintenance.withdrawn_anonymize_failed"),
+        }
+    }
 
     if !cancel.is_cancelled() {
         match run_workspace_purge(pool, storage, now, cancel).await {

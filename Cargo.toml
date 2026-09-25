@@ -226,3 +226,8 @@ required-features = ["db-tests"]
 name = "background_jobs"
 path = "tests/background_jobs.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "account_lifecycle"
+path = "tests/account_lifecycle.rs"
+required-features = ["db-tests"]

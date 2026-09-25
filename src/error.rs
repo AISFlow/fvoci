@@ -45,6 +45,9 @@ pub enum ProblemCode {
     ProjectArchived,
     RestoreRejected,
     CollabTimeoutRetry,
+    ConfirmInvalid,
+    OwnerTransferRequired,
+    LastInstanceAdmin,
     InternalError,
 }
 
@@ -90,6 +93,9 @@ impl ProblemCode {
             Self::ProjectArchived => "project_archived",
             Self::RestoreRejected => "restore_rejected",
             Self::CollabTimeoutRetry => "collab_timeout_retry",
+            Self::ConfirmInvalid => "confirm_invalid",
+            Self::OwnerTransferRequired => "owner_transfer_required",
+            Self::LastInstanceAdmin => "last_instance_admin",
             Self::InternalError => "internal_error",
         }
     }
@@ -137,6 +143,9 @@ impl ProblemCode {
             Self::ProjectArchived => "project archived",
             Self::RestoreRejected => "restore rejected",
             Self::CollabTimeoutRetry => "collab timeout — retry",
+            Self::ConfirmInvalid => "confirm_invalid",
+            Self::OwnerTransferRequired => "owner_transfer_required",
+            Self::LastInstanceAdmin => "last_instance_admin",
             Self::InternalError => "internal error",
         }
     }
@@ -149,6 +158,7 @@ impl ProblemCode {
             Self::InvalidInput
             | Self::PasswordInvalid
             | Self::MagicInvalid
+            | Self::ConfirmInvalid
             | Self::AssigneeIsNotAMember => StatusCode::BAD_REQUEST,
             Self::InstanceSetupAlreadyCompleted
             | Self::NotFound
@@ -171,7 +181,11 @@ impl ProblemCode {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
             Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
-            Self::Conflict | Self::ProjectArchived | Self::RestoreRejected => StatusCode::CONFLICT,
+            Self::Conflict
+            | Self::ProjectArchived
+            | Self::RestoreRejected
+            | Self::OwnerTransferRequired
+            | Self::LastInstanceAdmin => StatusCode::CONFLICT,
             Self::CollabTimeoutRetry => StatusCode::GATEWAY_TIMEOUT,
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,

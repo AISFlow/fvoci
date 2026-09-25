@@ -16,6 +16,10 @@ import { NotificationsPage } from "@/pages/NotificationsPage";
 import { InvitePage } from "@/pages/InvitePage";
 import { AttachmentViewPage } from "@/pages/AttachmentViewPage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
+import { MagicLinkPage } from "@/pages/MagicLinkPage";
+import { ConfirmEmailPage } from "@/pages/ConfirmEmailPage";
+import { CancelWithdrawPage } from "@/pages/CancelWithdrawPage";
+import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -53,6 +57,38 @@ export function App() {
             element={
               <SetupGuard>
                 <ResetPasswordPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/magic-link"
+            element={
+              <SetupGuard>
+                <MagicLinkPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/confirm-email"
+            element={
+              <SetupGuard>
+                <ConfirmEmailPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/cancel-withdraw"
+            element={
+              <SetupGuard>
+                <CancelWithdrawPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/settings/account"
+            element={
+              <SetupGuard>
+                <AccountSettingsPage />
               </SetupGuard>
             }
           />

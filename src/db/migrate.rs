@@ -27,6 +27,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
     (include_str!("../../migrations/020_mail_reset.sql"), 20),
     (include_str!("../../migrations/021_maintenance_gc.sql"), 21),
     (include_str!("../../migrations/022_task_activity.sql"), 22),
+    (
+        include_str!("../../migrations/025_account_lifecycle.sql"),
+        25,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -36,6 +40,12 @@ const APP_ROLE_PLACEHOLDER: &str = ":\"app_role\"";
 
 pub const SCHEMA_GATE_OPERATOR_HINT: &str =
     "run `fvoci-migrate` then `fvoci-migrate --grant-app-role <app-role>` before starting fvoci-server";
+
+/// Number of migrations compiled into this binary. Versions may have gaps
+/// (a number reserved by an unmerged branch), so this is not the latest version.
+pub fn compiled_migration_count() -> usize {
+    MIGRATIONS.len()
+}
 
 /// Latest migration version compiled into this binary.
 pub fn latest_migration_version() -> i32 {
@@ -432,6 +442,10 @@ mod tests {
         (
             22,
             "62ed9fa9bdc77189975c11ddf420a4dccf79ee039f6d2548355f85e6ed6eba3c",
+        ),
+        (
+            25,
+            "4be2f2cecbfe3f316dd610468bd57bc89fa520363c0f9f1281f0aa7b17228733",
         ),
     ];
 
