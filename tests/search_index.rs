@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use fvoci_server::db::attachment_extract::{finish_extract, ExtractClaim, FinishExtract};
@@ -22,17 +23,26 @@ use rand::RngCore;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
+
+/// One Meili CE + one Postgres accept these tests; running them in parallel
+/// makes `meili_down_retries_*` miss its 15s dispatcher wait while other
+/// cases create indexes and upsert. Hold this for the whole TestDb lifetime
+/// so the wait still matches CI without raising timeouts.
+static SEARCH_INDEX_EXCLUSIVE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 struct TestDb {
     admin_url: String,
     app_url: String,
     db_name: String,
     role_name: String,
+    _exclusive: MutexGuard<'static, ()>,
 }
 
 impl TestDb {
     async fn bootstrap() -> Self {
+        let exclusive = SEARCH_INDEX_EXCLUSIVE.lock().await;
         let admin_base = std::env::var("TEST_DATABASE_URL")
             .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
             .expect("TEST_DATABASE_URL missing");
@@ -78,6 +88,7 @@ impl TestDb {
             app_url: app.to_string(),
             db_name,
             role_name,
+            _exclusive: exclusive,
         }
     }
 
@@ -371,7 +382,19 @@ async fn meili_ids(meili: &MeiliConfig) -> Vec<String> {
     ids
 }
 
-async fn wait_until<F>(timeout: Duration, mut predicate: F)
+async fn meili_doc(meili: &MeiliConfig, id: &str) -> Value {
+    let url = format!("{}/indexes/{}/documents/{}", meili.url, meili.index_uid, id);
+    let resp = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(meili.api_key())
+        .send()
+        .await
+        .expect("get document");
+    assert_eq!(resp.status().as_u16(), 200, "get document {id}");
+    resp.json().await.expect("json")
+}
+
+async fn wait_until<F>(timeout: Duration, what: &str, mut predicate: F)
 where
     F: FnMut() -> Pin<Box<dyn Future<Output = bool> + Send>>,
 {
@@ -382,7 +405,7 @@ where
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("condition not met within {timeout:?}");
+    panic!("{what}: condition not met within {timeout:?}");
 }
 
 #[tokio::test]
@@ -819,17 +842,21 @@ async fn meili_down_retries_without_advancing_then_converges() {
         vec![consumer],
     )
     .expect("dispatcher");
-    wait_until(Duration::from_secs(15), || {
-        let pool = app.clone();
-        let id = event.id;
-        Box::pin(async move {
-            fetch_failure_state(&pool, SEARCH_INDEX_CONSUMER, id)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
-        })
-    })
+    wait_until(
+        Duration::from_secs(15),
+        "meili-down failure recorded",
+        || {
+            let pool = app.clone();
+            let id = event.id;
+            Box::pin(async move {
+                fetch_failure_state(&pool, SEARCH_INDEX_CONSUMER, id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+        },
+    )
     .await;
     let cursor = fetch_cursor(&admin, SEARCH_INDEX_CONSUMER)
         .await
@@ -853,7 +880,7 @@ async fn meili_down_retries_without_advancing_then_converges() {
         vec![ok],
     )
     .expect("dispatcher up");
-    wait_until(Duration::from_secs(15), || {
+    wait_until(Duration::from_secs(15), "meili-up search hits", || {
         let meili = good.clone();
         let ws = fixture.workspace_id;
         let token = fixture.token.clone();
@@ -906,6 +933,220 @@ async fn rebuild_from_empty_index_converges() {
     rebuild.close().await;
     let after = meili_ids(&meili).await;
     assert_eq!(before, after);
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn partial_extract_chunks_are_indexed() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxpartial").await;
+    let lease = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        UPDATE fvoci.attachments
+        SET extract_lease_token = $2,
+            extract_lease_expires_at = now() + interval '5 minutes',
+            extract_status = 'pending'
+        WHERE id = $1
+        "#,
+    )
+    .bind(fixture.attachment_id)
+    .bind(lease)
+    .execute(&admin)
+    .await
+    .expect("lease");
+    let long = format!("{}\n\n{}", "qvoxpartial ".repeat(200), "tail ".repeat(200));
+    assert!(chunk_plain_text(&long).len() >= 2);
+    let claim = ExtractClaim {
+        workspace_id: fixture.workspace_id,
+        attachment_id: fixture.attachment_id,
+        lease_token: lease,
+        attempt: 1,
+    };
+    let applied = finish_extract(
+        &app,
+        &claim,
+        &FinishExtract {
+            status: "partial".into(),
+            text: long.clone(),
+            warnings: vec!["truncated".into()],
+            rhwp_rev: None,
+        },
+    )
+    .await
+    .expect("finish");
+    assert!(applied);
+    let chunks: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT chunk_no, status FROM fvoci.attachment_text WHERE attachment_id = $1 ORDER BY chunk_no",
+    )
+    .bind(fixture.attachment_id)
+    .fetch_all(&admin)
+    .await
+    .expect("chunks");
+    assert!(chunks.len() >= 2, "{chunks:?}");
+    assert!(chunks.iter().all(|(_, status)| status == "partial"));
+
+    let event = fvoci_server::db::outbox::fetch_event_by_id(&admin, {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM fvoci.events WHERE verb = 'attachment.extracted' AND target_id = $1",
+        )
+        .bind(fixture.attachment_id)
+        .fetch_one(&admin)
+        .await
+        .expect("extracted event")
+    })
+    .await
+    .expect("fetch")
+    .expect("row");
+    process_search_index_event(&app, &meili, &event)
+        .await
+        .expect("index chunks");
+    let chunk_id = search_source_id(
+        SearchSourceKind::Attachment,
+        &fixture.attachment_id.to_string(),
+        Some(0),
+    );
+    let ids = meili_ids(&meili).await;
+    assert!(ids.contains(&chunk_id), "{ids:?}");
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_body_refresh_skips_comments_and_chunks_until_title_or_trash() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxn4body").await;
+    for (verb, ty, id) in [
+        ("document.created", "document", fixture.wiki_id),
+        ("comment.created", "comment", fixture.comment_id),
+    ] {
+        let event = insert_event(&admin, fixture.workspace_id, verb, ty, id).await;
+        process_search_index_event(&app, &meili, &event)
+            .await
+            .expect("index");
+    }
+
+    let comment_meili_id = search_source_id(
+        SearchSourceKind::Comment,
+        &fixture.comment_id.to_string(),
+        None,
+    );
+    let before = meili_doc(&meili, &comment_meili_id).await;
+    assert_eq!(before["body"].as_str().unwrap(), "qvoxn4body");
+
+    sqlx::query("UPDATE fvoci.comments SET body = 'stale-should-not-index' WHERE id = $1")
+        .bind(fixture.comment_id)
+        .execute(&admin)
+        .await
+        .expect("mutate comment off-event");
+    sqlx::query("UPDATE fvoci.documents SET text = 'collab body now' WHERE id = $1")
+        .bind(fixture.wiki_id)
+        .execute(&admin)
+        .await
+        .expect("mutate document body");
+
+    let mut collab = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.collab_update_appended",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+    collab.payload = json!({"documentId": fixture.wiki_id.to_string(), "seq": 1});
+    process_search_index_event(&app, &meili, &collab)
+        .await
+        .expect("collab");
+
+    let after_collab = meili_doc(&meili, &comment_meili_id).await;
+    assert_eq!(
+        after_collab["body"].as_str().unwrap(),
+        "qvoxn4body",
+        "collab refresh reindexed comments: {after_collab:?}"
+    );
+    let doc = meili_doc(
+        &meili,
+        &search_source_id(
+            SearchSourceKind::Document,
+            &fixture.wiki_id.to_string(),
+            None,
+        ),
+    )
+    .await;
+    assert!(
+        doc["body"].as_str().unwrap().contains("collab body now"),
+        "{doc:?}"
+    );
+
+    sqlx::query("UPDATE fvoci.documents SET title = 'qvoxn4title' WHERE id = $1")
+        .bind(fixture.wiki_id)
+        .execute(&admin)
+        .await
+        .expect("title");
+    let mut titled = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.updated",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+    titled.payload = json!({
+        "documentId": fixture.wiki_id.to_string(),
+        "title": "qvoxn4title",
+    });
+    process_search_index_event(&app, &meili, &titled)
+        .await
+        .expect("title");
+    let after_title = meili_doc(&meili, &comment_meili_id).await;
+    assert_eq!(after_title["title"].as_str().unwrap(), "qvoxn4title");
+    assert_eq!(
+        after_title["body"].as_str().unwrap(),
+        "stale-should-not-index"
+    );
+
+    sqlx::query("UPDATE fvoci.documents SET deleted_at = now() WHERE id = $1")
+        .bind(fixture.wiki_id)
+        .execute(&admin)
+        .await
+        .expect("trash");
+    let trashed = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.trashed",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+    process_search_index_event(&app, &meili, &trashed)
+        .await
+        .expect("trashed");
+    let ids = meili_ids(&meili).await;
+    assert!(
+        !ids.contains(&comment_meili_id),
+        "trashed parent left comment indexed: {ids:?}"
+    );
 
     app.close().await;
     admin.close().await;

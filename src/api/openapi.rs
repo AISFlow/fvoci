@@ -112,6 +112,7 @@ impl Modify for CookieSecurityAddon {
         remove_document_group_grant,
         get_project_workflow,
         lookup_display_id,
+        global_search,
         workspace_search,
         list_tasks,
         create_task,
@@ -1355,6 +1356,30 @@ fn list_tasks() {}
     )
 )]
 fn lookup_display_id() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/search",
+    tag = "search",
+    security(("fvoci_session" = [])),
+    params(
+        ("q" = String, Query, description = "Search query"),
+        ("type" = Option<String>, Query, description = "Result kind filter"),
+        ("tag" = Option<String>, Query, description = "Optional tag filter"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size 1-50"),
+        ("mode" = Option<String>, Query, description = "lexical or hybrid; global search stays lexical"),
+    ),
+    responses(
+        (status = 200, description = "Cross-workspace search hits", body = SearchListResponse),
+        (status = 400, description = "Invalid input or cursor", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Search unavailable", body = ProblemResponse),
+    )
+)]
+fn global_search() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

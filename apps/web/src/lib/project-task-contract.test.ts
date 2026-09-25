@@ -17,6 +17,8 @@ test("generated OpenAPI includes lookup and required list nextCursor/statusCount
   assert.equal(lookupPath, "/api/v1/workspaces/{workspace_id}/lookup/{display_id}");
   const searchPath: keyof paths = "/api/v1/workspaces/{workspace_id}/search";
   assert.equal(searchPath, "/api/v1/workspaces/{workspace_id}/search");
+  const globalSearchPath: keyof paths = "/api/v1/search";
+  assert.equal(globalSearchPath, "/api/v1/search");
   const page: components["schemas"]["TaskListResponse"] = {
     items: [],
     nextCursor: null,
