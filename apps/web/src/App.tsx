@@ -4,6 +4,7 @@ import { SetupGuard } from "@/components/setup-guard";
 import { HomePage } from "@/pages/HomePage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SetupPage } from "@/pages/SetupPage";
+import { SearchPage } from "@/pages/SearchPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { ProjectTasksPage } from "@/pages/ProjectTasksPage";
 import { TrashPage } from "@/pages/TrashPage";
@@ -62,6 +63,7 @@ export function App() {
           >
             <Route path="projects" element={<ProjectsPage />} />
             <Route path="wiki" element={<WikiPage />} />
+            <Route path="search" element={<SearchPage />} />
             <Route path="trash" element={<TrashPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
             <Route path=":ref/tasks" element={<ProjectTasksPage />} />

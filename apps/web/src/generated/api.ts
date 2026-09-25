@@ -676,6 +676,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workspace_search"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/tasks/{task_id}": {
         parameters: {
             query?: never;
@@ -1204,6 +1220,31 @@ export interface components {
         };
         RevisionRestoreResponse: {
             restored: boolean;
+        };
+        SearchItemOutput: {
+            /** Format: int64 */
+            chunkNo: number | null;
+            displayId: string | null;
+            documentId: string | null;
+            extractStatus: string | null;
+            id: string;
+            projectId: string | null;
+            /** Format: double */
+            score: number;
+            snippet: components["schemas"]["SearchSnippetPiece"][] | null;
+            taskId: string | null;
+            title: string;
+            type: string;
+            updatedAt: string;
+            workspaceId: string;
+        };
+        SearchListResponse: {
+            items: components["schemas"]["SearchItemOutput"][];
+            nextCursor: string | null;
+        };
+        SearchSnippetPiece: {
+            match: boolean;
+            text: string;
         };
         SessionUserOutput: {
             email: string;
@@ -3894,6 +3935,89 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    workspace_search: {
+        parameters: {
+            query: {
+                /** @description Search query */
+                q: string;
+                /** @description Result kind filter */
+                type?: string;
+                /** @description Optional project scope */
+                projectId?: string;
+                /** @description Optional tag filter */
+                tag?: string;
+                /** @description Pagination cursor */
+                cursor?: string;
+                /** @description Page size 1-50 */
+                limit?: number;
+                /** @description lexical or hybrid */
+                mode?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Search hits */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchListResponse"];
+                };
+            };
+            /** @description Invalid input or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not a workspace member */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Search unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

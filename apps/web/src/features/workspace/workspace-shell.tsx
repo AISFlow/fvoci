@@ -4,16 +4,18 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { projectsPath, settingsPath, wikiPath } from "@/lib/href";
+import { SearchCommand } from "@/features/workspace/search-command";
+import { projectsPath, searchPath, settingsPath, wikiPath } from "@/lib/href";
 import { api, ProblemError, problemMessage } from "@/lib/api";
 import { workspacesQuery } from "@/lib/queries";
 import "@/features/workspace/workspace-aux.css";
 
-export type WorkspaceNav = "wiki" | "settings" | "projects";
+export type WorkspaceNav = "wiki" | "settings" | "projects" | "search";
 
 function landingPath(slug: string, activeNav: WorkspaceNav): string {
   if (activeNav === "settings") return settingsPath(slug);
   if (activeNav === "projects") return projectsPath(slug);
+  if (activeNav === "search") return searchPath(slug);
   return wikiPath(slug);
 }
 
@@ -88,6 +90,13 @@ export function WorkspaceShell({
               {t("nav.projects")}
             </Link>
             <Link
+              to={searchPath(slug)}
+              className={activeNav === "search" ? "workspace-shell__nav-link is-active" : "workspace-shell__nav-link"}
+              aria-current={activeNav === "search" ? "page" : undefined}
+            >
+              {t("nav.search")}
+            </Link>
+            <Link
               to={settingsPath(slug)}
               className={activeNav === "settings" ? "workspace-shell__nav-link is-active" : "workspace-shell__nav-link"}
               aria-current={activeNav === "settings" ? "page" : undefined}
@@ -122,6 +131,7 @@ export function WorkspaceShell({
           ) : (
             <span className="workspace-shell__name">{workspaceName}</span>
           )}
+          <SearchCommand slug={slug} workspaceId={workspaceId} />
           <Button
             type="button"
             size="sm"
