@@ -6,7 +6,7 @@ use uuid::Uuid;
 pub const OUTBOX_LEASE_SECS: i64 = 30;
 pub const OUTBOX_DEFAULT_BATCH: i32 = 100;
 pub const OUTBOX_MAX_ATTEMPTS: i32 = 5;
-pub const OUTBOX_FAILURE_BACKOFF_SECS: i32 = 1;
+pub const OUTBOX_FAILURE_BACKOFF_MS: i32 = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEvent {
@@ -29,6 +29,13 @@ pub struct OutboxRetry {
     pub event_id: Uuid,
     pub attempts: i32,
     pub last_error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxFailureState {
+    pub attempts: i32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub dead_at: Option<DateTime<Utc>>,
 }
 
 pub async fn ensure_consumer(pool: &PgPool, consumer: &str) -> Result<(), sqlx::Error> {
@@ -153,16 +160,50 @@ pub async fn record_failure(
     consumer: &str,
     event_id: Uuid,
     error: &str,
-    backoff_secs: i32,
+    backoff_ms: i32,
+    max_attempts: i32,
 ) -> Result<i32, sqlx::Error> {
-    let attempts = sqlx::query_scalar("SELECT fvoci.app_outbox_record_failure($1, $2, $3, $4)")
+    let attempts = sqlx::query_scalar("SELECT fvoci.app_outbox_record_failure($1, $2, $3, $4, $5)")
         .bind(consumer)
         .bind(event_id)
         .bind(error)
-        .bind(backoff_secs.max(1))
+        .bind(backoff_ms.max(1))
+        .bind(max_attempts.max(1))
         .fetch_one(pool)
         .await?;
     Ok(attempts)
+}
+
+pub async fn fetch_failure_state(
+    pool: &PgPool,
+    consumer: &str,
+    event_id: Uuid,
+) -> Result<Option<OutboxFailureState>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT attempts, next_attempt_at, dead_at
+        FROM fvoci.app_outbox_failure_state($1, $2)
+        "#,
+    )
+    .bind(consumer)
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| OutboxFailureState {
+        attempts: row.get("attempts"),
+        next_attempt_at: row.get("next_attempt_at"),
+        dead_at: row.get("dead_at"),
+    }))
+}
+
+pub async fn requeue(pool: &PgPool, consumer: &str, event_id: Uuid) -> Result<bool, sqlx::Error> {
+    let requeued = sqlx::query_scalar("SELECT fvoci.app_outbox_requeue($1, $2)")
+        .bind(consumer)
+        .bind(event_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(requeued)
 }
 
 pub async fn clear_failure(

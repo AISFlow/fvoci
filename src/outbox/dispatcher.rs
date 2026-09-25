@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -10,9 +11,10 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::db::outbox::{
-    advance_cursor, claim_retries, clear_failure, fetch_event_by_id, is_processed, lease_consumer,
-    mark_processed, read_events, record_failure, release_consumer, OutboxEvent,
-    OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_SECS, OUTBOX_LEASE_SECS, OUTBOX_MAX_ATTEMPTS,
+    advance_cursor, claim_retries, clear_failure, fetch_event_by_id, fetch_failure_state,
+    is_processed, lease_consumer, mark_processed, read_events, record_failure, release_consumer,
+    OutboxEvent, OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_MS, OUTBOX_LEASE_SECS,
+    OUTBOX_MAX_ATTEMPTS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +41,9 @@ pub trait OutboxConsumer: Send + Sync {
     }
 
     /// Deliver one event. For `PgOnly`, implementations must apply their effect
-    /// and advance the cursor in the same transaction via `advance_in_tx`.
+    /// and advance the cursor in the same transaction via `advance_cursor_tx`.
+    /// `External` implementations must be idempotent: a duplicate delivery after
+    /// a crash or overlapping lease must converge to the same side effect.
     fn deliver<'a>(
         &'a self,
         pool: &'a PgPool,
@@ -62,7 +66,7 @@ impl Default for OutboxDispatcherSettings {
             poll_interval: Duration::from_secs(1),
             lease_ttl: Duration::from_secs(OUTBOX_LEASE_SECS as u64),
             batch_limit: OUTBOX_DEFAULT_BATCH,
-            failure_backoff: Duration::from_secs(OUTBOX_FAILURE_BACKOFF_SECS as u64),
+            failure_backoff: Duration::from_millis(OUTBOX_FAILURE_BACKOFF_MS as u64),
         }
     }
 }
@@ -79,6 +83,10 @@ impl OutboxDispatcherSettings {
             poll_interval: Duration::from_secs(poll_secs),
             ..Self::default()
         }
+    }
+
+    fn backoff_ms(&self) -> i32 {
+        self.failure_backoff.as_millis().clamp(1, 60_000) as i32
     }
 }
 
@@ -105,7 +113,10 @@ pub fn spawn_outbox_dispatcher(
     settings: OutboxDispatcherSettings,
     pool: PgPool,
     consumers: Vec<Arc<dyn OutboxConsumer>>,
-) -> OutboxDispatcherHandle {
+) -> Option<OutboxDispatcherHandle> {
+    if consumers.is_empty() {
+        return None;
+    }
     let cancel = CancellationToken::new();
     let wake = Arc::new(Notify::new());
     let child_cancel = cancel.child_token();
@@ -116,7 +127,7 @@ pub fn spawn_outbox_dispatcher(
         child_cancel,
         wake.clone(),
     ));
-    OutboxDispatcherHandle { cancel, join, wake }
+    Some(OutboxDispatcherHandle { cancel, join, wake })
 }
 
 async fn run_dispatcher_loop(
@@ -198,8 +209,25 @@ async fn process_consumer_cycle(
             let _ = release_consumer(pool, consumer.name(), owner).await?;
             return Ok(true);
         }
+        if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
+            return Ok(worked);
+        }
+
+        let failure = fetch_failure_state(pool, consumer.name(), event.id).await?;
+        if failure.as_ref().is_some_and(|row| row.dead_at.is_some()) {
+            let _ = advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await?;
+            worked = true;
+            continue;
+        }
+        if failure
+            .as_ref()
+            .is_some_and(|row| row.next_attempt_at > Utc::now())
+        {
+            return Ok(worked);
+        }
+
         worked = true;
-        if let Err(err) = deliver_one(settings, pool, consumer, owner, &event).await {
+        if let Err(err) = deliver_one(pool, consumer, owner, &event).await {
             warn!(
                 consumer = consumer.name(),
                 event_id = %event.id,
@@ -207,7 +235,9 @@ async fn process_consumer_cycle(
                 "outbox delivery failed"
             );
             handle_failure(settings, pool, consumer, owner, &event, &err.to_string()).await?;
+            break;
         }
+        let _ = clear_failure(pool, consumer.name(), event.id).await?;
     }
 
     Ok(worked)
@@ -222,8 +252,12 @@ async fn process_retries(
 ) -> Result<bool, sqlx::Error> {
     let retries = claim_retries(pool, consumer.name(), settings.batch_limit).await?;
     let mut worked = false;
+    let ttl_secs = settings.lease_ttl.as_secs().clamp(1, 3600) as i64;
     for retry in retries {
         if cancel.is_cancelled() {
+            return Ok(worked);
+        }
+        if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
             return Ok(worked);
         }
         let Some(event) = fetch_event_by_id(pool, retry.event_id).await? else {
@@ -260,7 +294,6 @@ async fn deliver_retry(
 }
 
 async fn deliver_one(
-    _settings: &OutboxDispatcherSettings,
     pool: &PgPool,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
@@ -300,8 +333,15 @@ async fn handle_failure(
     event: &OutboxEvent,
     error: &str,
 ) -> Result<(), sqlx::Error> {
-    let backoff_secs = settings.failure_backoff.as_secs().max(1) as i32;
-    let attempts = record_failure(pool, consumer.name(), event.id, error, backoff_secs).await?;
+    let attempts = record_failure(
+        pool,
+        consumer.name(),
+        event.id,
+        error,
+        settings.backoff_ms(),
+        consumer.max_attempts(),
+    )
+    .await?;
     if attempts >= consumer.max_attempts() {
         warn!(
             consumer = consumer.name(),

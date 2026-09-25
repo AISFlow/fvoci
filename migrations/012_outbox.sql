@@ -5,6 +5,7 @@ CREATE TABLE fvoci.outbox_consumers (
     lease_owner uuid,
     lease_until timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT outbox_consumers_name_check CHECK (consumer ~ '^[a-z][a-z0-9_-]{0,62}$'),
     CONSTRAINT outbox_consumers_lease_pair_check
         CHECK ((lease_owner IS NULL) = (lease_until IS NULL))
 );
@@ -15,6 +16,7 @@ CREATE TABLE fvoci.outbox_failures (
     attempts integer NOT NULL,
     last_error text NOT NULL,
     next_attempt_at timestamptz NOT NULL,
+    dead_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (consumer, event_id),
@@ -22,7 +24,8 @@ CREATE TABLE fvoci.outbox_failures (
 );
 
 CREATE INDEX outbox_failures_retry_idx
-    ON fvoci.outbox_failures (consumer, next_attempt_at);
+    ON fvoci.outbox_failures (consumer, next_attempt_at)
+    WHERE dead_at IS NULL;
 
 CREATE TABLE fvoci.processed_events (
     consumer text NOT NULL,
@@ -38,6 +41,9 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
+    IF p_consumer IS NULL OR p_consumer !~ '^[a-z][a-z0-9_-]{0,62}$' THEN
+        RAISE EXCEPTION 'invalid outbox consumer name';
+    END IF;
     INSERT INTO fvoci.outbox_consumers (consumer)
     VALUES (p_consumer)
     ON CONFLICT (consumer) DO NOTHING;
@@ -127,7 +133,11 @@ DECLARE
     v_xmin xid8;
     v_last_xact xid8;
     v_last_seq bigint;
+    v_prev text;
 BEGIN
+    v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
+    PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
+
     SELECT pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()) INTO v_xmin;
 
     SELECT c.last_xact, c.last_seq
@@ -136,6 +146,7 @@ BEGIN
     WHERE c.consumer = p_consumer;
 
     IF NOT FOUND THEN
+        PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
         RETURN;
     END IF;
 
@@ -158,6 +169,8 @@ BEGIN
       AND e.xact < v_xmin
     ORDER BY e.xact, e.seq
     LIMIT GREATEST(p_limit, 0);
+
+    PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
 END;
 $$;
 
@@ -174,7 +187,27 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     advanced boolean;
+    v_xmin xid8;
+    v_prev text;
 BEGIN
+    v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
+    PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
+    SELECT pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()) INTO v_xmin;
+
+    IF p_xact >= v_xmin THEN
+        PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
+        RETURN false;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM fvoci.events AS e
+        WHERE e.xact = p_xact AND e.seq = p_seq
+    ) THEN
+        PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
+        RETURN false;
+    END IF;
+
     UPDATE fvoci.outbox_consumers AS c
     SET
         last_xact = p_xact,
@@ -186,6 +219,7 @@ BEGIN
       AND (p_xact, p_seq) > (c.last_xact, c.last_seq)
     RETURNING true INTO advanced;
 
+    PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
     RETURN COALESCE(advanced, false);
 END;
 $$;
@@ -194,7 +228,8 @@ CREATE OR REPLACE FUNCTION fvoci.app_outbox_record_failure(
     p_consumer text,
     p_event_id uuid,
     p_error text,
-    p_backoff_seconds integer DEFAULT 60
+    p_backoff_ms integer DEFAULT 1000,
+    p_max_attempts integer DEFAULT 5
 )
 RETURNS integer
 LANGUAGE plpgsql
@@ -203,25 +238,53 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_attempts integer;
+    v_base_ms integer;
+    v_max_attempts integer;
+    v_dead timestamptz;
 BEGIN
+    v_base_ms := GREATEST(p_backoff_ms, 1);
+    v_max_attempts := GREATEST(p_max_attempts, 1);
+
+    SELECT f.attempts, f.dead_at
+    INTO v_attempts, v_dead
+    FROM fvoci.outbox_failures AS f
+    WHERE f.consumer = p_consumer AND f.event_id = p_event_id;
+
+    IF v_dead IS NOT NULL THEN
+        RETURN v_attempts;
+    END IF;
+
     INSERT INTO fvoci.outbox_failures AS f (
         consumer,
         event_id,
         attempts,
         last_error,
-        next_attempt_at
+        next_attempt_at,
+        dead_at
     ) VALUES (
         p_consumer,
         p_event_id,
         1,
         left(p_error, 4000),
-        pg_catalog.now() + make_interval(secs => GREATEST(p_backoff_seconds, 1))
+        pg_catalog.now() + ((v_base_ms::text || ' milliseconds')::interval),
+        CASE WHEN v_max_attempts <= 1 THEN pg_catalog.now() ELSE NULL END
     )
     ON CONFLICT (consumer, event_id) DO UPDATE
     SET
         attempts = f.attempts + 1,
         last_error = EXCLUDED.last_error,
-        next_attempt_at = EXCLUDED.next_attempt_at,
+        next_attempt_at = pg_catalog.now() + (
+            (
+                LEAST(
+                    60000::bigint,
+                    v_base_ms::bigint * (2 ^ LEAST(f.attempts, 20))::bigint
+                )::text || ' milliseconds'
+            )::interval
+        ),
+        dead_at = CASE
+            WHEN f.attempts + 1 >= v_max_attempts THEN pg_catalog.now()
+            ELSE NULL
+        END,
         updated_at = pg_catalog.now()
     RETURNING attempts INTO v_attempts;
 
@@ -250,6 +313,53 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION fvoci.app_outbox_failure_state(
+    p_consumer text,
+    p_event_id uuid
+)
+RETURNS TABLE (
+    attempts integer,
+    next_attempt_at timestamptz,
+    dead_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT f.attempts, f.next_attempt_at, f.dead_at
+    FROM fvoci.outbox_failures AS f
+    WHERE f.consumer = p_consumer
+      AND f.event_id = p_event_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION fvoci.app_outbox_requeue(
+    p_consumer text,
+    p_event_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    requeued boolean;
+BEGIN
+    UPDATE fvoci.outbox_failures AS f
+    SET
+        dead_at = NULL,
+        next_attempt_at = pg_catalog.now(),
+        updated_at = pg_catalog.now()
+    WHERE f.consumer = p_consumer
+      AND f.event_id = p_event_id
+    RETURNING true INTO requeued;
+
+    RETURN COALESCE(requeued, false);
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION fvoci.app_outbox_claim_retries(
     p_consumer text,
     p_limit integer DEFAULT 50
@@ -263,14 +373,25 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    v_prev text;
 BEGIN
+    v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
+    PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
+
     RETURN QUERY
     SELECT f.event_id, f.attempts, f.last_error
     FROM fvoci.outbox_failures AS f
+    INNER JOIN fvoci.outbox_consumers AS c ON c.consumer = f.consumer
+    INNER JOIN fvoci.events AS e ON e.id = f.event_id
     WHERE f.consumer = p_consumer
+      AND f.dead_at IS NULL
       AND f.next_attempt_at <= pg_catalog.now()
+      AND (e.xact, e.seq) <= (c.last_xact, c.last_seq)
     ORDER BY f.next_attempt_at, f.event_id
     LIMIT GREATEST(p_limit, 0);
+
+    PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);
 END;
 $$;
 
@@ -319,8 +440,10 @@ REVOKE ALL ON FUNCTION fvoci.app_outbox_lease(text, uuid, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_release(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_read(text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_advance(text, uuid, xid8, bigint) FROM PUBLIC;
-REVOKE ALL ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, text, integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_clear_failure(text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fvoci.app_outbox_failure_state(text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION fvoci.app_outbox_requeue(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_claim_retries(text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC;

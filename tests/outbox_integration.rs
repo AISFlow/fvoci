@@ -3,12 +3,13 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fvoci_server::db::outbox::{
-    advance_cursor, advance_cursor_tx, ensure_consumer, fetch_cursor, insert_test_event,
-    lease_consumer, record_failure, release_consumer, OUTBOX_MAX_ATTEMPTS,
+    advance_cursor, advance_cursor_tx, claim_retries, ensure_consumer, fetch_cursor,
+    fetch_failure_state, insert_test_event, lease_consumer, read_events, record_failure,
+    release_consumer, requeue, OUTBOX_MAX_ATTEMPTS,
 };
 use fvoci_server::db::{migrate, pool};
 use fvoci_server::outbox::{
@@ -298,6 +299,21 @@ where
     panic!("condition not met within {:?}", timeout);
 }
 
+async fn wait_until_readable(app: &PgPool, consumer: &str, event_id: Uuid) {
+    let consumer = consumer.to_string();
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let consumer = consumer.clone();
+        Box::pin(async move {
+            read_events(&pool, &consumer, 100)
+                .await
+                .ok()
+                .is_some_and(|rows| rows.iter().any(|event| event.id == event_id))
+        })
+    })
+    .await;
+}
+
 const DISPATCHER_WAIT: Duration = Duration::from_secs(15);
 
 fn run_dispatcher(
@@ -315,6 +331,7 @@ fn run_dispatcher(
         pool,
         vec![consumer],
     )
+    .expect("dispatcher requires at least one consumer")
 }
 
 #[tokio::test]
@@ -401,7 +418,19 @@ async fn inverted_commit_order_loses_nothing() {
 
     let consumer = Arc::new(PgOnlyTestConsumer::new("invert"));
     let dispatcher = run_dispatcher(app.clone(), consumer, 20);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        Box::pin(async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT lease_owner IS NOT NULL FROM fvoci.outbox_consumers WHERE consumer = 'invert'",
+            )
+            .fetch_optional(&pool)
+            .await
+            .expect("lease")
+            .unwrap_or(false)
+        })
+    })
+    .await;
     assert_eq!(delivery_count(&app, "invert").await, 0);
 
     tx1.commit().await.expect("commit1");
@@ -464,8 +493,24 @@ async fn long_open_transaction_stalls_without_skipping() {
     insert_test_event(&app, "stalled", json!({}))
         .await
         .expect("stalled");
+    let marker: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&admin)
+        .await
+        .expect("marker");
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        Box::pin(async move {
+            let updated: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT updated_at FROM fvoci.outbox_consumers WHERE consumer = 'stall'",
+            )
+            .fetch_optional(&pool)
+            .await
+            .expect("updated_at");
+            updated.is_some_and(|ts| ts > marker)
+        })
+    })
+    .await;
     assert_eq!(delivery_count(&app, "stall").await, 1);
 
     holder.commit().await.expect("release holder");
@@ -495,12 +540,16 @@ async fn lease_steal_after_expiry() {
         .await
         .expect("lease1"));
 
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-
     let owner2 = Uuid::now_v7();
-    assert!(lease_consumer(&app, consumer, owner2, 30)
-        .await
-        .expect("lease2"));
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            lease_consumer(&pool, consumer, owner2, 30)
+                .await
+                .expect("lease2 poll")
+        })
+    })
+    .await;
     assert!(!lease_consumer(&app, consumer, owner1, 30)
         .await
         .expect("old owner"));
@@ -523,6 +572,7 @@ async fn advance_rejected_without_lease() {
         .await
         .expect("fetch")
         .expect("row");
+    wait_until_readable(&app, consumer, event_id).await;
 
     let stranger = Uuid::now_v7();
     assert!(
@@ -589,6 +639,15 @@ async fn pg_only_crash_between_effect_and_advance_rolls_back() {
     })
     .await;
 
+    let leftover: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fvoci.outbox_failures WHERE consumer = 'exactly-once' AND event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&admin)
+    .await
+    .expect("cleared failure");
+    assert_eq!(leftover, 0);
+
     dispatcher.request_shutdown();
     dispatcher.join().await.expect("join");
     app.close().await;
@@ -615,9 +674,16 @@ async fn dead_letter_after_max_failures_and_sweep_retry() {
         .expect("lease"));
 
     for _ in 0..OUTBOX_MAX_ATTEMPTS {
-        let attempts = record_failure(&app, consumer_name, event_id, "boom", 1)
-            .await
-            .expect("record");
+        let attempts = record_failure(
+            &app,
+            consumer_name,
+            event_id,
+            "boom",
+            1,
+            OUTBOX_MAX_ATTEMPTS,
+        )
+        .await
+        .expect("record");
         if attempts >= OUTBOX_MAX_ATTEMPTS {
             assert!(
                 advance_cursor(&app, consumer_name, owner, &event.xact, event.seq)
@@ -632,15 +698,12 @@ async fn dead_letter_after_max_failures_and_sweep_retry() {
         .connect(&harness.admin_url)
         .await
         .expect("admin");
-    let failure_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM fvoci.outbox_failures WHERE consumer = $1 AND event_id = $2",
-    )
-    .bind(consumer_name)
-    .bind(event_id)
-    .fetch_one(&admin)
-    .await
-    .expect("failures");
-    assert_eq!(failure_count, 1);
+    let state = fetch_failure_state(&app, consumer_name, event_id)
+        .await
+        .expect("state")
+        .expect("failure row");
+    assert_eq!(state.attempts, OUTBOX_MAX_ATTEMPTS);
+    assert!(state.dead_at.is_some());
 
     let cursor = fetch_cursor(&admin, consumer_name).await.expect("cursor");
     assert_eq!(cursor, Some((event.xact.clone(), event.seq)));
@@ -658,27 +721,48 @@ async fn dead_letter_after_max_failures_and_sweep_retry() {
         .await
         .expect("release manual lease"));
 
+    let claimed = claim_retries(&app, consumer_name, 50).await.expect("claim");
+    assert!(claimed.is_empty(), "dead letters must not be swept");
+
     let failing = Arc::new(FailingConsumer::new(consumer_name, 0));
     let dispatcher = run_dispatcher(app.clone(), failing, 20);
+    let marker: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&admin)
+        .await
+        .expect("marker");
     wait_until(DISPATCHER_WAIT, || {
         let pool = admin.clone();
         Box::pin(async move {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM fvoci.outbox_failures WHERE consumer = $1 AND event_id = $2",
+            let updated: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT updated_at FROM fvoci.outbox_consumers WHERE consumer = 'dead-letter'",
             )
-            .bind(consumer_name)
-            .bind(event_id)
             .fetch_optional(&pool)
             .await
-            .expect("count")
-            .unwrap_or(1)
-                == 0
+            .expect("updated");
+            updated.is_some_and(|ts| ts > marker)
         })
     })
     .await;
 
+    let still_dead = fetch_failure_state(&app, consumer_name, event_id)
+        .await
+        .expect("state after sweep")
+        .expect("dead row remains");
+    assert_eq!(still_dead.attempts, OUTBOX_MAX_ATTEMPTS);
+    assert!(still_dead.dead_at.is_some());
+
     dispatcher.request_shutdown();
     dispatcher.join().await.expect("join");
+
+    assert!(requeue(&app, consumer_name, event_id)
+        .await
+        .expect("operator requeue"));
+    let requeued = fetch_failure_state(&app, consumer_name, event_id)
+        .await
+        .expect("requeued")
+        .expect("row");
+    assert!(requeued.dead_at.is_none());
+
     admin.close().await;
     app.close().await;
     harness.cleanup().await;
@@ -704,5 +788,303 @@ async fn dispatcher_shutdown_drains_within_deadline() {
 
     app.close().await;
     admin.close().await;
+    harness.cleanup().await;
+}
+
+struct SelectiveFailPgOnly {
+    name: String,
+    fail_id: Mutex<Option<Uuid>>,
+}
+
+impl OutboxConsumer for SelectiveFailPgOnly {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::PgOnly
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            {
+                let mut guard = self.fail_id.lock().expect("fail_id");
+                if *guard == Some(event.id) {
+                    *guard = None;
+                    return Err(OutboxProcessError::Delivery("fail once".into()));
+                }
+            }
+            let mut tx = pool.begin().await?;
+            sqlx::query(
+                r#"
+                INSERT INTO fvoci.outbox_test_deliveries (consumer, event_id, verb)
+                VALUES ($1, $2, $3)
+                ON CONFLICT DO NOTHING
+                "#,
+            )
+            .bind(self.name())
+            .bind(event.id)
+            .bind(&event.verb)
+            .execute(&mut *tx)
+            .await?;
+            if !advance_cursor_tx(&mut tx, self.name(), lease_owner, &event.xact, event.seq).await?
+            {
+                tx.rollback().await?;
+                return Err(OutboxProcessError::Delivery(
+                    "advance rejected in pg-only tx".into(),
+                ));
+            }
+            tx.commit().await?;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn pg_only_head_of_line_failure_does_not_skip_later_event() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    install_delivery_table(&admin, &harness.role_name).await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let a = insert_test_event(&app, "A", json!({})).await.expect("A");
+    let b = insert_test_event(&app, "B", json!({})).await.expect("B");
+    let consumer = Arc::new(SelectiveFailPgOnly {
+        name: "r1".into(),
+        fail_id: Mutex::new(Some(a)),
+    });
+    let dispatcher = run_dispatcher(app.clone(), consumer, 20);
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move { delivery_count(&pool, "r1").await == 2 })
+    })
+    .await;
+
+    let delivered_a: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fvoci.outbox_test_deliveries WHERE consumer = 'r1' AND event_id = $1",
+    )
+    .bind(a)
+    .fetch_one(&admin)
+    .await
+    .expect("delivered a");
+    let delivered_b: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fvoci.outbox_test_deliveries WHERE consumer = 'r1' AND event_id = $1",
+    )
+    .bind(b)
+    .fetch_one(&admin)
+    .await
+    .expect("delivered b");
+    assert_eq!(delivered_a, 1);
+    assert_eq!(delivered_b, 1);
+    assert!(fetch_failure_state(&app, "r1", a)
+        .await
+        .expect("failure")
+        .is_none());
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn poison_event_dead_letters_and_does_not_retry() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let id = insert_test_event(&app, "poison", json!({}))
+        .await
+        .expect("ev");
+    let failing = Arc::new(FailingConsumer::new("r2", i32::MAX));
+    let dispatcher = run_dispatcher(app.clone(), failing, 20);
+
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            fetch_failure_state(&pool, "r2", id)
+                .await
+                .expect("state")
+                .is_some_and(|row| row.dead_at.is_some())
+        })
+    })
+    .await;
+
+    let dead = fetch_failure_state(&app, "r2", id)
+        .await
+        .expect("dead")
+        .expect("row");
+    assert_eq!(dead.attempts, OUTBOX_MAX_ATTEMPTS);
+    let marker: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&admin)
+        .await
+        .expect("marker");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        Box::pin(async move {
+            let updated: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT updated_at FROM fvoci.outbox_consumers WHERE consumer = 'r2'",
+            )
+            .fetch_optional(&pool)
+            .await
+            .expect("updated");
+            updated.is_some_and(|ts| ts > marker)
+        })
+    })
+    .await;
+    let later = fetch_failure_state(&app, "r2", id)
+        .await
+        .expect("later")
+        .expect("row");
+    assert_eq!(later.attempts, OUTBOX_MAX_ATTEMPTS);
+    assert!(later.dead_at.is_some());
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn advance_rejects_unknown_event_and_future_xmin() {
+    let harness = TestDb::bootstrap().await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let owner = Uuid::now_v7();
+    assert!(lease_consumer(&app, "search", owner, 30)
+        .await
+        .expect("lease"));
+    let skipped = advance_cursor(&app, "search", owner, "9223372036854775000", 0)
+        .await
+        .expect("adv");
+    assert!(!skipped);
+
+    let later = insert_test_event(&app, "after", json!({}))
+        .await
+        .expect("ev");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            read_events(&pool, "search", 100)
+                .await
+                .ok()
+                .is_some_and(|rows| rows.len() == 1)
+        })
+    })
+    .await;
+    let rows = read_events(&app, "search", 100).await.expect("read");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, later);
+
+    let unknown = read_events(&app, "anything", 100).await.expect("unknown");
+    assert!(unknown.is_empty());
+    ensure_consumer(&app, "anything").await.expect("ensure");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            read_events(&pool, "anything", 100)
+                .await
+                .ok()
+                .is_some_and(|rows| rows.len() == 1)
+        })
+    })
+    .await;
+    let after_ensure = read_events(&app, "anything", 100)
+        .await
+        .expect("after ensure");
+    assert_eq!(after_ensure.len(), 1);
+
+    let err = ensure_consumer(&app, "BadName").await.expect_err("invalid");
+    assert!(
+        err.to_string().contains("invalid outbox consumer name")
+            || err.to_string().to_lowercase().contains("invalid")
+    );
+
+    let _ = release_consumer(&app, "search", owner).await;
+    app.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn read_sees_events_when_function_owner_is_subject_to_rls() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let _ = insert_test_event(&app, "x", json!({})).await.expect("ev");
+    ensure_consumer(&app, "r4").await.unwrap();
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            read_events(&pool, "r4", 100)
+                .await
+                .ok()
+                .is_some_and(|rows| rows.len() == 1)
+        })
+    })
+    .await;
+    let before = read_events(&app, "r4", 100).await.unwrap().len();
+    assert_eq!(before, 1);
+
+    let owner = format!("{}_own", harness.role_name);
+    for q in [
+        format!("CREATE ROLE \"{owner}\" NOLOGIN NOSUPERUSER NOBYPASSRLS"),
+        format!("GRANT USAGE ON SCHEMA fvoci TO \"{owner}\""),
+        format!("ALTER TABLE fvoci.events OWNER TO \"{owner}\""),
+        format!("GRANT SELECT ON fvoci.outbox_consumers TO \"{owner}\""),
+        format!(
+            "GRANT EXECUTE ON FUNCTION public.app_tenant_id(), public.app_system_ctx_on() TO \"{owner}\""
+        ),
+        format!("ALTER FUNCTION fvoci.app_outbox_read(text, integer) OWNER TO \"{owner}\""),
+    ] {
+        sqlx::query(&q).execute(&admin).await.expect(&q);
+    }
+    let after = read_events(&app, "r4", 100)
+        .await
+        .map(|r| r.len())
+        .expect("read under non-bypass owner");
+    assert_eq!(after, 1);
+
+    for q in [
+        "ALTER TABLE fvoci.events OWNER TO CURRENT_USER".to_string(),
+        "ALTER FUNCTION fvoci.app_outbox_read(text, integer) OWNER TO CURRENT_USER".to_string(),
+        format!(
+            "REVOKE EXECUTE ON FUNCTION public.app_tenant_id(), public.app_system_ctx_on() FROM \"{owner}\""
+        ),
+        format!("REVOKE ALL ON fvoci.outbox_consumers FROM \"{owner}\""),
+        format!("REVOKE ALL ON SCHEMA fvoci FROM \"{owner}\""),
+        format!("DROP ROLE \"{owner}\""),
+    ] {
+        sqlx::query(&q).execute(&admin).await.expect(&q);
+    }
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn spawn_without_consumers_is_idle() {
+    let harness = TestDb::bootstrap().await;
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    assert!(
+        spawn_outbox_dispatcher(OutboxDispatcherSettings::default(), app.clone(), Vec::new(),)
+            .is_none()
+    );
+    app.close().await;
     harness.cleanup().await;
 }

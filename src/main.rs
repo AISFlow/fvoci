@@ -231,7 +231,11 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         pool.clone(),
         Vec::new(),
     );
-    tracing::info!("outbox dispatcher started");
+    if outbox_dispatcher.is_some() {
+        tracing::info!("outbox dispatcher started");
+    } else {
+        tracing::info!("outbox dispatcher idle (no consumers registered)");
+    }
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
@@ -250,7 +254,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let (signaled_tx, signaled_rx) = tokio::sync::oneshot::channel::<Instant>();
     let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
-    let outbox_task = Arc::new(tokio::sync::Mutex::new(Some(outbox_dispatcher)));
+    let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
