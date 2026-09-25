@@ -15,6 +15,7 @@ pub enum ProblemCode {
     InvalidInput,
     InstanceSetupAlreadyCompleted,
     PasswordInvalid,
+    MagicInvalid,
     SlugTaken,
     OriginMismatch,
     AssigneeIsNotAMember,
@@ -55,6 +56,7 @@ impl ProblemCode {
             Self::InvalidInput => "invalid_input",
             Self::InstanceSetupAlreadyCompleted => "instance_setup_already_completed",
             Self::PasswordInvalid => "password_invalid",
+            Self::MagicInvalid => "magic_invalid",
             Self::SlugTaken => "slug_taken",
             Self::OriginMismatch => "origin_mismatch",
             Self::AssigneeIsNotAMember => "assignee_is_not_a_member",
@@ -99,6 +101,7 @@ impl ProblemCode {
             Self::InvalidInput => "invalid input",
             Self::InstanceSetupAlreadyCompleted => "instance setup already completed",
             Self::PasswordInvalid => "password_invalid",
+            Self::MagicInvalid => "magic_invalid",
             Self::SlugTaken => "slug taken",
             Self::OriginMismatch => "origin mismatch",
             Self::AssigneeIsNotAMember => "assignee is not a member",
@@ -143,9 +146,10 @@ impl ProblemCode {
             Self::AuthenticationRequired
             | Self::InvalidEmailOrPassword
             | Self::CannotAcceptInvitation => StatusCode::UNAUTHORIZED,
-            Self::InvalidInput | Self::PasswordInvalid | Self::AssigneeIsNotAMember => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::InvalidInput
+            | Self::PasswordInvalid
+            | Self::MagicInvalid
+            | Self::AssigneeIsNotAMember => StatusCode::BAD_REQUEST,
             Self::InstanceSetupAlreadyCompleted
             | Self::NotFound
             | Self::InvitationNotFoundOrExpired => StatusCode::NOT_FOUND,

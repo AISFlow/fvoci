@@ -31,6 +31,7 @@ async fn setup_status(
         branding: BrandingOutput {
             name: state.branding_name.clone(),
         },
+        mail_enabled: state.mailer.enabled(),
     }))
 }
 

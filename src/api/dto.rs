@@ -126,6 +126,7 @@ use utoipa::ToSchema;
 pub struct SetupStatusResponse {
     pub needed: bool,
     pub branding: BrandingOutput,
+    pub mail_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +168,21 @@ pub struct LoginBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct LoginResponse {
     pub user_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PasswordResetBody {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PasswordResetConfirmBody {
+    pub token: String,
+    pub new_password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +476,8 @@ pub struct InvitationCreateBody {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct InvitationCreateResponse {
     pub accept_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail_delayed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
