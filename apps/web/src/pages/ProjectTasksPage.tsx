@@ -18,7 +18,7 @@ import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
-import { formatDisplayId, itemPath, parseRef, projectsPath } from "@/lib/href";
+import { formatDisplayId, itemPath, parseRef, projectPath, projectsPath } from "@/lib/href";
 import "@/features/projects/projects.css";
 
 function roleAtLeast(role: string, minimum: string): boolean {
@@ -96,7 +96,7 @@ export function ProjectTasksPage() {
           <p className="task-home__crumb">
             <Link to={projectsPath(slug)}>{t("nav.projects")}</Link>
             <span aria-hidden="true"> / </span>
-            <span>{project.key}</span>
+            <Link to={projectPath(slug, project.key)}>{project.key}</Link>
           </p>
           <div className="task-home__head">
             <h1 className="task-home__title">{project.name}</h1>

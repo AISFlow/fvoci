@@ -20,6 +20,8 @@ pub mod notifications;
 pub mod outbox;
 pub mod outbox_recover;
 pub mod pool;
+pub mod project_clone;
+pub mod project_documents;
 pub mod projects;
 pub mod quota;
 pub mod revisions;

@@ -105,6 +105,15 @@ pub struct CreateProjectInput<'a> {
     pub lead_user_id: Option<Uuid>,
 }
 
+pub struct CloneProjectInput<'a> {
+    pub key: &'a str,
+    pub name: &'a str,
+    pub visibility: Option<&'a str>,
+    pub description: Option<Option<&'a str>>,
+    pub icon: Option<Option<&'a str>>,
+    pub lead_user_id: Option<Uuid>,
+}
+
 pub struct UpdateProjectInput<'a> {
     pub name: Option<&'a str>,
     pub visibility: Option<&'a str>,
@@ -417,7 +426,7 @@ pub(crate) fn is_private_lead_violation(err: &sqlx::Error) -> bool {
         .is_some_and(|code| code.as_ref() == PRIVATE_LEAD_SQLSTATE)
 }
 
-async fn seed_workflow(
+pub(crate) async fn seed_workflow(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,
@@ -711,6 +720,271 @@ pub async fn create_project(
     )
     .bind(workspace_id)
     .bind(project_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(Ok(ProjectRow {
+        id: row.0,
+        workspace_id,
+        key: row.1,
+        name: row.2,
+        description: row.3,
+        icon: row.4,
+        visibility: row.5,
+        root_document_id: row.6,
+        status: row.7,
+        created_by: row.8,
+        created_at: row.9,
+        updated_at: row.10,
+    }))
+}
+
+pub async fn clone_project(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    source_project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CloneProjectInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    let dest_project_id = Uuid::now_v7();
+    let root_document_id = Uuid::now_v7();
+    let mut lock_users = vec![actor_user_id];
+    if let Some(lead) = input.lead_user_id {
+        if lead != actor_user_id {
+            lock_users.push(lead);
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &lock_users).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let actor_role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    if !actor_role
+        .map(|r| r.at_least(WorkspaceRole::Member))
+        .unwrap_or(false)
+    {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+
+    lock_tree(&mut tx, workspace_id).await?;
+
+    let source = lock_project(&mut tx, workspace_id, source_project_id).await?;
+    let Some(source) = source else {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    if !project_permission(&mut tx, workspace_id, actor_user_id, &source)
+        .await?
+        .at_least(ProjectPermission::Manage)
+    {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+
+    let visibility = input.visibility.unwrap_or(&source.visibility);
+    let description = match input.description {
+        Some(value) => optional_text_to_db(value),
+        None => source.description.clone(),
+    };
+    let icon = match input.icon {
+        Some(value) => optional_text_to_db(value),
+        None => source.icon.clone(),
+    };
+
+    let inserted = sqlx::query_as::<_, (Uuid,)>(
+        r#"
+        INSERT INTO fvoci.projects (
+            id, workspace_id, key, name, description, icon, visibility, status,
+            next_number, created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', 1, $8)
+        RETURNING id
+        "#,
+    )
+    .bind(dest_project_id)
+    .bind(workspace_id)
+    .bind(input.key)
+    .bind(input.name.trim())
+    .bind(&description)
+    .bind(&icon)
+    .bind(visibility)
+    .bind(actor_user_id)
+    .fetch_optional(&mut *tx)
+    .await;
+
+    if let Err(err) = inserted {
+        if let Some(db_err) = err.as_database_error() {
+            if db_err.constraint() == Some("projects_workspace_id_key_unique") {
+                tx.rollback().await?;
+                return Ok(Err(ProjectDbError::Conflict));
+            }
+        }
+        return Err(err);
+    }
+    inserted?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role)
+        VALUES ($1, $2, $3, $4, 'lead')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(dest_project_id)
+    .bind(actor_user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    if let Some(lead_user_id) = input.lead_user_id {
+        if lead_user_id != actor_user_id {
+            let lead_role = membership_role(&mut tx, workspace_id, lead_user_id).await?;
+            if !lead_role
+                .map(|r| r.at_least(WorkspaceRole::Member))
+                .unwrap_or(false)
+            {
+                tx.rollback().await?;
+                return Ok(Err(ProjectDbError::NotFound));
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role)
+                VALUES ($1, $2, $3, $4, 'lead')
+                ON CONFLICT (workspace_id, project_id, user_id) DO UPDATE SET role = 'lead', updated_at = now()
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace_id)
+            .bind(dest_project_id)
+            .bind(lead_user_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE fvoci.project_members
+                SET role = 'member', updated_at = now()
+                WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(dest_project_id)
+            .bind(actor_user_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    let doc_number: (i32,) = sqlx::query_as(
+        r#"
+        UPDATE fvoci.projects
+        SET next_number = next_number + 1, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2
+        RETURNING next_number - 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(dest_project_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, project_id, number, status,
+            schema_version, content_json, created_by
+        ) VALUES ($1, $2, $3, $4, NULL, 'V', $5, $6, 'published', $7, $8, $9)
+        "#,
+    )
+    .bind(root_document_id)
+    .bind(workspace_id)
+    .bind(input.name.trim())
+    .bind(to_path_label(root_document_id))
+    .bind(dest_project_id)
+    .bind(doc_number.0)
+    .bind(DOCUMENT_SCHEMA_VERSION)
+    .bind(empty_document_json())
+    .bind(actor_user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE fvoci.projects
+        SET root_document_id = $3, updated_at = now()
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(dest_project_id)
+    .bind(root_document_id)
+    .execute(&mut *tx)
+    .await?;
+
+    crate::db::project_clone::copy_project_configuration(
+        &mut tx,
+        workspace_id,
+        source_project_id,
+        dest_project_id,
+    )
+    .await?;
+
+    record_project_event_and_audit(
+        &mut tx,
+        ProjectChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "project.created",
+            target_type: "project",
+            target_id: dest_project_id,
+            payload: json!({
+                "projectId": dest_project_id.to_string(),
+                "key": input.key,
+                "name": input.name.trim(),
+                "visibility": visibility,
+                "rootDocumentId": root_document_id.to_string(),
+                "sourceProjectId": source_project_id.to_string(),
+            }),
+            client_ip,
+        },
+    )
+    .await?;
+
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<Uuid>,
+            String,
+            Uuid,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ),
+    >(
+        r#"
+        SELECT id, key, name, description, icon, visibility, root_document_id, status,
+               created_by, created_at, updated_at
+        FROM fvoci.projects
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(dest_project_id)
     .fetch_one(&mut *tx)
     .await?;
 
