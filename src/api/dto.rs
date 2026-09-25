@@ -1288,6 +1288,7 @@ pub struct CreateTaskDependencyBody {
     #[serde(rename = "type")]
     pub dependency_type: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_i32")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub lag_days: Option<i32>,
 }
 

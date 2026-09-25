@@ -1391,7 +1391,7 @@ export interface components {
             /** Format: uuid */
             blockedId: string;
             /** Format: int32 */
-            lagDays?: number | null;
+            lagDays?: number;
             type?: string | null;
         };
         CreateWorkspaceBody: {

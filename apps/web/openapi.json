@@ -8146,10 +8146,7 @@
             "format": "uuid"
           },
           "lagDays": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int32"
           },
           "type": {
