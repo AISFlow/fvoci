@@ -200,7 +200,9 @@ fn parse_s3_endpoint(name: &str, raw: &str) -> Result<String, String> {
     Ok(raw.trim().trim_end_matches('/').to_string())
 }
 
-fn storage_settings_from_env() -> Result<StorageSettings, String> {
+/// Attachment storage settings from `STORAGE_DRIVER` and its variables, as
+/// the server reads them. Also used by `fvoci-migrate --verify-storage`.
+pub fn storage_settings_from_env() -> Result<StorageSettings, String> {
     let driver = env::var("STORAGE_DRIVER")
         .ok()
         .map(|v| v.trim().to_string())
@@ -245,15 +247,27 @@ fn storage_settings_from_env() -> Result<StorageSettings, String> {
 /// S3 rejects non-final multipart parts under 5 MiB (source:
 /// `UPLOAD_PART_SIZE_MB must be >= 5`). The local driver keeps its range.
 pub const S3_MIN_PART_SIZE_BYTES: i64 = 5 * 1024 * 1024;
+/// Largest part this server proxies to S3. S3 itself allows 5 GiB; parts are
+/// streamed rather than buffered, but one PUT still holds an S3 connection
+/// for its whole transfer, so the cap stays well below the protocol limit
+/// (the source's default `UPLOAD_MAX_PART_SIZE_MB` is 100).
+pub const S3_MAX_PART_SIZE_BYTES: i64 = 1024 * 1024 * 1024;
 
 fn check_part_size_for_storage(
     storage: &StorageSettings,
     upload: &UploadLimits,
 ) -> Result<(), String> {
-    if matches!(storage, StorageSettings::S3(_)) && upload.part_size_bytes < S3_MIN_PART_SIZE_BYTES
-    {
+    if !matches!(storage, StorageSettings::S3(_)) {
+        return Ok(());
+    }
+    if upload.part_size_bytes < S3_MIN_PART_SIZE_BYTES {
         return Err(format!(
             "FVOCI_UPLOAD_PART_SIZE_BYTES must be >= {S3_MIN_PART_SIZE_BYTES} (S3 minimum part size) when STORAGE_DRIVER=s3"
+        ));
+    }
+    if upload.part_size_bytes > S3_MAX_PART_SIZE_BYTES {
+        return Err(format!(
+            "FVOCI_UPLOAD_PART_SIZE_BYTES must be <= {S3_MAX_PART_SIZE_BYTES} when STORAGE_DRIVER=s3"
         ));
     }
     Ok(())
@@ -467,6 +481,24 @@ mod tests {
         assert!(check_part_size_for_storage(&s3, &small).is_err());
         let default = upload_limits_from_values(None, None, None).unwrap();
         assert!(check_part_size_for_storage(&s3, &default).is_ok());
+        let at_cap = upload_limits_from_values(
+            Some(&S3_MAX_PART_SIZE_BYTES.to_string()),
+            Some(&(6 * S3_MAX_PART_SIZE_BYTES).to_string()),
+            None,
+        )
+        .unwrap();
+        assert!(check_part_size_for_storage(&s3, &at_cap).is_ok());
+        // 5 GiB + 1 is above the S3 protocol limit; 2 GiB is above the cap.
+        for part in [5 * 1024 * 1024 * 1024 + 1_i64, 2 * S3_MAX_PART_SIZE_BYTES] {
+            let big = upload_limits_from_values(
+                Some(&part.to_string()),
+                Some(&(6 * 1024 * 1024 * 1024_i64).to_string()),
+                None,
+            )
+            .unwrap();
+            assert!(check_part_size_for_storage(&s3, &big).is_err());
+            assert!(check_part_size_for_storage(&local, &big).is_ok());
+        }
     }
 
     #[test]

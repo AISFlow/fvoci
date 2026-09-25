@@ -105,6 +105,16 @@ pub enum StorageError {
     PartTooLarge,
     #[error("etag mismatch")]
     EtagMismatch,
+    /// A non-final part is below the backend's minimum part size
+    /// (S3 `EntityTooSmall`).
+    #[error("part too small (EntityTooSmall)")]
+    PartTooSmall,
+    /// The part body has no declared length and the backend needs one.
+    #[error("part length required")]
+    LengthRequired,
+    /// The part body ended before, or ran past, its declared length.
+    #[error("part body does not match its declared length")]
+    LengthMismatch,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 }

@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::stream;
-use fvoci_server::attachments::{gc_stale_uploads, ObjectStorage, S3Storage, StorageError};
+use fvoci_server::attachments::{ObjectStorage, S3Storage, StorageError};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
 use fvoci_server::config::S3Settings;
@@ -333,6 +333,7 @@ async fn s3_multipart_complete_download_delete_and_abort() {
             Some(&upload_id),
             1,
             stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(body))]),
+            Some(body.len() as u64),
             body.len() as u64,
         )
         .await
@@ -392,6 +393,7 @@ async fn s3_complete_is_idempotent_when_object_already_published() {
             Some(&upload_id),
             1,
             stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(body))]),
+            Some(body.len() as u64),
             body.len() as u64,
         )
         .await
@@ -567,6 +569,19 @@ async fn s3_http_upload_download_and_stale_gc() {
     let cutoff = Utc::now() - chrono::Duration::hours(24);
 
     let pool = pool::connect_app(&harness.app_url).await.unwrap();
+    // Each run is bounded: the listing stops at the batch limit across
+    // workspaces instead of loading every stale row.
+    let one = fvoci_server::db::attachments::list_stale_uploading(&pool, cutoff, 1)
+        .await
+        .unwrap();
+    assert_eq!(one.len(), 1);
+    let all = fvoci_server::db::attachments::list_stale_uploading(&pool, cutoff, 10)
+        .await
+        .unwrap();
+    let mut seen: Vec<Uuid> = all.iter().map(|row| row.workspace_id).collect();
+    seen.dedup();
+    assert_eq!(all.len(), 2);
+    assert_eq!(seen.len(), 2, "stale rows from both workspaces: {all:?}");
     let purged = gc_stale_uploads(&pool, &gc_storage, cutoff)
         .await
         .expect("gc");
@@ -721,6 +736,7 @@ async fn stage_and_publish(
             stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(
                 body,
             ))]),
+            Some(body.len() as u64),
             body.len() as u64,
         )
         .await
@@ -831,8 +847,8 @@ async fn s3_error_paths_map_to_storage_errors() {
         .assemble_multipart(&key, Some(&upload_id), &[(1, a.etag), (2, b.etag)])
         .await
         .unwrap_err();
-    let message = err.to_string();
-    assert!(message.contains("EntityTooSmall"), "{message}");
+    // EntityTooSmall is a client part-list problem (4xx), not an I/O error.
+    assert!(matches!(err, StorageError::PartTooSmall), "{err:?}");
     assert_eq!(storage.head(&key).await.unwrap(), None);
     storage
         .abort_multipart(&key, Some(&upload_id))
@@ -860,6 +876,7 @@ async fn s3_error_paths_map_to_storage_errors() {
             stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"late",
             ))]),
+            Some(4),
             4,
         )
         .await
@@ -898,6 +915,7 @@ async fn s3_error_paths_map_to_storage_errors() {
                 Ok::<Bytes, std::io::Error>(Bytes::from_static(b"12345")),
                 Ok(Bytes::from_static(b"6789")),
             ]),
+            Some(9),
             8,
         )
         .await
@@ -1100,5 +1118,574 @@ async fn s3_http_two_part_upload_resume_and_range_download() {
         .await
         .unwrap();
     assert_eq!(&ranged[..], &payload[start..=end]);
+    harness.cleanup().await;
+}
+
+/// One bounded maintenance upload-GC pass; returns the number of rows purged.
+async fn gc_stale_uploads(
+    pool: &sqlx::PgPool,
+    storage: &ObjectStorage,
+    cutoff: chrono::DateTime<Utc>,
+) -> Result<u32, sqlx::Error> {
+    fvoci_server::jobs::run_stale_upload_gc(
+        pool,
+        storage,
+        cutoff,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map(|stats| stats.purged)
+}
+
+/// A part body that records whether the server ever polled it.
+fn tracked_body(chunks: Vec<Vec<u8>>) -> (axum::body::Body, Arc<std::sync::atomic::AtomicBool>) {
+    let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = polled.clone();
+    let mut chunks = chunks.into_iter();
+    let body = stream::poll_fn(move |_| {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::task::Poll::Ready(
+            chunks
+                .next()
+                .map(|chunk| Ok::<Bytes, std::io::Error>(Bytes::from(chunk))),
+        )
+    });
+    (axum::body::Body::from_stream(body), polled)
+}
+
+async fn put_raw(
+    app: &axum::Router,
+    cookie: &str,
+    url: &str,
+    content_length: Option<u64>,
+    body: axum::body::Body,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("PUT")
+        .uri(url)
+        .header("cookie", format!("fvoci_session={cookie}"))
+        .header("content-type", "application/octet-stream");
+    if let Some(len) = content_length {
+        builder = builder.header("content-length", len);
+    }
+    let mut req = builder.body(body).unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(test_peer()));
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn upload_ref_of(harness: &TestDb, attachment_id: &str) -> (String, Option<String>) {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let row: (String, Option<String>) = sqlx::query_as(
+        "SELECT storage_key, upload_meta->>'upload_ref' FROM fvoci.attachments WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(attachment_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    row
+}
+
+/// Review B1: proxied S3 parts stream with their declared length. An
+/// oversized or undeclared length is refused before the body is read, and a
+/// body that disagrees with its length never becomes an S3 part.
+#[tokio::test]
+async fn s3_part_put_streams_with_a_bounded_declared_length() {
+    let harness = TestDb::bootstrap().await;
+    let storage = s3_backend().await;
+    let (app, cookie, workspace_id) = setup_session(&harness, storage.clone()).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = patterned(1000, 5);
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+        Some(json!({ "name": "len.bin", "sizeBytes": payload.len() })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+    let part_url = created["parts"][0]["url"].as_str().unwrap().to_string();
+    let (key, upload_id) = upload_ref_of(&harness, &attachment_id).await;
+    let upload_id = upload_id.expect("upload id persisted");
+
+    // Declared length above the part maximum: 413 without reading a byte.
+    let (body, polled) = tracked_body(vec![vec![0u8; 5000]]);
+    let (status, problem) = put_raw(&app, &cookie, &part_url, Some(5000), body).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{problem:?}");
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+
+    // No declared length (chunked): refused before reading, nothing buffered.
+    let (body, polled) = tracked_body(vec![payload.clone()]);
+    let (status, problem) = put_raw(&app, &cookie, &part_url, None, body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem:?}");
+    assert_eq!(problem["code"], "invalid_input", "{problem:?}");
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Short and long bodies against a valid declared length fail the S3
+    // request, so no part is stored.
+    let (body, _) = tracked_body(vec![payload[..500].to_vec()]);
+    let (status, problem) = put_raw(&app, &cookie, &part_url, Some(1000), body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "short: {problem:?}");
+    let (body, _) = tracked_body(vec![payload.clone(), vec![1u8; 500]]);
+    let (status, problem) = put_raw(&app, &cookie, &part_url, Some(1000), body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "long: {problem:?}");
+    let parts = storage.list_parts(&key, Some(&upload_id)).await.unwrap();
+    assert!(
+        parts.is_empty(),
+        "rejected bodies must not be parts: {parts:?}"
+    );
+
+    // The exact declared length streams through in chunks and completes.
+    let (body, _) = tracked_body(payload.chunks(256).map(<[u8]>::to_vec).collect());
+    let (status, problem) = put_raw(&app, &cookie, &part_url, Some(1000), body).await;
+    assert_eq!(status, StatusCode::OK, "{problem:?}");
+    let parts = storage.list_parts(&key, Some(&upload_id)).await.unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].size_bytes, 1000);
+    let (status, completed, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": parts[0].etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "complete: {completed:?}");
+    assert_eq!(
+        storage.read_range(&key, 0, 999).await.unwrap(),
+        payload,
+        "streamed part must round-trip"
+    );
+    harness.cleanup().await;
+}
+
+/// Review N4: a non-final part under the S3 minimum makes complete answer a
+/// 4xx parts problem and leaves the upload resumable, not a 500.
+#[tokio::test]
+async fn s3_complete_with_too_small_part_is_a_client_error() {
+    let harness = TestDb::bootstrap().await;
+    let storage = s3_backend().await;
+    let part_size = 5 * MIB;
+    let (app, cookie, workspace_id) =
+        setup_session_with_part_size(&harness, storage.clone(), part_size as i64).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+        Some(json!({ "name": "small.bin", "sizeBytes": part_size + 1000 })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+    let parts = created["parts"].as_array().unwrap();
+    // Part 1 is below its maximum (allowed per request) but below 5 MiB.
+    let (status, etag1) = put_part(
+        &app,
+        &cookie,
+        parts[0]["url"].as_str().unwrap(),
+        &patterned(1000, 1),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, etag2) = put_part(
+        &app,
+        &cookie,
+        parts[1]["url"].as_str().unwrap(),
+        &patterned(1000, 2),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, problem, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [
+            { "partNumber": 1, "etag": etag1 },
+            { "partNumber": 2, "etag": etag2 }
+        ] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem:?}");
+    assert_eq!(
+        problem["code"], "submitted_parts_do_not_match_uploaded_parts",
+        "{problem:?}"
+    );
+    let (status, resume, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/upload"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "still resumable: {resume:?}");
+    assert_eq!(resume["uploadedParts"].as_array().unwrap().len(), 2);
+    harness.cleanup().await;
+}
+
+/// Review N1, pinned semantics: with S3 the part bytes reach the multipart
+/// upload before `commit_upload_part` rechecks the session (as with the
+/// source's presigned PUTs). A PUT whose session is revoked mid-request gets
+/// a 4xx and the part is listed by S3, but it is never published: complete
+/// with the revoked session is refused and no object exists.
+#[tokio::test]
+async fn s3_revocation_during_part_put_is_refused_and_never_published() {
+    use fvoci_server::db::attachments::test_barrier;
+
+    let harness = TestDb::bootstrap().await;
+    let storage = s3_backend().await;
+    let (app, cookie, workspace_id) = setup_session(&harness, storage.clone()).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"revoked-mid-put".to_vec();
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+        Some(json!({ "name": "revoke.bin", "sizeBytes": payload.len() })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+    let part_url = created["parts"][0]["url"].as_str().unwrap().to_string();
+    let (key, upload_id) = upload_ref_of(&harness, &attachment_id).await;
+    let upload_id = upload_id.expect("upload id persisted");
+
+    let mut barrier = test_barrier::arm_pre_publish(Uuid::parse_str(&attachment_id).unwrap());
+    let put = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        let payload = payload.clone();
+        async move { put_part(&app, &cookie, &part_url, &payload).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+        .await
+        .expect("PUT should reach the pre-publish barrier")
+        .expect("barrier entered");
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/logout",
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    barrier.proceed();
+    let (status, _) = put.await.unwrap();
+    assert!(status.is_client_error(), "revoked PUT answered {status}");
+
+    let listed = storage.list_parts(&key, Some(&upload_id)).await.unwrap();
+    assert_eq!(listed.len(), 1, "S3 holds the part bytes: {listed:?}");
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": listed[0].etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(storage.head(&key).await.unwrap(), None, "never published");
+    harness.cleanup().await;
+}
+
+/// Workspace purge with S3: every key's open multipart uploads (including an
+/// orphan whose id never reached the row) are aborted and objects deleted
+/// before the DB rows go. Wrong credentials or a missing bucket keep every
+/// row for the next sweep; an object that is already gone counts as deleted.
+#[tokio::test]
+async fn s3_workspace_purge_cleans_storage_before_rows() {
+    let harness = TestDb::bootstrap().await;
+    let storage = s3_backend().await;
+    let (app, cookie, _) = setup_session(&harness, storage.clone()).await;
+    let (status, body, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({ "name": "Purge", "slug": "s3purge" })),
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "create workspace: {status} {body:?}");
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let ws: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 's3purge'")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    let document_id = create_document(&app, &cookie, ws).await;
+
+    // One stored attachment.
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents/{document_id}/uploads"),
+        Some(json!({ "name": "kept.png", "sizeBytes": PNG_BYTES.len(), "declaredMime": "image/png" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let stored_id = created["attachmentId"].as_str().unwrap().to_string();
+    let (status, etag) = put_part(
+        &app,
+        &cookie,
+        created["parts"][0]["url"].as_str().unwrap(),
+        PNG_BYTES,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, completed, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/attachments/{stored_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed:?}");
+    let (stored_key, _) = upload_ref_of(&harness, &stored_id).await;
+
+    // One in-flight upload with a part, plus an orphan upload on its key.
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/documents/{document_id}/uploads"),
+        Some(json!({ "name": "inflight.bin", "sizeBytes": 7 })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let inflight_id = created["attachmentId"].as_str().unwrap().to_string();
+    let (status, _) = put_part(
+        &app,
+        &cookie,
+        created["parts"][0]["url"].as_str().unwrap(),
+        b"inflite",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (inflight_key, _) = upload_ref_of(&harness, &inflight_id).await;
+    storage
+        .create_multipart(&inflight_key)
+        .await
+        .unwrap()
+        .expect("orphan upload");
+    assert_eq!(
+        storage
+            .list_multipart_uploads(&inflight_key)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let (status, body, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{ws}"),
+        Some(json!({ "confirmSlug": "s3purge" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    sqlx::query(
+        "UPDATE fvoci.workspaces SET deleted_at = now() - interval '31 days' WHERE id = $1",
+    )
+    .bind(ws)
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    let pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let rows_left = |admin: &sqlx::PgPool| {
+        let admin = admin.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM fvoci.attachments WHERE workspace_id = $1",
+            )
+            .bind(ws)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    // Wrong secret (403) and a missing bucket (404 NoSuchBucket) are
+    // failures: storage and rows are both kept.
+    let mut bad_secret = s3_settings();
+    bad_secret.secret_access_key = "wrong-secret-for-purge".into();
+    let mut missing_bucket = s3_settings();
+    missing_bucket.bucket = format!("fvoci-missing-{}", Uuid::now_v7().simple());
+    for settings in [bad_secret, missing_bucket] {
+        let broken = ObjectStorage::from(S3Storage::new(settings).unwrap());
+        let stats = fvoci_server::jobs::run_workspace_purge(&pool, &broken, Utc::now(), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(stats.purged, 0, "{stats:?}");
+        assert!(stats.storage_failed > 0, "{stats:?}");
+        assert_eq!(rows_left(&admin).await, 2);
+        assert!(storage.head(&stored_key).await.unwrap().is_some());
+        assert_eq!(
+            storage
+                .list_multipart_uploads(&inflight_key)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    // A crash after an earlier storage delete: the object is already gone.
+    storage.delete_object(&stored_key).await.unwrap();
+    let stats = fvoci_server::jobs::run_workspace_purge(&pool, &storage, Utc::now(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(stats.purged, 1, "{stats:?}");
+    assert_eq!(stats.storage_failed, 0, "{stats:?}");
+    assert_eq!(rows_left(&admin).await, 0);
+    assert_eq!(storage.head(&stored_key).await.unwrap(), None);
+    assert_eq!(storage.head(&inflight_key).await.unwrap(), None);
+    assert!(storage
+        .list_multipart_uploads(&inflight_key)
+        .await
+        .unwrap()
+        .is_empty());
+    let gone: Option<Uuid> = sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_optional(&admin)
+        .await
+        .unwrap();
+    assert!(gone.is_none());
+    let again = fvoci_server::jobs::run_workspace_purge(&pool, &storage, Utc::now(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(again.purged, 0);
+    pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Native extraction reads the original through `ObjectStorage`: for S3 that
+/// is a ranged GET of the whole object (across a part boundary), with the
+/// size limit enforced from HeadObject before any byte is read.
+#[tokio::test]
+async fn s3_extract_input_reads_original_through_object_storage() {
+    let storage = s3_backend().await;
+    let key = Uuid::now_v7().to_string();
+    let upload_id = storage.create_multipart(&key).await.unwrap().unwrap();
+    let first = patterned(5 * MIB, 3);
+    let second = patterned(4096, 4);
+    let a = stage_and_publish(&storage, &key, &upload_id, 1, &first).await;
+    let b = stage_and_publish(&storage, &key, &upload_id, 2, &second).await;
+    storage
+        .assemble_multipart(&key, Some(&upload_id), &[(1, a.etag), (2, b.etag)])
+        .await
+        .unwrap();
+    let mut expected = first;
+    expected.extend(&second);
+    let read = fvoci_server::attachments::read_extract_input(&storage, &key, 64 * MIB as u64)
+        .await
+        .unwrap();
+    assert_eq!(read, expected);
+    let too_big =
+        fvoci_server::attachments::read_extract_input(&storage, &key, expected.len() as u64 - 1)
+            .await
+            .unwrap_err();
+    assert!(too_big.contains("exceeds"), "{too_big}");
+    storage.delete_object(&key).await.unwrap();
+    let missing = fvoci_server::attachments::read_extract_input(&storage, &key, 64 * MIB as u64)
+        .await
+        .unwrap_err();
+    assert!(missing.contains("missing"), "{missing}");
+}
+
+/// Post-restore check (`fvoci-migrate --verify-storage`): every stored
+/// attachment must exist in the bucket with its recorded size. A missing
+/// object is reported; a storage error is a failure, never "missing".
+#[tokio::test]
+async fn s3_verify_stored_objects_reports_missing_and_fails_on_storage_errors() {
+    let harness = TestDb::bootstrap().await;
+    let storage = s3_backend().await;
+    let (app, cookie, workspace_id) = setup_session(&harness, storage.clone()).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+        Some(json!({ "name": "verify.png", "sizeBytes": PNG_BYTES.len(), "declaredMime": "image/png" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+    let (status, etag) = put_part(
+        &app,
+        &cookie,
+        created["parts"][0]["url"].as_str().unwrap(),
+        PNG_BYTES,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, completed, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed:?}");
+    let (key, _) = upload_ref_of(&harness, &attachment_id).await;
+
+    let pool = pool::connect_app(&harness.app_url).await.unwrap();
+    let report = fvoci_server::attachments::verify_stored_objects(&pool, &storage)
+        .await
+        .unwrap();
+    assert_eq!(report.checked, 1);
+    assert!(report.is_complete(), "{report:?}");
+
+    let mut bad_secret = s3_settings();
+    bad_secret.secret_access_key = "wrong-secret-for-verify".into();
+    let broken = ObjectStorage::from(S3Storage::new(bad_secret).unwrap());
+    assert!(
+        fvoci_server::attachments::verify_stored_objects(&pool, &broken)
+            .await
+            .is_err(),
+        "a 403 must fail the check, not report the object missing"
+    );
+
+    storage.delete_object(&key).await.unwrap();
+    let report = fvoci_server::attachments::verify_stored_objects(&pool, &storage)
+        .await
+        .unwrap();
+    assert_eq!(
+        report.missing,
+        vec![Uuid::parse_str(&attachment_id).unwrap()]
+    );
+    assert!(!report.is_complete());
+    pool.close().await;
     harness.cleanup().await;
 }

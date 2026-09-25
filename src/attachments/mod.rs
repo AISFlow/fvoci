@@ -1,18 +1,16 @@
 mod backend;
-mod cleanup;
 mod disposition;
 mod extract_job;
 mod local;
 mod mime;
 mod range;
 mod s3;
+mod verify;
 
 pub use backend::{ObjectBody, ObjectStorage};
-pub use cleanup::{
-    cleanup_interval, gc_stale_uploads, spawn_stale_upload_cleanup, StaleUploadCleanupHandle,
-};
 pub use extract_job::{
-    spawn_extract_job, validate_extractor_bin, ExtractJobHandle, ExtractJobSettings,
+    read_extract_input, spawn_extract_job, validate_extractor_bin, ExtractJobHandle,
+    ExtractJobSettings,
 };
 
 pub use disposition::content_disposition_attachment;
@@ -20,6 +18,7 @@ pub use local::{LocalStorage, PartInfo, StagedPart, StorageError};
 pub use mime::{is_image_mime, sniff_mime_from_bytes};
 pub use range::{parse_range, ParsedRange};
 pub use s3::{S3Storage, MINIO_TEST_IMAGE};
+pub use verify::{verify_stored_objects, StorageVerifyReport};
 
 use std::fmt;
 

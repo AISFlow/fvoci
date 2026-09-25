@@ -15,7 +15,8 @@ use fvoci_server::db::magic::issue_password_reset_token;
 use fvoci_server::db::outbox::mark_processed;
 use fvoci_server::jobs::{
     run_daily_sweep, run_ics_token_gc, run_magic_token_gc, run_notification_gc, run_processed_gc,
-    run_workspace_purge, spawn_maintenance, JobClaim, MaintenanceSettings, JOB_KEY_DAILY,
+    run_stale_upload_sweep, run_workspace_purge, spawn_maintenance, JobClaim, MaintenanceSettings,
+    JOB_KEY_DAILY, JOB_KEY_UPLOADS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{admin_pool, app_pool, json_request, setup_session, TestDb};
@@ -595,6 +596,7 @@ async fn shutdown_drains_the_scheduler_loop() {
         MaintenanceSettings {
             tick: Duration::from_millis(20),
             interval: Duration::from_secs(3600),
+            ..MaintenanceSettings::default()
         },
         pool.clone(),
         storage,
@@ -756,6 +758,125 @@ async fn failed_digest_send_is_retried_with_the_same_window() {
         sink.last_text()
     );
 
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+async fn insert_stale_upload(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    uploader_id: Uuid,
+    storage_key: &str,
+) -> Uuid {
+    let attachment_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.attachments (
+            id, workspace_id, document_id, uploader_id, status, name, reserved_size_bytes,
+            storage_key, created_at
+        ) VALUES ($1, $2, $3, $4, 'uploading', 'stale.bin', 4, $5, now() - interval '25 hours')
+        "#,
+    )
+    .bind(attachment_id)
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(uploader_id)
+    .bind(storage_key)
+    .execute(admin)
+    .await
+    .expect("insert stale upload");
+    attachment_id
+}
+
+async fn attachment_exists(admin: &PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.attachments WHERE id = $1")
+        .bind(id)
+        .fetch_one(admin)
+        .await
+        .unwrap()
+        == 1
+}
+
+/// Abandoned-upload cleanup runs inside the one maintenance scheduler, under
+/// its own claim key and cadence, and drains with it on shutdown.
+#[tokio::test]
+async fn scheduler_runs_stale_upload_gc_under_its_own_claim() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let (root, storage) = temp_storage();
+    let (status, wiki) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"title": "upload gc", "parentId": null})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{wiki:?}");
+    let document_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
+    let key = Uuid::now_v7().to_string();
+    let staging = root.join("tmp").join(&key);
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("1"), b"part").unwrap();
+    let stale = insert_stale_upload(&admin, workspace_id, document_id, owner_id, &key).await;
+
+    // Another process holds the upload cleanup claim: this runner skips.
+    let held = JobClaim::try_claim(&pool, JOB_KEY_UPLOADS)
+        .await
+        .unwrap()
+        .expect("claim");
+    let ttl = Duration::from_secs(24 * 60 * 60);
+    let skipped = run_stale_upload_sweep(&pool, &storage, ttl, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(skipped.is_none());
+    assert!(attachment_exists(&admin, stale).await);
+    // The daily sweep's claim is separate and unaffected.
+    let daily = JobClaim::try_claim(&pool, JOB_KEY_DAILY)
+        .await
+        .unwrap()
+        .expect("daily claim is independent");
+    daily.release().await;
+    held.release().await;
+
+    let handle = spawn_maintenance(
+        MaintenanceSettings {
+            tick: Duration::from_millis(20),
+            interval: Duration::from_secs(3600),
+            upload_gc_interval: Duration::from_secs(3600),
+            upload_incomplete_ttl: ttl,
+        },
+        pool.clone(),
+        storage.clone(),
+        Arc::new(Mailer::disabled()),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while attachment_exists(&admin, stale).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scheduler did not purge the stale upload"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!staging.exists(), "staged parts must be removed");
+    handle.request_shutdown();
+    tokio::time::timeout(Duration::from_secs(2), handle.join())
+        .await
+        .expect("join within deadline")
+        .expect("join ok");
+
+    // Idempotent once drained.
+    let again = run_stale_upload_sweep(&pool, &storage, ttl, &CancellationToken::new())
+        .await
+        .unwrap()
+        .expect("claim free after shutdown");
+    assert_eq!(again.purged, 0);
+
+    let _ = std::fs::remove_dir_all(&root);
     admin.close().await;
     pool.close().await;
     harness.cleanup().await;

@@ -214,7 +214,7 @@ async fn process_one_claim(
         oversize_resource_limit(input.size_bytes)
     } else {
         let bytes =
-            read_storage_bytes(storage, &input.storage_key, settings.limits.max_input_bytes)
+            read_extract_input(storage, &input.storage_key, settings.limits.max_input_bytes)
                 .await
                 .map_err(|e| format!("storage read failed: {e}"))?;
         if cancel.is_cancelled() {
@@ -247,7 +247,11 @@ async fn process_one_claim(
     Ok(true)
 }
 
-async fn read_storage_bytes(
+/// Reads an attachment original through the configured `ObjectStorage`
+/// (local file or S3 ranged GET) into memory, refusing anything above
+/// `max_bytes` before reading. The bytes go to the extractor over stdin, so
+/// no temporary file is written on either driver.
+pub async fn read_extract_input(
     storage: &ObjectStorage,
     storage_key: &str,
     max_bytes: u64,

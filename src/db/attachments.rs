@@ -454,18 +454,6 @@ async fn fetch_after_create(
 /// Aborts every multipart upload that could still publish `storage_key`, then
 /// removes any published object. Errors propagate so callers keep the row and
 /// a later sweep retries instead of orphaning remote state.
-async fn abort_all_and_delete(
-    storage: &ObjectStorage,
-    storage_key: &str,
-) -> Result<(), StorageError> {
-    for upload_ref in storage.list_multipart_uploads(storage_key).await? {
-        storage
-            .abort_multipart(storage_key, upload_ref.as_deref())
-            .await?;
-    }
-    storage.delete_object(storage_key).await
-}
-
 async fn persist_upload_ref(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -500,7 +488,7 @@ pub async fn cleanup_reserved_upload(
     attachment_id: Uuid,
     storage_key: &str,
 ) -> Result<(), sqlx::Error> {
-    if abort_all_and_delete(storage, storage_key).await.is_err() {
+    if storage.purge_key(storage_key).await.is_err() {
         // Keep the reserved row: the stale-upload sweep retries the storage
         // cleanup after the TTL instead of losing track of a live upload.
         tracing::warn!(%attachment_id, "reserved upload storage cleanup failed; left for sweep");
@@ -898,7 +886,9 @@ async fn complete_owned_inner(
                 delete_attachment_row(lock, workspace_id, attachment_id).await?;
                 return Ok(CompleteAttempt::Denied(AttachmentDbError::InvalidInput));
             }
-            Err(StorageError::EtagMismatch) => {
+            // EntityTooSmall: a non-final part below the S3 minimum is a
+            // client-side part list problem, not a server failure.
+            Err(StorageError::EtagMismatch | StorageError::PartTooSmall) => {
                 revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
                 return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
             }
@@ -1144,7 +1134,8 @@ pub struct StaleUpload {
     pub workspace_id: Uuid,
 }
 
-/// Incomplete uploads created before `cutoff`, across every workspace.
+/// At most `limit` incomplete uploads created before `cutoff`, across every
+/// workspace.
 ///
 /// `fvoci.attachments` RLS has no system-context bypass, so this enumerates
 /// workspaces under the system context (which `fvoci.workspaces` allows) and
@@ -1153,6 +1144,7 @@ pub struct StaleUpload {
 pub async fn list_stale_uploading(
     pool: &PgPool,
     cutoff: chrono::DateTime<Utc>,
+    limit: i64,
 ) -> Result<Vec<StaleUpload>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let previous = set_system(&mut tx).await?;
@@ -1163,6 +1155,10 @@ pub async fn list_stale_uploading(
     restore_system(&mut tx, &previous).await?;
     let mut stale = Vec::new();
     for workspace_id in workspace_ids {
+        let remaining = limit - stale.len() as i64;
+        if remaining <= 0 {
+            break;
+        }
         set_tenant(&mut tx, workspace_id).await?;
         let ids: Vec<Uuid> = sqlx::query_scalar(
             r#"
@@ -1172,16 +1168,70 @@ pub async fn list_stale_uploading(
               AND status IN ('uploading', 'assembling')
               AND created_at < $2
             ORDER BY created_at ASC, id ASC
+            LIMIT $3
             "#,
         )
         .bind(workspace_id)
         .bind(cutoff)
+        .bind(remaining)
         .fetch_all(&mut *tx)
         .await?;
         stale.extend(ids.into_iter().map(|id| StaleUpload { id, workspace_id }));
     }
     tx.commit().await?;
     Ok(stale)
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredObject {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub storage_key: String,
+    pub size_bytes: i64,
+}
+
+/// Every stored attachment's key and size in one workspace, read under that
+/// workspace's tenant context (the app role has no cross-tenant bypass).
+pub async fn list_workspace_stored_objects(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<StoredObject>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let rows: Vec<(Uuid, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT id, storage_key, size_bytes
+        FROM fvoci.attachments
+        WHERE workspace_id = $1 AND status = 'stored'
+        ORDER BY id
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, storage_key, size_bytes)| StoredObject {
+            id,
+            workspace_id,
+            storage_key,
+            size_bytes,
+        })
+        .collect())
+}
+
+/// All workspace ids, including soft-deleted ones whose attachments still
+/// hold storage until purge.
+pub async fn list_all_workspace_ids(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let previous = set_system(&mut tx).await?;
+    let ids = sqlx::query_scalar("SELECT id FROM fvoci.workspaces ORDER BY id")
+        .fetch_all(&mut *tx)
+        .await?;
+    restore_system(&mut tx, &previous).await?;
+    tx.commit().await?;
+    Ok(ids)
 }
 
 pub async fn gc_stale_upload_row(
@@ -1227,7 +1277,8 @@ async fn gc_stale_upload_locked(
     }
     tx.commit().await?;
 
-    abort_all_and_delete(storage, &storage_key)
+    storage
+        .purge_key(&storage_key)
         .await
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
 

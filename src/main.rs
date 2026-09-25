@@ -9,8 +9,7 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use fvoci_server::attachments::{
-    cleanup_interval, spawn_extract_job, spawn_stale_upload_cleanup, ExtractJobHandle,
-    ExtractJobSettings, ObjectStorage, StaleUploadCleanupHandle,
+    spawn_extract_job, ExtractJobHandle, ExtractJobSettings, ObjectStorage,
 };
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::hub::ShutdownStatus;
@@ -89,7 +88,6 @@ struct DrainOutcome {
     hub: HubOutcome,
     extract: Result<(), String>,
     outbox: Result<(), String>,
-    stale_uploads: Result<(), String>,
     maintenance: Result<(), String>,
 }
 
@@ -245,16 +243,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             None
         }
     };
-    let stale_upload_cleanup = spawn_stale_upload_cleanup(
-        pool.clone(),
-        storage.clone(),
-        config.upload_incomplete_ttl,
-        cleanup_interval(),
-    );
-    tracing::info!(
-        ttl_secs = config.upload_incomplete_ttl.as_secs(),
-        "abandoned upload cleanup enabled"
-    );
     let mailer = std::sync::Arc::new(fvoci_server::mail::Mailer::from_smtp(config.smtp.clone()));
     if mailer.enabled() {
         tracing::info!("smtp mailer enabled");
@@ -277,8 +265,14 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("outbox dispatcher idle (no consumers registered)");
     }
+    let maintenance_settings = MaintenanceSettings::from_env(config.upload_incomplete_ttl);
+    tracing::info!(
+        ttl_secs = maintenance_settings.upload_incomplete_ttl.as_secs(),
+        interval_secs = maintenance_settings.upload_gc_interval.as_secs(),
+        "abandoned upload cleanup scheduled in maintenance"
+    );
     let maintenance = Some(spawn_maintenance(
-        MaintenanceSettings::from_env(),
+        maintenance_settings,
         pool.clone(),
         storage.clone(),
         mailer.clone(),
@@ -303,13 +297,11 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let (signaled_tx, signaled_rx) = tokio::sync::oneshot::channel::<Instant>();
     let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
-    let stale_upload_task = Arc::new(tokio::sync::Mutex::new(Some(stale_upload_cleanup)));
     let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
     let maintenance_task = Arc::new(tokio::sync::Mutex::new(maintenance));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
-    let stale_upload_task_for_signal = stale_upload_task.clone();
     let outbox_task_for_signal = outbox_task.clone();
     let maintenance_task_for_signal = maintenance_task.clone();
 
@@ -325,12 +317,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             if let Some(job) = extract_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
                 tracing::info!("attachment extract shutdown started concurrently with HTTP drain");
-            }
-            if let Some(job) = stale_upload_task_for_signal.lock().await.as_ref() {
-                job.request_shutdown();
-                tracing::info!(
-                    "stale upload cleanup shutdown started concurrently with HTTP drain"
-                );
             }
             if let Some(job) = outbox_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
@@ -379,7 +365,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
-                    let stale_uploads = join_stale_upload_finished(&stale_upload_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
                     drain_pool.close().await;
@@ -388,7 +373,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                         hub,
                         extract,
                         outbox,
-                        stale_uploads,
                         maintenance,
                     }
                 },
@@ -412,7 +396,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
-                    let stale_uploads = join_stale_upload_finished(&stale_upload_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
                     drain_pool.close().await;
@@ -421,7 +404,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                         hub,
                         extract,
                         outbox,
-                        stale_uploads,
                         maintenance,
                     }
                 },
@@ -448,16 +430,6 @@ async fn join_extract_finished(
     extract_task: &tokio::sync::Mutex<Option<ExtractJobHandle>>,
 ) -> Result<(), String> {
     if let Some(job) = extract_task.lock().await.take() {
-        job.request_shutdown();
-        job.join().await?;
-    }
-    Ok(())
-}
-
-async fn join_stale_upload_finished(
-    task: &tokio::sync::Mutex<Option<StaleUploadCleanupHandle>>,
-) -> Result<(), String> {
-    if let Some(job) = task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;
     }
@@ -548,7 +520,6 @@ where
             if let Some(error) = hub_failure_error(joined)
                 .or_else(|| hub_failure_error(outcome.hub))
                 .or_else(|| extract_failure_error(outcome.extract))
-                .or_else(|| extract_failure_error(outcome.stale_uploads))
                 .or_else(|| extract_failure_error(outcome.outbox))
                 .or_else(|| extract_failure_error(outcome.maintenance))
             {
@@ -667,7 +638,6 @@ mod shutdown_outcome_tests {
                         hub: HubOutcome::Clean,
                         extract: Ok(()),
                         outbox: Ok(()),
-                        stale_uploads: Ok(()),
                         maintenance: Ok(()),
                     }
                 },

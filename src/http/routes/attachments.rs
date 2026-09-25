@@ -243,6 +243,7 @@ async fn put_upload_part(
         }
         Err(_) => return Err(AppError::internal()),
     };
+    let declared_len = declared_body_length(&headers, &body)?;
     let stream = body.into_data_stream();
     let mut staged = state
         .storage
@@ -251,6 +252,7 @@ async fn put_upload_part(
             upload_ref.as_deref(),
             part_number,
             stream,
+            declared_len,
             max_bytes,
         )
         .await
@@ -606,14 +608,32 @@ async fn serve_download(
     }
 }
 
+/// The part's declared length: `Content-Length`, or the exact size the body
+/// already knows (e.g. a buffered body). A malformed header is rejected; no
+/// declared length at all (chunked) yields `None`, which the S3 driver refuses.
+fn declared_body_length(headers: &HeaderMap, body: &Body) -> Result<Option<u64>, AppError> {
+    match headers.get(CONTENT_LENGTH) {
+        Some(value) => value
+            .to_str()
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Some)
+            .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput)),
+        None => Ok(axum::body::HttpBody::size_hint(body).exact()),
+    }
+}
+
 fn map_storage_error(err: StorageError) -> AppError {
     match err {
         StorageError::PartTooLarge => AppError::from_code(ProblemCode::PartExceedsUploadPartSizeMb),
         StorageError::UploadGone | StorageError::InvalidKey => {
             AppError::from_code(ProblemCode::UploadIsNotInTheRequiredState)
         }
-        StorageError::EtagMismatch => {
+        StorageError::EtagMismatch | StorageError::PartTooSmall => {
             AppError::from_code(ProblemCode::SubmittedPartsDoNotMatchUploadedParts)
+        }
+        StorageError::LengthRequired | StorageError::LengthMismatch => {
+            AppError::from_code(ProblemCode::InvalidInput)
         }
         _ => AppError::internal(),
     }

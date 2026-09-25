@@ -26,9 +26,10 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `S3_BUCKET` | Bucket name. Required when `STORAGE_DRIVER=s3`. The server probes with HeadBucket at startup and does not create the bucket. |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | Credentials. Required when `STORAGE_DRIVER=s3`. Never logged. |
 | `S3_FORCE_PATH_STYLE` | Path-style URLs unless set to `0` (default matches the source: on). |
-| `S3_PUBLIC_ENDPOINT` | Optional; validated (HTTP(S), no credentials/query/fragment) but **currently unused**. Parts and downloads are proxied through the API, so no bucket CORS or public S3 endpoint is needed. The source's direct presigned part PUT and 302 presigned download are not implemented yet and are tracked separately. |
-| `UPLOAD_INCOMPLETE_TTL_HOURS` | Abandoned `uploading`/`assembling` rows older than this are swept every 10 minutes: every open multipart upload for the key is aborted, any object deleted, then the row removed (default 24). A row whose storage cleanup fails is kept for the next sweep. Must be a positive integer. |
-| `FVOCI_UPLOAD_PART_SIZE_BYTES` | Multipart part size; defaults to 32 MiB. Must be positive and no larger than the maximum file size. With `STORAGE_DRIVER=s3` it must be at least 5 MiB (S3 minimum part size). The S3 driver buffers each proxied part in memory up to this size. |
+| `S3_PUBLIC_ENDPOINT` | Optional; validated (HTTP(S), no credentials/query/fragment) but **currently unused**. Only the proxied mode is implemented: parts and downloads go through the API, so no bucket CORS or public S3 endpoint is needed. **Not done** (source parity, tracked separately): presigned direct part PUT, 302 presigned download signed against `S3_PUBLIC_ENDPOINT`, the matching CSP `connect-src` and bucket CORS. |
+| `UPLOAD_INCOMPLETE_TTL_HOURS` | Abandoned `uploading`/`assembling` rows older than this are removed by the maintenance scheduler's upload-cleanup job: every open multipart upload for the key is aborted, any object deleted, then the row removed (default 24). A row whose storage cleanup fails is kept for the next run. Must be a positive integer. |
+| `FVOCI_UPLOAD_GC_INTERVAL_SECS` | Cadence of that upload-cleanup job (default 600). Each run takes its own cluster-wide advisory claim, examines at most 200 rows, and stops early on shutdown; leftovers wait for the next run. |
+| `FVOCI_UPLOAD_PART_SIZE_BYTES` | Multipart part size; defaults to 32 MiB. Must be positive and no larger than the maximum file size. With `STORAGE_DRIVER=s3` it must be between 5 MiB (S3 minimum part size) and 1 GiB. S3 parts are streamed to `UploadPart` with the request's declared length and are not buffered in server memory: a part PUT must declare `Content-Length` (browsers do for a `Blob` body), a length above the part's maximum is refused with 413 before the body is read, and a body shorter or longer than its declared length fails with 400 and is never stored. |
 | `FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES` | Upload size ceiling; defaults to 5120 MiB. This is independent of the native extractor's 20 MiB input ceiling. |
 | `FVOCI_UPLOAD_CREATE_RATE_PER_5MIN` | Upload creation rate limit; defaults to 120. Must be positive. |
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
@@ -105,7 +106,16 @@ The only database URL the server process requires is `DATABASE_APP_URL`.
 The current durability implementation requires the server account to read/search every ancestor of the storage directory up to `/`, as well as write within it, because those directory entries are synchronized. Validate permissions for the actual service account before deployment.
 
 Local attachment storage must be on persistent storage. A new empty directory
-does not restore the files referenced by an existing database. Uploads retain
+does not restore the files referenced by an existing database.
+
+With `STORAGE_DRIVER=s3`, the S3 client sends signed requests only to
+`S3_ENDPOINT`: it follows no redirects and ignores `HTTP(S)_PROXY`. Ranged
+downloads require a `206` whose `Content-Range` matches the request. A part PUT
+whose session is revoked while its body streams is answered 4xx after the bytes
+already reached the multipart upload (as with the source's presigned PUTs):
+S3 may list that part, but only the same uploader with a live session can
+complete the upload, so it is never published by the revoked session. The
+local driver stages the part and discards it instead. Uploads retain
 their original bytes separately from derived extraction results; native
 extraction job integration and search indexing are not yet accepted.
 
@@ -459,8 +469,12 @@ scripts/restore.sh \
 Restore starts postgres and Meilisearch on empty volumes, creates the
 application role, restores the dump, restores storage, then runs the one-shot
 `init` job (`fvoci-migrate`, `--grant-app-role`, `--ensure-meili-key`; all
-idempotent on this path) and starts the server. Confirm login with the original
-password, document body, attachment bytes, extraction text, and tasks.
+idempotent on this path), rebases the outbox, rebuilds search, and runs
+`fvoci-migrate --verify-storage` with the server's own environment: every
+`stored` attachment in the restored database must exist in the configured
+storage with its recorded size, or the restore stops before the server starts.
+Then it starts the server. Confirm login with the original password, document
+body, attachment bytes, extraction text, and tasks.
 
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
@@ -470,6 +484,40 @@ plus uid `1000` and that the restored server receives only `DATABASE_APP_URL`.
 Trap cleanup removes only those two projects. CI runs it as a separate job on
 `ubuntu-24.04` and `ubuntu-24.04-arm` in `.github/workflows/install.yml` (no
 secrets, no image publish).
+
+### S3 storage backup
+
+`scripts/backup.sh` and `scripts/restore.sh` archive and restore the **local**
+storage volume. They do not copy bucket objects, and a volume archive of an S3
+install would contain none, so `scripts/backup.sh` refuses a server running
+with `STORAGE_DRIVER=s3`. The supported model for S3 is:
+
+1. **Objects:** the operator protects the bucket itself: enable bucket
+   versioning (so a deleted or overwritten object can be recovered) and, for
+   site loss, replication to a second bucket/region, or the provider's backup
+   service. Attachment objects are immutable once `stored`; keys are
+   server-generated UUIDs.
+2. **Database:** a `pg_dump` of schemas `public` and `fvoci` taken the same way
+   as `scripts/backup.sh` does (custom format, owner role, server stopped so the
+   dump is quiesced). Objects deleted by workspace purge after the dump are
+   recoverable only from bucket versions.
+3. **Restore:** restore the dump, point the server at the bucket (or the
+   replica), and before starting the server run the storage check with the
+   server's environment:
+
+   ```sh
+   docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml \
+     --project-name <project> --env-file <env> \
+     run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
+   ```
+
+   It prints `{"checked":N,"missing":[...],"sizeMismatch":[...]}` and exits
+   non-zero when any stored attachment is missing or has a different size, or
+   when the bucket cannot be read (credentials, wrong bucket, network). Restore
+   the listed objects from bucket versions before starting the server.
+
+A scripted S3-aware backup/restore (dump-only archives, bucket snapshot
+orchestration) is not implemented.
 
 When `FVOCI_EXTRACTOR_BIN` is absent, extraction is explicitly disabled and stored
 HWP/HWPX attachments remain pending. An invalid configured path fails startup.
@@ -496,8 +544,8 @@ rhwp revision accompany extracted text. Results are stored for subsequent produc
 consumers. Search indexing and search permission-revocation propagation are not
 connected by this slice. Other attachment parents and thumbnails remain out
 of this slice's acceptance. S3-compatible storage and abandoned-upload cleanup
-are implemented behind `STORAGE_DRIVER=s3` and the local driver; they are not
-a claim that backup/restore of remote buckets is complete.
+are implemented behind `STORAGE_DRIVER=s3` and the local driver; see "S3
+storage backup" for what backup/restore covers with S3.
 
 The Native documents CI runs actual PostgreSQL product tests on x64 and ARM64.
 Its ordinary helper checks authenticated HWP/HWPX input, then a separately built

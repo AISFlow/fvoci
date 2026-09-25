@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
@@ -73,18 +73,24 @@ impl ObjectStorage {
         }
     }
 
+    /// Stages one part body. `declared_len` is the request's declared body
+    /// length; a length above `max_bytes` is refused before any byte is read.
     pub async fn stage_part_stream<S, E>(
         &self,
         key: &str,
         upload_ref: Option<&str>,
         part_number: i32,
         stream: S,
+        declared_len: Option<u64>,
         max_bytes: u64,
     ) -> Result<StagedPart, StorageError>
     where
-        S: Stream<Item = Result<Bytes, E>> + Unpin,
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+        S: Stream<Item = Result<Bytes, E>> + Unpin + Send + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
     {
+        if declared_len.is_some_and(|len| len > max_bytes) {
+            return Err(StorageError::PartTooLarge);
+        }
         match self {
             Self::Local(local) => {
                 let _ = upload_ref;
@@ -93,15 +99,17 @@ impl ObjectStorage {
                     .await
             }
             Self::S3(s3) => {
-                // S3 needs the part length up front, so the body is buffered
-                // (bounded by `max_bytes`) and uploaded before the caller
-                // commits. Like the source's presigned PUTs, an uploaded part
-                // stays invisible until `CompleteMultipartUpload` names it.
+                // The body streams straight into UploadPart with its declared
+                // length, so no part is held in memory. Like the source's
+                // presigned PUTs, an uploaded part stays invisible until
+                // `CompleteMultipartUpload` names it.
+                let len = declared_len.ok_or(StorageError::LengthRequired)?;
                 let upload_id = upload_ref
                     .filter(|id| !id.is_empty())
                     .ok_or(StorageError::UploadGone)?;
-                let body = buffer_part(key, part_number, stream, max_bytes).await?;
-                let part = s3.upload_part(key, upload_id, part_number, body).await?;
+                let part = s3
+                    .upload_part_stream(key, upload_id, part_number, stream, len)
+                    .await?;
                 Ok(StagedPart::uploaded(part.etag, part.size_bytes))
             }
         }
@@ -146,6 +154,17 @@ impl ObjectStorage {
             Self::Local(local) => local.list_multipart_uploads(key).await,
             Self::S3(s3) => s3.list_multipart_uploads(key).await,
         }
+    }
+
+    /// Aborts every open multipart upload that could still publish `key`
+    /// (the row's own and any orphan whose id was never persisted), then
+    /// deletes the object. A missing upload or object counts as done; any
+    /// other storage error is returned so the caller keeps its DB row.
+    pub async fn purge_key(&self, key: &str) -> Result<(), StorageError> {
+        for upload_ref in self.list_multipart_uploads(key).await? {
+            self.abort_multipart(key, upload_ref.as_deref()).await?;
+        }
+        self.delete_object(key).await
     }
 
     pub async fn payload_exists(&self, key: &str) -> Result<bool, StorageError> {
@@ -263,29 +282,4 @@ impl From<LocalStorage> for ObjectStorage {
     fn from(local: LocalStorage) -> Self {
         Self::Local(local)
     }
-}
-
-async fn buffer_part<S, E>(
-    key: &str,
-    part_number: i32,
-    mut stream: S,
-    max_bytes: u64,
-) -> Result<Bytes, StorageError>
-where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    LocalStorage::assert_key(key)?;
-    if !(1..=10_000).contains(&part_number) {
-        return Err(StorageError::InvalidKey);
-    }
-    let mut buf = BytesMut::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| StorageError::Io(io::Error::other(err)))?;
-        if buf.len() as u64 + chunk.len() as u64 > max_bytes {
-            return Err(StorageError::PartTooLarge);
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(buf.freeze())
 }

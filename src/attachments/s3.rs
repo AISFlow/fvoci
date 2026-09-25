@@ -10,10 +10,15 @@
 //! error bodies are reduced to the operation, HTTP status and error code.
 
 use std::io;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use reqwest::{Client, Response, StatusCode};
+use futures_util::Stream;
+use reqwest::{redirect, Client, Response, StatusCode};
 use rusty_s3::actions::{CreateMultipartUpload, ListParts, S3Action};
 use rusty_s3::{Bucket, Credentials, UrlStyle};
 use serde::{Deserialize, Serialize};
@@ -39,6 +44,10 @@ const MAX_PART_NUMBER: i32 = 10_000;
 #[derive(Clone)]
 pub struct S3Storage {
     client: Client,
+    /// Streams proxied part bodies. reqwest's `read_timeout` also bounds the
+    /// wait for response headers, which for a streamed PUT includes the whole
+    /// upload of a client-paced body, so this client has none.
+    upload_client: Client,
     bucket: Bucket,
     credentials: Credentials,
     endpoint: String,
@@ -72,13 +81,16 @@ impl S3Storage {
         };
         let bucket = Bucket::new(endpoint, style, settings.bucket, settings.region)
             .map_err(|e| format!("invalid S3 bucket configuration: {e:?}"))?;
-        let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
+        let client = client_builder()
             .read_timeout(READ_TIMEOUT)
+            .build()
+            .map_err(|e| format!("s3 http client: {}", e.without_url()))?;
+        let upload_client = client_builder()
             .build()
             .map_err(|e| format!("s3 http client: {}", e.without_url()))?;
         Ok(Self {
             client,
+            upload_client,
             bucket,
             credentials: Credentials::new(settings.access_key_id, settings.secret_access_key),
             endpoint: settings.endpoint,
@@ -179,24 +191,43 @@ impl S3Storage {
         }
     }
 
-    pub async fn upload_part(
+    /// Streams one part straight to S3 with its declared length; nothing is
+    /// buffered beyond the chunk in flight. A body that ends early or runs
+    /// past `content_length` fails the request, so S3 never stores it.
+    pub async fn upload_part_stream<S, E>(
         &self,
         key: &str,
         upload_id: &str,
         part_number: i32,
-        body: Bytes,
-    ) -> Result<PartInfo, StorageError> {
+        stream: S,
+        content_length: u64,
+    ) -> Result<PartInfo, StorageError>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
+    {
         assert_key(key)?;
         let number = part_number_u16(part_number)?;
         if upload_id.is_empty() {
             return Err(StorageError::UploadGone);
         }
-        let size_bytes = body.len() as u64;
         let url = self
             .bucket
             .upload_part(Some(&self.credentials), key, number, upload_id)
             .sign(SIGN_TTL);
-        let res = self.send(self.client.put(url).body(body)).await?;
+        let body = ExactLength::new(stream, content_length);
+        let outcome = body.outcome.clone();
+        let sent = self
+            .upload_client
+            .put(url)
+            .header(reqwest::header::CONTENT_LENGTH, content_length)
+            .body(reqwest::Body::wrap_stream(body))
+            .send()
+            .await;
+        if outcome.load(Ordering::Acquire) == BODY_LENGTH_MISMATCH {
+            return Err(StorageError::LengthMismatch);
+        }
+        let res = sent.map_err(transport)?;
         let status = res.status();
         if !status.is_success() {
             let text = read_text(res).await?;
@@ -212,7 +243,7 @@ impl S3Storage {
         Ok(PartInfo {
             part_number,
             etag,
-            size_bytes,
+            size_bytes: content_length,
         })
     }
 
@@ -400,10 +431,16 @@ impl S3Storage {
             .sign(SIGN_TTL);
         let res = self.send(self.client.delete(url)).await?;
         let status = res.status();
-        if status.is_success() || status == StatusCode::NOT_FOUND {
-            Ok(())
-        } else {
-            Err(status_error("DeleteObject", res).await)
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = read_text(res).await?;
+        let code = error_code(&body);
+        // A missing key is already deleted; a missing bucket (also a 404) is
+        // a misconfiguration and must not let callers drop their DB rows.
+        match code.as_deref() {
+            None | Some("NoSuchKey") if status == StatusCode::NOT_FOUND => Ok(()),
+            code => Err(op_error("DeleteObject", status, code)),
         }
     }
 
@@ -439,7 +476,9 @@ impl S3Storage {
         Ok(bytes.to_vec())
     }
 
-    /// Opens the inclusive byte range `start..=end` of an object.
+    /// Opens the inclusive byte range `start..=end` of an object. The
+    /// response must be the requested range: a server or proxy that ignores
+    /// `Range` would otherwise stream the object from byte 0.
     pub async fn get_object(
         &self,
         key: &str,
@@ -467,8 +506,26 @@ impl S3Storage {
                 "object not found",
             )));
         }
-        if status != StatusCode::PARTIAL_CONTENT && status != StatusCode::OK {
+        if !status.is_success() {
             return Err(status_error("GetObject", res).await);
+        }
+        let wanted = end - start + 1;
+        let exact = match status {
+            StatusCode::PARTIAL_CONTENT => res
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| content_range_matches(v, start, end)),
+            // A whole-object 200 is only the requested range when it starts
+            // at 0 and has exactly the requested length.
+            StatusCode::OK => start == 0 && res.content_length() == Some(wanted),
+            _ => false,
+        };
+        if !exact {
+            return Err(StorageError::Io(io::Error::other(format!(
+                "GetObject returned HTTP {} without the requested range",
+                status.as_u16()
+            ))));
         }
         Ok(res)
     }
@@ -486,6 +543,102 @@ impl S3Storage {
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<Response, StorageError> {
         request.send().await.map_err(transport)
     }
+}
+
+/// No redirects (a redirect would replay a signed PUT body elsewhere) and no
+/// implicit `HTTP(S)_PROXY`: signed URLs go only to the configured endpoint.
+fn client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(redirect::Policy::none())
+        .no_proxy()
+}
+
+const BODY_OK: u8 = 0;
+const BODY_LENGTH_MISMATCH: u8 = 1;
+
+/// Passes a part body through while enforcing its declared length. The
+/// chunk that completes the length is held back until the source ends, so
+/// surplus bytes fail the upload instead of being silently dropped once the
+/// HTTP client has written `Content-Length` bytes. The outcome flag lets the
+/// caller tell a length violation from a transport or client-disconnect error
+/// once reqwest has wrapped both.
+struct ExactLength<S> {
+    inner: Pin<Box<S>>,
+    remaining: u64,
+    held: Option<Bytes>,
+    done: bool,
+    outcome: Arc<AtomicU8>,
+}
+
+impl<S> ExactLength<S> {
+    fn new(inner: S, length: u64) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            remaining: length,
+            held: None,
+            done: false,
+            outcome: Arc::new(AtomicU8::new(BODY_OK)),
+        }
+    }
+
+    fn mismatch(&mut self) -> Poll<Option<Result<Bytes, io::Error>>> {
+        self.done = true;
+        self.held = None;
+        self.outcome.store(BODY_LENGTH_MISMATCH, Ordering::Release);
+        Poll::Ready(Some(Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "part body does not match its declared length",
+        ))))
+    }
+}
+
+impl<S, E> Stream for ExactLength<S>
+where
+    S: Stream<Item = Result<Bytes, E>>,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Item = Result<Bytes, io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if this.done {
+                return Poll::Ready(this.held.take().map(Ok));
+            }
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(chunk))) if chunk.is_empty() => {}
+                Poll::Ready(Some(Ok(chunk))) => {
+                    let len = chunk.len() as u64;
+                    if this.held.is_some() || len > this.remaining {
+                        return this.mismatch();
+                    }
+                    this.remaining -= len;
+                    if this.remaining > 0 {
+                        return Poll::Ready(Some(Ok(chunk)));
+                    }
+                    this.held = Some(chunk);
+                }
+                Poll::Ready(Some(Err(err))) => {
+                    this.done = true;
+                    this.held = None;
+                    return Poll::Ready(Some(Err(io::Error::other(err))));
+                }
+                Poll::Ready(None) if this.remaining > 0 => return this.mismatch(),
+                Poll::Ready(None) => this.done = true,
+            }
+        }
+    }
+}
+
+fn content_range_matches(value: &str, start: u64, end: u64) -> bool {
+    value
+        .trim()
+        .strip_prefix("bytes ")
+        .and_then(|rest| rest.split_once('/'))
+        .and_then(|(range, _total)| range.split_once('-'))
+        .is_some_and(|(s, e)| s.parse() == Ok(start) && e.parse() == Ok(end))
 }
 
 #[derive(Serialize)]
@@ -587,6 +740,7 @@ fn op_error(op: &str, status: StatusCode, code: Option<&str>) -> StorageError {
         Some("NoSuchUpload") => StorageError::UploadGone,
         Some("InvalidPart" | "InvalidPartOrder") => StorageError::EtagMismatch,
         Some("EntityTooLarge") => StorageError::PartTooLarge,
+        Some("EntityTooSmall") => StorageError::PartTooSmall,
         _ => StorageError::Io(io::Error::other(format!(
             "{op} failed: HTTP {} code={}",
             status.as_u16(),
@@ -700,6 +854,64 @@ mod tests {
         )
         .unwrap();
         assert!(empty.uploads.is_empty());
+    }
+
+    #[test]
+    fn content_range_must_match_the_requested_range() {
+        assert!(content_range_matches("bytes 10-20/100", 10, 20));
+        assert!(!content_range_matches("bytes 0-99/100", 10, 20));
+        assert!(!content_range_matches("bytes 10-21/100", 10, 20));
+        assert!(!content_range_matches("items 10-20/100", 10, 20));
+        assert!(!content_range_matches("bytes */100", 10, 20));
+    }
+
+    #[tokio::test]
+    async fn exact_length_rejects_short_and_long_bodies() {
+        use futures_util::{stream, StreamExt};
+
+        async fn run(chunks: &[&'static [u8]], len: u64) -> (Vec<u8>, bool, u8) {
+            let body = ExactLength::new(
+                stream::iter(
+                    chunks
+                        .iter()
+                        .map(|c| Ok::<_, io::Error>(Bytes::from_static(c)))
+                        .collect::<Vec<_>>(),
+                ),
+                len,
+            );
+            let outcome = body.outcome.clone();
+            let items: Vec<_> = body.collect().await;
+            let failed = items.iter().any(Result::is_err);
+            let bytes = items
+                .into_iter()
+                .filter_map(Result::ok)
+                .flat_map(|b| b.to_vec())
+                .collect();
+            (bytes, failed, outcome.load(Ordering::Acquire))
+        }
+
+        assert_eq!(
+            run(&[b"ab", b"cd"], 4).await,
+            (b"abcd".to_vec(), false, BODY_OK)
+        );
+        let (_, failed, outcome) = run(&[b"ab"], 4).await;
+        assert!(failed);
+        assert_eq!(outcome, BODY_LENGTH_MISMATCH);
+        let (bytes, failed, outcome) = run(&[b"ab", b"cde"], 4).await;
+        assert_eq!(bytes, b"ab");
+        assert!(failed);
+        assert_eq!(outcome, BODY_LENGTH_MISMATCH);
+        // Surplus after an exact-length prefix still fails: the completing
+        // chunk is held until the source ends.
+        let (bytes, failed, outcome) = run(&[b"ab", b"cd", b"e"], 4).await;
+        assert_eq!(bytes, b"ab");
+        assert!(failed);
+        assert_eq!(outcome, BODY_LENGTH_MISMATCH);
+        assert_eq!(run(&[], 0).await, (Vec::new(), false, BODY_OK));
+        assert_eq!(
+            run(&[b"", b"abcd", b""], 4).await,
+            (b"abcd".to_vec(), false, BODY_OK)
+        );
     }
 
     #[test]

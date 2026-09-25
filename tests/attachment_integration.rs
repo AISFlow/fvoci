@@ -9,7 +9,6 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::stream;
 use futures_util::StreamExt;
-use fvoci_server::attachments::gc_stale_uploads;
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::token::hash_token;
 use fvoci_server::auth::AuthService;
@@ -1085,6 +1084,7 @@ async fn put_stream_revocation_blocks_part_publication() {
             stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
                 bytes::Bytes::from_static(payload),
             )]),
+            None,
             payload.len() as u64,
         )
         .await
@@ -2389,4 +2389,20 @@ async fn writing_temps(root: &Path) -> usize {
         }
     }
     count
+}
+
+/// One bounded maintenance upload-GC pass; returns the number of rows purged.
+async fn gc_stale_uploads(
+    pool: &sqlx::PgPool,
+    storage: &fvoci_server::attachments::ObjectStorage,
+    cutoff: chrono::DateTime<Utc>,
+) -> Result<u32, sqlx::Error> {
+    fvoci_server::jobs::run_stale_upload_gc(
+        pool,
+        storage,
+        cutoff,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map(|stats| stats.purged)
 }
