@@ -344,6 +344,94 @@ fn skip_gc_revision_snapshot_restores_deleted_text() {
     }
 }
 
+fn snapshot_bytes_of(engine: &mut CollabEngine) -> Vec<u8> {
+    match engine.handle(&Request::RevisionSnapshot) {
+        EngineStatus::Ok {
+            applied: true,
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("revision snapshot b64"),
+        other => panic!("revision_snapshot: {other:?}"),
+    }
+}
+
+fn restore_update_of(engine: &mut CollabEngine, snap: &[u8]) -> Vec<u8> {
+    match engine.handle(&Request::RestoreFromSnapshot {
+        snap_b64: snap.to_vec(),
+        encoding: 1,
+    }) {
+        EngineStatus::Ok {
+            applied: true,
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("restore update b64"),
+        other => panic!("restore_from_snapshot: {other:?}"),
+    }
+}
+
+#[test]
+fn revision_snapshot_roundtrip_restores_structured_json() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("structured.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let before = project_of(&mut engine);
+    assert_eq!(before, expectations()["structured"]["prosemirror_json"]);
+    let snap = snapshot_bytes_of(&mut engine);
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: load_bytes("followup_edit.v1"),
+        encoding: 1,
+    }));
+    let after = project_of(&mut engine);
+    let after_text = after.to_string();
+    assert!(
+        after_text.contains("후속편집한글✨"),
+        "follow-up must be visible before restore, got {after_text}"
+    );
+    let forward = restore_update_of(&mut engine, &snap);
+    assert!(
+        !forward.is_empty(),
+        "restore of a past snapshot after later edits must produce a forward update"
+    );
+    let still_after = project_of(&mut engine);
+    assert_eq!(
+        still_after, after,
+        "RestoreFromSnapshot must not mutate the live Doc before the parent applies the update"
+    );
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: forward,
+        encoding: 1,
+    }));
+    let restored = project_of(&mut engine);
+    assert_eq!(
+        restored, before,
+        "forward restore must match the captured revision JSON"
+    );
+}
+
+#[test]
+fn restore_from_snapshot_keeps_marks_and_block_ids() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("marks_link_bold.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let before = project_of(&mut engine);
+    let snap = snapshot_bytes_of(&mut engine);
+    let forward = restore_update_of(&mut engine, &snap);
+    if !forward.is_empty() {
+        assert_ok_applied(&engine.handle(&Request::Apply {
+            update_b64: forward,
+            encoding: 1,
+        }));
+    }
+    let restored = project_of(&mut engine);
+    assert_eq!(restored, before);
+}
+
 #[test]
 fn invalid_utf8_is_malformed_result_and_child_is_recycled() {
     let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());

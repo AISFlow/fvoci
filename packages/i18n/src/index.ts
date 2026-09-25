@@ -33,6 +33,8 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   rate_limit_exceeded: "Rate limit exceeded",
   conflict: "conflict",
   project_archived: "project.archivedReadOnly",
+  restore_rejected: "restore rejected",
+  collab_timeout_retry: "collab timeout — retry",
   cannot_invite_a_role_above_your_own: "cannot invite a role above your own",
   cannot_manage_a_role_above_your_own: "cannot manage a workspace role above your own",
   invitation_not_found_or_expired: "invitation not found or expired",
@@ -43,6 +45,12 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   "limit.seats": "seat limit reached",
   "limit.guests": "guest limit reached",
   internal_error: "error.http.fallback",
+  document_version_mismatch: "document version mismatch (optimistic lock)",
+  wip_limit_exceeded: "wip limit exceeded",
+  task_hierarchy_violation: "task hierarchy violation",
+  invalid_recurrence_preset: "invalid recurrence preset",
+  task_archived: "task is archived — read-only",
+  status_not_in_project_workflow: "status not in project workflow",
 };
 
 export function tProblemTitle(

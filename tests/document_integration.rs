@@ -1688,7 +1688,7 @@ async fn app_role_rls_and_secret_grants_hold_for_new_tables() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::migration_count())
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
     );
     app_pool.close().await;
     admin.close().await;
@@ -1762,7 +1762,7 @@ async fn migration_001_003_upgrades_to_004_documents() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::migration_count())
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
     );
     let has_documents: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'fvoci' AND table_name = 'documents')",
@@ -1873,4 +1873,605 @@ async fn migration_001_003_upgrades_to_004_documents() {
         role_name,
     };
     cleanup.cleanup().await;
+}
+
+async fn create_doc(
+    app: &axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    parent_id: Option<&str>,
+    title: &str,
+) -> Value {
+    let body = match parent_id {
+        Some(parent) => json!({"parentId": parent, "title": title}),
+        None => json!({"parentId": null, "title": title}),
+    };
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(body),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    body
+}
+
+#[tokio::test]
+async fn document_move_sort_trash_restore_and_trash_list() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let root = create_doc(&app, &cookie, workspace_id, None, "Root").await;
+    let root_id = root["id"].as_str().unwrap();
+    let child = create_doc(&app, &cookie, workspace_id, Some(root_id), "Child").await;
+    let child_id = child["id"].as_str().unwrap();
+    let sibling = create_doc(&app, &cookie, workspace_id, None, "Sibling").await;
+    let sibling_id = sibling["id"].as_str().unwrap();
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{root_id}"),
+        Some(json!({"title": "Renamed root"})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["title"], "Renamed root");
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/move"),
+        Some(json!({"newParentId": sibling_id})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["parentId"], sibling_id);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/sort"),
+        Some(json!({"afterId": null})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let first_sort = body["sortKey"].as_str().unwrap();
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/trash"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/tree"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["id"] == child_id));
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/trash"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["items"][0]["id"], child_id);
+    assert_eq!(body["items"][0]["title"], "Child");
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/restore"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["sortKey"], first_sort);
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let moved_events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'document.moved' AND workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(moved_events.0 >= 2);
+    let trashed_events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'document.trashed' AND workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(trashed_events.0, 1);
+    let restored_events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'document.restored' AND workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(restored_events.0, 1);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_move_cycle_and_depth_are_rejected() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let root = create_doc(&app, &cookie, workspace_id, None, "Root").await;
+    let root_id = root["id"].as_str().unwrap();
+    let child = create_doc(&app, &cookie, workspace_id, Some(root_id), "Child").await;
+    let child_id = child["id"].as_str().unwrap();
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{root_id}/move"),
+        Some(json!({"newParentId": child_id})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "document_cycle");
+
+    let mut deepest_id = root_id.to_string();
+    for index in 0..19 {
+        let deepest = create_doc(
+            &app,
+            &cookie,
+            workspace_id,
+            Some(&deepest_id),
+            &format!("Deep {index}"),
+        )
+        .await;
+        deepest_id = deepest["id"].as_str().unwrap().to_string();
+    }
+
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/move"),
+        Some(json!({"newParentId": deepest_id})),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "tree_depth_limit");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_restore_rejects_trashed_parent() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let parent = create_doc(&app, &cookie, workspace_id, None, "Parent").await;
+    let parent_id = parent["id"].as_str().unwrap();
+    let child = create_doc(&app, &cookie, workspace_id, Some(parent_id), "Child").await;
+    let child_id = child["id"].as_str().unwrap();
+
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{parent_id}/trash"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{child_id}/restore"),
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "restore_rejected");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_lifecycle_denies_guest_and_non_member() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let doc = create_doc(&app, &owner_cookie, workspace_id, None, "Secret").await;
+    let doc_id = doc["id"].as_str().unwrap();
+    let (guest_id, guest_cookie) =
+        create_second_user_session(&harness, "guest2@example.com", "Guest").await;
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    fvoci_server::db::workspace::add_membership_for_test(
+        &app_pool,
+        workspace_id,
+        guest_id,
+        fvoci_server::db::workspace::WorkspaceRole::Guest,
+    )
+    .await
+    .unwrap();
+    app_pool.close().await;
+
+    for (method, path, body) in [
+        (
+            "POST",
+            format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/trash"),
+            None,
+        ),
+        (
+            "POST",
+            format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/move"),
+            Some(json!({"newParentId": doc_id})),
+        ),
+        (
+            "GET",
+            format!("/api/v1/workspaces/{workspace_id}/trash"),
+            None,
+        ),
+    ] {
+        let (status, body_json, _, _) =
+            json_request(app.clone(), method, &path, body, Some(&guest_cookie), &[]).await;
+        if method == "GET" {
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body_json["items"].as_array().unwrap().len(), 0);
+        } else {
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body_json["code"], "not_found");
+        }
+    }
+
+    let (other_id, other_cookie) =
+        create_second_user_session(&harness, "other@example.com", "Other").await;
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}"),
+        None,
+        Some(&other_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+    assert_ne!(other_id, guest_id);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_lifecycle_denies_other_workspace_and_revoked_session() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let doc = create_doc(&app, &owner_cookie, workspace_id, None, "Locked").await;
+    let doc_id = doc["id"].as_str().unwrap();
+
+    let (foreign_id, foreign_cookie) =
+        create_second_user_session(&harness, "foreign@example.com", "Foreign").await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let foreign_workspace = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(foreign_workspace)
+        .bind(fvoci_server::db::workspace::personal_workspace_slug(
+            foreign_id,
+        ))
+        .bind("Foreign")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(foreign_workspace)
+    .bind(foreign_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/trash"),
+        None,
+        Some(&foreign_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+
+    let (status, body, _, _) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/move"),
+        Some(json!({"newParentId": doc_id})),
+        Some(&owner_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "authentication_required");
+    assert_ne!(foreign_id, owner_id);
+    harness.cleanup().await;
+}
+
+async fn create_project_via_api(
+    app: &axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    key: &str,
+    visibility: &str,
+) -> Value {
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects"),
+        Some(json!({"key": key, "name": key, "visibility": visibility})),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    body
+}
+
+async fn add_workspace_member(
+    harness: &TestDb,
+    workspace_id: Uuid,
+    email: &str,
+    given_name: &str,
+    role: fvoci_server::db::workspace::WorkspaceRole,
+) -> (Uuid, String) {
+    let (user_id, cookie) = create_second_user_session(harness, email, given_name).await;
+    let pool = pool::connect_app(&harness.app_url).await.unwrap();
+    fvoci_server::db::workspace::add_membership_for_test(&pool, workspace_id, user_id, role)
+        .await
+        .unwrap();
+    pool.close().await;
+    (user_id, cookie)
+}
+
+#[tokio::test]
+async fn document_move_into_project_denies_unauthorized() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+
+    let (lead_id, lead_cookie) = add_workspace_member(
+        &harness,
+        workspace_id,
+        "lead@example.com",
+        "Lead",
+        fvoci_server::db::workspace::WorkspaceRole::Member,
+    )
+    .await;
+    let private = create_project_via_api(&app, &lead_cookie, workspace_id, "HID", "private").await;
+    let private_project_id = private["id"].as_str().unwrap();
+    let private_root_id = private["rootDocumentId"].as_str().unwrap();
+
+    let wiki = create_doc(&app, &lead_cookie, workspace_id, None, "Wiki").await;
+    let wiki_id = wiki["id"].as_str().unwrap();
+
+    let (outsider_id, outsider_cookie) = add_workspace_member(
+        &harness,
+        workspace_id,
+        "outsider@example.com",
+        "Outsider",
+        fvoci_server::db::workspace::WorkspaceRole::Member,
+    )
+    .await;
+    assert_ne!(outsider_id, lead_id);
+
+    async fn assert_move_denied(
+        admin: &PgPool,
+        app: &axum::Router,
+        cookie: &str,
+        workspace_id: Uuid,
+        document_id: &str,
+        new_parent_id: &str,
+    ) {
+        let moved_before: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM fvoci.events WHERE verb = 'document.moved' AND workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        let audit_before: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'document.moved' AND workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        let project_id_before: Option<(Option<Uuid>,)> = sqlx::query_as(
+            "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(Uuid::parse_str(document_id).unwrap())
+        .fetch_optional(admin)
+        .await
+        .unwrap();
+
+        let (status, body, _, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/move"),
+            Some(json!({"newParentId": new_parent_id})),
+            Some(cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "body={body:?}");
+        assert_eq!(body["code"], "not_found");
+
+        let moved_after: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM fvoci.events WHERE verb = 'document.moved' AND workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        let audit_after: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'document.moved' AND workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(admin)
+        .await
+        .unwrap();
+        let project_id_after: Option<(Option<Uuid>,)> = sqlx::query_as(
+            "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(Uuid::parse_str(document_id).unwrap())
+        .fetch_optional(admin)
+        .await
+        .unwrap();
+
+        assert_eq!(moved_before.0, moved_after.0);
+        assert_eq!(audit_before.0, audit_after.0);
+        assert_eq!(project_id_before, project_id_after);
+    }
+
+    assert_move_denied(
+        &admin,
+        &app,
+        &owner_cookie,
+        workspace_id,
+        wiki_id,
+        private_root_id,
+    )
+    .await;
+
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{private_project_id}/members"),
+        Some(json!({"userId": owner_id.to_string(), "role":"viewer"})),
+        Some(&lead_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_move_denied(
+        &admin,
+        &app,
+        &owner_cookie,
+        workspace_id,
+        wiki_id,
+        private_root_id,
+    )
+    .await;
+    assert_move_denied(
+        &admin,
+        &app,
+        &outsider_cookie,
+        workspace_id,
+        wiki_id,
+        private_root_id,
+    )
+    .await;
+
+    sqlx::query(
+        "UPDATE fvoci.projects SET status = 'archived' WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(Uuid::parse_str(private_project_id).unwrap())
+    .execute(&admin)
+    .await
+    .unwrap();
+    assert_move_denied(
+        &admin,
+        &app,
+        &lead_cookie,
+        workspace_id,
+        wiki_id,
+        private_root_id,
+    )
+    .await;
+
+    let lab = create_project_via_api(&app, &lead_cookie, workspace_id, "LAB", "workspace").await;
+    let lab_root_id = lab["rootDocumentId"].as_str().unwrap();
+    let movable = create_doc(&app, &lead_cookie, workspace_id, None, "Movable").await;
+    let movable_id = movable["id"].as_str().unwrap();
+    let (status, body, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{movable_id}/move"),
+        Some(json!({"newParentId": lab_root_id})),
+        Some(&lead_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["projectId"], lab["id"]);
+
+    admin.close().await;
+    harness.cleanup().await;
 }

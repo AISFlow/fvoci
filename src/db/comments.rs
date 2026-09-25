@@ -258,14 +258,9 @@ async fn target_of_comment(
     Err(CommentDbError::NotFound)
 }
 
-fn map_document_error(err: DocumentDbError) -> CommentDbError {
-    match err {
-        DocumentDbError::Forbidden => CommentDbError::NotFound,
-        DocumentDbError::NotFound
-        | DocumentDbError::AffiliationMismatch
-        | DocumentDbError::DepthLimit
-        | DocumentDbError::InvalidSortKey => CommentDbError::NotFound,
-    }
+fn map_document_error(_err: DocumentDbError) -> CommentDbError {
+    // Every document-side refusal is reported as not found (no existence leak).
+    CommentDbError::NotFound
 }
 
 async fn require_document_access(
@@ -276,11 +271,17 @@ async fn require_document_access(
     min: DocumentPermission,
     writable: bool,
 ) -> Result<(), CommentDbError> {
-    let permission = document_permission(tx, workspace_id, actor_user_id, document_id)
+    // Single wiki document permission path (db::documents::document_permission).
+    // Project documents resolve to None there, as on every other document path.
+    let permission = document_permission(tx, workspace_id, actor_user_id, document_id, true)
         .await
         .map_err(|_| CommentDbError::NotFound)?;
-    let permission = permission.map_err(map_document_error)?;
-    if !permission.at_least(min) {
+    let required = match min {
+        DocumentPermission::None => ProjectPermission::None,
+        DocumentPermission::View => ProjectPermission::View,
+        DocumentPermission::Edit => ProjectPermission::Edit,
+    };
+    if permission < required || permission == ProjectPermission::None {
         return Err(CommentDbError::NotFound);
     }
     if writable {

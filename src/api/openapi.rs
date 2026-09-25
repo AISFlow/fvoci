@@ -15,13 +15,16 @@ use crate::api::dto::{
     DocumentMetaResponse, ExpectedDatesBody, InvitationAcceptBody, InvitationConsentItem,
     InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
     InvitationPublicResponse, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
-    MemberResponse, MemberRoleBody, MembersResponse, MoveTaskBody, OkResponse, PatchCommentBody,
-    PatchDocumentBody, PatchMeBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody,
-    ProblemResponse, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
-    PutAttachmentPartResponse, ResumeAttachmentUploadResponse, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, TaskChildOutput, TaskChildProgressOutput, TaskListResponse,
-    TaskMetaOutput, TaskOutput, TaskParentOutput, TreeResponse, WorkflowOutput,
-    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+    MemberResponse, MemberRoleBody, MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse,
+    PatchCommentBody, PatchDocumentBody, PatchMeBody, PatchProjectBody, PatchTaskBody,
+    PatchWorkspaceBody, ProblemResponse, ProjectListResponse, ProjectMembersResponse,
+    ProjectOutput, PutAttachmentPartResponse, ResumeAttachmentUploadResponse,
+    RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse,
+    RevisionRestoreBody, RevisionRestoreResponse, SessionUserOutput, SetupBody, SetupResponse,
+    SetupStatusResponse, SortDocumentBody, TaskChildOutput, TaskChildProgressOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
+    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -87,6 +90,7 @@ impl Modify for CookieSecurityAddon {
         patch_document,
         get_ancestors,
         get_body,
+    create_revision, list_revisions, get_revision, restore_revision, move_document, sort_document, trash_document, restore_document, list_trash,
         create_attachment_upload,
         put_attachment_part,
         resume_attachment_upload,
@@ -153,6 +157,7 @@ impl Modify for CookieSecurityAddon {
             TreeResponse,
             AncestorsResponse,
             BodyResponse,
+    RevisionCreateResponse, RevisionMetaResponse, RevisionListResponse, RevisionDetailResponse, RevisionRestoreBody, RevisionRestoreResponse, MoveDocumentBody, SortDocumentBody, TrashListResponse, TrashItemResponse,
             CreateAttachmentUploadBody,
             CreateAttachmentUploadResponse,
             AttachmentPartUrlResponse,
@@ -986,6 +991,93 @@ fn patch_document() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/move",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = MoveDocumentBody,
+    responses(
+        (status = 200, description = "Moved document", body = DocumentMetaResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn move_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/sort",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = SortDocumentBody,
+    responses(
+        (status = 200, description = "Reordered document", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn sort_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/trash",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("children" = Option<String>, Query, description = "trash or reparent"),
+    ),
+    responses(
+        (status = 200, description = "Trashed", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn trash_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Restored", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Parent trashed", body = ProblemResponse),
+    )
+)]
+fn restore_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/trash",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Trashed documents", body = TrashListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_trash() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
     get,
     path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/ancestors",
     tag = "documents",
@@ -1017,6 +1109,89 @@ fn get_ancestors() {}
     )
 )]
 fn get_body() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 201, description = "Revision created", body = RevisionCreateResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Collab unavailable", body = ProblemResponse),
+    )
+)]
+fn create_revision() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("limit" = Option<i64>, Query, description = "Page size 1..=100, default 50"),
+        ("cursor" = Option<String>, Query, description = "Opaque list cursor"),
+    ),
+    responses(
+        (status = 200, description = "Revision list", body = RevisionListResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_revisions() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("revision_id" = String, description = "Revision id"),
+    ),
+    responses(
+        (status = 200, description = "Revision detail", body = RevisionDetailResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_revision() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("revision_id" = String, description = "Revision id"),
+    ),
+    request_body = RevisionRestoreBody,
+    responses(
+        (status = 200, description = "Restored", body = RevisionRestoreResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Restore rejected", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 504, description = "Collab timeout", body = ProblemResponse),
+    )
+)]
+fn restore_revision() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

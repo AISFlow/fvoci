@@ -92,7 +92,7 @@ jobs:
       - name: PostgreSQL integration tests
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
-        run: cargo test --locked --offline --no-fail-fast --features db-tests --test db_integration --test document_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration --test invitation_integration
+        run: cargo test --locked --offline --no-fail-fast --features db-tests --test db_integration --test document_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration --test invitation_integration --test comment_integration
 
   collaboration:
     name: ${{ matrix.check }}
@@ -154,4 +154,4 @@ jobs:
           set -o pipefail
           cargo test --locked --offline --features db-tests --lib collab::validation::tests::validate_recovery_bundle_huge_varint_memory_is_rejected -- --exact | tee "$RUNNER_TEMP/native-admission-test.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/native-admission-test.log"
-          cargo test --locked --offline --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown
+          cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration

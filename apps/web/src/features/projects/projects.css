@@ -123,10 +123,26 @@ dialog.project-dialog::backdrop {
 }
 
 .project-form__actions,
-.task-form__actions {
+.task-form__actions,
+.task-form__hierarchy-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+.task-form__hierarchy {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.task-form__hierarchy legend {
+  padding: 0;
+  font-size: var(--text-dense-size);
+  color: var(--muted-foreground);
 }
 
 .project-form select,
@@ -282,4 +298,16 @@ dialog.project-dialog::backdrop {
   border-radius: var(--radius);
   padding: 1rem;
   background: color-mix(in oklab, var(--muted) 35%, transparent);
+}
+
+.task-detail__archived {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  background: color-mix(in oklab, var(--muted) 45%, transparent);
 }

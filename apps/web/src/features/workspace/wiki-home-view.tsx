@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { EmptyState } from "@/components/empty-state";
 import { QueryError, QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
-import { documentPath, wikiDisplayId } from "@/lib/href";
+import { documentPath, trashPath, wikiDisplayId } from "@/lib/href";
 import type { TreeNode } from "@/lib/queries/documents";
 import { childrenByParent, childrenOf } from "@/features/workspace/wiki-tree";
 
@@ -113,6 +113,9 @@ export function WikiHomeView({
         <div className="wiki-home__intro">
           <h1 className="wiki-home__title">{t("nav.wiki")}</h1>
           <p className="wiki-home__role">{t("wiki.role.current", { role: roleLabel(role) })}</p>
+          <Link className="wiki-home__trash-link" to={trashPath(slug)}>
+            {t("trash.title")}
+          </Link>
         </div>
         {canCreate && !empty ? (
           <Button type="button" disabled={creating} onClick={onCreate}>

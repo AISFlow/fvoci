@@ -41,6 +41,8 @@ pub enum ProblemCode {
     RangeNotSatisfiable,
     Conflict,
     ProjectArchived,
+    RestoreRejected,
+    CollabTimeoutRetry,
     InternalError,
 }
 
@@ -82,6 +84,8 @@ impl ProblemCode {
             Self::RangeNotSatisfiable => "range_not_satisfiable",
             Self::Conflict => "conflict",
             Self::ProjectArchived => "project_archived",
+            Self::RestoreRejected => "restore_rejected",
+            Self::CollabTimeoutRetry => "collab_timeout_retry",
             Self::InternalError => "internal_error",
         }
     }
@@ -125,6 +129,8 @@ impl ProblemCode {
             Self::RangeNotSatisfiable => "range not satisfiable",
             Self::Conflict => "conflict",
             Self::ProjectArchived => "project archived",
+            Self::RestoreRejected => "restore rejected",
+            Self::CollabTimeoutRetry => "collab timeout — retry",
             Self::InternalError => "internal error",
         }
     }
@@ -156,7 +162,8 @@ impl ProblemCode {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
             Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
-            Self::Conflict | Self::ProjectArchived => StatusCode::CONFLICT,
+            Self::Conflict | Self::ProjectArchived | Self::RestoreRejected => StatusCode::CONFLICT,
+            Self::CollabTimeoutRetry => StatusCode::GATEWAY_TIMEOUT,
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,

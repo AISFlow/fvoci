@@ -12,6 +12,7 @@ pub mod migrate;
 pub mod pool;
 pub mod projects;
 pub mod quota;
+pub mod revisions;
 pub mod tasks;
 pub mod workspace;
 

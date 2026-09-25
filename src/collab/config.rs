@@ -27,6 +27,7 @@ pub struct CollabConfig {
     pub idle_evict_ms: u64,
     pub revoke_poll_ms: u64,
     pub client_id_ttl_ms: u64,
+    pub rpc_timeout_ms: u64,
 }
 
 impl CollabConfig {
@@ -113,6 +114,10 @@ impl CollabConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60_000);
+        let rpc_timeout_ms = env::var("COLLAB_RPC_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000);
         Some(Self {
             engine_bin,
             limits: Limits::default(),
@@ -134,6 +139,7 @@ impl CollabConfig {
             idle_evict_ms: idle_evict_ms.max(1_000),
             revoke_poll_ms: revoke_poll_ms.max(500),
             client_id_ttl_ms: client_id_ttl_ms.max(5_000),
+            rpc_timeout_ms: rpc_timeout_ms.max(1),
         })
     }
 

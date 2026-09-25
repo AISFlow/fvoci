@@ -852,7 +852,7 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .unwrap();
     assert_eq!(
         versions,
-        i64::from(fvoci_server::db::migrate::migration_count())
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
     );
     admin.close().await;
     harness.cleanup().await;
@@ -878,7 +878,7 @@ async fn versioned_migrations_are_idempotent_on_rerun() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::migration_count())
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
     );
     admin.close().await;
     harness.cleanup().await;
@@ -2167,7 +2167,7 @@ async fn migration_001_002_database_upgrades_to_003() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::migration_count())
+        i64::from(fvoci_server::db::migrate::latest_migration_version())
     );
     reapply_app_grants(&harness.admin_url, &harness.role_name).await;
     let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
