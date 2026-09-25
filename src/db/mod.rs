@@ -27,6 +27,7 @@ pub mod projects;
 pub mod quota;
 pub mod revisions;
 pub mod search_index;
+pub mod task_activity;
 pub mod tasks;
 pub mod workspace;
 

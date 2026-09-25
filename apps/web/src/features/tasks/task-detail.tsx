@@ -5,7 +5,7 @@ import type { WorkflowStatus } from "@/features/projects/queries";
 import { TaskDetailForm } from "./task-detail-form";
 import type { TaskDetail, TaskListItem, LabelItem, MilestoneItem } from "./queries";
 import type { MemberOutput } from "@/lib/contracts";
-import { CommentPanel } from "@/features/comments/comment-panel";
+import { TaskActivityPanel } from "@/features/comments/task-activity-panel";
 import "@/features/projects/projects.css";
 
 export function TaskDetailView({
@@ -123,11 +123,10 @@ export function TaskDetailView({
         <p className="task-home__note">{t("task.body.unavailable")}</p>
       </section>
       {currentUserId ? (
-        <CommentPanel
+        <TaskActivityPanel
           key={task.id}
           workspaceId={workspaceId}
-          kind="task"
-          targetId={task.id}
+          taskId={task.id}
           currentUserId={currentUserId}
           readOnly={readOnly}
         />

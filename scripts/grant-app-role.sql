@@ -83,6 +83,16 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.notifications TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.notification_prefs TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.workspace_holidays TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.ics_tokens TO :"app_role";
+GRANT SELECT, INSERT ON fvoci.task_activity TO :"app_role";
+REVOKE UPDATE, DELETE ON fvoci.task_activity FROM :"app_role";
+
+REVOKE ALL ON fvoci.magic_tokens FROM :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_magic_issue(text, text, uuid, integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_magic_issue(text, text, uuid, integer, timestamptz) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_magic_consume(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_magic_consume(text) TO :"app_role";
 
 REVOKE ALL ON fvoci.magic_tokens FROM :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) FROM PUBLIC;

@@ -7,17 +7,18 @@ use utoipa::{Modify, OpenApi};
 
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
-    AddProjectMemberBody, AncestorsResponse, ApiTokenCreateBody, ApiTokenCreatedOutput,
-    ApiTokenListResponse, ApiTokenOutput, AttachmentOutput, AttachmentPartUrlResponse,
-    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CloneProjectBody,
-    CommentListResponse, CommentOutput, CommentReactionBody, CommentReactionSummary,
-    CompleteAttachmentUploadBody, CreateAttachmentUploadBody, CreateAttachmentUploadResponse,
-    CreateCommentBody, CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody,
-    CreateMilestoneBody, CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody,
-    CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody,
-    GroupListResponse, GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput,
-    HolidaysListResponse, IcsTokenResponse, InvitationAcceptBody, InvitationConsentItem,
-    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    ActivityActorOutput, ActivityChangeOutput, ActivityCommentParentOutput, ActivityItemOutput,
+    ActivityListResponse, AddProjectMemberBody, AncestorsResponse, ApiTokenCreateBody,
+    ApiTokenCreatedOutput, ApiTokenListResponse, ApiTokenOutput, AttachmentOutput,
+    AttachmentPartUrlResponse, AttachmentUploadedPartResponse, BodyResponse, BrandingOutput,
+    CloneProjectBody, CommentListResponse, CommentOutput, CommentReactionBody,
+    CommentReactionSummary, CompleteAttachmentUploadBody, CreateAttachmentUploadBody,
+    CreateAttachmentUploadResponse, CreateCommentBody, CreateDocumentBody, CreateGroupBody,
+    CreateHolidayBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody, CreateTaskBody,
+    CreateTaskDependencyBody, CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse,
+    ExpectedDatesBody, GroupListResponse, GroupMemberBody, GroupMemberListResponse,
+    GroupMemberOutput, GroupOutput, HolidaysListResponse, IcsTokenResponse, InvitationAcceptBody,
+    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
     InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
     LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
     MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
@@ -128,6 +129,7 @@ impl Modify for CookieSecurityAddon {
         list_tasks,
         create_task,
         get_task,
+        list_task_activity,
         patch_task,
         move_task,
         trash_task,
@@ -287,6 +289,11 @@ impl Modify for CookieSecurityAddon {
             CommentReactionBody,
             CommentReactionSummary,
             CommentOutput,
+            ActivityActorOutput,
+            ActivityChangeOutput,
+            ActivityCommentParentOutput,
+            ActivityItemOutput,
+            ActivityListResponse,
             CommentListResponse,
             ProblemResponse,
         )
@@ -1577,6 +1584,27 @@ fn create_task() {}
     )
 )]
 fn get_task() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/activity",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+        ("filter" = Option<String>, Query, description = "all | comments | changes"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size"),
+    ),
+    responses(
+        (status = 200, description = "Task activity feed", body = ActivityListResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_task_activity() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
