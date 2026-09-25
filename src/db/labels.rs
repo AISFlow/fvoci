@@ -361,38 +361,27 @@ pub async fn purge_label(
     Ok(Ok(()))
 }
 
-pub async fn label_is_visible(
+/// Task list `labelId` filter: the label must belong to the listed project (the
+/// caller has already been checked for view access to that project).
+pub async fn project_label_exists(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
-    actor_user_id: Uuid,
+    project_id: Uuid,
     label_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let Some(role) = membership_role(tx, workspace_id, actor_user_id).await? else {
-        return Ok(false);
-    };
-    let guest = role == WorkspaceRole::Guest;
-    let visible = visible_project_sql("p", 3, 4);
-    let sql = format!(
+    let exists: (bool,) = sqlx::query_as(
         r#"
         SELECT EXISTS (
-            SELECT 1
-            FROM fvoci.labels l
-            INNER JOIN fvoci.projects p
-                ON p.workspace_id = l.workspace_id AND p.id = l.project_id
-            WHERE l.workspace_id = $1
-              AND l.id = $2
-              AND p.deleted_at IS NULL
-              AND {visible}
+            SELECT 1 FROM fvoci.labels
+            WHERE workspace_id = $1 AND project_id = $2 AND id = $3
         )
-        "#
-    );
-    let exists: (bool,) = sqlx::query_as(&sql)
-        .bind(workspace_id)
-        .bind(label_id)
-        .bind(guest)
-        .bind(actor_user_id)
-        .fetch_one(&mut **tx)
-        .await?;
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(label_id)
+    .fetch_one(&mut **tx)
+    .await?;
     Ok(exists.0)
 }
 

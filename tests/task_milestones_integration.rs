@@ -249,6 +249,37 @@ async fn milestone_errors_and_invisible_filter() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{problem}");
     assert_eq!(problem["code"], "not_found");
 
+    // Filter ids must belong to the listed project (source view-query adds
+    // project_id), even when the caller can see the other project.
+    let other_label = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{other_id}/labels"),
+        Some(json!({"name": "other", "color": "blue"})),
+        Some(&cookie),
+    )
+    .await
+    .1;
+    for filter in [
+        format!(r#"{{"filters":{{"milestoneId":"{other_ms_id}"}}}}"#),
+        format!(
+            r#"{{"filters":{{"labelId":"{}"}}}}"#,
+            other_label["id"].as_str().unwrap()
+        ),
+    ] {
+        let q = encode_query(&filter);
+        let (status, problem) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks?query={q}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{filter} {problem}");
+        assert_eq!(problem["code"], "invalid_input");
+    }
+
     let missing = encode_query(&format!(
         r#"{{"filters":{{"milestoneId":"{}"}}}}"#,
         Uuid::now_v7()
