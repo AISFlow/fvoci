@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::auth::password::{hash_password, verify_password, Keyring};
 use crate::auth::token::{hash_token, new_token};
 use crate::db::context::{
-    clear_invitation_token_hash, lock_membership_users, recheck_session, set_invitation_token_hash,
-    set_tenant,
+    clear_invitation_token_hash, clear_self_user, lock_membership_users, recheck_session,
+    set_invitation_token_hash, set_self_user, set_tenant,
 };
 use crate::db::identity::{
     find_user_id_by_email, issue_session, password_hash_by_id, rehash_password_if_unchanged,
@@ -48,6 +48,8 @@ pub struct InvitationPublic {
     pub workspace_name: String,
     pub email_masked: String,
     pub role: WorkspaceRole,
+    /// Required latest legal documents the invitee must accept (kind, version, title).
+    pub required_legal: Vec<(String, i32, String)>,
 }
 
 pub struct CreatedInvitation {
@@ -60,6 +62,10 @@ pub struct AcceptInvitationRequest<'a> {
     pub family_name: Option<&'a str>,
     pub password: Option<&'a str>,
     pub client_ip: Option<&'a str>,
+    /// Submitted `consents` items (kind, version).
+    pub consents: &'a [(String, i32)],
+    /// Instance `defaults.user` for a new account.
+    pub defaults: &'a crate::settings::DefaultsUserSettings,
 }
 
 type InvitationScan = (
@@ -78,6 +84,7 @@ struct NewAccount {
     given_name: String,
     family_name: Option<String>,
     password_hash: String,
+    defaults: crate::settings::DefaultsUserSettings,
 }
 
 pub async fn remove_pending_by_inviter(
@@ -234,10 +241,16 @@ pub async fn get_invitation_public(
         return Ok(Err(InvitationDbError::NotFound));
     }
     tx.commit().await?;
+    let required_legal = crate::db::legal::required_latest(pool)
+        .await?
+        .into_iter()
+        .map(|doc| (doc.kind, doc.version, doc.title))
+        .collect();
     Ok(Ok(InvitationPublic {
         workspace_name: name,
         email_masked: mask_email(&invitation.email),
         role: invitation.role,
+        required_legal,
     }))
 }
 
@@ -257,8 +270,10 @@ pub async fn accept_invitation(
         }
     }
 
-    // Legal documents are not ported; source coverage is vacuously true when
-    // listRequiredLatest is empty, so 428 is wired but not reachable yet.
+    let required = crate::db::legal::required_latest(pool).await?;
+    if !crate::db::legal::covers_required(&required, request.consents) {
+        return Ok(Err(InvitationDbError::ConsentRequired));
+    }
     let existing = find_user_id_by_email(pool, &invitation.email).await?;
     let mut new_account = None;
     let user_id;
@@ -302,11 +317,19 @@ pub async fn accept_invitation(
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
             password_hash,
+            defaults: request.defaults.clone(),
         });
     }
 
-    if let Err(err) =
-        grant_membership(pool, &invitation, user_id, new_account, request.client_ip).await?
+    if let Err(err) = grant_membership(
+        pool,
+        &invitation,
+        user_id,
+        new_account,
+        request.client_ip,
+        request.consents,
+    )
+    .await?
     {
         return Ok(Err(err));
     }
@@ -325,6 +348,7 @@ async fn grant_membership(
     user_id: Uuid,
     new_account: Option<NewAccount>,
     client_ip: Option<&str>,
+    consents: &[(String, i32)],
 ) -> Result<Result<(), InvitationDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;
@@ -363,8 +387,11 @@ async fn grant_membership(
         }
         sqlx::query(
             r#"
-            INSERT INTO fvoci.users (id, email, password_hash, given_name, family_name)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO fvoci.users (
+                id, email, password_hash, given_name, family_name,
+                locale, timezone, week_starts_on, text_scale
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(user_id)
@@ -372,6 +399,10 @@ async fn grant_membership(
         .bind(&new_account.password_hash)
         .bind(&new_account.given_name)
         .bind(&new_account.family_name)
+        .bind(&new_account.defaults.locale)
+        .bind(&new_account.defaults.timezone)
+        .bind(new_account.defaults.week_starts_on as i32)
+        .bind(new_account.defaults.text_scale as i16)
         .execute(&mut *tx)
         .await?;
     } else {
@@ -440,6 +471,19 @@ async fn grant_membership(
         },
     )
     .await?;
+    // Signup consents commit with the membership (source grantMembership).
+    if !consents.is_empty() {
+        set_self_user(&mut tx, user_id).await?;
+        crate::db::legal::insert_consents(
+            &mut tx,
+            user_id,
+            consents,
+            client_ip,
+            crate::db::legal::ConsentChannel::Signup,
+        )
+        .await?;
+        clear_self_user(&mut tx).await?;
+    }
     tx.commit().await?;
     Ok(Ok(()))
 }

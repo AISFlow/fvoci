@@ -19,6 +19,7 @@ pub mod outbox;
 pub mod projects;
 pub mod search;
 pub mod secret_box;
+pub mod settings;
 pub mod share_render;
 pub mod tasks;
 pub mod validate;

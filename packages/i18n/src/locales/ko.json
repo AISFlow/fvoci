@@ -634,6 +634,7 @@
 	"admin.workspaces": "워크스페이스",
 	"admin.system": "시스템",
 	"admin.instanceAdmin": "인스턴스 관리자",
+	"admin.console": "인스턴스 관리",
 	"admin.documents": "문서",
 	"admin.tasks": "태스크",
 	"admin.yes": "예",

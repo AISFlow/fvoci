@@ -2155,6 +2155,14 @@ async fn migration_001_002_database_upgrades_to_003() {
         .execute(&admin)
         .await
         .unwrap();
+    for policy in ["user_consents_select", "user_consents_insert"] {
+        sqlx::query(&format!(
+            "DROP POLICY IF EXISTS {policy} ON fvoci.user_consents"
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
     sqlx::query("ALTER TABLE fvoci.users DROP CONSTRAINT IF EXISTS users_personal_workspace_fk")
         .execute(&admin)
         .await

@@ -8,28 +8,34 @@ use utoipa::{Modify, OpenApi};
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
     ActivityActorOutput, ActivityChangeOutput, ActivityCommentParentOutput, ActivityItemOutput,
-    ActivityListResponse, AddProjectMemberBody, AncestorsResponse, ApiTokenCreateBody,
+    ActivityListResponse, AddProjectMemberBody, AdminInstanceSettingsOutput, AdminSystemOutput,
+    AdminUserItemOutput, AdminUserListResponse, AdminUserPatchBody, AdminUserPatchOutput,
+    AdminWorkspaceItemOutput, AdminWorkspaceListResponse, AncestorsResponse, ApiTokenCreateBody,
     ApiTokenCreatedOutput, ApiTokenListResponse, ApiTokenOutput, AttachmentOutput,
-    AttachmentPartUrlResponse, AttachmentUploadedPartResponse, BodyResponse, BrandingOutput,
-    CloneProjectBody, CommentListResponse, CommentOutput, CommentReactionBody,
-    CommentReactionSummary, CompleteAttachmentUploadBody, CreateAttachmentUploadBody,
-    CreateAttachmentUploadResponse, CreateCommentBody, CreateDocumentBody, CreateGroupBody,
-    CreateHolidayBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody, CreateTaskBody,
-    CreateTaskDependencyBody, CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse,
-    DocumentShareLinkCreateBody, ExpectedDatesBody, GroupListResponse, GroupMemberBody,
-    GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
-    IcsTokenResponse, ImportJobResponse, InvitationAcceptBody, InvitationConsentItem,
-    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
-    InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
-    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
-    MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
-    NotificationItemOutput, NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
-    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PasswordResetBody,
-    PasswordResetConfirmBody, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
-    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
-    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
-    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
-    PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
+    AttachmentPartUrlResponse, AttachmentUploadedPartResponse, AuditLogItemOutput,
+    AuditLogListResponse, BodyResponse, BrandingOutput, BrandingPatchSchema, CloneProjectBody,
+    CommentListResponse, CommentOutput, CommentReactionBody, CommentReactionSummary,
+    CompleteAttachmentUploadBody, ConsentItemBody, ConsentsPendingResponse, ConsentsSubmitBody,
+    CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
+    CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody, CreateMilestoneBody,
+    CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
+    DeleteWorkspaceBody, DocumentMetaResponse, DocumentShareLinkCreateBody, ExpectedDatesBody,
+    GroupListResponse, GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput,
+    HolidaysListResponse, IcsTokenResponse, ImportJobResponse, InstanceAdminBody,
+    InstanceSettingsOutput, InstanceSettingsPatchSchema, InvitationAcceptBody,
+    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    InvitationPublicResponse, LabelListResponse, LabelOutput, LegalDocumentOutput,
+    LegalPublishBody, LegalVersionMetaOutput, LegalVersionsResponse, LoginBody, LoginResponse,
+    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput,
+    MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse, MilestoneOutput,
+    MoveDocumentBody, MoveTaskBody, NotificationItemOutput, NotificationListResponse,
+    NotificationPatchBody, NotificationPrefsBody, NotificationReadAllResponse,
+    NotificationUnreadCountResponse, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
+    PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody,
+    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
+    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
+    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PublicBrandingOutput,
+    PublicSettingsValues, PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
     ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
     RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
     SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
@@ -38,8 +44,8 @@ use crate::api::dto::{
     StarCreateBody, StarItemOutput, StarListResponse, StartImportBody, TaskChildOutput,
     TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse,
     TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse,
-    TreeResponse, WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse,
-    WorkspaceMetaResponse,
+    TreeResponse, WorkflowOutput, WorkspaceConsentsResponse, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMemberConsentsOutput, WorkspaceMetaResponse,
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
@@ -53,6 +59,12 @@ use crate::api::dto::{
     ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse,
     MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, TokenBody, WithdrawBody,
     WorkspaceStatusOutput,
+};
+#[cfg(feature = "api-schema")]
+use crate::settings::catalog::{
+    AttachmentPreviewSettings, AuthSettings, BrandingAsset, BrandingSettings, DefaultsUserSettings,
+    EmbedSettings, FeaturesSettings, I18nSettings, OperatorSettings, SecuritySettings,
+    SettingsValues, SharePolicy,
 };
 
 #[cfg(feature = "api-schema")]
@@ -252,6 +264,24 @@ impl Modify for CookieSecurityAddon {
         get_share_document,
         get_share_attachment,
         download_share_attachment,
+        admin_audit,
+        admin_system,
+        admin_users,
+        admin_update_users,
+        admin_workspaces,
+        admin_instance_settings,
+        admin_update_instance_settings,
+        admin_instance_admins,
+        admin_publish_legal,
+        admin_upload_branding_asset,
+        admin_remove_branding_asset,
+        branding_asset,
+        instance_settings_public,
+        legal_get,
+        legal_versions,
+        pending_consents,
+        submit_consents,
+        workspace_consents,
     ),
     components(
         schemas(
@@ -381,6 +411,44 @@ impl Modify for CookieSecurityAddon {
             CommentListResponse,
     DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, DocumentShareLinkCreateBody, EmailChangeBody, ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse, MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, RecentItemOutput, RecentListResponse, ShareCreateBody, ShareLinkCreatedOutput, ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput, StarCreateBody, StarItemOutput, StarListResponse, TokenBody, WithdrawBody, WorkspaceStatusOutput,
             ProblemResponse,
+            AuditLogItemOutput,
+            AuditLogListResponse,
+            AdminSystemOutput,
+            AdminUserItemOutput,
+            AdminUserListResponse,
+            AdminUserPatchBody,
+            AdminUserPatchOutput,
+            AdminWorkspaceItemOutput,
+            AdminWorkspaceListResponse,
+            InstanceAdminBody,
+            LegalPublishBody,
+            LegalDocumentOutput,
+            LegalVersionMetaOutput,
+            LegalVersionsResponse,
+            ConsentItemBody,
+            ConsentsSubmitBody,
+            ConsentsPendingResponse,
+            MemberConsentOutput,
+            WorkspaceMemberConsentsOutput,
+            WorkspaceConsentsResponse,
+            AdminInstanceSettingsOutput,
+            PublicBrandingOutput,
+            PublicSettingsValues,
+            InstanceSettingsOutput,
+            InstanceSettingsPatchSchema,
+            BrandingPatchSchema,
+            SettingsValues,
+            BrandingSettings,
+            BrandingAsset,
+            DefaultsUserSettings,
+            AuthSettings,
+            SharePolicy,
+            EmbedSettings,
+            FeaturesSettings,
+            AttachmentPreviewSettings,
+            I18nSettings,
+            SecuritySettings,
+            OperatorSettings,
         )
     ),
     modifiers(&CookieSecurityAddon),
@@ -3287,6 +3355,291 @@ fn download_attachment() {}
 pub fn spec_json() -> String {
     ApiDoc::openapi().to_pretty_json().expect("openapi json")
 }
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/audit",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    params(
+        ("limit" = Option<i32>, Query, description = "Page size 1-100 (default 50)"),
+        ("cursor" = Option<String>, Query, description = "Keyset cursor"),
+    ),
+    responses(
+        (status = 200, description = "Instance audit log, newest first", body = AuditLogListResponse),
+        (status = 400, description = "Invalid query or cursor", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin", body = ProblemResponse),
+        (status = 428, description = "Consent required", body = ProblemResponse),
+    )
+)]
+fn admin_audit() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/system",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "Instance counts", body = AdminSystemOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin", body = ProblemResponse),
+    )
+)]
+fn admin_system() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/users",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "Instance users", body = AdminUserListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin", body = ProblemResponse),
+    )
+)]
+fn admin_users() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/admin/users",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    request_body = AdminUserPatchBody,
+    responses(
+        (status = 200, description = "User updated", body = AdminUserPatchOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 402, description = "Seat limit", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin or user not found", body = ProblemResponse),
+        (status = 409, description = "last_instance_admin or self_suspension", body = ProblemResponse),
+    )
+)]
+fn admin_update_users() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/workspaces",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "Live workspaces", body = AdminWorkspaceListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin", body = ProblemResponse),
+    )
+)]
+fn admin_workspaces() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/instance-settings",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "All settings with override state", body = AdminInstanceSettingsOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin", body = ProblemResponse),
+    )
+)]
+fn admin_instance_settings() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/admin/instance-settings",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    request_body = InstanceSettingsPatchSchema,
+    responses(
+        (status = 200, description = "Settings after the change", body = AdminInstanceSettingsOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin", body = ProblemResponse),
+    )
+)]
+fn admin_update_instance_settings() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/admin/instance-admins",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    request_body = InstanceAdminBody,
+    responses(
+        (status = 200, description = "Flag set", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 402, description = "Seat limit", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin or user not found", body = ProblemResponse),
+        (status = 409, description = "last_instance_admin", body = ProblemResponse),
+    )
+)]
+fn admin_instance_admins() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/legal",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    request_body = LegalPublishBody,
+    responses(
+        (status = 201, description = "Next version published", body = LegalDocumentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin", body = ProblemResponse),
+    )
+)]
+fn admin_publish_legal() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/branding/assets/{asset}",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    params(("asset" = String, Path, description = "logo or favicon")),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream", description = "PNG, APNG, WebP or JPEG, at most 512 KiB"),
+    responses(
+        (status = 200, description = "Settings after the upload", body = AdminInstanceSettingsOutput),
+        (status = 400, description = "Empty body or invalid asset", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin", body = ProblemResponse),
+        (status = 413, description = "Larger than 512 KiB", body = ProblemResponse),
+        (status = 415, description = "Not application/octet-stream or not a supported image", body = ProblemResponse),
+    )
+)]
+fn admin_upload_branding_asset() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/admin/branding/assets/{asset}",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    params(("asset" = String, Path, description = "logo or favicon")),
+    responses(
+        (status = 200, description = "Settings after the removal", body = AdminInstanceSettingsOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin or no asset", body = ProblemResponse),
+    )
+)]
+fn admin_remove_branding_asset() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/branding/{asset}",
+    tag = "admin",
+    params(("asset" = String, Path, description = "logo or favicon")),
+    responses(
+        (status = 200, description = "Asset bytes (nosniff, CSP sandbox)", content_type = "image/*"),
+        (status = 304, description = "Not modified"),
+        (status = 404, description = "No asset", body = ProblemResponse),
+    )
+)]
+fn branding_asset() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/instance",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Public instance settings", body = InstanceSettingsOutput),
+        (status = 304, description = "Not modified"),
+        (status = 428, description = "Consent required (signed-in user)", body = ProblemResponse),
+    )
+)]
+fn instance_settings_public() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/legal/{kind}",
+    tag = "legal",
+    params(
+        ("kind" = String, Path, description = "Document kind"),
+        ("version" = Option<i32>, Query, description = "Version (default latest)"),
+    ),
+    responses(
+        (status = 200, description = "Legal document", body = LegalDocumentOutput),
+        (status = 400, description = "Invalid kind or version", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+    )
+)]
+fn legal_get() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/legal/{kind}/versions",
+    tag = "legal",
+    params(("kind" = String, Path, description = "Document kind")),
+    responses(
+        (status = 200, description = "Published versions, newest first", body = LegalVersionsResponse),
+        (status = 400, description = "Invalid kind", body = ProblemResponse),
+    )
+)]
+fn legal_versions() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/consents/pending",
+    tag = "legal",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "Required documents still to accept", body = ConsentsPendingResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+    )
+)]
+fn pending_consents() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/consents",
+    tag = "legal",
+    security(("fvoci_session" = [])),
+    request_body = ConsentsSubmitBody,
+    responses(
+        (status = 200, description = "Consents recorded", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+    )
+)]
+fn submit_consents() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/consents",
+    tag = "legal",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Members' consents", body = WorkspaceConsentsResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn workspace_consents() {}
 
 #[cfg(test)]
 mod tests {

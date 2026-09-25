@@ -1,4 +1,5 @@
 pub mod account;
+pub mod admin;
 pub mod api_tokens;
 pub mod attachment_extract;
 pub mod attachments;
@@ -17,6 +18,7 @@ pub mod import_jobs;
 pub mod integrations;
 pub mod invitations;
 pub mod labels;
+pub mod legal;
 pub mod lookup;
 pub mod magic;
 pub mod migrate;
@@ -43,10 +45,15 @@ use sqlx::PgPool;
 #[derive(Clone)]
 pub struct Db {
     pub pool: PgPool,
+    /// Instance settings as first resolved by this process (restart badges).
+    pub settings_boot: crate::settings::SettingsBoot,
 }
 
 impl Db {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            settings_boot: crate::settings::SettingsBoot::default(),
+        }
     }
 }

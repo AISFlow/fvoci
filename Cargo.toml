@@ -241,6 +241,11 @@ path = "tests/background_jobs.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "admin_integration"
+path = "tests/admin_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "account_lifecycle"
 path = "tests/account_lifecycle.rs"
 required-features = ["db-tests"]

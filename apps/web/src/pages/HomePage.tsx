@@ -71,6 +71,11 @@ export function HomePage() {
       <div className="app-shell">
         <DeniedBanner />
         <main className="app-shell__main">
+          {me.data?.isInstanceAdmin ? (
+            <Link to="/settings/admin" className="text-ui underline underline-offset-2">
+              {t("admin.console")}
+            </Link>
+          ) : null}
           <EmptyWorkspace
             isAdmin={me.data?.isInstanceAdmin === true}
             onCreate={async (input) => {
@@ -101,6 +106,14 @@ export function HomePage() {
       <header className="app-shell__header">
         <h1 className="text-title font-semibold">{t("dashboard.title")}</h1>
         <div className="flex gap-2">
+          {me.data?.isInstanceAdmin ? (
+            <Link
+              to="/settings/admin"
+              className="inline-flex h-8 items-center rounded-md border border-border px-3 text-sm font-medium hover:bg-accent"
+            >
+              {t("admin.console")}
+            </Link>
+          ) : null}
           {me.data?.isInstanceAdmin ? (
             <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
               {t("workspace.create")}

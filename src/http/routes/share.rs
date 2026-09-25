@@ -152,6 +152,19 @@ fn map_share_error(err: ShareDbError) -> AppError {
     }
 }
 
+/// Source share public routes: 404 for every route while the instance share
+/// policy is disabled (checked before anything else, like `onBeforeHandle`).
+async fn ensure_sharing_enabled(state: &AppState) -> Result<(), AppError> {
+    let policy = crate::settings::share_policy(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
+    if policy.enabled {
+        Ok(())
+    } else {
+        Err(not_found())
+    }
+}
+
 fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", err);
     AppError::internal()
@@ -220,6 +233,9 @@ async fn create_link(
     expires_in_days: Option<i64>,
     affiliation: Option<DocumentAffiliation>,
 ) -> Result<Response, AppError> {
+    let policy = crate::settings::share_policy(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
     let created = create_share_link(
         &state.auth.db.pool,
         workspace_id,
@@ -227,6 +243,7 @@ async fn create_link(
         credential_id,
         target,
         expires_in_days,
+        &policy,
         affiliation,
     )
     .await
@@ -445,6 +462,7 @@ async fn public_meta_route(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(token): Path<String>,
 ) -> Result<Json<SharePublicMetaOutput>, AppError> {
+    ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
     let meta = share_public_meta(&state.auth.db.pool, &token)
         .await
@@ -627,6 +645,7 @@ async fn public_body_route(
     Path(token): Path<String>,
     query: Result<Query<ShareBodyQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    ensure_sharing_enabled(&state).await?;
     let Query(query) = query.map_err(AppError::from)?;
     let format = parse_format(&query)?;
     enforce_share_limit(&state, peer).await?;
@@ -640,6 +659,7 @@ async fn public_document_route(
     Path((token, document_id)): Path<(String, Uuid)>,
     query: Result<Query<ShareBodyQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    ensure_sharing_enabled(&state).await?;
     let Query(query) = query.map_err(AppError::from)?;
     let format = parse_format(&query)?;
     enforce_share_limit(&state, peer).await?;
@@ -651,6 +671,7 @@ async fn public_tree_route(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(token): Path<String>,
 ) -> Result<Json<TreeResponse>, AppError> {
+    ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
     let nodes = share_tree(&state.auth.db.pool, &token)
         .await
@@ -691,6 +712,7 @@ async fn public_pdf_route(
     Path(token): Path<String>,
     query: Result<Query<SharePdfQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    ensure_sharing_enabled(&state).await?;
     let Query(query) = query.map_err(AppError::from)?;
     let document_id = match query.document_id.as_deref() {
         None => None,
@@ -873,6 +895,7 @@ async fn public_search_route(
     Path(token): Path<String>,
     query: Result<Query<ShareSearchQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    ensure_sharing_enabled(&state).await?;
     let Query(query) = query.map_err(AppError::from)?;
     let raw_q = query
         .q
@@ -1016,6 +1039,7 @@ async fn public_attachment_route(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path((token, attachment_id)): Path<(String, Uuid)>,
 ) -> Result<Json<AttachmentOutput>, AppError> {
+    ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
     let att = share_attachment(&state.auth.db.pool, &token, attachment_id)
         .await
@@ -1043,6 +1067,7 @@ async fn public_download_route(
     Path((token, attachment_id)): Path<(String, Uuid)>,
     query: Result<Query<AttachmentDownloadQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    ensure_sharing_enabled(&state).await?;
     let Query(query) = query.map_err(AppError::from)?;
     match query.variant.as_deref() {
         None => {}
