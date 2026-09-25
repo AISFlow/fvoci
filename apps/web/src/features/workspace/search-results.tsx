@@ -1,19 +1,15 @@
 import { t } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
-import { documentPath } from "@/lib/href";
+import { searchItemHref, type SearchHit as SearchTargetHit } from "@/features/workspace/search-target";
 
-export type SearchHit = {
-  type: string;
-  id: string;
+export type SearchHit = SearchTargetHit & {
   title: string;
-  displayId?: string | null;
   snippet?: Array<{ text: string; match: boolean }> | null;
   extractStatus?: string | null;
 };
 
 export function searchHitHref(slug: string, item: SearchHit): string | null {
-  if (item.displayId) return documentPath(slug, item.displayId);
-  return null;
+  return searchItemHref(slug, item);
 }
 
 export function SearchResultList({
@@ -26,7 +22,7 @@ export function SearchResultList({
   labelledBy?: string;
 }) {
   return (
-    <ul className="search-results" aria-labelledby={labelledBy}>
+    <ul className="search-results" role="region" aria-labelledby={labelledBy}>
       {items.map((item) => {
         const href = searchHitHref(slug, item);
         const typeLabel =

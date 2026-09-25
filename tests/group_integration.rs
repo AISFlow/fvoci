@@ -1201,3 +1201,62 @@ async fn wiki_grant_revoke_is_visible_to_collab_acl_poll() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn group_only_viewer_project_list_reports_can_edit_false() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "viewer-grant").await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "VWR", "private").await;
+    let project_id = project["id"].as_str().unwrap();
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "뷰어"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let group_id = created["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": member.user_id.to_string()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups"),
+        Some(json!({"groupId": group_id, "role": "viewer"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, listed) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed:?}");
+    let row = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == project_id)
+        .expect("granted project is listed");
+    assert_eq!(row["canEdit"], false);
+
+    admin.close().await;
+    harness.cleanup().await;
+}

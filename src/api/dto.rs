@@ -18,6 +18,18 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_optional_non_null_i32<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i32>, D::Error> {
+    match Option::<i32>::deserialize(deserializer)? {
+        Some(value) => Ok(Some(value)),
+        None => Err(serde::de::Error::invalid_type(
+            serde::de::Unexpected::Unit,
+            &"integer",
+        )),
+    }
+}
+
 fn deserialize_optional_non_null_string<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -884,6 +896,7 @@ pub struct ProjectListItemOutput {
     pub updated_at: DateTime<Utc>,
     pub task_count: i64,
     pub open_task_count: i64,
+    pub can_edit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1303,6 +1316,8 @@ pub struct CreateTaskDependencyBody {
     #[serde(default, deserialize_with = "deserialize_present_string")]
     #[serde(rename = "type")]
     pub dependency_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_i32")]
+    #[cfg_attr(feature = "api-schema", schema(nullable = false))]
     pub lag_days: Option<i32>,
 }
 

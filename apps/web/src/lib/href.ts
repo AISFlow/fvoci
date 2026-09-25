@@ -79,6 +79,8 @@ export function documentPath(slug: string, displayId: string): string {
   return `/w/${slug.toLowerCase()}/${displayId}`;
 }
 
+export const COMMENTS_ANCHOR_ID = "document-comments";
+
 export function itemPath(slug: string, displayId: string): string {
   return documentPath(slug, displayId);
 }
