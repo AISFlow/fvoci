@@ -248,7 +248,9 @@ echo "running migrate, grant-app-role, and ensure-meili-key"
 
 # Event xids from the old cluster are not comparable with this one; rebase the
 # outbox cursors before any server starts (writers are still stopped here).
-read -r SNAPSHOT_AT SINCE < <(python3 -c 'import datetime,json,sys; t=datetime.datetime.strptime(json.load(open(sys.argv[1]))["createdAt"],"%Y-%m-%dT%H:%M:%SZ"); f="%Y-%m-%dT%H:%M:%SZ"; print(t.strftime(f),(t-datetime.timedelta(days=29)).strftime(f))' "$MANIFEST")
+# createdAt is taken after the quiesced dump but has whole-second precision, so
+# events from earlier in that same second sort after it; use the next second.
+read -r SNAPSHOT_AT SINCE < <(python3 -c 'import datetime,json,sys; t=datetime.datetime.strptime(json.load(open(sys.argv[1]))["createdAt"],"%Y-%m-%dT%H:%M:%SZ")+datetime.timedelta(seconds=1); f="%Y-%m-%dT%H:%M:%SZ"; print(t.strftime(f),(t-datetime.timedelta(days=29)).strftime(f))' "$MANIFEST")
 echo "rebasing outbox cursors (snapshot $SNAPSHOT_AT)"
 "${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
   --recover-outbox --since "$SINCE" --snapshot-at "$SNAPSHOT_AT" \
