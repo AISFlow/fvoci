@@ -1,4 +1,4 @@
-import { COMMENTS_ANCHOR_ID, documentPath } from "@/lib/href";
+import { COMMENTS_ANCHOR_ID, attachmentViewPath, documentPath } from "@/lib/href";
 
 export type SearchHit = {
   type: string;
@@ -10,8 +10,9 @@ export type SearchHit = {
 };
 
 export function searchItemHref(slug: string, item: SearchHit): string | null {
-  // Attachment hits open the parent document: the source's attachment viewer
-  // route is not ported yet.
+  if (item.type === "attachment") {
+    return attachmentViewPath(slug, item.id, item.chunkNo);
+  }
   const ref = item.displayId;
   if (!ref) {
     return null;

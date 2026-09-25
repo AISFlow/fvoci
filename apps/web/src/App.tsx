@@ -14,6 +14,7 @@ import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
 import { InvitePage } from "@/pages/InvitePage";
+import { AttachmentViewPage } from "@/pages/AttachmentViewPage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 
 const queryClient = new QueryClient({
@@ -77,6 +78,7 @@ export function App() {
             <Route path="trash" element={<TrashPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
             <Route path="notifications" element={<NotificationsPage />} />
+            <Route path="a/:attachmentId/view" element={<AttachmentViewPage />} />
             <Route path=":ref/tasks" element={<ProjectTasksPage />} />
             <Route path=":ref" element={<WorkspaceRefPage />} />
           </Route>

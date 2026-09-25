@@ -40,6 +40,20 @@ export function membersQuery(workspaceId: string) {
   });
 }
 
+export function groupsQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["workspaces", workspaceId, "groups"] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/groups", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    retry: false,
+    enabled: Boolean(workspaceId),
+  });
+}
+
 export type SearchTab = "all" | "document" | "task" | "attachment" | "comment";
 
 export function searchQuery(

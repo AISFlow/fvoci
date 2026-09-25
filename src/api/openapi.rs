@@ -159,6 +159,8 @@ impl Modify for CookieSecurityAddon {
         download_attachment,
         list_document_comments,
         create_document_comment,
+        list_project_document_comments,
+        create_project_document_comment,
         list_task_comments,
         create_task_comment,
         patch_comment,
@@ -311,7 +313,7 @@ pub struct ApiDoc;
     get,
     path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("document_id" = String, description = "Document id"),
@@ -331,7 +333,7 @@ fn list_document_comments() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("document_id" = String, description = "Document id"),
@@ -348,9 +350,50 @@ fn create_document_comment() {}
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
     get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size"),
+    ),
+    responses(
+        (status = 200, description = "Project document comments", body = CommentListResponse),
+        (status = 400, description = "Invalid cursor", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_document_comments() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = CreateCommentBody,
+    responses(
+        (status = 201, description = "Created comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_project_document_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
     path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("task_id" = String, description = "Task id"),
@@ -370,7 +413,7 @@ fn list_task_comments() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("task_id" = String, description = "Task id"),
@@ -389,7 +432,7 @@ fn create_task_comment() {}
     patch,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -408,7 +451,7 @@ fn patch_comment() {}
     delete,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -425,7 +468,7 @@ fn delete_comment() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/resolve",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -443,7 +486,7 @@ fn resolve_comment() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/unresolve",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),
@@ -461,7 +504,7 @@ fn unresolve_comment() {}
     post,
     path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/reactions",
     tag = "comments",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("comment_id" = String, description = "Comment id"),

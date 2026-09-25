@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
-    "test": "node --experimental-strip-types --import ./test/register-ts.mjs --test src/features/workspace/*.test.ts src/features/documents/*.test.ts src/features/tasks/*.test.ts src/features/comments/*.test.ts src/features/notifications/*.test.ts src/features/settings/*.test.ts src/lib/*.test.ts",
+    "test": "node --experimental-strip-types --import ./test/register-ts.mjs --test src/features/workspace/*.test.ts src/features/documents/*.test.ts src/features/tasks/*.test.ts src/features/comments/*.test.ts src/features/attachments/*.test.ts src/features/notifications/*.test.ts src/features/settings/*.test.ts src/lib/*.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {
