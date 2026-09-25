@@ -86,6 +86,22 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
   await logout(page);
   await login(page, member.email, member.password);
   await page.goto(`/w/${owner.workspaceSlug}/wiki`);
+  // Both notifications (assignment, group mention) are delivered by the
+  // outbox relay; wait until both exist before loading the inbox, which does
+  // not refetch on its own.
+  await expect
+    .poll(
+      async () => {
+        const res = await page.request.get(
+          `/api/v1/workspaces/${workspace.id}/notifications`,
+        );
+        if (!res.ok()) return false;
+        const items: { verb: string }[] = (await res.json()).items;
+        return items.some((item) => item.verb.startsWith("comment."));
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
   await expect(
     page.getByRole("button", { name: /안 읽은 알림 \d+건/ }),
   ).toBeVisible({ timeout: 15_000 });

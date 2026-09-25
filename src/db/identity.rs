@@ -10,7 +10,7 @@ use crate::db::quota::acquire_admission_lock;
 
 const SESSION_SLIDE_THRESHOLD_SECS: i64 = 15 * 24 * 60 * 60;
 
-const INSTANCE_ADMIN_LOCK_KEY: i64 = 847_291_003_551;
+pub(crate) const INSTANCE_ADMIN_LOCK_KEY: i64 = 847_291_003_551;
 
 pub(crate) struct EventAppend {
     pub id: Uuid,
@@ -725,8 +725,10 @@ pub async fn issue_session(pool: &PgPool, user_id: Uuid) -> Result<Option<String
     let mut tx = pool.begin().await?;
     lock_sign_in(&mut tx, user_id).await?;
 
+    // Recheck under the row lock: a withdraw (deleted_at) or suspension that
+    // committed after the password check must not receive a new session.
     let suspended: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT suspended_at FROM fvoci.users WHERE id = $1")
+        sqlx::query_as("SELECT suspended_at FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL")
             .bind(user_id)
             .fetch_optional(&mut *tx)
             .await?;

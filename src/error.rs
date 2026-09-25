@@ -48,6 +48,12 @@ pub enum ProblemCode {
     ImportFailed,
     UnsupportedMediaType,
     UploadCapacityExceeded,
+    ConfirmInvalid,
+    OwnerTransferRequired,
+    LastInstanceAdmin,
+    SelfSuspension,
+    UnsupportedBrandingAssetType,
+    RawApplicationOctetStreamBodyRequired,
     InternalError,
 }
 
@@ -96,6 +102,14 @@ impl ProblemCode {
             Self::ImportFailed => "import_failed",
             Self::UnsupportedMediaType => "unsupported_media_type",
             Self::UploadCapacityExceeded => "upload_capacity_exceeded",
+            Self::ConfirmInvalid => "confirm_invalid",
+            Self::OwnerTransferRequired => "owner_transfer_required",
+            Self::LastInstanceAdmin => "last_instance_admin",
+            Self::SelfSuspension => "self_suspension",
+            Self::UnsupportedBrandingAssetType => "unsupported_branding_asset_type",
+            Self::RawApplicationOctetStreamBodyRequired => {
+                "raw_application_octet_stream_body_required"
+            }
             Self::InternalError => "internal_error",
         }
     }
@@ -146,6 +160,14 @@ impl ProblemCode {
             Self::ImportFailed => "import failed",
             Self::UnsupportedMediaType => "unsupported media type",
             Self::UploadCapacityExceeded => "upload capacity exceeded — retry",
+            Self::ConfirmInvalid => "confirm_invalid",
+            Self::OwnerTransferRequired => "owner_transfer_required",
+            Self::LastInstanceAdmin => "last_instance_admin",
+            Self::SelfSuspension => "self_suspension",
+            Self::UnsupportedBrandingAssetType => "unsupported branding asset type",
+            Self::RawApplicationOctetStreamBodyRequired => {
+                "raw application/octet-stream body required"
+            }
             Self::InternalError => "internal error",
         }
     }
@@ -158,6 +180,8 @@ impl ProblemCode {
             Self::InvalidInput
             | Self::PasswordInvalid
             | Self::MagicInvalid
+            | Self::ConfirmInvalid
+            | Self::RawApplicationOctetStreamBodyRequired
             | Self::AssigneeIsNotAMember => StatusCode::BAD_REQUEST,
             Self::InstanceSetupAlreadyCompleted
             | Self::NotFound
@@ -180,10 +204,17 @@ impl ProblemCode {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
             Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
-            Self::Conflict | Self::ProjectArchived | Self::RestoreRejected => StatusCode::CONFLICT,
+            Self::Conflict
+            | Self::ProjectArchived
+            | Self::RestoreRejected
+            | Self::OwnerTransferRequired
+            | Self::LastInstanceAdmin
+            | Self::SelfSuspension => StatusCode::CONFLICT,
             Self::CollabTimeoutRetry => StatusCode::GATEWAY_TIMEOUT,
             Self::ImportFailed => StatusCode::BAD_REQUEST,
-            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::UnsupportedMediaType | Self::UnsupportedBrandingAssetType => {
+                StatusCode::UNSUPPORTED_MEDIA_TYPE
+            }
             Self::UploadCapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,

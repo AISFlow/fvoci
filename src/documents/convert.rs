@@ -68,6 +68,7 @@ struct ConvertResponse {
     code: Option<String>,
     detail: Option<String>,
     content_json: Option<Value>,
+    html: Option<String>,
     update_b64: Option<String>,
     content_type: Option<String>,
     ext: Option<String>,
@@ -251,6 +252,19 @@ impl ConvertClient {
         resp.content_json.ok_or(ConvertError::Failed(
             "convert helper omitted contentJson".into(),
         ))
+    }
+
+    /// Markdown -> sanitized HTML through the editor schema (legal documents).
+    pub async fn md_to_safe_html(&self, markdown: &str) -> Result<String, ConvertError> {
+        let resp = Self::map_code(
+            self.call(json!({
+                "op": "md_to_safe_html",
+                "markdown": markdown,
+            }))
+            .await?,
+        )?;
+        resp.html
+            .ok_or(ConvertError::Failed("convert helper omitted html".into()))
     }
 
     pub async fn tiptap_to_yjs_update(

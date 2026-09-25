@@ -875,7 +875,7 @@ fn card_count_visible_sql(project_alias: &str) -> String {
     visible_project_sql(project_alias, 2, 3)
 }
 
-async fn workspace_card_counts_in_tx(
+pub(crate) async fn workspace_card_counts_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     user_id: Uuid,

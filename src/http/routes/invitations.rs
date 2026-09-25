@@ -10,8 +10,8 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    InvitationAcceptBody, InvitationCreateBody, InvitationCreateResponse, InvitationPublicResponse,
-    LoginResponse,
+    InvitationAcceptBody, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    InvitationPublicResponse, LoginResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::auth::token::hash_token;
@@ -22,9 +22,7 @@ use crate::http::cookie::set_session_cookie;
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
-use crate::validate::{
-    normalize_email, validate_family_name, validate_given_name, validate_password_length,
-};
+use crate::validate::{normalize_email, validate_family_name, validate_given_name};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -128,7 +126,15 @@ async fn get_invitation(
             workspace_name: preview.workspace_name,
             email_masked: preview.email_masked,
             role: preview.role.as_str().to_string(),
-            required_legal: Vec::new(),
+            required_legal: preview
+                .required_legal
+                .into_iter()
+                .map(|(kind, version, title)| InvitationLegalDocument {
+                    kind,
+                    version,
+                    title,
+                })
+                .collect(),
         })),
         Err(InvitationDbError::Expired | InvitationDbError::AlreadyAccepted) => Err(
             AppError::from_code(ProblemCode::InvitationNotFoundOrExpired),
@@ -159,8 +165,18 @@ async fn accept_invitation(
         return Err(AppError::rate_limited(retry_after));
     }
     if let Some(password) = body.password.as_deref() {
-        validate_password_length(password)?;
+        crate::validate::validate_password_setting(&state.auth.db.pool, password).await?;
     }
+    let settings = crate::settings::current_values(&state.auth.db.pool, &state.branding_name)
+        .await
+        .map_err(internal)?;
+    let consents: Vec<(String, i32)> = body
+        .consents
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|item| (item.kind.clone(), item.version))
+        .collect();
     let email = match body.email.as_deref() {
         Some(value) => Some(normalize_email(value)?),
         None => None,
@@ -181,6 +197,8 @@ async fn accept_invitation(
             family_name: body.family_name.as_deref(),
             password: body.password.as_deref(),
             client_ip: Some(&ip),
+            consents: &consents,
+            defaults: &settings.defaults_user,
         },
     )
     .await

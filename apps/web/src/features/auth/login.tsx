@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { problemMessage } from "@/lib/api";
 import { formFieldMessage } from "@/lib/form-issues";
 import type { LoginInput } from "@/lib/contracts";
-import { loginInput, passwordResetInput } from "@/lib/validators";
+import { loginInput, magicLinkInput, passwordResetInput } from "@/lib/validators";
 import {
   AuthAlert,
   AuthDisclosure,
@@ -20,16 +20,29 @@ import { AuthLayout, AuthPanel } from "./auth-layout";
 
 const RESET_SENT_NOTICE = t("auth.reset.sent");
 const RESET_DONE_NOTICE = t("auth.reset.done");
+const MAGIC_SENT_NOTICE = t("auth.magic.sent");
+const MAGIC_DISABLED_NOTICE = t("auth.magic.disabled");
+const WITHDRAWN_NOTICE = t("auth.withdrawn");
 
-function PasswordResetForm({
+function EmailActionForm({
+  emailId,
+  schema,
   onSubmit,
+  submitLabel,
+  sentNotice,
+  errorKey,
 }: {
+  emailId: string;
+  schema: typeof magicLinkInput | typeof passwordResetInput;
   onSubmit: (email: string) => Promise<void>;
+  submitLabel: string;
+  sentNotice: string;
+  errorKey: "error.auth.magic" | "error.auth.resetRequest";
 }) {
   const [serverError, setServerError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
   const form = useForm<{ email: string }>({
-    resolver: zodResolver(passwordResetInput),
+    resolver: zodResolver(schema),
     defaultValues: { email: "" },
   });
   const fieldError = formFieldMessage(form.formState.errors.email, "email");
@@ -42,33 +55,33 @@ function PasswordResetForm({
           await onSubmit(values.email);
           setSent(true);
         } catch (err) {
-          setServerError(problemMessage(err, "error.auth.resetRequest"));
+          setServerError(problemMessage(err, errorKey));
         }
       })}
       noValidate
       className="auth-shell__stack"
     >
       <AuthField
-        id="password-reset-email"
+        id={emailId}
         label={t("auth.email")}
         error={fieldError ?? undefined}
       >
         <AuthInput
-          id="password-reset-email"
+          id={emailId}
           type="email"
           autoComplete="email"
           {...form.register("email")}
         />
       </AuthField>
       {serverError ? <AuthAlert>{serverError}</AuthAlert> : null}
-      {sent ? <AuthStatus>{RESET_SENT_NOTICE}</AuthStatus> : null}
+      {sent ? <AuthStatus>{sentNotice}</AuthStatus> : null}
       <Button
         type="submit"
         size="lg"
         disabled={form.formState.isSubmitting}
         className={authPrimaryButtonClass}
       >
-        {form.formState.isSubmitting ? t("form.requesting") : t("auth.reset.submit")}
+        {form.formState.isSubmitting ? t("form.requesting") : submitLabel}
       </Button>
     </form>
   );
@@ -81,6 +94,9 @@ export function LoginForm({
   mailEnabled,
   onPasswordReset,
   resetNotice,
+  withdrawnNotice,
+  magicLink,
+  onMagicLink,
 }: {
   onSubmit: (input: LoginInput) => Promise<void>;
   brandingName?: string | null;
@@ -88,8 +104,13 @@ export function LoginForm({
   mailEnabled?: boolean;
   onPasswordReset?: (email: string) => Promise<void>;
   resetNotice?: boolean;
+  withdrawnNotice?: boolean;
+  // `undefined` while GET /auth/providers is loading: show neither state.
+  magicLink?: boolean;
+  onMagicLink?: (email: string) => Promise<void>;
 }) {
   const [serverError, setServerError] = useState<string | null>(null);
+  const [magicOpen, setMagicOpen] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const form = useForm<LoginInput>({
     resolver: zodResolver(loginInput),
@@ -100,6 +121,7 @@ export function LoginForm({
     <AuthLayout brandingName={brandingName}>
       <AuthPanel title={t("auth.login")}>
         {resetNotice ? <AuthStatus>{RESET_DONE_NOTICE}</AuthStatus> : null}
+        {withdrawnNotice ? <AuthStatus>{WITHDRAWN_NOTICE}</AuthStatus> : null}
         {unavailableNotice ? <AuthStatus>{unavailableNotice}</AuthStatus> : null}
         <form
           onSubmit={form.handleSubmit(async (values) => {
@@ -142,15 +164,42 @@ export function LoginForm({
             {form.formState.isSubmitting ? t("auth.login.pending") : t("auth.login")}
           </Button>
         </form>
+        {magicLink === true && onMagicLink ? (
+          <>
+            <hr className="my-1 border-border" />
+            <AuthDisclosure
+              trigger={t("auth.magic.cta")}
+              open={magicOpen}
+              onOpenChange={setMagicOpen}
+            >
+              <EmailActionForm
+                emailId="magic-link-email"
+                schema={magicLinkInput}
+                onSubmit={onMagicLink}
+                submitLabel={t("auth.magic.submit")}
+                sentNotice={MAGIC_SENT_NOTICE}
+                errorKey="error.auth.magic"
+              />
+            </AuthDisclosure>
+          </>
+        ) : null}
         {mailEnabled && onPasswordReset ? (
           <AuthDisclosure
             trigger={t("auth.reset.forgot")}
             open={resetOpen}
             onOpenChange={setResetOpen}
           >
-            <PasswordResetForm onSubmit={onPasswordReset} />
+            <EmailActionForm
+              emailId="password-reset-email"
+              schema={passwordResetInput}
+              onSubmit={onPasswordReset}
+              submitLabel={t("auth.reset.submit")}
+              sentNotice={RESET_SENT_NOTICE}
+              errorKey="error.auth.resetRequest"
+            />
           </AuthDisclosure>
         ) : null}
+        {magicLink === false ? <AuthStatus>{MAGIC_DISABLED_NOTICE}</AuthStatus> : null}
         <p className="unavailable-note">{t("auth.unsupported.notice")}</p>
       </AuthPanel>
     </AuthLayout>

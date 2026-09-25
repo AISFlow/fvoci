@@ -872,7 +872,7 @@ async fn concurrent_migrations_wait_then_initialize_once() {
         .unwrap();
     assert_eq!(
         versions,
-        i64::from(fvoci_server::db::migrate::latest_migration_version())
+        fvoci_server::db::migrate::compiled_migration_count() as i64
     );
     admin.close().await;
     harness.cleanup().await;
@@ -898,7 +898,7 @@ async fn versioned_migrations_are_idempotent_on_rerun() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::latest_migration_version())
+        fvoci_server::db::migrate::compiled_migration_count() as i64
     );
     admin.close().await;
     harness.cleanup().await;
@@ -2155,6 +2155,14 @@ async fn migration_001_002_database_upgrades_to_003() {
         .execute(&admin)
         .await
         .unwrap();
+    for policy in ["user_consents_select", "user_consents_insert"] {
+        sqlx::query(&format!(
+            "DROP POLICY IF EXISTS {policy} ON fvoci.user_consents"
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
     sqlx::query("ALTER TABLE fvoci.users DROP CONSTRAINT IF EXISTS users_personal_workspace_fk")
         .execute(&admin)
         .await
@@ -2200,7 +2208,7 @@ async fn migration_001_002_database_upgrades_to_003() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::latest_migration_version())
+        fvoci_server::db::migrate::compiled_migration_count() as i64
     );
     reapply_app_grants(&harness.admin_url, &harness.role_name).await;
     let app_pool = pool::connect_app(&harness.app_url).await.unwrap();

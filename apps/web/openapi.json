@@ -9,6 +9,1084 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/admin/audit": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_audit",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size 1-100 (default 50)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Keyset cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Instance audit log, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Consent required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/branding/assets/{asset}": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_upload_branding_asset",
+        "parameters": [
+          {
+            "name": "asset",
+            "in": "path",
+            "description": "logo or favicon",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "PNG, APNG, WebP or JPEG, at most 512 KiB",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Settings after the upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminInstanceSettingsOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty body or invalid asset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Larger than 512 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Not application/octet-stream or not a supported image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_remove_branding_asset",
+        "parameters": [
+          {
+            "name": "asset",
+            "in": "path",
+            "description": "logo or favicon",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Settings after the removal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminInstanceSettingsOutput"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin or no asset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/instance-admins": {
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_instance_admins",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstanceAdminBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Flag set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Seat limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin or user not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "last_instance_admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/instance-settings": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_instance_settings",
+        "responses": {
+          "200": {
+            "description": "All settings with override state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminInstanceSettingsOutput"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_update_instance_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstanceSettingsPatchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Settings after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminInstanceSettingsOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/legal": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_publish_legal",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LegalPublishBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Next version published",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LegalDocumentOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/system": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_system",
+        "responses": {
+          "200": {
+            "description": "Instance counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminSystemOutput"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/users": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_users",
+        "responses": {
+          "200": {
+            "description": "Instance users",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUserListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_update_users",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminUserPatchBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "User updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUserPatchOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Seat limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin or user not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "last_instance_admin or self_suspension",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/workspaces": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "admin_workspaces",
+        "responses": {
+          "200": {
+            "description": "Live workspaces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminWorkspaceListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not an instance admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/cancel-withdraw": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "cancel_withdraw",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Withdrawal cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown, used or expired cancel token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/consents": {
+      "post": {
+        "tags": [
+          "legal"
+        ],
+        "operationId": "submit_consents",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsentsSubmitBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Consents recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/consents/pending": {
+      "get": {
+        "tags": [
+          "legal"
+        ],
+        "operationId": "pending_consents",
+        "responses": {
+          "200": {
+            "description": "Required documents still to accept",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentsPendingResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/email": {
+      "patch": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "email_change",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailChangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted (same response whether or not mail was sent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/email/confirm": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "email_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Email changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "magic_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/identities": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "auth_identities",
+        "responses": {
+          "200": {
+            "description": "Linked external identities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentitiesOutput"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -65,6 +1143,106 @@
             "fvoci_session": []
           }
         ]
+      }
+    },
+    "/api/v1/auth/magic-link": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "magic_link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MagicLinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted (same response for unknown addresses)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/magic-link/consume": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "magic_link_consume",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "magic_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/auth/me": {
@@ -139,6 +1317,71 @@
           },
           "401": {
             "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/password": {
+      "patch": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "password_change",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Password changed; other sessions revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "password_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
             "content": {
               "application/json": {
                 "schema": {
@@ -244,6 +1487,141 @@
           },
           "429": {
             "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/providers": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "auth_providers",
+        "responses": {
+          "200": {
+            "description": "Sign-in methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvidersOutput"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/withdraw": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "withdraw",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Erasure scheduled; session cookie cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErasureScheduleOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "confirm_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "owner_transfer_required or last_instance_admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/branding/{asset}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "branding_asset",
+        "parameters": [
+          {
+            "name": "asset",
+            "in": "path",
+            "description": "logo or favicon",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Asset bytes (nosniff, CSP sandbox)",
+            "content": {
+              "image/*": {}
+            }
+          },
+          "304": {
+            "description": "Not modified"
+          },
+          "404": {
+            "description": "No asset",
             "content": {
               "application/json": {
                 "schema": {
@@ -462,6 +1840,39 @@
         ]
       }
     },
+    "/api/v1/instance": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "instance_settings_public",
+        "responses": {
+          "200": {
+            "description": "Public instance settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceSettingsOutput"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified"
+          },
+          "428": {
+            "description": "Consent required (signed-in user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/invitations/{token}": {
       "get": {
         "tags": [
@@ -593,6 +2004,108 @@
           },
           "428": {
             "description": "Consent required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/legal/{kind}": {
+      "get": {
+        "tags": [
+          "legal"
+        ],
+        "operationId": "legal_get",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Document kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "Version (default latest)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Legal document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LegalDocumentOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid kind or version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/legal/{kind}/versions": {
+      "get": {
+        "tags": [
+          "legal"
+        ],
+        "operationId": "legal_versions",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Document kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Published versions, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LegalVersionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid kind",
             "content": {
               "application/json": {
                 "schema": {
@@ -782,6 +2295,178 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/dashboard": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "me_dashboard",
+        "parameters": [
+          {
+            "name": "lastVisited",
+            "in": "query",
+            "description": "Workspace id to list first",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cross-workspace dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeDashboardResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/export": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "me_export",
+        "responses": {
+          "200": {
+            "description": "ZIP: profile.json, comments.json, attachments.json, attachments/*",
+            "content": {
+              "application/zip": {}
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/locate": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "me_locate",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "description": "task or document",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "description": "Task or document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace holding the target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeLocateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or not visible",
             "content": {
               "application/json": {
                 "schema": {
@@ -4145,6 +5830,62 @@
           },
           {
             "bearer_api_token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/consents": {
+      "get": {
+        "tags": [
+          "legal"
+        ],
+        "operationId": "workspace_consents",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Members' consents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceConsentsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or not a workspace admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
           }
         ]
       }
@@ -13705,6 +15446,228 @@
         },
         "additionalProperties": false
       },
+      "AdminInstanceSettingsOutput": {
+        "type": "object",
+        "required": [
+          "version",
+          "values",
+          "overridden",
+          "restartRequired",
+          "envApplied",
+          "eeFeatures"
+        ],
+        "properties": {
+          "eeFeatures": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "envApplied": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "overridden": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "restartRequired": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "values": {
+            "$ref": "#/components/schemas/SettingsValues"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "AdminSystemOutput": {
+        "type": "object",
+        "required": [
+          "users",
+          "workspaces",
+          "documents",
+          "tasks"
+        ],
+        "properties": {
+          "documents": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tasks": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "users": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "workspaces": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "AdminUserItemOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "givenName",
+          "instanceAdmin",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deletedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "email": {
+            "type": "string"
+          },
+          "eraseAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "familyName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "givenName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "instanceAdmin": {
+            "type": "boolean"
+          },
+          "suspendedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "AdminUserListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminUserItemOutput"
+            }
+          }
+        }
+      },
+      "AdminUserPatchBody": {
+        "type": "object",
+        "description": "Source `adminUserPatchInput`: at least one of the flags.",
+        "required": [
+          "userId"
+        ],
+        "properties": {
+          "instanceAdmin": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "suspended": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminUserPatchOutput": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "suspendedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "AdminWorkspaceItemOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "AdminWorkspaceListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminWorkspaceItemOutput"
+            }
+          }
+        }
+      },
       "AncestorResponse": {
         "type": "object",
         "required": [
@@ -14007,6 +15970,18 @@
           }
         }
       },
+      "AttachmentPreviewSettings": {
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "AttachmentUploadedPartResponse": {
         "type": "object",
         "required": [
@@ -14023,6 +15998,93 @@
           }
         }
       },
+      "AuditLogItemOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "verb",
+          "payload",
+          "createdAt"
+        ],
+        "properties": {
+          "actorUserId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload": {
+            "type": "object"
+          },
+          "targetId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targetType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verb": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AuditLogListResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditLogItemOutput"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AuthSettings": {
+        "type": "object",
+        "required": [
+          "passwordMinLength"
+        ],
+        "properties": {
+          "passwordMinLength": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
       "BodyResponse": {
         "type": "object",
         "required": [
@@ -14037,6 +16099,28 @@
           }
         }
       },
+      "BrandingAsset": {
+        "type": "object",
+        "description": "The identity the upload route recorded: storage key, digest, sniffed type.\nServing checks the digest, so a hand-written key cannot turn this public\nroute into a reader for another object.",
+        "required": [
+          "key",
+          "sha256",
+          "mime"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "BrandingOutput": {
         "type": "object",
         "required": [
@@ -14047,6 +16131,75 @@
             "type": "string"
           }
         }
+      },
+      "BrandingPatchInput": {
+        "type": "object",
+        "required": [
+          "name",
+          "smtpFromDisplay",
+          "loginBrandText"
+        ],
+        "properties": {
+          "loginBrandText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "smtpFromDisplay": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BrandingSettings": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "favicon": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BrandingAsset"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loginBrandText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logo": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BrandingAsset"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "smtpFromDisplay": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "CloneProjectBody": {
         "type": "object",
@@ -15067,6 +17220,52 @@
         },
         "additionalProperties": false
       },
+      "ConsentItemBody": {
+        "type": "object",
+        "description": "Items are non-strict objects in the source (extra keys are ignored).",
+        "required": [
+          "kind",
+          "version"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ConsentsPendingResponse": {
+        "type": "object",
+        "required": [
+          "pending"
+        ],
+        "properties": {
+          "pending": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LegalDocumentOutput"
+            }
+          }
+        }
+      },
+      "ConsentsSubmitBody": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConsentItemBody"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateAttachmentUploadBody": {
         "type": "object",
         "required": [
@@ -15370,6 +17569,137 @@
         },
         "additionalProperties": false
       },
+      "DashboardProjectOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "key",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          }
+        }
+      },
+      "DashboardRecentItemOutput": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "title",
+          "projectId",
+          "number",
+          "updatedAt",
+          "workspaceId"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string"
+          }
+        }
+      },
+      "DashboardWorkspaceOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "role",
+          "kind",
+          "documentCount",
+          "assignedCount",
+          "unreadCount"
+        ],
+        "properties": {
+          "assignedCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "documentCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "unreadCount": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "DefaultsUserSettings": {
+        "type": "object",
+        "required": [
+          "locale",
+          "timezone",
+          "weekStartsOn",
+          "textScale"
+        ],
+        "properties": {
+          "locale": {
+            "type": "string"
+          },
+          "textScale": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "weekStartsOn": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
       "DeleteWorkspaceBody": {
         "type": "object",
         "required": [
@@ -15636,6 +17966,57 @@
           }
         }
       },
+      "EmailChangeBody": {
+        "type": "object",
+        "required": [
+          "newEmail"
+        ],
+        "properties": {
+          "newEmail": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EmbedSettings": {
+        "type": "object",
+        "required": [
+          "hosts"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErasureScheduleOutput": {
+        "type": "object",
+        "required": [
+          "ok",
+          "cancelToken",
+          "eraseAt",
+          "mailSent"
+        ],
+        "properties": {
+          "cancelToken": {
+            "type": "string"
+          },
+          "eraseAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mailSent": {
+            "type": "boolean"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
       "ExpectedDatesBody": {
         "type": "object",
         "required": [
@@ -15664,6 +18045,18 @@
               "null"
             ],
             "format": "date"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FeaturesSettings": {
+        "type": "object",
+        "required": [
+          "ai"
+        ],
+        "properties": {
+          "ai": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -15767,6 +18160,24 @@
           }
         }
       },
+      "I18nSettings": {
+        "type": "object",
+        "required": [
+          "overrides"
+        ],
+        "properties": {
+          "overrides": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "IcsTokenResponse": {
         "type": "object",
         "required": [
@@ -15774,6 +18185,43 @@
         ],
         "properties": {
           "url": {
+            "type": "string"
+          }
+        }
+      },
+      "IdentitiesOutput": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityOutput"
+            }
+          }
+        }
+      },
+      "IdentityOutput": {
+        "type": "object",
+        "required": [
+          "provider",
+          "email",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
             "type": "string"
           }
         }
@@ -15805,6 +18253,145 @@
           },
           "workspaceId": {
             "type": "string"
+          }
+        }
+      },
+      "InstanceAdminBody": {
+        "type": "object",
+        "required": [
+          "userId",
+          "value"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "value": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InstanceSettingsOutput": {
+        "type": "object",
+        "required": [
+          "version",
+          "values"
+        ],
+        "properties": {
+          "values": {
+            "$ref": "#/components/schemas/PublicSettingsValues"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "InstanceSettingsPatchInput": {
+        "type": "object",
+        "description": "OpenAPI shape of `PATCH /admin/instance-settings`: every key optional,\n`null` resets it; `branding` has no asset leaves. The server validates the\nraw JSON against the catalog.",
+        "properties": {
+          "attachmentPreview": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentPreviewSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "auth": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AuthSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "branding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BrandingPatchInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "defaults.user": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DefaultsUserSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "embed": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EmbedSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "features": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FeaturesSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "i18n": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/I18nSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operator": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OperatorSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "security": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SecuritySettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "share": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SharePolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -15980,6 +18567,121 @@
           }
         }
       },
+      "LegalDocumentOutput": {
+        "type": "object",
+        "required": [
+          "kind",
+          "version",
+          "title",
+          "bodyHtml",
+          "effectiveAt",
+          "required",
+          "publishedAt"
+        ],
+        "properties": {
+          "bodyHtml": {
+            "type": "string"
+          },
+          "effectiveAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "LegalPublishBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "title",
+          "bodyMarkdown",
+          "required",
+          "effectiveAt"
+        ],
+        "properties": {
+          "bodyMarkdown": {
+            "type": "string"
+          },
+          "effectiveAt": {
+            "type": "string",
+            "description": "ISO 8601 UTC date-time (`Z`)."
+          },
+          "kind": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LegalVersionMetaOutput": {
+        "type": "object",
+        "required": [
+          "kind",
+          "version",
+          "title",
+          "effectiveAt",
+          "required",
+          "publishedAt"
+        ],
+        "properties": {
+          "effectiveAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "LegalVersionsResponse": {
+        "type": "object",
+        "required": [
+          "versions"
+        ],
+        "properties": {
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LegalVersionMetaOutput"
+            }
+          }
+        }
+      },
       "LoginBody": {
         "type": "object",
         "required": [
@@ -16051,6 +18753,18 @@
           }
         }
       },
+      "MagicLinkBody": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "MeApiTokenCreateBody": {
         "type": "object",
         "required": [
@@ -16074,6 +18788,99 @@
           }
         },
         "additionalProperties": false
+      },
+      "MeDashboardResponse": {
+        "type": "object",
+        "required": [
+          "assigned",
+          "recent",
+          "labels",
+          "statuses",
+          "projects",
+          "members",
+          "workspaces",
+          "unreadCount"
+        ],
+        "properties": {
+          "assigned": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskListItemOutput"
+            }
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabelOutput"
+            }
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberResponse"
+            }
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardProjectOutput"
+            }
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardRecentItemOutput"
+            }
+          },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceStatusOutput"
+            }
+          },
+          "unreadCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardWorkspaceOutput"
+            }
+          }
+        }
+      },
+      "MeLocateResponse": {
+        "type": "object",
+        "required": [
+          "workspaceId"
+        ],
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          }
+        }
+      },
+      "MemberConsentOutput": {
+        "type": "object",
+        "required": [
+          "kind",
+          "version",
+          "consentedAt"
+        ],
+        "properties": {
+          "consentedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
       },
       "MemberResponse": {
         "type": "object",
@@ -16408,6 +19215,86 @@
             "type": "boolean"
           }
         }
+      },
+      "OperatorSettings": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "businessInfoUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "businessName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hostingProvider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mailOrderNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "registrationNumber": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "representative": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supportEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "PasswordChangeBody": {
+        "type": "object",
+        "required": [
+          "currentPassword",
+          "newPassword"
+        ],
+        "properties": {
+          "currentPassword": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` only for password-less accounts."
+          },
+          "newPassword": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "PasswordResetBody": {
         "type": "object",
@@ -17080,6 +19967,110 @@
           }
         }
       },
+      "ProviderOutput": {
+        "type": "object",
+        "required": [
+          "provider",
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        }
+      },
+      "ProvidersOutput": {
+        "type": "object",
+        "required": [
+          "providers",
+          "magicLink",
+          "workspaceSso"
+        ],
+        "properties": {
+          "magicLink": {
+            "type": "boolean"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderOutput"
+            }
+          },
+          "workspaceSso": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PublicBrandingOutput": {
+        "type": "object",
+        "description": "Public branding: asset delivery paths, never storage keys.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "favicon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "loginBrandText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "PublicSettingsValues": {
+        "type": "object",
+        "required": [
+          "branding",
+          "defaults.user",
+          "share",
+          "features",
+          "attachmentPreview",
+          "operator"
+        ],
+        "properties": {
+          "attachmentPreview": {
+            "$ref": "#/components/schemas/AttachmentPreviewSettings"
+          },
+          "branding": {
+            "$ref": "#/components/schemas/PublicBrandingOutput"
+          },
+          "defaults.user": {
+            "$ref": "#/components/schemas/DefaultsUserSettings"
+          },
+          "features": {
+            "$ref": "#/components/schemas/FeaturesSettings"
+          },
+          "operator": {
+            "$ref": "#/components/schemas/OperatorSettings"
+          },
+          "share": {
+            "$ref": "#/components/schemas/SharePolicy"
+          },
+          "webPushPublicKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "PutAttachmentPartResponse": {
         "type": "object",
         "required": [
@@ -17424,6 +20415,18 @@
           }
         }
       },
+      "SecuritySettings": {
+        "type": "object",
+        "properties": {
+          "contact": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "SessionUserOutput": {
         "type": "object",
         "required": [
@@ -17485,6 +20488,54 @@
           "weekStartsOn": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "SettingsValues": {
+        "type": "object",
+        "description": "The effective value of every key (serialized as the admin `values`).",
+        "required": [
+          "branding",
+          "defaults.user",
+          "auth",
+          "share",
+          "embed",
+          "features",
+          "attachmentPreview",
+          "i18n",
+          "security",
+          "operator"
+        ],
+        "properties": {
+          "attachmentPreview": {
+            "$ref": "#/components/schemas/AttachmentPreviewSettings"
+          },
+          "auth": {
+            "$ref": "#/components/schemas/AuthSettings"
+          },
+          "branding": {
+            "$ref": "#/components/schemas/BrandingSettings"
+          },
+          "defaults.user": {
+            "$ref": "#/components/schemas/DefaultsUserSettings"
+          },
+          "embed": {
+            "$ref": "#/components/schemas/EmbedSettings"
+          },
+          "features": {
+            "$ref": "#/components/schemas/FeaturesSettings"
+          },
+          "i18n": {
+            "$ref": "#/components/schemas/I18nSettings"
+          },
+          "operator": {
+            "$ref": "#/components/schemas/OperatorSettings"
+          },
+          "security": {
+            "$ref": "#/components/schemas/SecuritySettings"
+          },
+          "share": {
+            "$ref": "#/components/schemas/SharePolicy"
           }
         }
       },
@@ -17677,6 +20728,29 @@
             "type": "string"
           }
         }
+      },
+      "SharePolicy": {
+        "type": "object",
+        "description": "Instance share-link policy. Share-link routes read it through\n[`crate::settings::share_policy`].",
+        "required": [
+          "enabled",
+          "defaultExpiresDays",
+          "maxExpiresDays"
+        ],
+        "properties": {
+          "defaultExpiresDays": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "maxExpiresDays": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
       },
       "SharePublicMetaOutput": {
         "type": "object",
@@ -18203,6 +21277,18 @@
           }
         }
       },
+      "TokenBody": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "TrashItemResponse": {
         "type": "object",
         "required": [
@@ -18315,6 +21401,29 @@
           }
         }
       },
+      "WithdrawBody": {
+        "type": "object",
+        "description": "POST /auth/withdraw. Source `withdrawInput`: a non-null `currentPassword`\nwins; otherwise `emailLocalPart` (password-less accounts).",
+        "required": [
+          "currentPassword",
+          "emailLocalPart"
+        ],
+        "properties": {
+          "currentPassword": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "emailLocalPart": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "WorkflowOutput": {
         "type": "object",
         "required": [
@@ -18372,6 +21481,20 @@
           }
         }
       },
+      "WorkspaceConsentsResponse": {
+        "type": "object",
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceMemberConsentsOutput"
+            }
+          }
+        }
+      },
       "WorkspaceListItemResponse": {
         "type": "object",
         "required": [
@@ -18423,6 +21546,24 @@
           }
         }
       },
+      "WorkspaceMemberConsentsOutput": {
+        "type": "object",
+        "required": [
+          "userId",
+          "consents"
+        ],
+        "properties": {
+          "consents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberConsentOutput"
+            }
+          },
+          "userId": {
+            "type": "string"
+          }
+        }
+      },
       "WorkspaceMetaResponse": {
         "type": "object",
         "required": [
@@ -18438,6 +21579,45 @@
             "type": "string"
           },
           "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceStatusOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "workflowId",
+          "projectId",
+          "name",
+          "sortKey",
+          "category",
+          "wipLimit"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "sortKey": {
+            "type": "string"
+          },
+          "wipLimit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "workflowId": {
             "type": "string"
           }
         }

@@ -24,11 +24,8 @@ use crate::db::documents::{document_permission, membership_role, workspace_is_li
 use crate::db::projects::project_permission_by_id;
 use crate::db::workspace::WorkspaceRole;
 use crate::projects::ProjectPermission;
+use crate::settings::catalog::SharePolicy;
 
-/// Source `settings.share` default (`enabled`, 7 days default, 365 max). The
-/// instance settings store is not ported, so the policy is fixed at the default.
-pub const SHARE_DEFAULT_EXPIRES_DAYS: i64 = 7;
-pub const SHARE_MAX_EXPIRES_DAYS: i64 = 365;
 /// Tokens we issue are 43 chars; anything much longer is not ours and is not hashed.
 const MAX_TOKEN_LEN: usize = 256;
 
@@ -90,10 +87,18 @@ fn record_from_row(row: RecordRow) -> ShareLinkRecord {
     }
 }
 
-/// Source `expiresAtFromDays`: default 7, integer 1..=max.
-pub fn share_expiry(days: Option<i64>, now: DateTime<Utc>) -> Result<DateTime<Utc>, ShareDbError> {
-    let value = days.unwrap_or(SHARE_DEFAULT_EXPIRES_DAYS);
-    if !(1..=SHARE_MAX_EXPIRES_DAYS).contains(&value) {
+/// Source `expiresAtFromDays`: refused while the instance policy is disabled;
+/// otherwise the policy default, integer 1..=policy max.
+pub fn share_expiry(
+    days: Option<i64>,
+    policy: &SharePolicy,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, ShareDbError> {
+    if !policy.enabled {
+        return Err(ShareDbError::InvalidInput);
+    }
+    let value = days.unwrap_or(policy.default_expires_days);
+    if !(1..=policy.max_expires_days).contains(&value) {
         return Err(ShareDbError::InvalidInput);
     }
     Ok(now + chrono::Duration::days(value))
@@ -196,6 +201,7 @@ async fn document_access(
 
 /// Source `createShareLink`: edit permission on the target document or project.
 /// `affiliation` is set for the document-scoped routes.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_share_link(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -203,9 +209,10 @@ pub async fn create_share_link(
     credential_id: Uuid,
     target: ShareTarget,
     expires_in_days: Option<i64>,
+    policy: &SharePolicy,
     affiliation: Option<DocumentAffiliation>,
 ) -> Result<Result<ShareLinkCreated, ShareDbError>, sqlx::Error> {
-    let expires_at = match share_expiry(expires_in_days, Utc::now()) {
+    let expires_at = match share_expiry(expires_in_days, policy, Utc::now()) {
         Ok(at) => at,
         Err(err) => return Ok(Err(err)),
     };
@@ -951,12 +958,28 @@ mod tests {
     #[test]
     fn share_expiry_bounds() {
         let now = Utc::now();
+        let policy = SharePolicy::default();
         assert_eq!(
-            share_expiry(None, now).unwrap(),
+            share_expiry(None, &policy, now).unwrap(),
             now + chrono::Duration::days(7)
         );
-        assert!(share_expiry(Some(0), now).is_err());
-        assert!(share_expiry(Some(366), now).is_err());
-        assert!(share_expiry(Some(365), now).is_ok());
+        assert!(share_expiry(Some(0), &policy, now).is_err());
+        assert!(share_expiry(Some(366), &policy, now).is_err());
+        assert!(share_expiry(Some(365), &policy, now).is_ok());
+        let narrow = SharePolicy {
+            enabled: true,
+            default_expires_days: 3,
+            max_expires_days: 30,
+        };
+        assert_eq!(
+            share_expiry(None, &narrow, now).unwrap(),
+            now + chrono::Duration::days(3)
+        );
+        assert!(share_expiry(Some(31), &narrow, now).is_err());
+        let disabled = SharePolicy {
+            enabled: false,
+            ..SharePolicy::default()
+        };
+        assert!(share_expiry(Some(1), &disabled, now).is_err());
     }
 }

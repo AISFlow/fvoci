@@ -1830,3 +1830,469 @@ pub struct SharePublicMetaOutput {
     pub project_id: Option<String>,
     pub expires_at: String,
 }
+
+/// POST /auth/withdraw. Source `withdrawInput`: a non-null `currentPassword`
+/// wins; otherwise `emailLocalPart` (password-less accounts).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WithdrawBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub current_password: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub email_local_part: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ErasureScheduleOutput {
+    pub ok: bool,
+    pub cancel_token: String,
+    pub erase_at: DateTime<Utc>,
+    pub mail_sent: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TokenBody {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct EmailChangeBody {
+    pub new_email: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PasswordChangeBody {
+    /// `null` only for password-less accounts.
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub current_password: Option<String>,
+    pub new_password: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MagicLinkBody {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProviderOutput {
+    pub provider: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProvidersOutput {
+    pub providers: Vec<ProviderOutput>,
+    pub magic_link: bool,
+    pub workspace_sso: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct IdentityOutput {
+    pub provider: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub email: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct IdentitiesOutput {
+    pub items: Vec<IdentityOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DashboardRecentItemOutput {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub project_id: Option<String>,
+    pub number: i32,
+    pub updated_at: DateTime<Utc>,
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceStatusOutput {
+    pub id: String,
+    pub workflow_id: String,
+    pub project_id: String,
+    pub name: String,
+    pub sort_key: String,
+    pub category: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub wip_limit: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DashboardProjectOutput {
+    pub id: String,
+    pub workspace_id: String,
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DashboardWorkspaceOutput {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub role: String,
+    pub kind: String,
+    pub document_count: i32,
+    pub assigned_count: i32,
+    pub unread_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MeDashboardResponse {
+    pub assigned: Vec<TaskListItemOutput>,
+    pub recent: Vec<DashboardRecentItemOutput>,
+    pub labels: Vec<LabelOutput>,
+    pub statuses: Vec<WorkspaceStatusOutput>,
+    pub projects: Vec<DashboardProjectOutput>,
+    pub members: Vec<MemberResponse>,
+    pub workspaces: Vec<DashboardWorkspaceOutput>,
+    pub unread_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MeLocateResponse {
+    pub workspace_id: String,
+}
+
+// ---------------------------------------------------------------- admin console
+
+fn deserialize_optional_non_null_bool<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    match Option::<bool>::deserialize(deserializer)? {
+        Some(value) => Ok(Some(value)),
+        None => Err(serde::de::Error::invalid_type(
+            serde::de::Unexpected::Unit,
+            &"boolean",
+        )),
+    }
+}
+
+/// Source `auditLogListQuery` (strict: only `limit` and `cursor`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditLogQuery {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AuditLogItemOutput {
+    pub id: String,
+    pub actor_user_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub verb: String,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = Object))]
+    pub payload: Value,
+    pub ip: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AuditLogListResponse {
+    pub items: Vec<AuditLogItemOutput>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminSystemOutput {
+    pub users: i64,
+    pub workspaces: i64,
+    pub documents: i64,
+    pub tasks: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminUserItemOutput {
+    pub id: String,
+    pub email: String,
+    pub given_name: String,
+    pub family_name: Option<String>,
+    pub instance_admin: bool,
+    pub suspended_at: Option<DateTime<Utc>>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub erase_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminUserListResponse {
+    pub items: Vec<AdminUserItemOutput>,
+}
+
+/// Source `adminUserPatchInput`: at least one of the flags.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminUserPatchBody {
+    pub user_id: Uuid,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_bool")]
+    pub instance_admin: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_bool")]
+    pub suspended: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminUserPatchOutput {
+    pub ok: bool,
+    pub suspended_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminWorkspaceItemOutput {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminWorkspaceListResponse {
+    pub items: Vec<AdminWorkspaceItemOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InstanceAdminBody {
+    pub user_id: Uuid,
+    pub value: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LegalPublishBody {
+    pub kind: String,
+    pub title: String,
+    pub body_markdown: String,
+    pub required: bool,
+    /// ISO 8601 UTC date-time (`Z`).
+    pub effective_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LegalDocumentOutput {
+    pub kind: String,
+    pub version: i32,
+    pub title: String,
+    pub body_html: String,
+    pub effective_at: DateTime<Utc>,
+    pub required: bool,
+    pub published_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LegalVersionMetaOutput {
+    pub kind: String,
+    pub version: i32,
+    pub title: String,
+    pub effective_at: DateTime<Utc>,
+    pub required: bool,
+    pub published_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LegalVersionsResponse {
+    pub versions: Vec<LegalVersionMetaOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegalVersionQuery {
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// Items are non-strict objects in the source (extra keys are ignored).
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ConsentItemBody {
+    pub kind: String,
+    pub version: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ConsentsSubmitBody {
+    pub items: Vec<ConsentItemBody>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ConsentsPendingResponse {
+    pub pending: Vec<LegalDocumentOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MemberConsentOutput {
+    pub kind: String,
+    pub version: i32,
+    pub consented_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceMemberConsentsOutput {
+    pub user_id: String,
+    pub consents: Vec<MemberConsentOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceConsentsResponse {
+    pub members: Vec<WorkspaceMemberConsentsOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminInstanceSettingsOutput {
+    pub version: i64,
+    pub values: crate::settings::SettingsValues,
+    pub overridden: Vec<String>,
+    pub restart_required: Vec<String>,
+    pub env_applied: Vec<String>,
+    pub ee_features: Vec<String>,
+}
+
+/// Public branding: asset delivery paths, never storage keys.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PublicBrandingOutput {
+    pub name: String,
+    pub logo: Option<String>,
+    pub favicon: Option<String>,
+    pub login_brand_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PublicSettingsValues {
+    pub branding: PublicBrandingOutput,
+    #[serde(rename = "defaults.user")]
+    pub defaults_user: crate::settings::catalog::DefaultsUserSettings,
+    pub share: crate::settings::catalog::SharePolicy,
+    pub features: crate::settings::catalog::FeaturesSettings,
+    pub attachment_preview: crate::settings::catalog::AttachmentPreviewSettings,
+    pub operator: crate::settings::catalog::OperatorSettings,
+    pub web_push_public_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct InstanceSettingsOutput {
+    pub version: i64,
+    pub values: PublicSettingsValues,
+}
+
+#[cfg(feature = "api-schema")]
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+#[schema(as = BrandingPatchInput)]
+#[allow(dead_code)]
+pub struct BrandingPatchSchema {
+    pub name: String,
+    #[schema(required = true, nullable = true)]
+    pub smtp_from_display: Option<String>,
+    #[schema(required = true, nullable = true)]
+    pub login_brand_text: Option<String>,
+}
+
+/// OpenAPI shape of `PATCH /admin/instance-settings`: every key optional,
+/// `null` resets it; `branding` has no asset leaves. The server validates the
+/// raw JSON against the catalog.
+#[cfg(feature = "api-schema")]
+#[derive(Serialize, ToSchema)]
+#[schema(as = InstanceSettingsPatchInput)]
+#[allow(dead_code)]
+pub struct InstanceSettingsPatchSchema {
+    #[schema(nullable = true)]
+    pub branding: Option<BrandingPatchSchema>,
+    #[serde(rename = "defaults.user")]
+    #[schema(nullable = true)]
+    pub defaults_user: Option<crate::settings::catalog::DefaultsUserSettings>,
+    #[schema(nullable = true)]
+    pub auth: Option<crate::settings::catalog::AuthSettings>,
+    #[schema(nullable = true)]
+    pub share: Option<crate::settings::catalog::SharePolicy>,
+    #[schema(nullable = true)]
+    pub embed: Option<crate::settings::catalog::EmbedSettings>,
+    #[schema(nullable = true)]
+    pub features: Option<crate::settings::catalog::FeaturesSettings>,
+    #[serde(rename = "attachmentPreview")]
+    #[schema(nullable = true)]
+    pub attachment_preview: Option<crate::settings::catalog::AttachmentPreviewSettings>,
+    #[schema(nullable = true)]
+    pub i18n: Option<crate::settings::catalog::I18nSettings>,
+    #[schema(nullable = true)]
+    pub security: Option<crate::settings::catalog::SecuritySettings>,
+    #[schema(nullable = true)]
+    pub operator: Option<crate::settings::catalog::OperatorSettings>,
+}

@@ -3423,3 +3423,78 @@ pub async fn remove_task_dependency(
     tx.commit().await?;
     Ok(Ok(()))
 }
+
+/// Source dashboard `listTasks(OPEN_ASSIGNED_QUERY, limit)` for one workspace:
+/// open tasks assigned to `user_id` in `project_ids`, due ascending (nulls
+/// last), id ascending. Also returns the due day in `time_zone` for the
+/// cross-workspace merge. The caller's transaction holds the tenant context.
+pub(crate) async fn list_open_assigned_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    project_ids: &[Uuid],
+    time_zone: &str,
+    limit: i64,
+) -> Result<Vec<(TaskListItemRow, Option<NaiveDate>)>, sqlx::Error> {
+    if project_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT t.id, t.project_id, t.number, t.title, t.type AS task_type, t.priority, t.status_id,
+               t.start_date, t.due_date, t.due_at, t.estimate::text AS estimate,
+               t.parent_id, t.milestone_id, t.sort_key, t.schema_version, t.version,
+               t.archived_at, t.created_by, t.created_at, t.updated_at, t.recurrence,
+               COALESCE(t.due_date, (t.due_at AT TIME ZONE $4)::date) AS due_key
+        FROM fvoci.tasks t
+        WHERE t.workspace_id = $1
+          AND t.project_id = ANY($3)
+          AND t.deleted_at IS NULL
+          AND t.archived_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM fvoci.task_assignees a
+            WHERE a.workspace_id = t.workspace_id AND a.task_id = t.id AND a.user_id = $2
+          )
+          AND EXISTS (
+            SELECT 1 FROM fvoci.statuses s_open
+            WHERE s_open.workspace_id = t.workspace_id
+              AND s_open.project_id = t.project_id
+              AND s_open.id = t.status_id
+              AND s_open.category NOT IN ('done', 'canceled')
+          )
+        ORDER BY COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date) ASC NULLS LAST, t.id ASC
+        LIMIT $5
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(project_ids)
+    .bind(time_zone)
+    .bind(limit)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut metas = Vec::with_capacity(rows.len());
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let record = map_task_row(row)?;
+        ids.push(record.id);
+        let recurrence = row.try_get::<Option<Value>, _>("recurrence").ok().flatten();
+        let due_key: Option<NaiveDate> = row.try_get("due_key")?;
+        metas.push((row_to_meta(workspace_id, record, recurrence), due_key));
+    }
+    let (assignee_map, label_map) = load_task_refs(tx, workspace_id, &ids).await?;
+    Ok(metas
+        .into_iter()
+        .map(|(meta, due_key)| {
+            let id = meta.id;
+            (
+                TaskListItemRow {
+                    assignee_ids: assignee_map.get(&id).cloned().unwrap_or_default(),
+                    label_ids: label_map.get(&id).cloned().unwrap_or_default(),
+                    meta,
+                },
+                due_key,
+            )
+        })
+        .collect())
+}
