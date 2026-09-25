@@ -436,11 +436,13 @@ async fn stars_and_recent_follow_current_read_access_and_token_kinds() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(token_recent["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|i| i["type"] == "task"));
+    let token_items = token_recent["items"].as_array().unwrap();
+    assert!(!token_items.is_empty(), "{token_recent}");
+    assert!(
+        token_items.iter().all(|i| i["type"] == "task"),
+        "{token_recent}"
+    );
+    assert!(ids(&token_recent).contains(&task), "{token_recent}");
     let share_only = create_api_token(&app, &cookie, ws, &["share.manage"]).await;
     let (status, empty) = bearer(app.clone(), "GET", &stars, None, &share_only).await;
     assert_eq!(status, StatusCode::OK);
@@ -461,6 +463,15 @@ async fn stars_and_recent_follow_current_read_access_and_token_kinds() {
         ids(&listed),
         vec![task_star["id"].as_str().unwrap().to_string()]
     );
+    let doc_star_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.stars WHERE document_id = $1 AND user_id = $2",
+    )
+    .bind(Uuid::parse_str(&doc).unwrap())
+    .bind(owner_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(doc_star_rows, 1, "the star row stays while hidden");
     let (_, recent) = json_request(
         app.clone(),
         "GET",
@@ -551,7 +562,6 @@ async fn stars_and_recent_follow_current_read_access_and_token_kinds() {
         .await
         .unwrap();
     assert_eq!(left, 0, "membership removal cascades to stars");
-    let _ = owner_id;
     admin.close().await;
     harness.cleanup().await;
 }
@@ -625,12 +635,23 @@ async fn document_share_scope_rechecks_state_on_every_request() {
         "{csp}"
     );
     assert_eq!(headers["cache-control"], "private, no-store");
+    assert!(csp.contains("img-src 'self' data: blob:"), "{csp}");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    assert!(
+        html.contains("<meta name=\"referrer\" content=\"no-referrer\"/>"),
+        "{html}"
+    );
     let (status, headers, fragment) =
         raw_get(app.clone(), &format!("{base}/body?format=fragment"), &[]).await;
     assert_eq!(status, StatusCode::OK);
     let fragment = String::from_utf8(fragment).unwrap();
     assert!(fragment.starts_with("<p>&lt;script&gt;"), "{fragment}");
     assert!(fragment.contains("<a>링크</a>"), "{fragment}");
+    assert_eq!(
+        headers["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
+    assert_eq!(headers["referrer-policy"], "no-referrer");
     let etag = headers["etag"].to_str().unwrap().to_string();
     let (status, _, empty) = raw_get(
         app.clone(),
@@ -643,6 +664,10 @@ async fn document_share_scope_rechecks_state_on_every_request() {
     let (status, headers, md) = raw_get(app.clone(), &format!("{base}/body?format=md"), &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["content-type"], "text/markdown; charset=utf-8");
+    assert_eq!(
+        headers["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
     let md = String::from_utf8(md).unwrap();
     assert!(md.contains("\\<script>alert(1)\\</script> 본문"), "{md}");
     for bad in ["?format=pdf", "?format=html&x=1"] {
@@ -884,8 +909,9 @@ async fn document_share_scope_rechecks_state_on_every_request() {
         .is_none());
 
     for bad in ["x", &"a".repeat(300)] {
-        let (status, _) = public_json(app.clone(), &format!("/api/v1/share/{bad}")).await;
+        let (status, headers, _) = raw_get(app.clone(), &format!("/api/v1/share/{bad}"), &[]).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(headers["referrer-policy"], "no-referrer", "errors too");
     }
     pool.close().await;
     admin.close().await;
@@ -1182,6 +1208,15 @@ async fn project_share_covers_project_subtree_and_tasks_only() {
     let (status, _, _) = raw_get(app.clone(), &format!("{base}/documents/{wiki}"), &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    let admin = admin_pool(&harness).await;
+    sqlx::query("UPDATE fvoci.tasks SET content_json = $2 WHERE id = $1")
+        .bind(Uuid::parse_str(&task).unwrap())
+        .bind(json!({"type": "doc", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "과제 설명 본문"}]}
+        ]}))
+        .execute(&admin)
+        .await
+        .unwrap();
     let pool = app_pool(&harness).await;
     let (_, rows) = hydrate_share_hits(
         &pool,
@@ -1206,9 +1241,13 @@ async fn project_share_covers_project_subtree_and_tasks_only() {
     ];
     want.sort();
     assert_eq!(got, want);
+    let task_row = rows.iter().find(|r| r.is_task).unwrap();
+    assert_eq!(
+        task_row.body, "과제 설명 본문",
+        "snippet body is the task text"
+    );
 
     // Deleting the project ends the share.
-    let admin = admin_pool(&harness).await;
     sqlx::query("UPDATE fvoci.projects SET deleted_at = now() WHERE id = $1")
         .bind(Uuid::parse_str(project_id).unwrap())
         .execute(&admin)
@@ -1343,6 +1382,13 @@ async fn app_role_rls_isolates_stars_and_share_links() {
             .await
             .unwrap();
     assert!(wrong.is_none());
+    // The system-context branch is SELECT-only: no cross-tenant delete.
+    let deleted = sqlx::query("DELETE FROM fvoci.share_links")
+        .execute(&mut *tx)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(deleted, 0, "system context cannot delete share links");
     tx.rollback().await.unwrap();
 
     let admin = admin_pool(&harness).await;
@@ -1372,6 +1418,217 @@ async fn app_role_rls_isolates_stars_and_share_links() {
     .unwrap();
     assert!(!public_exec, "definer EXECUTE is revoked from PUBLIC");
     pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn star(app: &axum::Router, cookie: &str, ws: Uuid, kind: &str, id: &str) -> StatusCode {
+    json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/stars"),
+        Some(json!({"type": kind, "id": id})),
+        Some(cookie),
+    )
+    .await
+    .0
+}
+
+async fn star_targets(app: &axum::Router, cookie: &str, ws: Uuid) -> Vec<String> {
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/stars"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["targetId"].as_str().unwrap().to_string())
+        .collect()
+}
+
+async fn recent_ids(app: &axum::Router, cookie: &str, ws: Uuid) -> Vec<String> {
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/recent?limit=50"),
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    ids(&body)
+}
+
+#[tokio::test]
+async fn stars_and_recent_gate_on_current_access() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, ws, "member", "gate-member").await;
+    let guest = add_workspace_user(&admin, ws, "guest", "gate-guest").await;
+
+    // 1. Revoked project access hides a starred private-project task.
+    let private = create_project(app.clone(), &cookie, ws, "GPR", "private").await;
+    let private_id = private["id"].as_str().unwrap();
+    let private_task = create_task(&app, &cookie, ws, private_id, "비공개 과제").await;
+    let (status, added) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{private_id}/members"),
+        Some(json!({"userId": member.user_id, "role": "member"})),
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{added}");
+    assert_eq!(
+        star(&app, &member.cookie, ws, "task", &private_task).await,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        star_targets(&app, &member.cookie, ws).await,
+        vec![private_task.clone()]
+    );
+    assert!(recent_ids(&app, &member.cookie, ws)
+        .await
+        .contains(&private_task));
+    let (status, removed) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{ws}/projects/{private_id}/members/{}",
+            member.user_id
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{removed}");
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/stars"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], json!([]));
+    assert!(
+        !body.to_string().contains("비공개 과제"),
+        "title leaked: {body}"
+    );
+    let recent = recent_ids(&app, &member.cookie, ws).await;
+    assert!(!recent.contains(&private_task), "{recent:?}");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.stars WHERE user_id = $1")
+        .bind(member.user_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "row kept, only hidden");
+
+    // 2. Guest: no wiki access without a grant, access with a group grant.
+    let wiki = create_wiki_doc(&app, &cookie, ws, None, "손님 문서").await;
+    assert_eq!(
+        star(&app, &guest.cookie, ws, "document", &wiki).await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(!recent_ids(&app, &guest.cookie, ws).await.contains(&wiki));
+    let group_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.groups (id, workspace_id, name) VALUES ($1, $2, 'guests')")
+        .bind(group_id)
+        .bind(ws)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.group_members (workspace_id, group_id, user_id) VALUES ($1, $2, $3)",
+    )
+    .bind(ws)
+    .bind(group_id)
+    .bind(guest.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.document_members (id, workspace_id, document_id, group_id, role)
+         VALUES ($1, $2, $3, $4, 'viewer')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws)
+    .bind(Uuid::parse_str(&wiki).unwrap())
+    .bind(group_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    assert!(recent_ids(&app, &guest.cookie, ws).await.contains(&wiki));
+    assert_eq!(
+        star(&app, &guest.cookie, ws, "document", &wiki).await,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        star_targets(&app, &guest.cookie, ws).await,
+        vec![wiki.clone()]
+    );
+    sqlx::query("DELETE FROM fvoci.group_members WHERE group_id = $1 AND user_id = $2")
+        .bind(group_id)
+        .bind(guest.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert!(star_targets(&app, &guest.cookie, ws).await.is_empty());
+    assert!(!recent_ids(&app, &guest.cookie, ws).await.contains(&wiki));
+
+    // 3. A soft-deleted project hides its documents and tasks.
+    let open = create_project(app.clone(), &cookie, ws, "GOP", "workspace").await;
+    let open_id = open["id"].as_str().unwrap();
+    let open_root = open["rootDocumentId"].as_str().unwrap().to_string();
+    let open_task = create_task(&app, &cookie, ws, open_id, "열린 과제").await;
+    assert_eq!(
+        star(&app, &cookie, ws, "task", &open_task).await,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        star(&app, &cookie, ws, "document", &open_root).await,
+        StatusCode::CREATED
+    );
+    let before = recent_ids(&app, &cookie, ws).await;
+    assert!(
+        before.contains(&open_task) && before.contains(&open_root),
+        "{before:?}"
+    );
+    sqlx::query("UPDATE fvoci.projects SET deleted_at = now() WHERE id = $1")
+        .bind(Uuid::parse_str(open_id).unwrap())
+        .execute(&admin)
+        .await
+        .unwrap();
+    let starred = star_targets(&app, &cookie, ws).await;
+    assert!(
+        !starred.contains(&open_task) && !starred.contains(&open_root),
+        "{starred:?}"
+    );
+    let after = recent_ids(&app, &cookie, ws).await;
+    assert!(
+        !after.contains(&open_task) && !after.contains(&open_root),
+        "{after:?}"
+    );
+
+    // 4. An archived task is absent from recent.
+    let live = create_project(app.clone(), &cookie, ws, "GLV", "workspace").await;
+    let archived = create_task(&app, &cookie, ws, live["id"].as_str().unwrap(), "보관 과제").await;
+    assert!(recent_ids(&app, &cookie, ws).await.contains(&archived));
+    sqlx::query("UPDATE fvoci.tasks SET archived_at = now() WHERE id = $1")
+        .bind(Uuid::parse_str(&archived).unwrap())
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert!(!recent_ids(&app, &cookie, ws).await.contains(&archived));
+
     admin.close().await;
     harness.cleanup().await;
 }

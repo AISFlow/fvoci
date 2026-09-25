@@ -1,6 +1,6 @@
 import { asSafeHtml, SafeHtmlView } from "@fvoci/editor/safe-html";
 import { t } from "@fvoci/i18n";
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import type { ShareTreeNode } from "@/lib/queries/share";
@@ -63,10 +63,13 @@ function PublicTreeBranch({
   );
 }
 
-/** Server `format=fragment` HTML is already sanitized; links still open detached. */
+/**
+ * Server `format=fragment` HTML is already sanitized; links still open detached.
+ * Layout effect: links are hardened before the first paint, never clickable raw.
+ */
 function ShareBodyView({ html }: { html: string }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = ref.current;
     if (!root) return;
     for (const link of root.querySelectorAll("a")) {

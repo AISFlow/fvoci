@@ -28,7 +28,8 @@ export function isSafeShareHref(href: string): boolean {
   const value = href.trim();
   if (value === "") return false;
   const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(value);
-  if (!scheme) return !value.startsWith("//") && !/[\u0000-\u001f]/.test(value);
+  // Browsers read `\\host` and `/\host` as protocol-relative `//host`.
+  if (!scheme) return !/^[/\\]{2}/.test(value) && !/[\u0000-\u001f]/.test(value);
   const name = scheme[1].toLowerCase();
   return name === "http" || name === "https" || name === "mailto";
 }

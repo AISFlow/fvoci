@@ -82,11 +82,13 @@ ALTER TABLE fvoci.share_links ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fvoci.share_links FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON fvoci.share_links
     AS PERMISSIVE FOR ALL TO public
-    USING (
-        workspace_id = (SELECT public.app_tenant_id())
-        OR (SELECT public.app_system_ctx_on())
-    )
+    USING (workspace_id = (SELECT public.app_tenant_id()))
     WITH CHECK (workspace_id = (SELECT public.app_tenant_id()));
+-- The system context only ever reads (token lookup); it can never delete or
+-- write another tenant's links.
+CREATE POLICY system_token_lookup ON fvoci.share_links
+    AS PERMISSIVE FOR SELECT TO public
+    USING ((SELECT public.app_system_ctx_on()));
 
 -- Public token resolution: exact hash match, unexpired only. Returns the
 -- stored hash so the caller can re-compare in constant time; no other secret

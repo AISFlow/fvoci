@@ -33,6 +33,9 @@ test("isSafeShareHref allows http/https/mailto/relative only", () => {
   assert.equal(isSafeShareHref(" JavaScript:alert(1)"), false);
   assert.equal(isSafeShareHref("data:text/html,x"), false);
   assert.equal(isSafeShareHref("//evil.example"), false);
+  assert.equal(isSafeShareHref("\\\\evil.example"), false);
+  assert.equal(isSafeShareHref("/\\evil.example"), false);
+  assert.equal(isSafeShareHref("\\/evil.example"), false);
   assert.equal(isSafeShareHref(""), false);
 });
 

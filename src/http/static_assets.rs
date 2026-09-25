@@ -69,7 +69,18 @@ impl Service<Request<Body>> for StaticFallback {
     }
 }
 
+/// Every shell/asset response sends `Referrer-Policy: no-referrer` (source
+/// global security headers): `/s/{token}` and invite paths carry secrets.
 async fn serve_static(req: Request<Body>, root: PathBuf, index: PathBuf) -> Response {
+    let mut response = serve_static_file(req, root, index).await;
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+async fn serve_static_file(req: Request<Body>, root: PathBuf, index: PathBuf) -> Response {
     let path = req.uri().path();
     if path.starts_with(crate::error::API_PREFIX) {
         return unknown_api_fallback(req).await;

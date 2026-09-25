@@ -57,6 +57,7 @@ use crate::share_render::{is_tiptap_doc, tiptap_doc_to_md, tiptap_doc_to_safe_ht
 use crate::validate::utf16_len;
 
 const SHARE_IP_LIMIT: u32 = 60;
+const FRAGMENT_CSP: &str = "default-src 'none'; sandbox";
 const SHARE_IP_WINDOW: Duration = Duration::from_secs(60);
 const SHARE_SEARCH_LIMIT: usize = 50;
 const SHARE_MEILI_PAGE: u32 = 50;
@@ -82,6 +83,13 @@ pub fn router() -> Router<AppState> {
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{id}/share-links",
             get(list_project_document_links).post(create_project_document_link),
         )
+        .merge(public_router())
+}
+
+/// Public routes carry `Referrer-Policy: no-referrer` on every response
+/// (including errors) so the token in the URL never leaks via Referer.
+fn public_router() -> Router<AppState> {
+    Router::new()
         .route("/api/v1/share/{token}", get(public_meta_route))
         .route("/api/v1/share/{token}/body", get(public_body_route))
         .route("/api/v1/share/{token}/tree", get(public_tree_route))
@@ -99,6 +107,15 @@ pub fn router() -> Router<AppState> {
             "/api/v1/share/{token}/attachments/{attachment_id}/download",
             get(public_download_route),
         )
+        .layer(axum::middleware::map_response(no_referrer))
+}
+
+async fn no_referrer(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 fn iso(at: chrono::DateTime<chrono::Utc>) -> String {
@@ -506,7 +523,7 @@ fn escape_html(value: &str) -> String {
 /// per-response nonce; nothing else may load or run.
 fn wrap_share_html(title: &str, inner: &str, nonce: &str) -> String {
     format!(
-        "<!DOCTYPE html>\n<html lang=\"ko\">\n<head>\n<meta charset=\"utf-8\"/>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n<title>{}</title>\n<style nonce=\"{}\">\nbody{{font-family:\"Noto Sans KR\",\"Noto Sans KR\",system-ui,\"Noto Sans KR\",sans-serif;word-break:keep-all;}}\n\n</style>\n</head>\n<body>\n{inner}\n</body>\n</html>",
+        "<!DOCTYPE html>\n<html lang=\"ko\">\n<head>\n<meta charset=\"utf-8\"/>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n<meta name=\"referrer\" content=\"no-referrer\"/>\n<title>{}</title>\n<style nonce=\"{}\">\nbody{{font-family:\"Noto Sans KR\",\"Noto Sans KR\",system-ui,\"Noto Sans KR\",sans-serif;word-break:keep-all;}}\n\n</style>\n</head>\n<body>\n{inner}\n</body>\n</html>",
         escape_html(title),
         escape_html(nonce),
     )
@@ -566,7 +583,7 @@ async fn document_body_response(
                 rand::rng().fill_bytes(&mut raw);
                 let nonce = URL_SAFE_NO_PAD.encode(raw);
                 let csp = format!(
-                    "default-src 'none'; style-src 'nonce-{nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                    "default-src 'none'; style-src 'nonce-{nonce}'; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
                 );
                 out.insert(
                     CONTENT_SECURITY_POLICY,
@@ -581,6 +598,12 @@ async fn document_body_response(
     if format == BodyFormat::Html {
         out.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     } else {
+        // Fragment and markdown are data for the SPA, never a document: a
+        // direct navigation gets no script, no subresources and an opaque origin.
+        out.insert(
+            CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(FRAGMENT_CSP),
+        );
         out.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
         out.insert(
             ETAG,

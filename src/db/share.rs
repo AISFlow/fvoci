@@ -13,7 +13,10 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::auth::token::{hash_token, new_token, token_hashes_eq};
+use crate::collab::derived_body::extract_text;
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, session_is_live, set_system, set_tenant,
 };
@@ -808,6 +811,8 @@ pub async fn share_attachment(
 // Public search hydration
 // ---------------------------------------------------------------------------
 
+type TaskHitRow = (Uuid, String, Uuid, DateTime<Utc>, Value);
+
 type DocHitRow = (Uuid, String, String, Option<Uuid>, DateTime<Utc>);
 
 #[derive(Debug, Clone)]
@@ -893,9 +898,10 @@ pub async fn hydrate_share_hits(
     if let (Some(project_id), None, false) =
         (share.project_id, share.document_id, task_ids.is_empty())
     {
-        let tasks: Vec<(Uuid, String, Uuid, DateTime<Utc>)> = sqlx::query_as(
+        let tasks: Vec<TaskHitRow> = sqlx::query_as(
             r#"
-            SELECT t.id, t.title, t.project_id, date_trunc('milliseconds', t.updated_at)
+            SELECT t.id, t.title, t.project_id, date_trunc('milliseconds', t.updated_at),
+                   t.content_json
             FROM fvoci.tasks t
             INNER JOIN fvoci.projects p
                 ON p.workspace_id = t.workspace_id AND p.id = t.project_id AND p.deleted_at IS NULL
@@ -909,17 +915,20 @@ pub async fn hydrate_share_hits(
         .bind(task_ids)
         .fetch_all(&mut *tx)
         .await?;
+        // Source `task.text` = `extractText(contentJson).normalize("NFC")`.
         rows.extend(
             tasks
                 .into_iter()
-                .map(|(id, title, project_id, updated_at)| ShareSearchRow {
-                    is_task: true,
-                    id,
-                    title: title.clone(),
-                    body: title,
-                    project_id: Some(project_id),
-                    updated_at,
-                }),
+                .map(
+                    |(id, title, project_id, updated_at, content_json)| ShareSearchRow {
+                        is_task: true,
+                        id,
+                        title,
+                        body: extract_text(&content_json).nfc().collect(),
+                        project_id: Some(project_id),
+                        updated_at,
+                    },
+                ),
         );
     }
     tx.commit().await?;
