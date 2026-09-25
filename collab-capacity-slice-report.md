@@ -68,3 +68,7 @@ Attempts to enable warm validators on the hot path (lazy spawn, cap raised to 64
 
 - `collab_pg_connections_required(max_rooms)` checked at startup against PostgreSQL `max_connections`.
 - Probe/test PG default `max_connections` raised to 150 for 64 room guards + app pool + reserve.
+
+### ARM64 `collab_operational_project_failure_recovers_primary` flake
+
+`collab_operational_project_failure_recovers_primary` passed 5/5 locally with `--test-threads=4` (matching CI parallelism). No branch change targets projection persist-failed timing; primary admission does not alter project-helper caps. If ARM64 CI still flakes, suspect pre-existing helper-slot contention under parallel `collab_projection` rather than this slice.
