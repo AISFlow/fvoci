@@ -11,6 +11,38 @@ use crate::search::meili::{meili_config_from_env, MeiliConfig};
 pub const DEFAULT_UPLOAD_PART_SIZE_BYTES: i64 = 32 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES: i64 = 5120_i64 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN: u32 = 120;
+pub const DEFAULT_UPLOAD_INCOMPLETE_TTL_HOURS: u64 = 24;
+
+#[derive(Clone)]
+pub struct S3Settings {
+    pub endpoint: String,
+    pub public_endpoint: Option<String>,
+    pub region: String,
+    pub bucket: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub force_path_style: bool,
+}
+
+impl fmt::Debug for S3Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Settings")
+            .field("endpoint", &self.endpoint)
+            .field("public_endpoint", &self.public_endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .field("force_path_style", &self.force_path_style)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum StorageSettings {
+    Local { root: PathBuf },
+    S3(S3Settings),
+}
 
 pub struct Config {
     pub bind: SocketAddr,
@@ -20,8 +52,9 @@ pub struct Config {
     pub public_origin: String,
     pub cookie_secure: bool,
     pub static_dir: Option<PathBuf>,
-    pub storage_root: PathBuf,
+    pub storage: StorageSettings,
     pub upload: UploadLimits,
+    pub upload_incomplete_ttl: Duration,
     /// Wall deadline covering HTTP drain, hub join, and pool close after the stop signal.
     pub shutdown_deadline: Duration,
     /// Present when `FVOCI_MEILI_URL` is set. The API key is never logged.
@@ -38,8 +71,9 @@ impl Clone for Config {
             public_origin: self.public_origin.clone(),
             cookie_secure: self.cookie_secure,
             static_dir: self.static_dir.clone(),
-            storage_root: self.storage_root.clone(),
+            storage: self.storage.clone(),
             upload: self.upload.clone(),
+            upload_incomplete_ttl: self.upload_incomplete_ttl,
             shutdown_deadline: self.shutdown_deadline,
             meili: self.meili.clone(),
         }
@@ -55,8 +89,9 @@ impl fmt::Debug for Config {
             .field("public_origin", &self.public_origin)
             .field("cookie_secure", &self.cookie_secure)
             .field("static_dir", &self.static_dir)
-            .field("storage_root", &self.storage_root)
+            .field("storage", &self.storage)
             .field("upload", &self.upload)
+            .field("upload_incomplete_ttl", &self.upload_incomplete_ttl)
             .field("shutdown_deadline", &self.shutdown_deadline)
             .field("meili", &self.meili)
             .finish()
@@ -104,8 +139,11 @@ impl Config {
             _ => None,
         };
 
-        let storage_root = required_storage_root_from_env()?;
+        let storage = storage_settings_from_env()?;
         let upload = required_upload_limits_from_env()?;
+        check_part_size_for_storage(&storage, &upload)?;
+        let upload_incomplete_ttl =
+            parse_incomplete_ttl_hours(env::var("UPLOAD_INCOMPLETE_TTL_HOURS").ok().as_deref())?;
 
         let shutdown_deadline =
             parse_shutdown_deadline_ms(env::var("FVOCI_SHUTDOWN_DEADLINE_MS").ok().as_deref())?;
@@ -119,22 +157,126 @@ impl Config {
             public_origin,
             cookie_secure,
             static_dir,
-            storage_root,
+            storage,
             upload,
+            upload_incomplete_ttl,
             shutdown_deadline,
             meili,
         })
     }
 }
 
-fn required_storage_root_from_env() -> Result<PathBuf, String> {
-    let path = storage_root_path_from_values(
-        env::var("FVOCI_STORAGE_DIR").ok().as_deref(),
-        env::var("STORAGE_LOCAL_PATH").ok().as_deref(),
+fn nonempty_env(name: &str) -> Result<String, String> {
+    let value = env::var(name).map_err(|_| format!("{name} is required when STORAGE_DRIVER=s3"))?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{name} is required when STORAGE_DRIVER=s3"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn parse_s3_endpoint(name: &str, raw: &str) -> Result<String, String> {
+    let url = url::Url::parse(raw).map_err(|e| format!("invalid {name}: {e}"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(format!(
+            "{name} must be an HTTP(S) URL without credentials, query or fragment"
+        ));
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!(
+            "{name} must be an HTTP(S) URL without credentials, query or fragment"
+        ));
+    }
+    Ok(raw.trim().trim_end_matches('/').to_string())
+}
+
+fn storage_settings_from_env() -> Result<StorageSettings, String> {
+    let driver = env::var("STORAGE_DRIVER")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "local".to_string());
+    match driver.as_str() {
+        "local" => {
+            let path = storage_root_path_from_values(
+                env::var("FVOCI_STORAGE_DIR").ok().as_deref(),
+                env::var("STORAGE_LOCAL_PATH").ok().as_deref(),
+            )?;
+            std::fs::create_dir_all(&path)
+                .map_err(|e| format!("failed to create storage root {}: {e}", path.display()))?;
+            Ok(StorageSettings::Local { root: path })
+        }
+        "s3" => {
+            let endpoint = parse_s3_endpoint("S3_ENDPOINT", &nonempty_env("S3_ENDPOINT")?)?;
+            let public_endpoint = match env::var("S3_PUBLIC_ENDPOINT") {
+                Ok(value) if !value.trim().is_empty() => {
+                    Some(parse_s3_endpoint("S3_PUBLIC_ENDPOINT", value.trim())?)
+                }
+                _ => None,
+            };
+            Ok(StorageSettings::S3(S3Settings {
+                endpoint,
+                public_endpoint,
+                region: nonempty_env("S3_REGION")?,
+                bucket: nonempty_env("S3_BUCKET")?,
+                access_key_id: nonempty_env("S3_ACCESS_KEY_ID")?,
+                secret_access_key: nonempty_env("S3_SECRET_ACCESS_KEY")?,
+                force_path_style: env::var("S3_FORCE_PATH_STYLE")
+                    .map(|v| v.trim() != "0")
+                    .unwrap_or(true),
+            }))
+        }
+        other => Err(format!(
+            "STORAGE_DRIVER must be \"local\" or \"s3\", got \"{other}\""
+        )),
+    }
+}
+
+/// S3 rejects non-final multipart parts under 5 MiB (source:
+/// `UPLOAD_PART_SIZE_MB must be >= 5`). The local driver keeps its range.
+pub const S3_MIN_PART_SIZE_BYTES: i64 = 5 * 1024 * 1024;
+
+fn check_part_size_for_storage(
+    storage: &StorageSettings,
+    upload: &UploadLimits,
+) -> Result<(), String> {
+    if matches!(storage, StorageSettings::S3(_)) && upload.part_size_bytes < S3_MIN_PART_SIZE_BYTES
+    {
+        return Err(format!(
+            "FVOCI_UPLOAD_PART_SIZE_BYTES must be >= {S3_MIN_PART_SIZE_BYTES} (S3 minimum part size) when STORAGE_DRIVER=s3"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_incomplete_ttl_hours(raw: Option<&str>) -> Result<Duration, String> {
+    let hours = parse_positive_u64(
+        "UPLOAD_INCOMPLETE_TTL_HOURS",
+        raw,
+        DEFAULT_UPLOAD_INCOMPLETE_TTL_HOURS,
     )?;
-    std::fs::create_dir_all(&path)
-        .map_err(|e| format!("failed to create storage root {}: {e}", path.display()))?;
-    Ok(path)
+    Ok(Duration::from_secs(hours.saturating_mul(60 * 60)))
+}
+
+fn parse_positive_u64(name: &str, raw: Option<&str>, default: u64) -> Result<u64, String> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{name} must be a positive integer"));
+    }
+    let value: u64 = trimmed
+        .parse()
+        .map_err(|e| format!("invalid {name}: {e}"))?;
+    if value == 0 {
+        return Err(format!("{name} must be a positive integer"));
+    }
+    Ok(value)
 }
 
 fn storage_root_path_from_values(
@@ -298,5 +440,68 @@ mod tests {
             limits.create_rate_per_5min,
             DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN
         );
+    }
+
+    #[test]
+    fn s3_requires_minimum_part_size_but_local_does_not() {
+        let small = upload_limits_from_values(Some("1024"), None, None).unwrap();
+        let local = StorageSettings::Local {
+            root: PathBuf::from("/tmp/x"),
+        };
+        assert!(check_part_size_for_storage(&local, &small).is_ok());
+        let s3 = StorageSettings::S3(S3Settings {
+            endpoint: "http://127.0.0.1:9000".into(),
+            public_endpoint: None,
+            region: "us-east-1".into(),
+            bucket: "fvoci".into(),
+            access_key_id: "id".into(),
+            secret_access_key: "secret".into(),
+            force_path_style: true,
+        });
+        assert!(check_part_size_for_storage(&s3, &small).is_err());
+        let default = upload_limits_from_values(None, None, None).unwrap();
+        assert!(check_part_size_for_storage(&s3, &default).is_ok());
+    }
+
+    #[test]
+    fn incomplete_ttl_defaults_and_rejects_zero() {
+        assert_eq!(
+            parse_incomplete_ttl_hours(None).unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert!(parse_incomplete_ttl_hours(Some("0")).is_err());
+        assert_eq!(
+            parse_incomplete_ttl_hours(Some("2")).unwrap(),
+            Duration::from_secs(2 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn s3_endpoint_rejects_credentials_query_and_fragment() {
+        assert!(parse_s3_endpoint("S3_ENDPOINT", "http://127.0.0.1:9000").is_ok());
+        assert!(parse_s3_endpoint("S3_ENDPOINT", "http://user:pass@127.0.0.1:9000").is_err());
+        assert!(parse_s3_endpoint("S3_ENDPOINT", "http://127.0.0.1:9000/?x=1").is_err());
+        assert!(parse_s3_endpoint("S3_ENDPOINT", "http://127.0.0.1:9000/#frag").is_err());
+        assert_eq!(
+            parse_s3_endpoint("S3_ENDPOINT", "http://127.0.0.1:9000/").unwrap(),
+            "http://127.0.0.1:9000"
+        );
+    }
+
+    #[test]
+    fn s3_settings_debug_redacts_keys() {
+        let settings = S3Settings {
+            endpoint: "http://127.0.0.1:9000".into(),
+            public_endpoint: None,
+            region: "us-east-1".into(),
+            bucket: "fvoci".into(),
+            access_key_id: "access-secret".into(),
+            secret_access_key: "secret-secret".into(),
+            force_path_style: true,
+        };
+        let rendered = format!("{settings:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("access-secret"));
+        assert!(!rendered.contains("secret-secret"));
     }
 }

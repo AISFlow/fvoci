@@ -18,9 +18,17 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_PUBLIC_ORIGIN` | Expected browser `Origin` for mutating routes (default `http://localhost:5173`). Trailing slashes are normalized. An explicit port `0` follows the actual bound port. |
 | `FVOCI_COOKIE_SECURE` | `true`/`1` to set `Secure` on session cookies; defaults from `FVOCI_PUBLIC_ORIGIN` scheme. |
 | `FVOCI_STATIC_DIR` | Optional built frontend directory containing index.html; validated at startup. |
-| `FVOCI_STORAGE_DIR` | Required persistent local attachment directory, writable by the server. Reuse the same directory across restarts and preserve it with the database. |
+| `FVOCI_STORAGE_DIR` | Required persistent local attachment directory when `STORAGE_DRIVER=local` (the default). Writable by the server. Reuse the same directory across restarts and preserve it with the database. |
 | `STORAGE_LOCAL_PATH` | Source-compatible storage path alias, used only when `FVOCI_STORAGE_DIR` is absent. |
-| `FVOCI_UPLOAD_PART_SIZE_BYTES` | Multipart part size; defaults to 32 MiB. Must be positive and no larger than the maximum file size. |
+| `STORAGE_DRIVER` | `local` (default) or `s3`. |
+| `S3_ENDPOINT` | S3-compatible API origin. Required when `STORAGE_DRIVER=s3`. HTTP(S) only; no credentials, query, or fragment. |
+| `S3_REGION` | Bucket region. Required when `STORAGE_DRIVER=s3`. |
+| `S3_BUCKET` | Bucket name. Required when `STORAGE_DRIVER=s3`. The server probes with HeadBucket at startup and does not create the bucket. |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | Credentials. Required when `STORAGE_DRIVER=s3`. Never logged. |
+| `S3_FORCE_PATH_STYLE` | Path-style URLs unless set to `0` (default matches the source: on). |
+| `S3_PUBLIC_ENDPOINT` | Optional; validated (HTTP(S), no credentials/query/fragment) but **currently unused**. Parts and downloads are proxied through the API, so no bucket CORS or public S3 endpoint is needed. The source's direct presigned part PUT and 302 presigned download are not implemented yet and are tracked separately. |
+| `UPLOAD_INCOMPLETE_TTL_HOURS` | Abandoned `uploading`/`assembling` rows older than this are swept every 10 minutes: every open multipart upload for the key is aborted, any object deleted, then the row removed (default 24). A row whose storage cleanup fails is kept for the next sweep. Must be a positive integer. |
+| `FVOCI_UPLOAD_PART_SIZE_BYTES` | Multipart part size; defaults to 32 MiB. Must be positive and no larger than the maximum file size. With `STORAGE_DRIVER=s3` it must be at least 5 MiB (S3 minimum part size). The S3 driver buffers each proxied part in memory up to this size. |
 | `FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES` | Upload size ceiling; defaults to 5120 MiB. This is independent of the native extractor's 20 MiB input ceiling. |
 | `FVOCI_UPLOAD_CREATE_RATE_PER_5MIN` | Upload creation rate limit; defaults to 120. Must be positive. |
 | `FVOCI_BRANDING_NAME` | Setup status branding (default `FVOCI`). |
@@ -78,6 +86,19 @@ export FVOCI_STORAGE_DIR='/path/to/persistent/fvoci-storage'
 cargo run --bin fvoci-server
 ```
 
+S3-compatible storage (MinIO/silo or AWS). Credentials come only from the environment; `FVOCI_STORAGE_DIR` is not required:
+
+```sh
+export STORAGE_DRIVER=s3
+export S3_ENDPOINT='http://127.0.0.1:9000'
+export S3_REGION=us-east-1
+export S3_BUCKET=fvoci
+export S3_ACCESS_KEY_ID='...'
+export S3_SECRET_ACCESS_KEY='...'
+export S3_FORCE_PATH_STYLE=1
+cargo run --bin fvoci-server
+```
+
 The only database URL the server process requires is `DATABASE_APP_URL`.
 
 The current durability implementation requires the server account to read/search every ancestor of the storage directory up to `/`, as well as write within it, because those directory entries are synchronized. Validate permissions for the actual service account before deployment.
@@ -117,6 +138,12 @@ Optional local PostgreSQL via Docker (loopback only, random password). The helpe
 scripts/start-test-postgres.sh
 # or
 scripts/start-test-postgres.sh cargo test --features db-tests --test db_integration
+```
+
+S3 driver + abandoned-upload GC against a pinned MinIO-compatible silo (loopback, random keys, port 0). Nest PostgreSQL when the suite needs the app database:
+
+```sh
+scripts/start-test-minio.sh scripts/start-test-postgres.sh cargo test --locked --offline --no-fail-fast --features db-tests --test attachment_s3_integration
 ```
 
 Integration tests always create and drop their own UUID database and app role; they never reuse or drop an externally supplied database.
@@ -344,6 +371,12 @@ docker build -f infra/rust/Dockerfile -t fvoci-rust-install:local .
 docker compose -f infra/rust/compose.yml --env-file infra/rust/.env up -d --wait server
 ```
 
+Optional S3-compatible storage (pinned silo, not published on the host). Set `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` in `.env` first:
+
+```sh
+docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --env-file infra/rust/.env up -d --wait server
+```
+
 The `init` service runs `fvoci-migrate`, creates the non-superuser
 `FVOCI_APP_ROLE` if missing, then `fvoci-migrate --grant-app-role <role>` with the
 owner `DATABASE_URL`. When `FVOCI_MEILI_URL` is set it also runs
@@ -460,8 +493,10 @@ originals can remain valid attachments while their extraction ends with
 `corrupt`, `resource_limit` and `worker_failure`; bounded warnings and the pinned
 rhwp revision accompany extracted text. Results are stored for subsequent product
 consumers. Search indexing and search permission-revocation propagation are not
-connected by this slice. S3, other attachment parents and thumbnails remain out
-of this slice's acceptance.
+connected by this slice. Other attachment parents and thumbnails remain out
+of this slice's acceptance. S3-compatible storage and abandoned-upload cleanup
+are implemented behind `STORAGE_DRIVER=s3` and the local driver; they are not
+a claim that backup/restore of remote buckets is complete.
 
 The Native documents CI runs actual PostgreSQL product tests on x64 and ARM64.
 Its ordinary helper checks authenticated HWP/HWPX input, then a separately built

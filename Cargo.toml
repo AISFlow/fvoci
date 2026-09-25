@@ -131,6 +131,11 @@ path = "tests/attachment_extract_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "attachment_s3_integration"
+path = "tests/attachment_s3_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "attachment_extract_native"
 path = "tests/attachment_extract_native.rs"
 required-features = ["extract-native-tests"]

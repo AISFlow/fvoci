@@ -48,7 +48,7 @@ async fn search_state(app_url: &str, meili: Option<MeiliConfig>) -> AppState {
         public_origin: "http://localhost".to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
-        storage: fvoci_server::attachments::LocalStorage::new(storage_root),
+        storage: fvoci_server::attachments::LocalStorage::new(storage_root).into(),
         upload: fvoci_server::attachments::UploadLimits {
             part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,

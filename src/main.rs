@@ -8,7 +8,10 @@ use tokio::signal;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
-use fvoci_server::attachments::{spawn_extract_job, ExtractJobHandle, ExtractJobSettings};
+use fvoci_server::attachments::{
+    cleanup_interval, spawn_extract_job, spawn_stale_upload_cleanup, ExtractJobHandle,
+    ExtractJobSettings, ObjectStorage, StaleUploadCleanupHandle,
+};
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
@@ -85,6 +88,7 @@ struct DrainOutcome {
     hub: HubOutcome,
     extract: Result<(), String>,
     outbox: Result<(), String>,
+    stale_uploads: Result<(), String>,
 }
 
 #[tokio::main]
@@ -224,23 +228,31 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         }
         None => None,
     };
+    let storage = ObjectStorage::from_settings(&config.storage)?;
+    storage.probe().await?;
     let extract_job = match ExtractJobSettings::from_env()? {
         Some(settings) => {
             tracing::info!(
                 extractor = %settings.extractor_bin.display(),
                 "attachment native extraction enabled"
             );
-            Some(spawn_extract_job(
-                settings,
-                pool.clone(),
-                fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
-            ))
+            Some(spawn_extract_job(settings, pool.clone(), storage.clone()))
         }
         None => {
             tracing::info!("attachment native extraction disabled (FVOCI_EXTRACTOR_BIN unset)");
             None
         }
     };
+    let stale_upload_cleanup = spawn_stale_upload_cleanup(
+        pool.clone(),
+        storage.clone(),
+        config.upload_incomplete_ttl,
+        cleanup_interval(),
+    );
+    tracing::info!(
+        ttl_secs = config.upload_incomplete_ttl.as_secs(),
+        "abandoned upload cleanup enabled"
+    );
     let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
     consumers.push(fvoci_server::notifications::notifications_consumer());
     if let Some(meili) = config.meili.clone() {
@@ -265,7 +277,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         public_origin,
         cookie_secure: config.cookie_secure,
         rate_limiter: RateLimiter::new(),
-        storage: fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
+        storage: storage.clone(),
         upload: config.upload.clone(),
         collab: collab.clone(),
         meili: config.meili.clone(),
@@ -275,10 +287,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let (signaled_tx, signaled_rx) = tokio::sync::oneshot::channel::<Instant>();
     let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
+    let stale_upload_task = Arc::new(tokio::sync::Mutex::new(Some(stale_upload_cleanup)));
     let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
+    let stale_upload_task_for_signal = stale_upload_task.clone();
     let outbox_task_for_signal = outbox_task.clone();
 
     let serve = announce_after_first_pending_poll(
@@ -293,6 +307,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             if let Some(job) = extract_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
                 tracing::info!("attachment extract shutdown started concurrently with HTTP drain");
+            }
+            if let Some(job) = stale_upload_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
+                tracing::info!(
+                    "stale upload cleanup shutdown started concurrently with HTTP drain"
+                );
             }
             if let Some(job) = outbox_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
@@ -335,6 +355,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
+                    let stale_uploads = join_stale_upload_finished(&stale_upload_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
@@ -342,6 +363,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                         hub,
                         extract,
                         outbox,
+                        stale_uploads,
                     }
                 },
                 Some(started),
@@ -364,6 +386,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task).await;
+                    let stale_uploads = join_stale_upload_finished(&stale_upload_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
@@ -371,6 +394,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                         hub,
                         extract,
                         outbox,
+                        stale_uploads,
                     }
                 },
                 started,
@@ -396,6 +420,16 @@ async fn join_extract_finished(
     extract_task: &tokio::sync::Mutex<Option<ExtractJobHandle>>,
 ) -> Result<(), String> {
     if let Some(job) = extract_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await?;
+    }
+    Ok(())
+}
+
+async fn join_stale_upload_finished(
+    task: &tokio::sync::Mutex<Option<StaleUploadCleanupHandle>>,
+) -> Result<(), String> {
+    if let Some(job) = task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;
     }
@@ -476,6 +510,7 @@ where
             if let Some(error) = hub_failure_error(joined)
                 .or_else(|| hub_failure_error(outcome.hub))
                 .or_else(|| extract_failure_error(outcome.extract))
+                .or_else(|| extract_failure_error(outcome.stale_uploads))
                 .or_else(|| extract_failure_error(outcome.outbox))
             {
                 return Err(error);
@@ -593,6 +628,7 @@ mod shutdown_outcome_tests {
                         hub: HubOutcome::Clean,
                         extract: Ok(()),
                         outbox: Ok(()),
+                        stale_uploads: Ok(()),
                     }
                 },
                 Some(Instant::now()),

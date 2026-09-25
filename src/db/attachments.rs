@@ -11,8 +11,8 @@ use crate::attachments::{
     initial_extract_status, is_image_mime, StagedPart, UploadLimits, ATTACHMENT_LOCK_NAMESPACE,
     MAX_PART_COUNT, STORAGE_LOCK_NAMESPACE,
 };
-use crate::attachments::{LocalStorage, StorageError};
-use crate::db::context::{lock_key_from_uuid, set_tenant};
+use crate::attachments::{ObjectStorage, StorageError};
+use crate::db::context::{lock_key_from_uuid, restore_system, set_system, set_tenant};
 use crate::db::documents::{
     document_permission, lock_membership_users, membership_role_for_update, recheck_session,
     session_is_live, workspace_is_live,
@@ -334,7 +334,7 @@ async fn record_attachment_event(
 #[allow(clippy::too_many_arguments)]
 pub async fn create_upload(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     limits: &UploadLimits,
     workspace_id: Uuid,
     document_id: Uuid,
@@ -353,7 +353,7 @@ pub async fn create_upload(
     }
     let attachment_id = Uuid::now_v7();
     let storage_key = Uuid::now_v7().to_string();
-    let upload_meta = UploadMeta {
+    let mut upload_meta = UploadMeta {
         part_size_bytes: limits.part_size_bytes,
         part_count,
         declared_size_bytes: input.size_bytes,
@@ -407,10 +407,30 @@ pub async fn create_upload(
 
     tx.commit().await?;
 
-    if let Err(err) = storage.create_multipart(&storage_key).await {
-        let _ =
-            cleanup_reserved_upload(pool, storage, workspace_id, attachment_id, &storage_key).await;
-        return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
+    match storage.create_multipart(&storage_key).await {
+        Ok(None) => {}
+        Ok(Some(upload_ref)) => {
+            upload_meta.upload_ref = Some(upload_ref.clone());
+            if let Err(err) =
+                persist_upload_ref(pool, workspace_id, attachment_id, &upload_ref).await
+            {
+                let _ = cleanup_reserved_upload(
+                    pool,
+                    storage,
+                    workspace_id,
+                    attachment_id,
+                    &storage_key,
+                )
+                .await;
+                return Err(err);
+            }
+        }
+        Err(err) => {
+            let _ =
+                cleanup_reserved_upload(pool, storage, workspace_id, attachment_id, &storage_key)
+                    .await;
+            return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
+        }
     }
 
     let row = fetch_after_create(pool, workspace_id, attachment_id).await?;
@@ -431,15 +451,61 @@ async fn fetch_after_create(
     Ok(row)
 }
 
+/// Aborts every multipart upload that could still publish `storage_key`, then
+/// removes any published object. Errors propagate so callers keep the row and
+/// a later sweep retries instead of orphaning remote state.
+async fn abort_all_and_delete(
+    storage: &ObjectStorage,
+    storage_key: &str,
+) -> Result<(), StorageError> {
+    for upload_ref in storage.list_multipart_uploads(storage_key).await? {
+        storage
+            .abort_multipart(storage_key, upload_ref.as_deref())
+            .await?;
+    }
+    storage.delete_object(storage_key).await
+}
+
+async fn persist_upload_ref(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    upload_ref: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE fvoci.attachments
+        SET upload_meta = jsonb_set(COALESCE(upload_meta, '{}'::jsonb), '{upload_ref}', to_jsonb($3::text), true)
+        WHERE workspace_id = $1 AND id = $2 AND status = 'uploading'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(attachment_id)
+    .bind(upload_ref)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if updated.rows_affected() == 0 {
+        return Err(sqlx::Error::RowNotFound);
+    }
+    Ok(())
+}
+
 pub async fn cleanup_reserved_upload(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     workspace_id: Uuid,
     attachment_id: Uuid,
     storage_key: &str,
 ) -> Result<(), sqlx::Error> {
-    let _ = storage.abort_multipart(storage_key).await;
-    let _ = storage.delete_object(storage_key).await;
+    if abort_all_and_delete(storage, storage_key).await.is_err() {
+        // Keep the reserved row: the stale-upload sweep retries the storage
+        // cleanup after the TTL instead of losing track of a live upload.
+        tracing::warn!(%attachment_id, "reserved upload storage cleanup failed; left for sweep");
+        return Ok(());
+    }
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     sqlx::query("DELETE FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2")
@@ -458,7 +524,7 @@ pub async fn authorize_upload_part(
     actor_user_id: Uuid,
     session_id: Uuid,
     part_number: i32,
-) -> Result<Result<(String, u64), AttachmentDbError>, sqlx::Error> {
+) -> Result<Result<(String, u64, Option<String>), AttachmentDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     lock_membership_users(&mut tx, &[actor_user_id]).await?;
@@ -505,14 +571,15 @@ pub async fn authorize_upload_part(
         (meta.declared_size_bytes - meta.part_size_bytes * (meta.part_count as i64 - 1)) as u64
     };
     let storage_key = att.storage_key.clone();
+    let upload_ref = meta.upload_ref.clone();
     tx.commit().await?;
-    Ok(Ok((storage_key, max_bytes)))
+    Ok(Ok((storage_key, max_bytes, upload_ref)))
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn commit_upload_part(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     workspace_id: Uuid,
     attachment_id: Uuid,
     actor_user_id: Uuid,
@@ -535,20 +602,20 @@ pub async fn commit_upload_part(
         Ok(att) => att,
         Err(err) => {
             tx.rollback().await?;
-            LocalStorage::discard_staged_part(staged).await;
+            ObjectStorage::discard_staged_part(staged).await;
             return Ok(Err(err));
         }
     };
     if att.status != "uploading" {
         tx.rollback().await?;
-        LocalStorage::discard_staged_part(staged).await;
+        ObjectStorage::discard_staged_part(staged).await;
         return Ok(Err(AttachmentDbError::UploadState));
     }
     let meta = parse_upload_meta(att.upload_meta.as_ref().unwrap_or(&json!({})))
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     if part_number > meta.part_count {
         tx.rollback().await?;
-        LocalStorage::discard_staged_part(staged).await;
+        ObjectStorage::discard_staged_part(staged).await;
         return Ok(Err(AttachmentDbError::InvalidInput));
     }
     let storage_key = att.storage_key.clone();
@@ -559,17 +626,17 @@ pub async fn commit_upload_part(
         Ok(part) => part,
         Err(StorageError::UploadGone) => {
             tx.rollback().await?;
-            LocalStorage::discard_staged_part(staged).await;
+            ObjectStorage::discard_staged_part(staged).await;
             return Ok(Err(AttachmentDbError::UploadState));
         }
         Err(StorageError::PartTooLarge) => {
             tx.rollback().await?;
-            LocalStorage::discard_staged_part(staged).await;
+            ObjectStorage::discard_staged_part(staged).await;
             return Ok(Err(AttachmentDbError::PartTooLarge));
         }
         Err(err) => {
             tx.rollback().await?;
-            LocalStorage::discard_staged_part(staged).await;
+            ObjectStorage::discard_staged_part(staged).await;
             return Err(sqlx::Error::Io(std::io::Error::other(err.to_string())));
         }
     };
@@ -579,7 +646,7 @@ pub async fn commit_upload_part(
 
 pub async fn resume_upload(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     workspace_id: Uuid,
     attachment_id: Uuid,
     actor_user_id: Uuid,
@@ -626,7 +693,7 @@ pub async fn resume_upload(
     };
     tx.commit().await?;
     let uploaded = storage
-        .list_parts(&att.storage_key)
+        .list_parts(&att.storage_key, meta.upload_ref.as_deref())
         .await
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     let done = uploaded
@@ -646,7 +713,7 @@ pub async fn resume_upload(
 #[allow(clippy::too_many_arguments)]
 pub async fn complete_upload(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     workspace_id: Uuid,
     attachment_id: Uuid,
     actor_user_id: Uuid,
@@ -693,7 +760,7 @@ enum CompleteAttempt {
 #[allow(clippy::too_many_arguments)]
 async fn try_complete_owned(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     workspace_id: Uuid,
     attachment_id: Uuid,
     actor_user_id: Uuid,
@@ -753,7 +820,7 @@ async fn try_complete_owned(
 #[allow(clippy::too_many_arguments)]
 async fn complete_owned_inner(
     lock: &mut AttachmentSessionLock,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     workspace_id: Uuid,
     attachment_id: Uuid,
     actor_user_id: Uuid,
@@ -822,7 +889,9 @@ async fn complete_owned_inner(
     tx.commit().await?;
 
     if needs_assembly {
-        let assemble = storage.assemble_multipart(&storage_key, parts).await;
+        let assemble = storage
+            .assemble_multipart(&storage_key, meta.upload_ref.as_deref(), parts)
+            .await;
         match assemble {
             Ok(size) if size as i64 != meta.declared_size_bytes => {
                 let _ = storage.delete_object(&storage_key).await;
@@ -832,6 +901,10 @@ async fn complete_owned_inner(
             Err(StorageError::EtagMismatch) => {
                 revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
                 return Ok(CompleteAttempt::Denied(AttachmentDbError::EtagMismatch));
+            }
+            Err(StorageError::UploadGone) => {
+                revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
+                return Ok(CompleteAttempt::Denied(AttachmentDbError::UploadState));
             }
             Err(err) => {
                 revert_assembling_on_conn(lock, workspace_id, attachment_id).await?;
@@ -1063,6 +1136,112 @@ impl std::fmt::Display for AttachmentDbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct StaleUpload {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+}
+
+/// Incomplete uploads created before `cutoff`, across every workspace.
+///
+/// `fvoci.attachments` RLS has no system-context bypass, so this enumerates
+/// workspaces under the system context (which `fvoci.workspaces` allows) and
+/// reads each tenant's stale rows under that tenant's own context, all in one
+/// read-only transaction served by `attachments_uploading_created_at_idx`.
+pub async fn list_stale_uploading(
+    pool: &PgPool,
+    cutoff: chrono::DateTime<Utc>,
+) -> Result<Vec<StaleUpload>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let previous = set_system(&mut tx).await?;
+    let workspace_ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces ORDER BY id")
+            .fetch_all(&mut *tx)
+            .await?;
+    restore_system(&mut tx, &previous).await?;
+    let mut stale = Vec::new();
+    for workspace_id in workspace_ids {
+        set_tenant(&mut tx, workspace_id).await?;
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM fvoci.attachments
+            WHERE workspace_id = $1
+              AND status IN ('uploading', 'assembling')
+              AND created_at < $2
+            ORDER BY created_at ASC, id ASC
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(cutoff)
+        .fetch_all(&mut *tx)
+        .await?;
+        stale.extend(ids.into_iter().map(|id| StaleUpload { id, workspace_id }));
+    }
+    tx.commit().await?;
+    Ok(stale)
+}
+
+pub async fn gc_stale_upload_row(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let Some(mut lock) = AttachmentSessionLock::try_acquire(pool, attachment_id).await? else {
+        return Ok(false);
+    };
+    let result = gc_stale_upload_locked(&mut lock, storage, workspace_id, attachment_id).await;
+    lock.release().await;
+    result
+}
+
+async fn gc_stale_upload_locked(
+    lock: &mut AttachmentSessionLock,
+    storage: &ObjectStorage,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = lock.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let row: Option<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT status, storage_key
+        FROM fvoci.attachments
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(attachment_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((status, storage_key)) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    if status != "uploading" && status != "assembling" {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    tx.commit().await?;
+
+    abort_all_and_delete(storage, &storage_key)
+        .await
+        .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
+
+    let mut tx = lock.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let deleted = sqlx::query(
+        "DELETE FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2 AND status IN ('uploading', 'assembling')",
+    )
+    .bind(workspace_id)
+    .bind(attachment_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(deleted.rows_affected() > 0)
 }
 
 #[cfg(feature = "db-tests")]
