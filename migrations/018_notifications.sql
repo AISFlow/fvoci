@@ -11,7 +11,10 @@ CREATE TABLE fvoci.notifications (
     read_at timestamptz,
     archived_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT notifications_workspace_id_id_unique UNIQUE (workspace_id, id)
+    CONSTRAINT notifications_workspace_id_id_unique UNIQUE (workspace_id, id),
+    -- One notification per recipient per event: outbox replay (e.g. after
+    -- fvoci-migrate --recover-outbox on restore) must not duplicate.
+    CONSTRAINT notifications_event_recipient_unique UNIQUE (workspace_id, user_id, event_id)
 );
 
 CREATE INDEX notifications_inbox_idx
@@ -80,14 +83,17 @@ CREATE POLICY owner_isolation ON fvoci.notification_prefs
     );
 
 -- Existing installs: start the notifications consumer after the events already
--- recorded, so an upgrade does not notify users about past activity. A fresh
--- database has no events and starts at the beginning as usual.
+-- recorded (settled, as the relay reads them), so an upgrade does not notify
+-- users about past activity. A fresh database has no events and starts at the
+-- beginning. A later --recover-outbox replays its window once more; the unique
+-- constraint keeps that from duplicating what was already delivered.
 DO $$
 BEGIN
     PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
     INSERT INTO fvoci.outbox_consumers (consumer, last_xact, last_seq)
     SELECT 'notifications', e.xact, e.seq
     FROM fvoci.events AS e
+    WHERE e.xact < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
     ORDER BY e.xact DESC, e.seq DESC
     LIMIT 1
     ON CONFLICT (consumer) DO NOTHING;

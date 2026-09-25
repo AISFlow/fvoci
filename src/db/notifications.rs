@@ -126,6 +126,7 @@ pub async fn insert_many(
                 id, workspace_id, user_id, event_id, verb, actor_user_id,
                 target_type, target_id, payload
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (workspace_id, user_id, event_id) DO NOTHING
             "#,
         )
         .bind(row.id)

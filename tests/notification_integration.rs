@@ -389,6 +389,28 @@ async fn comment_mention_notifies_member_not_actor() {
     assert_eq!(items.len(), 1, "{listed:?}");
     assert_eq!(items[0]["verb"], "comment.created");
 
+    // Replay (what --recover-outbox does on restore: the cursor is rebased
+    // before events already delivered) must not duplicate notifications.
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.notifications")
+        .fetch_one(&admin)
+        .await
+        .expect("count before replay");
+    sqlx::query(
+        "UPDATE fvoci.outbox_consumers SET last_xact = '0'::xid8, last_seq = 0 WHERE consumer = 'notifications'",
+    )
+    .execute(&admin)
+    .await
+    .expect("rebase cursor");
+    drain_notifications(&app_db).await;
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.notifications")
+        .fetch_one(&admin)
+        .await
+        .expect("count after replay");
+    assert_eq!(
+        after, before,
+        "replayed events must not duplicate notifications"
+    );
+
     let (status, owner_listed) = json_request(
         app.clone(),
         "GET",
