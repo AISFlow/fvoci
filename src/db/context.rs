@@ -105,30 +105,74 @@ pub async fn lock_membership_users(
     Ok(())
 }
 
-pub async fn recheck_session(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    session_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let live: Option<(bool,)> = sqlx::query_as(
-        r#"
+pub const CREDENTIAL_LIVE_SQL: &str = r#"
         SELECT (
-            s.revoked_at IS NULL
-            AND s.expires_at > clock_timestamp()
-            AND u.deleted_at IS NULL
+            u.deleted_at IS NULL
             AND u.suspended_at IS NULL
+            AND (
+                (
+                    s.id IS NOT NULL
+                    AND s.revoked_at IS NULL
+                    AND s.expires_at > clock_timestamp()
+                )
+                OR (
+                    t.id IS NOT NULL
+                    AND t.user_id = u.id
+                    AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
+                )
+            )
+        )
+        FROM fvoci.users u
+        LEFT JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
+        LEFT JOIN fvoci.api_tokens t ON t.id = $2 AND t.user_id = u.id
+        WHERE u.id = $1
+        "#;
+
+const SESSION_RECHECK_SQL: &str = r#"
+        SELECT (
+            u.deleted_at IS NULL
+            AND u.suspended_at IS NULL
+            AND s.revoked_at IS NULL
+            AND s.expires_at > clock_timestamp()
         )
         FROM fvoci.users u
         INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
         WHERE u.id = $1
         FOR UPDATE OF u, s
-        "#,
-    )
-    .bind(user_id)
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(live.map(|(v,)| v).unwrap_or(false))
+        "#;
+
+const TOKEN_RECHECK_SQL: &str = r#"
+        SELECT (
+            u.deleted_at IS NULL
+            AND u.suspended_at IS NULL
+            AND t.user_id = u.id
+            AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
+        )
+        FROM fvoci.users u
+        INNER JOIN fvoci.api_tokens t ON t.id = $2 AND t.user_id = u.id
+        WHERE u.id = $1
+        FOR UPDATE OF u, t
+        "#;
+
+pub async fn recheck_session(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let session_live: Option<(bool,)> = sqlx::query_as(SESSION_RECHECK_SQL)
+        .bind(user_id)
+        .bind(session_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if let Some((live,)) = session_live {
+        return Ok(live);
+    }
+    let token_live: Option<(bool,)> = sqlx::query_as(TOKEN_RECHECK_SQL)
+        .bind(user_id)
+        .bind(session_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(token_live.map(|(v,)| v).unwrap_or(false))
 }
 
 pub async fn session_is_live(
@@ -136,23 +180,11 @@ pub async fn session_is_live(
     user_id: Uuid,
     session_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let live: Option<(bool,)> = sqlx::query_as(
-        r#"
-        SELECT (
-            s.revoked_at IS NULL
-            AND s.expires_at > clock_timestamp()
-            AND u.deleted_at IS NULL
-            AND u.suspended_at IS NULL
-        )
-        FROM fvoci.users u
-        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
-        WHERE u.id = $1
-        "#,
-    )
-    .bind(user_id)
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await?;
+    let live: Option<(bool,)> = sqlx::query_as(CREDENTIAL_LIVE_SQL)
+        .bind(user_id)
+        .bind(session_id)
+        .fetch_optional(&mut **tx)
+        .await?;
     Ok(live.map(|(v,)| v).unwrap_or(false))
 }
 

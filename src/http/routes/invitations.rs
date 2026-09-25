@@ -17,9 +17,9 @@ use crate::auth::session::SessionUser;
 use crate::auth::token::hash_token;
 use crate::db::invitations::InvitationDbError;
 use crate::db::workspace::WorkspaceRole;
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
+use crate::error::{AppError, ProblemCode};
 use crate::http::cookie::set_session_cookie;
-use crate::http::guard::{check_origin, reject_bearer};
+use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::validate::{
@@ -48,13 +48,18 @@ async fn create_invitation(
     body: Result<Json<InvitationCreateBody>, JsonRejection>,
 ) -> Result<(axum::http::StatusCode, Json<InvitationCreateResponse>), AppError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     let email = normalize_email(&body.email)?;
     let role = WorkspaceRole::parse(&body.role)
         .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput))?;
-    let (user, session_id) = require_session(&state, &jar).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::WorkspaceManage),
+        Some(workspace_id),
+    )
+    .await?;
     if let Err(retry_after) = state
         .rate_limiter
         .allow(&format!("invite-create:{user_id}"), 30)
@@ -234,25 +239,14 @@ fn map_accept_error(err: InvitationDbError) -> AppError {
 
 async fn require_session(
     state: &AppState,
+    headers: &HeaderMap,
     jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
-}
-
-fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
-    Uuid::parse_str(value).map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))
+    access: crate::http::authz::Access,
+    workspace_id: Option<Uuid>,
+) -> Result<(SessionUser, Uuid, Uuid), AppError> {
+    let auth =
+        crate::http::authz::require_request_auth(state, headers, jar, access, workspace_id).await?;
+    Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
 fn internal(err: sqlx::Error) -> AppError {

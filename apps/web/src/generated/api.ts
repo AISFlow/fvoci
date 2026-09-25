@@ -84,6 +84,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/api-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_me_api_tokens"];
+        put?: never;
+        post: operations["create_me_api_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/api-tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revoke_me_api_token"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/personal-workspace": {
         parameters: {
             query?: never;
@@ -162,6 +194,38 @@ export interface paths {
         options?: never;
         head?: never;
         patch: operations["patch_workspace"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/api-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_workspace_api_tokens"];
+        put?: never;
+        post: operations["create_workspace_api_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/api-tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revoke_workspace_api_token"];
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}": {
@@ -825,6 +889,38 @@ export interface components {
         AncestorsResponse: {
             items: components["schemas"]["AncestorResponse"][];
         };
+        ApiTokenCreateBody: {
+            name: string;
+            scopes: string[];
+            service?: boolean | null;
+            unlimited?: boolean | null;
+        };
+        ApiTokenCreatedOutput: {
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            expiresAt: string | null;
+            id: string;
+            name: string;
+            scopes: string[];
+            token: string;
+            userId: string | null;
+            workspaceId: string;
+        };
+        ApiTokenListResponse: {
+            items: components["schemas"]["ApiTokenOutput"][];
+        };
+        ApiTokenOutput: {
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            expiresAt: string | null;
+            id: string;
+            name: string;
+            scopes: string[];
+            userId: string | null;
+            workspaceId: string;
+        };
         AttachmentCompletePartBody: {
             etag: string;
             /** Format: int32 */
@@ -1041,6 +1137,12 @@ export interface components {
         };
         LookupListResponse: {
             items: components["schemas"]["LookupItemOutput"][];
+        };
+        MeApiTokenCreateBody: {
+            name: string;
+            scopes: string[];
+            /** Format: uuid */
+            workspaceId: string;
         };
         MemberResponse: {
             email: string;
@@ -1664,6 +1766,163 @@ export interface operations {
             };
         };
     };
+    list_me_api_tokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current user API tokens */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiTokenListResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    create_me_api_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MeApiTokenCreateBody"];
+            };
+        };
+        responses: {
+            /** @description Token created; secret shown once */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiTokenCreatedOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    revoke_me_api_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Token id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token revoked */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     personal_workspace: {
         parameters: {
             query?: never;
@@ -1899,6 +2158,171 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkspaceMetaResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    list_workspace_api_tokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace API tokens */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiTokenListResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    create_workspace_api_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApiTokenCreateBody"];
+            };
+        };
+        responses: {
+            /** @description Token created; secret shown once */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiTokenCreatedOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    revoke_workspace_api_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Token id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token revoked */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
             /** @description Not found or forbidden */

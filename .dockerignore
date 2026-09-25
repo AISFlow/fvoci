@@ -14,4 +14,7 @@ compat/target
 !crates/collab-engine/README.md
 docs
 .agents
+scripts/backup.sh
+scripts/restore.sh
+scripts/backup-restore-smoke.sh
 compat/target

@@ -70,6 +70,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.tasks TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.invitations TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.revisions TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.comments TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.api_tokens TO :"app_role";
 
 REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() TO :"app_role";
