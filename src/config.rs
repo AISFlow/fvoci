@@ -26,6 +26,8 @@ pub struct Config {
     pub shutdown_deadline: Duration,
     /// Present when `FVOCI_MEILI_URL` is set. The API key is never logged.
     pub meili: Option<MeiliConfig>,
+    /// SMTP_HOST/PORT/FROM all set, or None when mail is disabled.
+    pub smtp: Option<crate::mail::SmtpConfig>,
 }
 
 impl Clone for Config {
@@ -42,6 +44,7 @@ impl Clone for Config {
             upload: self.upload.clone(),
             shutdown_deadline: self.shutdown_deadline,
             meili: self.meili.clone(),
+            smtp: self.smtp.clone(),
         }
     }
 }
@@ -59,6 +62,7 @@ impl fmt::Debug for Config {
             .field("upload", &self.upload)
             .field("shutdown_deadline", &self.shutdown_deadline)
             .field("meili", &self.meili)
+            .field("smtp", &self.smtp.as_ref().map(|_| "<configured>"))
             .finish()
     }
 }
@@ -110,6 +114,7 @@ impl Config {
         let shutdown_deadline =
             parse_shutdown_deadline_ms(env::var("FVOCI_SHUTDOWN_DEADLINE_MS").ok().as_deref())?;
         let meili = meili_config_from_env()?;
+        let smtp = crate::mail::smtp_from_env()?;
 
         Ok(Self {
             bind,
@@ -123,6 +128,7 @@ impl Config {
             upload,
             shutdown_deadline,
             meili,
+            smtp,
         })
     }
 }

@@ -56,6 +56,7 @@ async fn search_state(app_url: &str, meili: Option<MeiliConfig>) -> AppState {
         },
         collab: None,
         meili,
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
 

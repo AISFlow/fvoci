@@ -503,6 +503,7 @@ async fn collab_app_state_with_config(app_url: &str, cfg: CollabConfig) -> AppSt
         },
         collab: Some(Arc::new(CollabHub::new(cfg, pool))),
         meili: None,
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
 
@@ -534,6 +535,7 @@ async fn collab_app_state(app_url: &str, with_collab: bool) -> AppState {
         },
         collab,
         meili: None,
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
 

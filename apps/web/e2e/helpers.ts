@@ -1,6 +1,38 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { expect, type Page } from "@playwright/test";
+
+export type CapturedMail = { from: string; to: string; data: string; ts: number };
+
+export function capturedMails(): CapturedMail[] {
+  const capture = process.env.FVOCI_E2E_SMTP_CAPTURE;
+  if (!capture) {
+    throw new Error("FVOCI_E2E_SMTP_CAPTURE is required");
+  }
+  try {
+    const raw = readFileSync(capture, "utf8");
+    return raw
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as CapturedMail);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+}
+
+export async function waitForCapturedMail(
+  predicate: (mail: CapturedMail) => boolean,
+): Promise<CapturedMail> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const match = capturedMails().find(predicate);
+    if (match) return match;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("captured mail did not arrive");
+}
 
 export function createE2eUser(
   email: string,

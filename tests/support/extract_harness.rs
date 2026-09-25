@@ -161,6 +161,7 @@ pub async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> App
         },
         collab: None,
         meili: None,
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
 
