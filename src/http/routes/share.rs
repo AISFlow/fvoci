@@ -707,23 +707,41 @@ async fn public_pdf_route(
         tracing::error!("share pdf requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
         return Err(AppError::internal());
     };
-    let rendered =
-        match render_document_export(convert, ExportFormat::Pdf, &doc.title, &doc.content_json)
-            .await
-        {
-            Ok(v) => v,
-            Err(ExportRenderError::InvalidInput) => {
-                return Err(AppError::from_code(ProblemCode::InvalidInput));
-            }
-            Err(ExportRenderError::TooLarge) => {
-                return Ok(problem_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "document_body_exceeds_document_max_body_bytes",
-                    "document body exceeds document max body bytes",
-                ));
-            }
-            Err(ExportRenderError::Failed) => return Err(AppError::internal()),
-        };
+    let rendered = match render_document_export(
+        &convert.for_public(),
+        ExportFormat::Pdf,
+        &doc.title,
+        &doc.content_json,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(ExportRenderError::InvalidInput) => {
+            return Err(AppError::from_code(ProblemCode::InvalidInput));
+        }
+        Err(ExportRenderError::TooLarge) => {
+            return Ok(problem_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "document_body_exceeds_document_max_body_bytes",
+                "document body exceeds document max body bytes",
+            ));
+        }
+        Err(ExportRenderError::Busy) => {
+            // Anonymous PDFs never wait for a helper; members and import
+            // jobs keep their own permits.
+            let mut response = problem_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "share_pdf_busy",
+                "share pdf busy, retry",
+            );
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from_static("5"),
+            );
+            return Ok(response);
+        }
+        Err(ExportRenderError::Failed) => return Err(AppError::internal()),
+    };
     let filename = export_filename(&doc.title, &rendered.ext);
     let mut headers = HeaderMap::new();
     headers.insert(
