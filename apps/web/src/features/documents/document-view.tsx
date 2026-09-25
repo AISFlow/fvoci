@@ -16,6 +16,7 @@ import {
   documentMetaQuery,
   treeQuery,
 } from "@/lib/queries/documents";
+import { CommentPanel } from "@/features/comments/comment-panel";
 import { createAttachmentBridge } from "@/features/workspace/attachment-upload";
 import { bindBlockPresence, isBlockPresenceAwareness } from "./block-presence";
 import { collabBadge } from "./collab-badge";
@@ -462,6 +463,14 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
           </AttachmentBlockContext.Provider>
         ) : null}
       </section>
+      {me.data ? (
+        <CommentPanel
+          workspaceId={workspaceId}
+          documentId={documentId}
+          currentUserId={me.data.userId}
+          readOnly={readOnly}
+        />
+      ) : null}
     </article>
   );
 }
