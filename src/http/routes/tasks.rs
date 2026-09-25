@@ -1038,7 +1038,7 @@ fn map_task_list_query_error(err: TaskListQueryError) -> TaskApiError {
     }
 }
 
-fn task_meta_output(task: crate::db::tasks::TaskMetaRow) -> TaskMetaOutput {
+pub(crate) fn task_meta_output(task: crate::db::tasks::TaskMetaRow) -> TaskMetaOutput {
     TaskMetaOutput {
         id: task.id.to_string(),
         workspace_id: task.workspace_id.to_string(),

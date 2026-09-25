@@ -871,7 +871,7 @@ async fn migration_006_upgrades_to_007_attachment_extract() {
         .unwrap();
     assert_eq!(
         versions.0,
-        i64::from(fvoci_server::db::migrate::latest_migration_version())
+        fvoci_server::db::migrate::compiled_migration_count() as i64
     );
     let has_lease: (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'fvoci' AND table_name = 'attachments' AND column_name = 'extract_lease_token')",

@@ -42,6 +42,7 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let api = Router::new()
         .merge(routes::setup::router())
         .merge(routes::auth::router())
+        .merge(routes::account::router())
         .merge(routes::workspaces::router())
         .merge(routes::invitations::router())
         .merge(routes::projects::router())

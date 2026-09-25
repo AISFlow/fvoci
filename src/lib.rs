@@ -7,6 +7,7 @@ pub mod db;
 pub mod display_id;
 pub mod documents;
 pub mod error;
+pub mod export_zip;
 pub mod http;
 pub mod ics;
 pub mod import_job;

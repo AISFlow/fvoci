@@ -1450,7 +1450,7 @@ async fn visible_after_hydrate(
     }
 }
 
-async fn load_live_project(
+pub(crate) async fn load_live_project(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,

@@ -9,6 +9,206 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/auth/cancel-withdraw": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "cancel_withdraw",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Withdrawal cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown, used or expired cancel token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/email": {
+      "patch": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "email_change",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailChangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted (same response whether or not mail was sent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/email/confirm": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "email_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Email changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "magic_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/identities": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "auth_identities",
+        "responses": {
+          "200": {
+            "description": "Linked external identities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentitiesOutput"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -65,6 +265,106 @@
             "fvoci_session": []
           }
         ]
+      }
+    },
+    "/api/v1/auth/magic-link": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "magic_link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MagicLinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted (same response for unknown addresses)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/magic-link/consume": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "magic_link_consume",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "magic_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/auth/me": {
@@ -139,6 +439,71 @@
           },
           "401": {
             "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/password": {
+      "patch": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "password_change",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Password changed; other sessions revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "password_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
             "content": {
               "application/json": {
                 "schema": {
@@ -253,6 +618,101 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/auth/providers": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "auth_providers",
+        "responses": {
+          "200": {
+            "description": "Sign-in methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvidersOutput"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/withdraw": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "withdraw",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Erasure scheduled; session cookie cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErasureScheduleOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "confirm_invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "owner_transfer_required or last_instance_admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
       }
     },
     "/api/v1/ics/{token}": {
@@ -782,6 +1242,178 @@
           },
           "404": {
             "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/dashboard": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "me_dashboard",
+        "parameters": [
+          {
+            "name": "lastVisited",
+            "in": "query",
+            "description": "Workspace id to list first",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cross-workspace dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeDashboardResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/export": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "me_export",
+        "responses": {
+          "200": {
+            "description": "ZIP: profile.json, comments.json, attachments.json, attachments/*",
+            "content": {
+              "application/zip": {}
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/locate": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "me_locate",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "description": "task or document",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "description": "Task or document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace holding the target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeLocateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or not visible",
             "content": {
               "application/json": {
                 "schema": {
@@ -11949,6 +12581,111 @@
         },
         "additionalProperties": false
       },
+      "DashboardProjectOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "key",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          }
+        }
+      },
+      "DashboardRecentItemOutput": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "title",
+          "projectId",
+          "number",
+          "updatedAt",
+          "workspaceId"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspaceId": {
+            "type": "string"
+          }
+        }
+      },
+      "DashboardWorkspaceOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "role",
+          "kind",
+          "documentCount",
+          "assignedCount",
+          "unreadCount"
+        ],
+        "properties": {
+          "assignedCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "documentCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "unreadCount": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "DeleteWorkspaceBody": {
         "type": "object",
         "required": [
@@ -12060,6 +12797,42 @@
           }
         },
         "additionalProperties": false
+      },
+      "EmailChangeBody": {
+        "type": "object",
+        "required": [
+          "newEmail"
+        ],
+        "properties": {
+          "newEmail": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErasureScheduleOutput": {
+        "type": "object",
+        "required": [
+          "ok",
+          "cancelToken",
+          "eraseAt",
+          "mailSent"
+        ],
+        "properties": {
+          "cancelToken": {
+            "type": "string"
+          },
+          "eraseAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mailSent": {
+            "type": "boolean"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
       },
       "ExpectedDatesBody": {
         "type": "object",
@@ -12199,6 +12972,43 @@
         ],
         "properties": {
           "url": {
+            "type": "string"
+          }
+        }
+      },
+      "IdentitiesOutput": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityOutput"
+            }
+          }
+        }
+      },
+      "IdentityOutput": {
+        "type": "object",
+        "required": [
+          "provider",
+          "email",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
             "type": "string"
           }
         }
@@ -12476,6 +13286,18 @@
           }
         }
       },
+      "MagicLinkBody": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "MeApiTokenCreateBody": {
         "type": "object",
         "required": [
@@ -12499,6 +13321,78 @@
           }
         },
         "additionalProperties": false
+      },
+      "MeDashboardResponse": {
+        "type": "object",
+        "required": [
+          "assigned",
+          "recent",
+          "labels",
+          "statuses",
+          "projects",
+          "members",
+          "workspaces",
+          "unreadCount"
+        ],
+        "properties": {
+          "assigned": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskListItemOutput"
+            }
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabelOutput"
+            }
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberResponse"
+            }
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardProjectOutput"
+            }
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardRecentItemOutput"
+            }
+          },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceStatusOutput"
+            }
+          },
+          "unreadCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardWorkspaceOutput"
+            }
+          }
+        }
+      },
+      "MeLocateResponse": {
+        "type": "object",
+        "required": [
+          "workspaceId"
+        ],
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          }
+        }
       },
       "MemberResponse": {
         "type": "object",
@@ -12833,6 +13727,26 @@
             "type": "boolean"
           }
         }
+      },
+      "PasswordChangeBody": {
+        "type": "object",
+        "required": [
+          "currentPassword",
+          "newPassword"
+        ],
+        "properties": {
+          "currentPassword": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` only for password-less accounts."
+          },
+          "newPassword": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "PasswordResetBody": {
         "type": "object",
@@ -13366,6 +14280,43 @@
           },
           "workspaceId": {
             "type": "string"
+          }
+        }
+      },
+      "ProviderOutput": {
+        "type": "object",
+        "required": [
+          "provider",
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        }
+      },
+      "ProvidersOutput": {
+        "type": "object",
+        "required": [
+          "providers",
+          "magicLink",
+          "workspaceSso"
+        ],
+        "properties": {
+          "magicLink": {
+            "type": "boolean"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderOutput"
+            }
+          },
+          "workspaceSso": {
+            "type": "boolean"
           }
         }
       },
@@ -14492,6 +15443,18 @@
           }
         }
       },
+      "TokenBody": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "TrashItemResponse": {
         "type": "object",
         "required": [
@@ -14603,6 +15566,29 @@
             }
           }
         }
+      },
+      "WithdrawBody": {
+        "type": "object",
+        "description": "POST /auth/withdraw. Source `withdrawInput`: a non-null `currentPassword`\nwins; otherwise `emailLocalPart` (password-less accounts).",
+        "required": [
+          "currentPassword",
+          "emailLocalPart"
+        ],
+        "properties": {
+          "currentPassword": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "emailLocalPart": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "WorkflowOutput": {
         "type": "object",
@@ -14727,6 +15713,45 @@
             "type": "string"
           },
           "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceStatusOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "workflowId",
+          "projectId",
+          "name",
+          "sortKey",
+          "category",
+          "wipLimit"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "sortKey": {
+            "type": "string"
+          },
+          "wipLimit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "workflowId": {
             "type": "string"
           }
         }

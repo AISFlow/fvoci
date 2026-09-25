@@ -41,6 +41,13 @@ use crate::api::dto::{
     TreeResponse, WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse,
     WorkspaceMetaResponse,
 };
+#[cfg(feature = "api-schema")]
+use crate::api::dto::{
+    DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, EmailChangeBody,
+    ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse,
+    MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, TokenBody, WithdrawBody,
+    WorkspaceStatusOutput,
+};
 
 #[cfg(feature = "api-schema")]
 struct CookieSecurityAddon;
@@ -82,6 +89,18 @@ impl Modify for CookieSecurityAddon {
         me_patch,
         password_reset,
         confirm_password_reset,
+        withdraw,
+        cancel_withdraw,
+        email_change,
+        email_confirm,
+        password_change,
+        magic_link,
+        magic_link_consume,
+        auth_providers,
+        auth_identities,
+        me_export,
+        me_dashboard,
+        me_locate,
         list_my_workspaces,
         personal_workspace,
         create_workspace,
@@ -330,17 +349,7 @@ impl Modify for CookieSecurityAddon {
             ActivityItemOutput,
             ActivityListResponse,
             CommentListResponse,
-            StarCreateBody,
-            StarItemOutput,
-            StarListResponse,
-            RecentItemOutput,
-            RecentListResponse,
-            ShareCreateBody,
-            DocumentShareLinkCreateBody,
-            ShareLinkOutput,
-            ShareLinkCreatedOutput,
-            ShareLinkListResponse,
-            SharePublicMetaOutput,
+    DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, DocumentShareLinkCreateBody, EmailChangeBody, ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse, MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, RecentItemOutput, RecentListResponse, ShareCreateBody, ShareLinkCreatedOutput, ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput, StarCreateBody, StarItemOutput, StarListResponse, TokenBody, WithdrawBody, WorkspaceStatusOutput,
             ProblemResponse,
         )
     ),
@@ -801,6 +810,183 @@ fn password_reset() {}
     )
 )]
 fn confirm_password_reset() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/withdraw",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    request_body = WithdrawBody,
+    responses(
+        (status = 200, description = "Erasure scheduled; session cookie cleared", body = ErasureScheduleOutput),
+        (status = 400, description = "confirm_invalid", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 409, description = "owner_transfer_required or last_instance_admin", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn withdraw() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/cancel-withdraw",
+    tag = "auth",
+    request_body = TokenBody,
+    responses(
+        (status = 200, description = "Withdrawal cancelled", body = OkResponse),
+        (status = 404, description = "Unknown, used or expired cancel token", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn cancel_withdraw() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/auth/email",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    request_body = EmailChangeBody,
+    responses(
+        (status = 202, description = "Accepted (same response whether or not mail was sent)", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn email_change() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/email/confirm",
+    tag = "auth",
+    request_body = TokenBody,
+    responses(
+        (status = 200, description = "Email changed", body = OkResponse),
+        (status = 400, description = "magic_invalid", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn email_confirm() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/auth/password",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    request_body = PasswordChangeBody,
+    responses(
+        (status = 200, description = "Password changed; other sessions revoked", body = OkResponse),
+        (status = 400, description = "password_invalid", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn password_change() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/magic-link",
+    tag = "auth",
+    request_body = MagicLinkBody,
+    responses(
+        (status = 202, description = "Accepted (same response for unknown addresses)", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn magic_link() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/magic-link/consume",
+    tag = "auth",
+    request_body = TokenBody,
+    responses(
+        (status = 200, description = "Signed in", body = LoginResponse),
+        (status = 400, description = "magic_invalid", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn magic_link_consume() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/providers",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Sign-in methods", body = ProvidersOutput),
+    )
+)]
+fn auth_providers() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/identities",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "Linked external identities", body = IdentitiesOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+    )
+)]
+fn auth_identities() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/export",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "ZIP: profile.json, comments.json, attachments.json, attachments/*", content_type = "application/zip"),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn me_export() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/dashboard",
+    tag = "workspaces",
+    security(("fvoci_session" = [])),
+    params(("lastVisited" = Option<String>, Query, description = "Workspace id to list first")),
+    responses(
+        (status = 200, description = "Cross-workspace dashboard", body = MeDashboardResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+    )
+)]
+fn me_dashboard() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/locate",
+    tag = "workspaces",
+    security(("fvoci_session" = [])),
+    params(
+        ("type" = String, Query, description = "task or document"),
+        ("id" = String, Query, description = "Task or document id"),
+    ),
+    responses(
+        (status = 200, description = "Workspace holding the target", body = MeLocateResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not visible", body = ProblemResponse),
+    )
+)]
+fn me_locate() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
