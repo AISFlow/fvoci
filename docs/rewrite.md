@@ -87,7 +87,7 @@ squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있�
 | 기능 | 원본 근거 | 보존할 불변식 | 상태 | 증거 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 설치·로그인·세션·프로필 | identity/routes.ts, core/auth.ts | 활성 사용자, 철회, 본문+이벤트+감사 원자성 | 부분 | #1, #34 | 미착수: OIDC·MFA·비밀번호 재설정·계정 생명주기·설정 기반 비밀번호 정책 |
-| 워크스페이스 | domains/workspaces | 현재 역할·철회 경합·RLS·풀 컨텍스트 | 부분 | #4, #39 | 미착수: counts·workspace 삭제·workspace/guest/storage quota |
+| 워크스페이스 | domains/workspaces | 현재 역할·철회 경합·RLS·풀 컨텍스트 | 부분 | #4, #39 | 진행: counts·owner 전용 workspace 삭제(#56; 30일 purge 실행기·저장소 정리는 미구현). 미착수: workspace/guest/storage quota |
 | 멤버·초대 | invitation.ts, quota.ts, consent.ts | 좌석 한도(모든 billable 경로)·토큰 단일 사용·역할 상한 | 부분 | #21 | 미착수: 메일/SMTP, 수락 시 MFA/OIDC, legal consent 428, pending 목록/철회 API, 알림 설정 기본값, 계정 삭제 시 pending 정리, 다른 E2E의 SQL fixture 멤버 |
 | 그룹·권한 통합 | policies.ts effectivePermission, project/document_members(user XOR group) | 리소스별 단일 권한 함수 | 수락 | #23, #39, #50 | 후속: collab 프레임당 권한 재조회 축소·collab_delivery의 그룹 join 사본·설정 UI `canManage` DTO |
 | 프로젝트 | domains/projects | 비공개 접근(workspace admin 제외)·lead/멤버 제거 경합·원자성 | 부분 | #13, #39 | 진행: 프로젝트 홈·프로젝트 문서·복제·lead 선택(#52) |
