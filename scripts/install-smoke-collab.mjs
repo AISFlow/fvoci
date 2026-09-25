@@ -134,46 +134,60 @@ async function messageBytes(data) {
   return Buffer.from(data);
 }
 
+// One listener per socket queues every decoded frame in arrival order. A
+// listener attached per wait drops frames that arrive between waits or while an
+// earlier frame is still being decoded.
+const inbox = new WeakMap();
+
+function frameInbox(ws) {
+  let box = inbox.get(ws);
+  if (box) return box;
+  box = { frames: [], waiters: [], closed: null, decoding: Promise.resolve() };
+  const wake = () => {
+    for (const waiter of box.waiters.splice(0)) waiter();
+  };
+  ws.addEventListener("message", (event) => {
+    box.decoding = box.decoding.then(async () => {
+      try {
+        box.frames.push(decodeDocumentFrame(await messageBytes(event.data)));
+      } catch (error) {
+        box.closed = error;
+      }
+      wake();
+    });
+  });
+  ws.addEventListener("close", () => {
+    box.decoding = box.decoding.then(() => {
+      box.closed ??= new Error("websocket closed while waiting for frame");
+      wake();
+    });
+  });
+  ws.addEventListener("error", (error) => {
+    box.closed ??= error;
+    wake();
+  });
+  inbox.set(ws, box);
+  return box;
+}
+
 async function waitForMessage(ws, predicate, timeoutMs) {
+  const box = frameInbox(ws);
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const frame = await Promise.race([
-      new Promise((resolve, reject) => {
-        const onMessage = async (event) => {
-          cleanup();
-          try {
-            const data = await messageBytes(event.data);
-            resolve(decodeDocumentFrame(data));
-          } catch (error) {
-            reject(error);
-          }
-        };
-        const onError = (error) => {
-          cleanup();
-          reject(error);
-        };
-        const onClose = () => {
-          cleanup();
-          reject(new Error("websocket closed while waiting for frame"));
-        };
-        const timer = setTimeout(() => {
-          cleanup();
-          resolve(null);
-        }, Math.min(250, deadline - Date.now()));
-        const cleanup = () => {
-          clearTimeout(timer);
-          ws.removeEventListener("message", onMessage);
-          ws.removeEventListener("error", onError);
-          ws.removeEventListener("close", onClose);
-        };
-        ws.addEventListener("message", onMessage);
-        ws.addEventListener("error", onError);
-        ws.addEventListener("close", onClose);
-      }),
-    ]);
-    if (frame && predicate(frame)) {
-      return frame;
+  for (;;) {
+    while (box.frames.length > 0) {
+      const frame = box.frames.shift();
+      if (predicate(frame)) return frame;
     }
+    if (box.closed) throw box.closed;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, remaining);
+      box.waiters.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
   throw new Error("timed out waiting for websocket frame");
 }
@@ -288,6 +302,7 @@ async function main() {
     ws.addEventListener("open", resolve, { once: true });
     ws.addEventListener("error", reject, { once: true });
   });
+  frameInbox(ws);
 
   const base = fixtureBytes("delete_only_base.v1");
   const deleteOnly = fixtureBytes("delete_only.v1");
