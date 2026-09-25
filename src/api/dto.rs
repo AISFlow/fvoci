@@ -1175,3 +1175,46 @@ mod tests {
         assert!(body["createdAt"].as_str().unwrap().contains("2026-09-24"));
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchSnippetPiece {
+    pub text: String,
+    pub r#match: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchItemOutput {
+    pub r#type: String,
+    pub id: String,
+    pub title: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub display_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub extract_status: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub chunk_no: Option<i64>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub snippet: Option<Vec<SearchSnippetPiece>>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub project_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub document_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub task_id: Option<String>,
+    pub score: f64,
+    pub updated_at: String,
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchListResponse {
+    pub items: Vec<SearchItemOutput>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub next_cursor: Option<String>,
+}

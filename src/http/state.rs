@@ -4,6 +4,7 @@ use crate::attachments::{LocalStorage, UploadLimits};
 use crate::auth::AuthService;
 use crate::collab::CollabHub;
 use crate::http::rate_limit::RateLimiter;
+use crate::search::meili::MeiliConfig;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -15,4 +16,5 @@ pub struct AppState {
     pub storage: LocalStorage,
     pub upload: UploadLimits,
     pub collab: Option<Arc<CollabHub>>,
+    pub meili: Option<MeiliConfig>,
 }

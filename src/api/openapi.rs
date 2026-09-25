@@ -20,11 +20,11 @@ use crate::api::dto::{
     PatchWorkspaceBody, ProblemResponse, ProjectListResponse, ProjectMembersResponse,
     ProjectOutput, PutAttachmentPartResponse, ResumeAttachmentUploadResponse,
     RevisionCreateResponse, RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse,
-    RevisionRestoreBody, RevisionRestoreResponse, SessionUserOutput, SetupBody, SetupResponse,
-    SetupStatusResponse, SortDocumentBody, TaskChildOutput, TaskChildProgressOutput,
-    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
-    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
-    WorkspaceListResponse, WorkspaceMetaResponse,
+    RevisionRestoreBody, RevisionRestoreResponse, SearchItemOutput, SearchListResponse,
+    SearchSnippetPiece, SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse,
+    SortDocumentBody, TaskChildOutput, TaskChildProgressOutput, TaskListResponse, TaskMetaOutput,
+    TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse,
+    WorkflowOutput, WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -77,6 +77,7 @@ impl Modify for CookieSecurityAddon {
         delete_project_member,
         get_project_workflow,
         lookup_display_id,
+        workspace_search,
         list_tasks,
         create_task,
         get_task,
@@ -151,6 +152,9 @@ impl Modify for CookieSecurityAddon {
             TaskListResponse,
             LookupItemOutput,
             LookupListResponse,
+            SearchSnippetPiece,
+            SearchItemOutput,
+            SearchListResponse,
             CreateDocumentBody,
             PatchDocumentBody,
             DocumentMetaResponse,
@@ -181,7 +185,7 @@ impl Modify for CookieSecurityAddon {
         (name = "auth", description = "Authentication and profile"),
         (name = "workspaces", description = "Workspace membership and metadata"),
         (name = "projects", description = "Project and workflow management"),
-        (name = "search", description = "Display id lookup"),
+        (name = "search", description = "Workspace search and display id lookup"),
         (name = "tasks", description = "Project task operations"),
         (name = "documents", description = "Wiki documents"),
         (name = "attachments", description = "Wiki document attachments"),
@@ -812,6 +816,33 @@ fn list_tasks() {}
     )
 )]
 fn lookup_display_id() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/search",
+    tag = "search",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("q" = String, Query, description = "Search query"),
+        ("type" = Option<String>, Query, description = "Result kind filter"),
+        ("projectId" = Option<String>, Query, description = "Optional project scope"),
+        ("tag" = Option<String>, Query, description = "Optional tag filter"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size 1-50"),
+        ("mode" = Option<String>, Query, description = "lexical or hybrid"),
+    ),
+    responses(
+        (status = 200, description = "Search hits", body = SearchListResponse),
+        (status = 400, description = "Invalid input or cursor", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not a workspace member", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Search unavailable", body = ProblemResponse),
+    )
+)]
+fn workspace_search() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

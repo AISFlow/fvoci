@@ -144,3 +144,8 @@ required-features = ["db-tests"]
 name = "search_meili"
 path = "tests/search_meili.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "search_query"
+path = "tests/search_query.rs"
+required-features = ["db-tests"]
