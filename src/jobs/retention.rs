@@ -9,7 +9,13 @@ pub const PROCESSED_GC_WINDOW_DAYS: i32 = 30;
 pub const GC_DELETE_BATCH: i32 = 5_000;
 pub const GC_DELETE_ROUNDS: u32 = 30;
 
-const PROCESSED_GC_CONSUMERS: &[&str] = &["notifications", "mail", "search-index"];
+const PROCESSED_GC_CONSUMERS: &[&str] = &[
+    "notifications",
+    "mail",
+    "search-index",
+    "webhooks",
+    "github",
+];
 
 /// Source sweep.ts notification + processed_events GC. events, audit_log, and
 /// collab receipts are not purged in the source daily sweep (and the app role
@@ -156,4 +162,39 @@ async fn purge_archived_batch(pool: &PgPool) -> Result<u32, sqlx::Error> {
     .rows_affected();
     tx.commit().await?;
     Ok(deleted as u32)
+}
+
+/// Source `gcWebhookDeliveries` (90 days) and the GitHub delivery-id dedupe
+/// rows (30 days), in bounded batches.
+pub async fn run_integration_gc(
+    pool: &PgPool,
+    cancel: &CancellationToken,
+) -> Result<(u32, u32), sqlx::Error> {
+    use crate::db::integrations::{
+        purge_github_deliveries, purge_settled_deliveries, GITHUB_DELIVERY_RETENTION_DAYS,
+        INTEGRATION_GC_BATCH, WEBHOOK_DELIVERY_RETENTION_DAYS,
+    };
+    let mut webhook = 0u32;
+    let mut github = 0u32;
+    for _ in 0..GC_DELETE_ROUNDS {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let n = purge_settled_deliveries(pool, WEBHOOK_DELIVERY_RETENTION_DAYS).await?;
+        webhook += n as u32;
+        if (n as i64) < INTEGRATION_GC_BATCH {
+            break;
+        }
+    }
+    for _ in 0..GC_DELETE_ROUNDS {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let n = purge_github_deliveries(pool, GITHUB_DELIVERY_RETENTION_DAYS).await?;
+        github += n as u32;
+        if (n as i64) < INTEGRATION_GC_BATCH {
+            break;
+        }
+    }
+    Ok((webhook, github))
 }

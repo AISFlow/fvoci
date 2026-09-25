@@ -54,8 +54,8 @@ impl Keyring {
         if !KEY_ID_RE.is_match(active_id) {
             return Err("invalid active key id".into());
         }
-        let parsed: HashMap<String, String> = serde_json::from_str(raw)
-            .map_err(|_| "invalid PASSWORD_PEPPER_KEYS json".to_string())?;
+        let parsed: HashMap<String, String> =
+            serde_json::from_str(raw).map_err(|_| "invalid keyring json".to_string())?;
         if parsed.is_empty() || parsed.len() > 32 {
             return Err("keyring must have 1-32 keys".into());
         }

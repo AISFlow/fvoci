@@ -112,6 +112,8 @@ jobs:
             specs: e2e/api-token-flow.spec.ts
           - flow: import-export-flow
             specs: e2e/workspace-import-export.spec.ts
+          - flow: integrations-flow
+            specs: e2e/integrations-flow.spec.ts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

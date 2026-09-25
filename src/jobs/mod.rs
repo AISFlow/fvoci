@@ -33,7 +33,7 @@ pub use claim::{
     JOB_KEY_PROCESSED, JOB_KEY_UPLOADS, JOB_KEY_WORKSPACE, JOB_LOCK_NAMESPACE,
 };
 pub use retention::{
-    run_notification_gc, run_processed_gc, GC_DELETE_BATCH, GC_DELETE_ROUNDS,
+    run_integration_gc, run_notification_gc, run_processed_gc, GC_DELETE_BATCH, GC_DELETE_ROUNDS,
     NOTIFICATION_ARCHIVED_RETENTION_DAYS, NOTIFICATION_READ_RETENTION_DAYS,
     PROCESSED_GC_WINDOW_DAYS,
 };
@@ -235,6 +235,8 @@ pub struct DailySweepStats {
     pub processed: u32,
     pub digests_sent: u32,
     pub imports_swept: u32,
+    pub webhook_deliveries: u32,
+    pub github_deliveries: u32,
 }
 
 /// Claim the daily sweep lock, run every job, then release. `None` means
@@ -315,6 +317,17 @@ async fn run_daily_jobs(
                 stats.processed = deleted;
             }
             Err(err) => warn!(error = %err, "maintenance.processed_gc_failed"),
+        }
+    }
+
+    if !cancel.is_cancelled() {
+        match run_integration_gc(pool, cancel).await {
+            Ok((webhook, github)) => {
+                info!(webhook, github, "maintenance.integration_gc");
+                stats.webhook_deliveries = webhook;
+                stats.github_deliveries = github;
+            }
+            Err(err) => warn!(error = %err, "maintenance.integration_gc_failed"),
         }
     }
 

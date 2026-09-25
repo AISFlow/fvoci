@@ -779,11 +779,20 @@ pub(crate) async fn append_event(
     tx: &mut Transaction<'_, Postgres>,
     row: EventAppend,
 ) -> Result<(), sqlx::Error> {
+    append_event_channel(tx, row, "web").await
+}
+
+/// `append_event` with an explicit channel (`webhook` for inbound GitHub).
+pub(crate) async fn append_event_channel(
+    tx: &mut Transaction<'_, Postgres>,
+    row: EventAppend,
+    channel: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO fvoci.events (
             id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'web')
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(row.id)
@@ -793,6 +802,7 @@ pub(crate) async fn append_event(
     .bind(row.target_type.as_deref())
     .bind(row.target_id)
     .bind(row.payload)
+    .bind(channel)
     .execute(&mut **tx)
     .await?;
     Ok(())

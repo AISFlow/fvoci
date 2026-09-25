@@ -37,6 +37,12 @@ use crate::api::dto::{
     TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse, WorkflowOutput,
     WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
 };
+#[cfg(feature = "api-schema")]
+use crate::api::dto::{
+    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
+    GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
+    WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
+};
 
 #[cfg(feature = "api-schema")]
 struct CookieSecurityAddon;
@@ -192,9 +198,33 @@ impl Modify for CookieSecurityAddon {
         delete_workspace_holiday,
         create_ics_token,
         get_ics_feed,
+        list_webhooks_path,
+        create_webhook_path,
+        remove_webhook_path,
+        get_github_path,
+        remove_github_path,
+        install_github_path,
+        link_github_issue_path,
+        github_callback_path,
+        github_webhook_path,
+        ai_summarize_path,
+        ai_generate_tasks_path,
+        ai_suggest_links_path,
     ),
     components(
         schemas(
+            WebhookCreateBody,
+            WebhookOutput,
+            WebhookCreatedOutput,
+            WebhookListResponse,
+            GithubInstallOutput,
+            GithubInstallUrlOutput,
+            GithubIssueLinkBody,
+            GithubIssueLinkOutput,
+            AiDocumentBody,
+            AiSummarizeOutput,
+            AiGenerateTasksOutput,
+            AiSuggestLinksOutput,
             SetupStatusResponse,
             BrandingOutput,
             SetupBody,
@@ -323,6 +353,7 @@ impl Modify for CookieSecurityAddon {
         (name = "comments", description = "Document and task comments"),
         (name = "notifications", description = "In-app notifications"),
         (name = "schedule", description = "Holidays and ICS calendar feeds"),
+        (name = "integrations", description = "Webhooks, GitHub App and document AI actions"),
     )
 )]
 pub struct ApiDoc;
@@ -2906,3 +2937,201 @@ mod tests {
         }
     }
 }
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace webhooks (secrets are never listed)", body = WebhookListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn list_webhooks_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = WebhookCreateBody,
+    responses(
+        (status = 201, description = "Created webhook; the signing secret is shown only here", body = WebhookCreatedOutput),
+        (status = 400, description = "Invalid URL or events", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+        (status = 503, description = "Secret encryption keys are not configured", body = ProblemResponse),
+    )
+)]
+fn create_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/webhooks/{webhook_id}",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("webhook_id" = String, description = "Webhook id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted webhook and its deliveries", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn remove_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/github",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "GitHub App installation", body = GithubInstallOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn get_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/github",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Removed the installation link", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "No installation, or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn remove_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/github/install",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "GitHub App install URL with a signed state", body = GithubInstallUrlOutput),
+        (status = 400, description = "GitHub App not configured or unreachable", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not a workspace admin", body = ProblemResponse),
+    )
+)]
+fn install_github_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/github/issue-links",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = GithubIssueLinkBody,
+    responses(
+        (status = 201, description = "Linked the task to an issue", body = GithubIssueLinkOutput),
+        (status = 400, description = "Invalid repo/number or already linked", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Task not found or no project edit permission", body = ProblemResponse),
+    )
+)]
+fn link_github_issue_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/github/callback",
+    tag = "integrations",
+    params(
+        ("state" = Option<String>, Query, description = "Signed install state"),
+        ("installation_id" = Option<String>, Query, description = "GitHub installation id"),
+    ),
+    responses(
+        (status = 302, description = "Installed; redirects to the app"),
+        (status = 400, description = "Invalid or expired state", body = ProblemResponse),
+    )
+)]
+fn github_callback_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/github/webhook",
+    tag = "integrations",
+    responses(
+        (status = 200, description = "Accepted", body = OkResponse),
+        (status = 400, description = "Not configured or invalid payload", body = ProblemResponse),
+        (status = 401, description = "Signature invalid", body = ProblemResponse),
+        (status = 413, description = "Body too large", body = ProblemResponse),
+    )
+)]
+fn github_webhook_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/summarize",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Summary", body = AiSummarizeOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_summarize_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/generate-tasks",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Task titles", body = AiGenerateTasksOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_generate_tasks_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/ai/suggest-links",
+    tag = "integrations",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = AiDocumentBody,
+    responses(
+        (status = 200, description = "Visible document ids", body = AiSuggestLinksOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "AI disabled", body = ProblemResponse),
+    )
+)]
+fn ai_suggest_links_path() {}

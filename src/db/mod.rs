@@ -12,6 +12,7 @@ pub mod holidays;
 pub mod ics;
 pub mod identity;
 pub mod import_jobs;
+pub mod integrations;
 pub mod invitations;
 pub mod labels;
 pub mod lookup;

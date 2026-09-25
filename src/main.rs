@@ -18,7 +18,7 @@ use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
-use fvoci_server::http::{router, state::AppState};
+use fvoci_server::http::{router_with_integrations, state::AppState};
 use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
 use fvoci_server::jobs::{spawn_maintenance, MaintenanceHandle, MaintenanceSettings};
 use fvoci_server::outbox::{
@@ -258,6 +258,24 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     if let Some(meili) = config.meili.clone() {
         consumers.push(fvoci_server::search::index::search_index_consumer(meili));
     }
+    let integrations = Arc::new(fvoci_server::integrations::Integrations::from_env()?);
+    tracing::info!(
+        webhook_keys = integrations.encryption_keys.is_some(),
+        webhook_allow_targets = !integrations.outbound.policy().is_empty(),
+        github = integrations.github.is_some(),
+        ai = integrations.ai.is_some(),
+        "integrations configured"
+    );
+    consumers.push(fvoci_server::integrations::webhooks::webhooks_consumer(
+        integrations.outbound.clone(),
+        integrations.encryption_keys.clone(),
+        fvoci_server::integrations::webhooks::WebhookDeliverySettings::default(),
+    ));
+    if let Some(github) = integrations.github.clone() {
+        consumers.push(fvoci_server::integrations::github::github_sync_consumer(
+            github,
+        ));
+    }
     let outbox_dispatcher = spawn_outbox_dispatcher(
         OutboxDispatcherSettings::from_env(),
         pool.clone(),
@@ -329,7 +347,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let serve = announce_after_first_pending_poll(
         axum::serve(
             listener,
-            router(state, config.static_dir.clone())
+            router_with_integrations(state, config.static_dir.clone(), integrations)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {

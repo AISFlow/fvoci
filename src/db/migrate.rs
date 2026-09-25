@@ -28,6 +28,8 @@ const MIGRATIONS: &[(&str, i32)] = &[
     (include_str!("../../migrations/021_maintenance_gc.sql"), 21),
     (include_str!("../../migrations/022_task_activity.sql"), 22),
     (include_str!("../../migrations/023_import_jobs.sql"), 23),
+    // 024-026 are held by open branches; the coordinator renumbers on merge.
+    (include_str!("../../migrations/027_integrations.sql"), 27),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -437,6 +439,10 @@ mod tests {
         (
             23,
             "29b0d5367efb66f104a66794f1c3a3b4a41917e946c7a8077eb316eee700a32c",
+        ),
+        (
+            27,
+            "b4cf4f15f140fa1e0c4854faf8d8e1421b875df15178a5d446b0f83bfc154d8d",
         ),
     ];
 

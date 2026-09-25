@@ -48,6 +48,8 @@ pub enum ProblemCode {
     ImportFailed,
     UnsupportedMediaType,
     UploadCapacityExceeded,
+    AiUnavailable,
+    IntegrationUnavailable,
     InternalError,
 }
 
@@ -96,6 +98,8 @@ impl ProblemCode {
             Self::ImportFailed => "import_failed",
             Self::UnsupportedMediaType => "unsupported_media_type",
             Self::UploadCapacityExceeded => "upload_capacity_exceeded",
+            Self::AiUnavailable => "ai_unavailable",
+            Self::IntegrationUnavailable => "integration_unavailable",
             Self::InternalError => "internal_error",
         }
     }
@@ -146,6 +150,8 @@ impl ProblemCode {
             Self::ImportFailed => "import failed",
             Self::UnsupportedMediaType => "unsupported media type",
             Self::UploadCapacityExceeded => "upload capacity exceeded — retry",
+            Self::AiUnavailable => "ai unavailable",
+            Self::IntegrationUnavailable => "integration unavailable",
             Self::InternalError => "internal error",
         }
     }
@@ -184,7 +190,9 @@ impl ProblemCode {
             Self::CollabTimeoutRetry => StatusCode::GATEWAY_TIMEOUT,
             Self::ImportFailed => StatusCode::BAD_REQUEST,
             Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Self::UploadCapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
+            Self::UploadCapacityExceeded | Self::AiUnavailable | Self::IntegrationUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,

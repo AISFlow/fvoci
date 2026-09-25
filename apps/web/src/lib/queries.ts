@@ -164,3 +164,29 @@ export function workspaceApiTokensQuery(workspaceId: string) {
     retry: false,
   });
 }
+
+export function workspaceWebhooksQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["workspaces", workspaceId, "webhooks"],
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/webhooks", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    retry: false,
+  });
+}
+
+export function workspaceGithubQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["workspaces", workspaceId, "github"],
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/github", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    retry: false,
+  });
+}
