@@ -50,11 +50,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Two shards per architecture, balanced by measured suite time; each
+        # PostgreSQL suite runs in exactly one shard. Keep both lists in sync
+        # when adding a suite.
         include:
           - runner: ubuntu-24.04
             check: postgres
+            shard: a
+            tests: --test db_integration --test task_integration --test collab_integration --test document_import_export_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili
+          - runner: ubuntu-24.04
+            check: postgres-b
+            shard: b
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration
           - runner: ubuntu-24.04-arm
             check: postgres-arm64
+            shard: a
+            tests: --test db_integration --test task_integration --test collab_integration --test document_import_export_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili
+          - runner: ubuntu-24.04-arm
+            check: postgres-arm64-b
+            shard: b
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     services:
@@ -105,7 +120,7 @@ jobs:
       - name: Prepare the document convert helper (npm ci)
         run: bash scripts/prepare-document-convert.sh >> "$GITHUB_ENV"
       - name: Native server build and policy tests (ARM64)
-        if: runner.arch == 'ARM64'
+        if: runner.arch == 'ARM64' && matrix.shard == 'a'
         run: |
           cargo build --locked --offline --bins
           cargo test --locked --offline --lib
@@ -114,9 +129,10 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_MEILI_URL: http://127.0.0.1:${{ job.services.meilisearch.ports['7700'] }}
           FVOCI_MEILI_KEY: ci-ephemeral-meili-master
-        run: cargo test --locked --offline --no-fail-fast --features db-tests --test db_integration --test document_integration --test document_import_export_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration --test task_labels_integration --test group_integration --test task_milestones_integration --test notification_integration --test schedule_ics_integration --test mail_integration --test invitation_integration --test search_meili --test comment_integration --test task_activity_integration --test api_token_integration --test search_query --test outbox_integration --test search_index --test workspace_lifecycle --test background_jobs --test share_stars_integration
+        run: cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}
 
       - name: S3-compatible storage integration tests (pinned test server)
+        if: matrix.shard == 'b'
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
         run: bash scripts/start-test-minio.sh cargo test --locked --offline --no-fail-fast --features db-tests --test attachment_s3_integration
