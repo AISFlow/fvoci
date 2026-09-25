@@ -1754,11 +1754,11 @@ pub(crate) async fn copy_task_collection(
         }
         let new_id = Uuid::now_v7();
         remap.fields.insert(field.id, new_id);
-        let mut option_map = matches!(
-            field.field_type,
-            FieldType::Select | FieldType::MultiSelect | FieldType::Checkboxes
-        )
-        .then(std::collections::HashMap::new);
+        // Source OPTION_FIELD_TYPES: select, multi_select, checkboxes, labels.
+        let mut option_map = field
+            .field_type
+            .has_options()
+            .then(std::collections::HashMap::new);
         let mut options = Vec::new();
         for option in field.options.iter().filter(|o| o.deleted_at.is_none()) {
             let option_id = Uuid::now_v7();
