@@ -576,7 +576,9 @@ pub async fn compensate_import(
         }
     }
     for key in keys {
-        if let Err(err) = storage.delete_object(&key).await {
+        // Also aborts an open multipart upload, which could otherwise
+        // publish an object after its row is gone.
+        if let Err(err) = storage.purge_key(&key).await {
             out.failed += 1;
             warn!(error = %err, "import.compensate_object_failed");
         }
