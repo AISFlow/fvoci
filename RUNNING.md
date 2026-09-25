@@ -346,7 +346,7 @@ this slice; attachment `extract_text` is in PostgreSQL and comes back with the
 dump. Keep `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID` the same as
 the original or existing passwords will not verify. `POSTGRES_USER`,
 `POSTGRES_DB`, and `FVOCI_APP_ROLE` names must match; cluster passwords and
-`MEILI_MASTER_KEY` may be new.
+`MEILI_MASTER_KEY` may be new. `scripts/restore.sh` compares the keyring fingerprint recorded in the backup manifest and refuses to restore with a different keyring.
 
 **Ordering:** `scripts/backup.sh` stops the server (the only writer) and checks
 that no other client sessions remain, then dumps PostgreSQL, then archives
@@ -385,7 +385,7 @@ password, document body, attachment bytes, extraction text, and tasks.
 
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
-project/task; comments are not on this main), backs it up, deletes that stack
+project/task, a document comment), backs it up, deletes that stack
 and its volumes, restores into a second project, and checks those artifacts
 plus uid `1000` and that the restored server receives only `DATABASE_APP_URL`.
 Trap cleanup removes only those two projects. CI runs it as a separate job on

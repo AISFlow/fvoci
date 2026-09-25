@@ -47,6 +47,19 @@ read_env() {
   printf '%s\n' "${line#*=}"
 }
 
+pepper_fingerprint() {
+  # SHA-256 over the canonical keyring JSON (sorted ids) and the active id. The
+  # keys themselves never leave the env file.
+  PEPPER_KEYS="$1" PEPPER_ACTIVE="$2" python3 -c '
+import hashlib, json, os
+ring = json.loads(os.environ["PEPPER_KEYS"])
+if not isinstance(ring, dict) or not ring:
+    raise SystemExit("PASSWORD_PEPPER_KEYS must be a non-empty JSON object")
+canon = json.dumps({"keys": dict(sorted(ring.items())), "active": os.environ["PEPPER_ACTIVE"]}, separators=(",", ":"))
+print(hashlib.sha256(canon.encode()).hexdigest())
+'
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project)
@@ -144,6 +157,17 @@ def check(entry, path):
 check(manifest.get("database"), dump_path)
 check(manifest.get("storage"), tar_path)
 PY
+
+EXPECTED_PEPPER_FP="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("passwordPepper") or {}).get("fingerprint",""))' "$MANIFEST")"
+if [[ -z "$EXPECTED_PEPPER_FP" ]]; then
+  echo "backup manifest has no password pepper fingerprint; refusing to restore" >&2
+  exit 1
+fi
+ACTUAL_PEPPER_FP="$(pepper_fingerprint "$(read_env PASSWORD_PEPPER_KEYS)" "$(read_env PASSWORD_PEPPER_ACTIVE_KEY_ID)")"
+if [[ "$ACTUAL_PEPPER_FP" != "$EXPECTED_PEPPER_FP" ]]; then
+  echo "PASSWORD_PEPPER_KEYS/ACTIVE_KEY_ID differ from the backed-up install; existing passwords could not be verified. Use the original keyring." >&2
+  exit 1
+fi
 
 for vol in "${VOLUME_KEYS[@]}"; do
   if docker volume inspect "${PROJECT}_${vol}" >/dev/null 2>&1; then

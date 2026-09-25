@@ -38,6 +38,30 @@ EOF
   exit 2
 }
 
+read_env() {
+  local key="$1"
+  local line
+  line="$(grep -E "^${key}=" "$ENV_FILE" || true)"
+  if [[ -z "$line" ]]; then
+    echo "missing ${key} in env file" >&2
+    exit 1
+  fi
+  printf '%s\n' "${line#*=}"
+}
+
+pepper_fingerprint() {
+  # SHA-256 over the canonical keyring JSON (sorted ids) and the active id. The
+  # keys themselves never leave the env file.
+  PEPPER_KEYS="$1" PEPPER_ACTIVE="$2" python3 -c '
+import hashlib, json, os
+ring = json.loads(os.environ["PEPPER_KEYS"])
+if not isinstance(ring, dict) or not ring:
+    raise SystemExit("PASSWORD_PEPPER_KEYS must be a non-empty JSON object")
+canon = json.dumps({"keys": dict(sorted(ring.items())), "active": os.environ["PEPPER_ACTIVE"]}, separators=(",", ":"))
+print(hashlib.sha256(canon.encode()).hexdigest())
+'
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project)
@@ -177,14 +201,16 @@ fi
 
 TAR_LIST="$(tar -tf "$STAGING/storage.tar" | sed 's|^\./||')"
 MISSING=0
+# Capture first so a failing psql fails the backup instead of an empty loop.
+STORED_KEYS="$("${COMPOSE[@]}" exec -T postgres sh -c \
+  'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT storage_key FROM fvoci.attachments WHERE status='\''stored'\''"')"
 while IFS= read -r key; do
   [[ -z "$key" ]] && continue
   if ! grep -Fqx "objects/${key}/payload" <<<"$TAR_LIST"; then
     echo "storage archive missing objects/${key}/payload referenced by PostgreSQL" >&2
     MISSING=1
   fi
-done < <("${COMPOSE[@]}" exec -T postgres sh -c \
-  'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT storage_key FROM fvoci.attachments WHERE status='\''stored'\''"')
+done <<<"$STORED_KEYS"
 if (( MISSING != 0 )); then
   exit 1
 fi
@@ -197,7 +223,8 @@ TAR_SHA="$(sha256sum "$STAGING/storage.tar" | awk '{print $1}')"
 PG_VERSION="$("${COMPOSE[@]}" exec -T postgres sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SHOW server_version_num"')"
 PG_VERSION="$(printf '%s' "$PG_VERSION" | tr -d '[:space:]')"
 
-CREATED_AT="$CREATED_AT" SOURCE_PROJECT="$PROJECT" \
+PEPPER_FP="$(pepper_fingerprint "$(read_env PASSWORD_PEPPER_KEYS)" "$(read_env PASSWORD_PEPPER_ACTIVE_KEY_ID)")"
+PEPPER_FP="$PEPPER_FP" CREATED_AT="$CREATED_AT" SOURCE_PROJECT="$PROJECT" \
   DUMP_SIZE="$DUMP_SIZE" DUMP_SHA="$DUMP_SHA" \
   TAR_SIZE="$TAR_SIZE" TAR_SHA="$TAR_SHA" \
   PG_VERSION="$PG_VERSION" \
@@ -209,6 +236,10 @@ manifest = {
     "sourceProject": os.environ["SOURCE_PROJECT"],
     "schema": "fvoci",
     "postgres": {"serverVersionNum": int(os.environ["PG_VERSION"])},
+    "passwordPepper": {
+        "fingerprint": os.environ["PEPPER_FP"],
+        "note": "SHA-256 of the canonical keyring and active id; keys are not stored. Restore refuses a different keyring because existing password hashes could not be verified.",
+    },
     "search": {
         "included": False,
         "reason": "Meilisearch is derived. Restore runs fvoci-migrate --ensure-meili-key (scoped key and index settings). Product search-rebuild is not in this slice; extract_text lives in PostgreSQL.",

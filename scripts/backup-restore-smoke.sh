@@ -220,7 +220,11 @@ if [[ "$TASK_TITLE" != "Backup restore task" ]]; then
   exit 1
 fi
 log_assert "project + task create: ok (${TASK_ID})"
-log_assert "comments API is not on this main; skipped"
+COMMENT_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
+  -X POST "$SOURCE_BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments" \
+  -d '{"body":"백업 복원 댓글 🙂"}')"
+COMMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$COMMENT_CREATE")"
+log_assert "document comment create: ok (${COMMENT_ID})"
 
 log_assert "== backup source stack"
 BACKUP_START=$SECONDS
@@ -261,6 +265,23 @@ log_assert "source stack and volumes removed: ok"
 
 RESTORE_PORT="$(pick_port)"
 RESTORE_BASE="http://127.0.0.1:${RESTORE_PORT}"
+log_assert "== restore with a different pepper must be refused"
+WRONG_ENV="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-wrong-env.${RUN_ID}.XXXXXX")"
+chmod 600 "$WRONG_ENV"
+sed -E "s#^PASSWORD_PEPPER_KEYS=.*#PASSWORD_PEPPER_KEYS={\"install\":\"$(openssl rand -hex 32)\"}#" "$SOURCE_ENV" >"$WRONG_ENV"
+WRONG_PROJECT="${RESTORE_PROJECT}-wrongpepper"
+if bash "$ROOT/scripts/restore.sh" --project "$WRONG_PROJECT" --env-file "$WRONG_ENV" --input "$BACKUP_DIR" >/dev/null 2>&1; then
+  rm -f "$WRONG_ENV"
+  echo "restore with a different pepper keyring must fail" >&2
+  exit 1
+fi
+rm -f "$WRONG_ENV"
+if docker volume ls --format '{{.Name}}' | grep -q "^${WRONG_PROJECT}_"; then
+  echo "refused restore must not create volumes" >&2
+  exit 1
+fi
+log_assert "restore with a different pepper refused before touching anything: ok"
+
 write_env "$RESTORE_ENV" "$RESTORE_OWNER_PASSWORD" "$RESTORE_APP_PASSWORD" \
   "$RESTORE_MEILI_MASTER_KEY" "$RESTORE_BASE" "$RESTORE_PORT"
 
@@ -303,6 +324,15 @@ if [[ "$EXTRACT_STATUS" != "ok" ]] || ! grep -q '안녕' <<<"$EXTRACT_TEXT"; the
   exit 1
 fi
 log_assert "restored extraction text: ok"
+
+COMMENTS_JSON="$(curl -fsS -b "$COOKIE_JAR" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments")"
+python3 -c '
+import json, sys
+body = json.loads(sys.argv[1])
+items = body.get("items", body if isinstance(body, list) else [])
+assert any(c.get("id") == sys.argv[2] and c.get("body") == "백업 복원 댓글 🙂" for c in items), body
+' "$COMMENTS_JSON" "$COMMENT_ID"
+log_assert "restored document comment: ok"
 
 TASK_JSON="$(curl -fsS -b "$COOKIE_JAR" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/tasks/${TASK_ID}")"
 python3 -c 'import json,sys; body=json.loads(sys.argv[1]); assert body.get("title")=="Backup restore task", body; assert body.get("id")==sys.argv[2], body' "$TASK_JSON" "$TASK_ID"
