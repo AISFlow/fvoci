@@ -243,6 +243,12 @@ async fn put_upload_part(
         }
         Err(_) => return Err(AppError::internal()),
     };
+    // Held until the part is committed; refused before the body is read.
+    let Some(_slot) = state.upload.part_put_slots.try_acquire() else {
+        return Err(AppError::upload_capacity_exceeded(
+            PART_SLOT_RETRY_AFTER_SECS,
+        ));
+    };
     let declared_len = declared_body_length(&headers, &body)?;
     let stream = body.into_data_stream();
     let mut staged = state
@@ -608,6 +614,8 @@ async fn serve_download(
     }
 }
 
+const PART_SLOT_RETRY_AFTER_SECS: u32 = 2;
+
 /// The part's declared length: `Content-Length`, or the exact size the body
 /// already knows (e.g. a buffered body). A malformed header is rejected; no
 /// declared length at all (chunked) yields `None`, which the S3 driver refuses.
@@ -632,7 +640,9 @@ fn map_storage_error(err: StorageError) -> AppError {
         StorageError::EtagMismatch | StorageError::PartTooSmall => {
             AppError::from_code(ProblemCode::SubmittedPartsDoNotMatchUploadedParts)
         }
-        StorageError::LengthRequired | StorageError::LengthMismatch => {
+        // A body that broke off mid-stream is the client's failure: answer
+        // 400 (usually unseen) instead of logging a server error.
+        StorageError::LengthRequired | StorageError::LengthMismatch | StorageError::ClientBody => {
             AppError::from_code(ProblemCode::InvalidInput)
         }
         _ => AppError::internal(),

@@ -17,7 +17,7 @@ pub use disposition::content_disposition_attachment;
 pub use local::{LocalStorage, PartInfo, StagedPart, StorageError};
 pub use mime::{is_image_mime, sniff_mime_from_bytes};
 pub use range::{parse_range, ParsedRange};
-pub use s3::{S3Storage, MINIO_TEST_IMAGE};
+pub use s3::{S3Storage, UploadTimeouts, MINIO_TEST_IMAGE};
 pub use verify::{verify_stored_objects, StorageVerifyReport};
 
 use std::fmt;
@@ -27,6 +27,36 @@ pub struct UploadLimits {
     pub part_size_bytes: i64,
     pub max_file_size_bytes: i64,
     pub create_rate_per_5min: u32,
+    pub part_put_slots: PartPutSlots,
+}
+
+/// Per-process bound on part PUTs in flight. Each proxied part holds an
+/// inbound connection and, with S3, an outbound one for as long as the
+/// client paces its body; when every slot is taken the PUT is refused
+/// before its body is read.
+#[derive(Clone)]
+pub struct PartPutSlots {
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    max: u32,
+}
+
+impl PartPutSlots {
+    pub fn new(max: u32) -> Self {
+        Self {
+            semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(max as usize)),
+            max,
+        }
+    }
+
+    pub fn max(&self) -> u32 {
+        self.max
+    }
+
+    /// A slot held until the returned permit drops, or `None` when all are
+    /// in use.
+    pub fn try_acquire(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.semaphore.clone().try_acquire_owned().ok()
+    }
 }
 
 impl fmt::Debug for UploadLimits {
@@ -35,6 +65,7 @@ impl fmt::Debug for UploadLimits {
             .field("part_size_bytes", &self.part_size_bytes)
             .field("max_file_size_bytes", &self.max_file_size_bytes)
             .field("create_rate_per_5min", &self.create_rate_per_5min)
+            .field("max_concurrent_part_puts", &self.part_put_slots.max())
             .finish()
     }
 }

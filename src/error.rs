@@ -45,6 +45,7 @@ pub enum ProblemCode {
     ProjectArchived,
     RestoreRejected,
     CollabTimeoutRetry,
+    UploadCapacityExceeded,
     InternalError,
 }
 
@@ -90,6 +91,7 @@ impl ProblemCode {
             Self::ProjectArchived => "project_archived",
             Self::RestoreRejected => "restore_rejected",
             Self::CollabTimeoutRetry => "collab_timeout_retry",
+            Self::UploadCapacityExceeded => "upload_capacity_exceeded",
             Self::InternalError => "internal_error",
         }
     }
@@ -137,6 +139,7 @@ impl ProblemCode {
             Self::ProjectArchived => "project archived",
             Self::RestoreRejected => "restore rejected",
             Self::CollabTimeoutRetry => "collab timeout — retry",
+            Self::UploadCapacityExceeded => "upload capacity exceeded — retry",
             Self::InternalError => "internal error",
         }
     }
@@ -173,6 +176,7 @@ impl ProblemCode {
             Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
             Self::Conflict | Self::ProjectArchived | Self::RestoreRejected => StatusCode::CONFLICT,
             Self::CollabTimeoutRetry => StatusCode::GATEWAY_TIMEOUT,
+            Self::UploadCapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
@@ -224,6 +228,17 @@ impl AppError {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
             code: ProblemCode::RateLimitExceeded,
+            source: None,
+            params: Some(json!({ "retryAfter": retry_after })),
+            retry_after: Some(retry_after),
+        }
+    }
+
+    /// Every part-upload slot is busy; the client retries after the hint.
+    pub fn upload_capacity_exceeded(retry_after: u32) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: ProblemCode::UploadCapacityExceeded,
             source: None,
             params: Some(json!({ "retryAfter": retry_after })),
             retry_after: Some(retry_after),

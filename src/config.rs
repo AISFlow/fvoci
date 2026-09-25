@@ -11,6 +11,7 @@ use crate::search::meili::{meili_config_from_env, MeiliConfig};
 pub const DEFAULT_UPLOAD_PART_SIZE_BYTES: i64 = 32 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES: i64 = 5120_i64 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN: u32 = 120;
+pub const DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS: u32 = 64;
 pub const DEFAULT_UPLOAD_INCOMPLETE_TTL_HOURS: u64 = 24;
 
 #[derive(Clone)]
@@ -318,13 +319,21 @@ fn storage_root_path_from_values(
 }
 
 fn required_upload_limits_from_env() -> Result<UploadLimits, String> {
-    upload_limits_from_values(
+    let mut limits = upload_limits_from_values(
         env::var("FVOCI_UPLOAD_PART_SIZE_BYTES").ok().as_deref(),
         env::var("FVOCI_UPLOAD_MAX_FILE_SIZE_BYTES").ok().as_deref(),
         env::var("FVOCI_UPLOAD_CREATE_RATE_PER_5MIN")
             .ok()
             .as_deref(),
-    )
+    )?;
+    limits.part_put_slots = crate::attachments::PartPutSlots::new(parse_positive_u32(
+        "FVOCI_UPLOAD_MAX_CONCURRENT_PARTS",
+        env::var("FVOCI_UPLOAD_MAX_CONCURRENT_PARTS")
+            .ok()
+            .as_deref(),
+        DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+    )?);
+    Ok(limits)
 }
 
 fn upload_limits_from_values(
@@ -356,6 +365,7 @@ fn upload_limits_from_values(
         part_size_bytes,
         max_file_size_bytes,
         create_rate_per_5min,
+        part_put_slots: crate::attachments::PartPutSlots::new(DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS),
     })
 }
 
