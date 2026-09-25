@@ -254,7 +254,7 @@ END;
 $$;
 
 -- Workspace SSO entry by slug before sign-in (source `workspaces.findBySlug`
--- in a system transaction): only the id of a live team workspace that has a
+-- in a system transaction): only the id of a live workspace that has a
 -- configuration, nothing else.
 CREATE FUNCTION fvoci.app_workspace_sso_id_by_slug(p_slug text)
 RETURNS uuid
@@ -266,7 +266,7 @@ AS $$
     SELECT w.id
     FROM fvoci.workspaces AS w
     JOIN fvoci.workspace_oidc AS o ON o.workspace_id = w.id
-    WHERE w.slug = p_slug AND w.deleted_at IS NULL AND w.kind = 'team'
+    WHERE w.slug = p_slug AND w.deleted_at IS NULL
 $$;
 
 REVOKE ALL ON FUNCTION fvoci.app_mfa_challenge_issue(text, uuid, integer, timestamptz) FROM PUBLIC;

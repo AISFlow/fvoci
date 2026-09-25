@@ -13,6 +13,7 @@ pub mod legal;
 pub mod lookup;
 pub mod mfa;
 pub mod notifications;
+pub mod oidc;
 pub mod project_documents;
 pub mod projects;
 pub mod revisions;

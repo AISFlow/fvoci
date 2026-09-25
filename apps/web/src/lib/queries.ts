@@ -170,6 +170,12 @@ export const providersQuery = queryOptions({
   queryFn: async () => ensureOk(await api.GET("/api/v1/auth/providers")),
 });
 
+export const mfaStatusQuery = queryOptions({
+  queryKey: ["auth", "mfa"],
+  queryFn: async () => ensureOk(await api.GET("/api/v1/auth/mfa")),
+  retry: false,
+});
+
 export const identitiesQuery = queryOptions({
   queryKey: ["auth", "identities"],
   queryFn: async () => ensureOk(await api.GET("/api/v1/auth/identities")),

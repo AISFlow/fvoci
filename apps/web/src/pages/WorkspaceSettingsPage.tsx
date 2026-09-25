@@ -7,6 +7,7 @@ import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity
 import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
 import { WorkspaceCalendarSection } from "@/features/settings/workspace-calendar";
 import { WorkspaceTokensSection } from "@/features/settings/workspace-tokens";
+import { WorkspaceSsoSection } from "@/features/settings/workspace-sso";
 import { WorkspaceImportSection } from "@/features/settings/workspace-import";
 import { NotificationPrefsSection } from "@/features/notifications/notification-prefs";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
@@ -133,6 +134,7 @@ export function WorkspaceSettingsPage() {
         ) : null}
         <WorkspaceCalendarSection workspaceId={workspace.id} />
         {canManage ? <WorkspaceTokensSection workspaceId={workspace.id} /> : null}
+        {canManage ? <WorkspaceSsoSection workspaceId={workspace.id} /> : null}
       </div>
     </WorkspaceShell>
   );

@@ -24,6 +24,7 @@ pub mod mfa;
 pub mod migrate;
 pub mod milestones;
 pub mod notifications;
+pub mod oidc;
 pub mod outbox;
 pub mod outbox_recover;
 pub mod pool;

@@ -28,9 +28,9 @@ use uuid::Uuid;
 
 use crate::api::dto::{
     DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, EmailChangeBody,
-    ErasureScheduleOutput, IdentitiesOutput, LabelOutput, MagicLinkBody, MeDashboardResponse,
-    MeLocateResponse, MemberResponse, OkResponse, PasswordChangeBody, ProvidersOutput,
-    TaskListItemOutput, TokenBody, WithdrawBody, WorkspaceStatusOutput,
+    ErasureScheduleOutput, LabelOutput, MagicLinkBody, MeDashboardResponse, MeLocateResponse,
+    MemberResponse, OkResponse, PasswordChangeBody, TaskListItemOutput, TokenBody, WithdrawBody,
+    WorkspaceStatusOutput,
 };
 use crate::attachments::ObjectStorage;
 use crate::auth::password::{hash_password, verify_password};
@@ -71,8 +71,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/auth/password", patch(change_password))
         .route("/api/v1/auth/magic-link", post(request_magic_link))
         .route("/api/v1/auth/magic-link/consume", post(consume_magic_link))
-        .route("/api/v1/auth/providers", get(providers))
-        .route("/api/v1/auth/identities", get(identities))
         .route("/api/v1/me/export", get(export))
         .route("/api/v1/me/dashboard", get(me_dashboard))
         .route("/api/v1/me/locate", get(me_locate))
@@ -455,25 +453,6 @@ async fn consume_magic_link(
         state.cookie_secure,
         issued,
     ))
-}
-
-async fn providers(State(state): State<AppState>) -> Json<ProvidersOutput> {
-    // OIDC and workspace SSO are not ported: no configured providers.
-    Json(ProvidersOutput {
-        providers: Vec::new(),
-        magic_link: state.mailer.enabled(),
-        workspace_sso: false,
-    })
-}
-
-async fn identities(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    jar: CookieJar,
-) -> Result<Json<IdentitiesOutput>, AppError> {
-    session(&state, &headers, &jar).await?;
-    // Source lists OIDC identity links only; there is no link store until OIDC exists.
-    Ok(Json(IdentitiesOutput { items: Vec::new() }))
 }
 
 fn strict_query(

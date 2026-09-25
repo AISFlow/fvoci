@@ -6,7 +6,8 @@ import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { problemMessage } from "@/lib/api";
 import { formFieldMessage } from "@/lib/form-issues";
-import type { LoginInput } from "@/lib/contracts";
+import type { LoginInput, ProviderOutput } from "@/lib/contracts";
+import { oidcStartHref, WORKSPACE_SSO_ACTION } from "@/lib/oidc";
 import { loginInput, magicLinkInput, passwordResetInput } from "@/lib/validators";
 import {
   AuthAlert,
@@ -14,6 +15,8 @@ import {
   AuthField,
   AuthInput,
   AuthStatus,
+  authOutlineButtonClass,
+  authOutlineLinkClass,
   authPrimaryButtonClass,
 } from "./auth-form";
 import { AuthLayout, AuthPanel } from "./auth-layout";
@@ -87,6 +90,21 @@ function EmailActionForm({
   );
 }
 
+// Plain GET form: the server resolves the workspace slug and redirects the
+// browser to that workspace's IdP.
+function SsoSlugForm() {
+  return (
+    <form method="get" action={WORKSPACE_SSO_ACTION} className="auth-shell__stack">
+      <AuthField id="login-sso-slug" label={t("auth.sso.slug")}>
+        <AuthInput id="login-sso-slug" name="slug" autoComplete="off" maxLength={32} />
+      </AuthField>
+      <Button type="submit" variant="outline" size="lg" className={authOutlineButtonClass}>
+        {t("auth.sso.login")}
+      </Button>
+    </form>
+  );
+}
+
 export function LoginForm({
   onSubmit,
   brandingName,
@@ -97,6 +115,10 @@ export function LoginForm({
   withdrawnNotice,
   magicLink,
   onMagicLink,
+  notice,
+  providers,
+  providersLoading,
+  workspaceSso,
 }: {
   onSubmit: (input: LoginInput) => Promise<void>;
   brandingName?: string | null;
@@ -108,6 +130,11 @@ export function LoginForm({
   // `undefined` while GET /auth/providers is loading: show neither state.
   magicLink?: boolean;
   onMagicLink?: (email: string) => Promise<void>;
+  // OIDC callback `?error=` message.
+  notice?: string | null;
+  providers?: ProviderOutput[];
+  providersLoading?: boolean;
+  workspaceSso?: boolean;
 }) {
   const [serverError, setServerError] = useState<string | null>(null);
   const [magicOpen, setMagicOpen] = useState(false);
@@ -123,6 +150,7 @@ export function LoginForm({
         {resetNotice ? <AuthStatus>{RESET_DONE_NOTICE}</AuthStatus> : null}
         {withdrawnNotice ? <AuthStatus>{WITHDRAWN_NOTICE}</AuthStatus> : null}
         {unavailableNotice ? <AuthStatus>{unavailableNotice}</AuthStatus> : null}
+        {notice ? <AuthAlert>{notice}</AuthAlert> : null}
         <form
           onSubmit={form.handleSubmit(async (values) => {
             setServerError(null);
@@ -200,7 +228,29 @@ export function LoginForm({
           </AuthDisclosure>
         ) : null}
         {magicLink === false ? <AuthStatus>{MAGIC_DISABLED_NOTICE}</AuthStatus> : null}
-        <p className="unavailable-note">{t("auth.unsupported.notice")}</p>
+        {providers && providers.length > 0 ? (
+          <>
+            <hr className="my-1 border-border" />
+            <p className="text-ui font-medium text-muted-foreground">{t("auth.login.social")}</p>
+            <div className="auth-shell__stack">
+              {providers.map((p) => (
+                <a
+                  key={p.provider}
+                  href={oidcStartHref(p.provider)}
+                  className={authOutlineLinkClass}
+                >
+                  {p.label}
+                </a>
+              ))}
+            </div>
+          </>
+        ) : null}
+        {providersLoading || workspaceSso !== true ? null : (
+          <>
+            <hr className="my-1 border-border" />
+            <SsoSlugForm />
+          </>
+        )}
       </AuthPanel>
     </AuthLayout>
   );

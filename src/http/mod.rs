@@ -112,6 +112,7 @@ pub fn router_with_identity(
         .merge(routes::setup::router())
         .merge(routes::auth::router())
         .merge(routes::mfa::router(identity.clone()))
+        .merge(routes::oidc::router(identity.clone()))
         .merge(routes::account::router())
         .merge(routes::workspaces::router())
         .merge(routes::invitations::router())

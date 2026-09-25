@@ -241,7 +241,9 @@ fn map_accept_error(err: InvitationDbError) -> AppError {
         InvitationDbError::NotFound => AppError::from_code(ProblemCode::NotFound),
         InvitationDbError::Expired => AppError::from_code(ProblemCode::Expired),
         InvitationDbError::AlreadyAccepted => AppError::from_code(ProblemCode::AlreadyAccepted),
-        InvitationDbError::Unauthorized | InvitationDbError::Forbidden => {
+        InvitationDbError::Unauthorized
+        | InvitationDbError::Forbidden
+        | InvitationDbError::AlreadyLinked => {
             AppError::from_code(ProblemCode::CannotAcceptInvitation)
         }
         InvitationDbError::ConsentRequired => AppError::from_code(ProblemCode::ConsentRequired),

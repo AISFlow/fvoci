@@ -100,6 +100,8 @@ pub struct OidcSettings {
     pub allow_insecure_loopback: bool,
     /// `PUBLIC_URL`; the redirect URI is `<origin>/api/v1/auth/oidc/<p>/callback`.
     pub public_origin: String,
+    /// Discovery / JWKS cache shared by every request of this server.
+    pub cache: std::sync::Arc<crate::oidc::client::OidcCache>,
 }
 
 /// Source `issuerSchema`: trailing slashes trimmed.
@@ -184,7 +186,14 @@ impl OidcSettings {
             providers,
             allow_insecure_loopback: env_nonempty("OIDC_ALLOW_INSECURE").is_some(),
             public_origin: public_origin.trim_end_matches('/').to_string(),
+            cache: Default::default(),
         })
+    }
+
+    pub fn fetch_policy(&self) -> crate::oidc::fetch::FetchPolicy {
+        crate::oidc::fetch::FetchPolicy {
+            allow_insecure_loopback: self.allow_insecure_loopback,
+        }
     }
 
     pub fn find(&self, key: ProviderKey) -> Option<&ResolvedProvider> {

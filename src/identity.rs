@@ -6,7 +6,8 @@ use std::sync::Arc;
 use crate::auth::password::Keyring;
 use crate::oidc::OidcSettings;
 
-/// Milliseconds since the epoch. Tests pin it to exercise TOTP steps.
+/// Milliseconds since the epoch for TOTP steps; tests pin it. id_token
+/// times are checked against the real clock.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 pub fn system_clock() -> Clock {

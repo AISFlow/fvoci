@@ -3,13 +3,20 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { problemMessage } from "@/lib/api";
-import type { InvitationAcceptInput, InvitationPublicOutput } from "@/lib/contracts";
+import type {
+  InvitationAcceptInput,
+  InvitationPublicOutput,
+  ProviderOutput,
+} from "@/lib/contracts";
+import { oidcStartHref } from "@/lib/oidc";
 import { invitationAcceptInput } from "@/lib/validators";
 import {
   AuthAlert,
   AuthField,
   AuthInput,
   AuthStatus,
+  authOutlineButtonClass,
+  authOutlineLinkClass,
   authPrimaryButtonClass,
 } from "./auth-form";
 import { AuthLayout, AuthPanel } from "./auth-layout";
@@ -39,12 +46,16 @@ export function InviteLoadError({ message }: { message: string }) {
 
 export function InviteAcceptForm({
   invitation,
+  token,
   brandingName,
   onSubmit,
+  providers,
 }: {
   invitation: InvitationPublicOutput;
+  token: string;
   brandingName?: string | null;
   onSubmit: (input: InvitationAcceptInput) => Promise<void>;
+  providers?: ProviderOutput[];
 }) {
   const [serverError, setServerError] = useState<string | null>(null);
   const form = useForm<{
@@ -206,6 +217,36 @@ export function InviteAcceptForm({
               : t("auth.invite.accept")}
           </Button>
         </form>
+        {providers && providers.length > 0 ? (
+          <>
+            <hr className="my-1 border-border" />
+            <p className="text-ui font-medium text-muted-foreground">{t("auth.invite.social")}</p>
+            <div className="auth-shell__stack">
+              {providers.map((p) =>
+                allConsented ? (
+                  <a
+                    key={p.provider}
+                    href={oidcStartHref(p.provider, { token, consents: consentItems })}
+                    className={authOutlineLinkClass}
+                  >
+                    {p.label}
+                  </a>
+                ) : (
+                  <Button
+                    key={p.provider}
+                    type="button"
+                    variant="outline"
+                    size="lg"
+                    disabled
+                    className={authOutlineButtonClass}
+                  >
+                    {p.label}
+                  </Button>
+                ),
+              )}
+            </div>
+          </>
+        ) : null}
       </AuthPanel>
     </AuthLayout>
   );
