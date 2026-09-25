@@ -469,17 +469,18 @@ async fn authorize_wiki_collab_write(
     if role.is_none() {
         return Ok(Err(CollabDbError::Forbidden));
     }
-    let permission =
-        document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
-    if !permission.at_least(ProjectPermission::Edit) {
-        return Ok(Err(CollabDbError::Forbidden));
-    }
+    // Existence (tenant, trash, wiki) decides NotFound before permission decides Forbidden.
     let doc = lock_wiki_document_for_update(tx, workspace_id, document_id).await?;
     let Some((project_id, status, deleted_at)) = doc else {
         return Ok(Err(CollabDbError::NotFound));
     };
     if deleted_at.is_some() || project_id.is_some() {
         return Ok(Err(CollabDbError::NotFound));
+    }
+    let permission =
+        document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission.at_least(ProjectPermission::Edit) {
+        return Ok(Err(CollabDbError::Forbidden));
     }
     if status == "archived" {
         return Ok(Err(CollabDbError::Forbidden));
@@ -512,16 +513,16 @@ async fn authorize_wiki_collab_read(
     if role.is_none() {
         return Ok(Err(CollabDbError::NotFound));
     }
-    let permission =
-        document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
-    if !permission.at_least(ProjectPermission::View) {
-        return Ok(Err(CollabDbError::NotFound));
-    }
     let doc = lock_wiki_document_for_update(tx, workspace_id, document_id).await?;
     let Some((project_id, _status, deleted_at)) = doc else {
         return Ok(Err(CollabDbError::NotFound));
     };
     if deleted_at.is_some() || project_id.is_some() {
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let permission =
+        document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission.at_least(ProjectPermission::View) {
         return Ok(Err(CollabDbError::NotFound));
     }
     Ok(Ok(()))
