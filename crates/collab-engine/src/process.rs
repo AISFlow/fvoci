@@ -2,19 +2,74 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::frame::{read_frame, write_frame, FrameError};
-use crate::limits::{Limits, MAX_CHILD_CONCURRENCY, MAX_CHILD_STDERR_BYTES, RSS_POLL_MS};
+use crate::limits::{
+    Limits, DEFAULT_MAX_CHILD_CONCURRENCY, MAX_CHILD_STDERR_BYTES, RSS_POLL_MS,
+};
 use crate::outcome::{EngineReport, EngineStatus, LimitKind, WorkerFailureReason};
 use crate::protocol::Request;
 
 static CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
+static MAX_CHILD_CONCURRENCY_RUNTIME: AtomicUsize =
+    AtomicUsize::new(DEFAULT_MAX_CHILD_CONCURRENCY);
+static LIVE_CHILD_PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
+
+/// Configure the process-wide live-child cap. Last write wins.
+pub fn set_max_child_concurrency(limit: usize) {
+    MAX_CHILD_CONCURRENCY_RUNTIME.store(limit.max(1), Ordering::Release);
+}
+
+fn max_child_concurrency_limit() -> usize {
+    MAX_CHILD_CONCURRENCY_RUNTIME
+        .load(Ordering::Acquire)
+        .max(1)
+}
+
+/// Current live-child cap for this process.
+pub fn max_child_concurrency() -> usize {
+    max_child_concurrency_limit()
+}
 
 fn slots() -> &'static Mutex<usize> {
     CHILD_SLOTS.get_or_init(|| Mutex::new(0))
+}
+
+fn live_child_pids() -> &'static Mutex<Vec<u32>> {
+    LIVE_CHILD_PIDS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn register_live_child_pid(pid: u32) {
+    if let Ok(mut pids) = live_child_pids().lock() {
+        pids.push(pid);
+    }
+}
+
+fn unregister_live_child_pid(pid: u32) {
+    if let Ok(mut pids) = live_child_pids().lock() {
+        pids.retain(|p| *p != pid);
+    }
+}
+
+/// Sum VmRSS across registered live helper children (best-effort `/proc` read).
+pub fn sum_live_children_rss_bytes() -> u64 {
+    let pids = live_child_pids()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    pids.iter().filter_map(|pid| child_rss_bytes(*pid)).sum()
+}
+
+#[cfg(feature = "test-hang")]
+pub fn live_child_pids_for_tests() -> Vec<u32> {
+    live_child_pids()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
 }
 
 struct SlotGuard;
@@ -24,14 +79,15 @@ impl SlotGuard {
         let mut used = slots().lock().map_err(|_| {
             worker_fail(WorkerFailureReason::SlotPoison, "child slot mutex poisoned")
         })?;
-        if *used < MAX_CHILD_CONCURRENCY {
+        let cap = max_child_concurrency_limit();
+        if *used < cap {
             *used += 1;
             return Ok(Self);
         }
         Err(EngineReport::new(EngineStatus::ResourceLimit {
             kind: LimitKind::Ops,
             detail: format!(
-                "live collab children at cap {MAX_CHILD_CONCURRENCY}; parent room map owns per-document uniqueness"
+                "live collab children at cap {cap}; parent room map owns per-document uniqueness"
             ),
         }))
     }
@@ -435,6 +491,7 @@ impl EngineSession {
     /// Kill, wait, join helpers. Safe to call twice. Session cannot be reused.
     pub fn kill_and_reap(&mut self) {
         if let Some(mut live) = self.live.take() {
+            unregister_live_child_pid(self.pid);
             let _ = live.child.kill();
             let _ = live.child.wait();
             if live.stderr_join.is_some() {
@@ -537,6 +594,7 @@ fn spawn_child(req: SpawnRequest, slot: SlotGuard) -> Result<EngineSession, Engi
     })?;
 
     let pid = child.id();
+    register_live_child_pid(pid);
     #[cfg(feature = "test-hang")]
     record_spawn(pid);
 
@@ -800,6 +858,44 @@ fn worker_fail(reason: WorkerFailureReason, detail: impl Into<String>) -> Engine
     })
 }
 
+/// Raise the soft `RLIMIT_NOFILE` to the hard ceiling for the server process.
+pub fn raise_nofile_to_hard_limit() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        if lim.rlim_max > lim.rlim_cur {
+            lim.rlim_cur = lim.rlim_max;
+            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+        }
+    }
+}
+
+/// Raise `oom_score_adj` so cgroup/kernel OOM prefers helpers over the parent server.
+fn apply_child_oom_score_adj() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{}/oom_score_adj", std::process::id());
+        std::fs::write(path, "1000")?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-hang")]
+pub fn child_oom_score_adj(pid: u32) -> Option<i32> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj")).ok()?;
+    text.trim().parse().ok()
+}
+
 fn child_rss_bytes(pid: u32) -> Option<u64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     for line in status.lines() {
@@ -819,7 +915,11 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
         let stack_bytes = limits.max_child_stack_bytes;
         let cpu_secs = limits.cpu_budget_secs();
         unsafe {
-            cmd.pre_exec(move || apply_rlimits_now(as_bytes, cpu_secs, stack_bytes));
+            cmd.pre_exec(move || {
+                apply_rlimits_now(as_bytes, cpu_secs, stack_bytes)?;
+                apply_child_oom_score_adj()?;
+                Ok(())
+            });
         }
         Ok(())
     }

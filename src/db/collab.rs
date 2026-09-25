@@ -1290,6 +1290,37 @@ pub async fn load_collab_readonly(
     Ok(Ok(load))
 }
 
+/// Best-effort persisted collab bytes for memory admission (snapshot + tail payloads).
+pub async fn estimate_persisted_collab_bytes(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let row: Option<(i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT
+            coalesce(octet_length(ds.state), 0)::bigint,
+            coalesce((
+                SELECT sum(octet_length(payload))::bigint
+                FROM fvoci.document_collab_updates
+                WHERE workspace_id = ds.workspace_id
+                  AND document_id = ds.document_id
+                  AND seq > ds.snapshot_cutoff_seq
+            ), 0)::bigint
+        FROM fvoci.document_states ds
+        WHERE ds.workspace_id = $1 AND ds.document_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match row {
+        Some((snapshot_len, tail_len)) => (snapshot_len + tail_len) as u64,
+        None => 2,
+    })
+}
+
 pub async fn project_derived_body(
     pool: &PgPool,
     input: ProjectDerivedBodyInput,

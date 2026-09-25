@@ -3,6 +3,17 @@ use std::path::PathBuf;
 
 use collab_engine::limits::Limits;
 
+pub const DEFAULT_MAX_ROOMS: usize = 64;
+pub const MAX_MAX_ROOMS: usize = 512;
+/// Default aggregate helper RSS budget (2 GiB). Tune with `FVOCI_COLLAB_MEMORY_BUDGET`.
+pub const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Headroom above [`DEFAULT_MAX_ROOMS`] for recycle, revision restore, and derived work.
+pub fn derive_max_child_concurrency(max_rooms: usize) -> usize {
+    let headroom = (max_rooms / 2).max(4);
+    max_rooms + headroom
+}
+
 /// Product collab runtime configuration. Enabled only when `FVOCI_COLLAB_ENGINE`
 /// points at a built `collab-engine` helper binary.
 #[derive(Debug, Clone)]
@@ -10,6 +21,8 @@ pub struct CollabConfig {
     pub engine_bin: PathBuf,
     pub limits: Limits,
     pub max_rooms: usize,
+    pub max_child_concurrency: usize,
+    pub memory_budget_bytes: u64,
     pub max_collab_sockets: usize,
     pub max_collab_sockets_per_session: usize,
     pub max_connections_per_room: usize,
@@ -44,7 +57,18 @@ impl CollabConfig {
         let max_rooms = env::var("FVOCI_COLLAB_MAX_ROOMS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(4);
+            .unwrap_or(DEFAULT_MAX_ROOMS)
+            .clamp(1, MAX_MAX_ROOMS);
+        let max_child_concurrency = env::var("FVOCI_COLLAB_MAX_CHILDREN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| derive_max_child_concurrency(max_rooms))
+            .max(max_rooms);
+        let memory_budget_bytes = env::var("FVOCI_COLLAB_MEMORY_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MEMORY_BUDGET_BYTES)
+            .max(collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES);
         let max_connections_per_room = env::var("FVOCI_COLLAB_MAX_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -121,7 +145,9 @@ impl CollabConfig {
         Some(Self {
             engine_bin,
             limits: Limits::default(),
-            max_rooms: max_rooms.clamp(1, 4),
+            max_rooms,
+            max_child_concurrency,
+            memory_budget_bytes,
             max_collab_sockets: max_collab_sockets.max(1),
             max_collab_sockets_per_session: max_collab_sockets_per_session.clamp(1, 8),
             max_connections_per_room: max_connections_per_room.max(1),
@@ -146,6 +172,11 @@ impl CollabConfig {
     pub fn is_available(&self) -> bool {
         self.engine_bin.is_file()
     }
+
+    /// Apply process-wide helper limits derived from this configuration.
+    pub fn apply_runtime_limits(&self) {
+        collab_engine::process::set_max_child_concurrency(self.max_child_concurrency);
+    }
 }
 
 pub fn collab_engine_path_for_tests() -> Option<PathBuf> {
@@ -167,4 +198,31 @@ pub fn require_collab_engine_for_tests() -> PathBuf {
     collab_engine_path_for_tests().expect(
         "FVOCI_COLLAB_ENGINE or target/debug/collab-engine required for collab product tests",
     )
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn derive_child_concurrency_includes_headroom() {
+        assert_eq!(derive_max_child_concurrency(4), 8);
+        assert_eq!(derive_max_child_concurrency(16), 24);
+        assert_eq!(derive_max_child_concurrency(64), 96);
+    }
+
+    #[test]
+    fn max_rooms_env_clamps_to_ceiling() {
+        let engine = require_collab_engine_for_tests();
+        let key = "FVOCI_COLLAB_MAX_ROOMS";
+        let prior = env::var(key).ok();
+        unsafe { env::set_var(key, "9999") };
+        unsafe { env::set_var("FVOCI_COLLAB_ENGINE", engine.to_string_lossy().as_ref()) };
+        let cfg = CollabConfig::from_env().expect("collab config");
+        assert_eq!(cfg.max_rooms, MAX_MAX_ROOMS);
+        match prior {
+            Some(value) => unsafe { env::set_var(key, value) },
+            None => unsafe { env::remove_var(key) },
+        }
+    }
 }

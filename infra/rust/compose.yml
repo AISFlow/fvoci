@@ -54,6 +54,7 @@ services:
 
   server:
     image: ${FVOCI_IMAGE:?FVOCI_IMAGE is required}
+    mem_limit: ${FVOCI_SERVER_MEM_LIMIT:-4g}
     ports:
       - "${FVOCI_PUBLISH_ADDR:-127.0.0.1}:${FVOCI_PUBLISH_PORT:-0}:8080"
     environment:
@@ -66,6 +67,8 @@ services:
       FVOCI_STORAGE_DIR: /data/storage
       FVOCI_STATIC_DIR: /opt/fvoci/static
       FVOCI_COLLAB_ENGINE: /opt/fvoci/bin/collab-engine
+      FVOCI_COLLAB_MAX_ROOMS: ${FVOCI_COLLAB_MAX_ROOMS:-64}
+      FVOCI_COLLAB_MEMORY_BUDGET: ${FVOCI_COLLAB_MEMORY_BUDGET:-2147483648}
       FVOCI_EXTRACTOR_BIN: /opt/fvoci/bin/document-extract
       FVOCI_EXTRACT_POLL_SECS: ${FVOCI_EXTRACT_POLL_SECS:-2}
       FVOCI_SHUTDOWN_DEADLINE_MS: ${FVOCI_SHUTDOWN_DEADLINE_MS:-30000}

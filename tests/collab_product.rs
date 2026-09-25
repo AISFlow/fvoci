@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::Router;
@@ -78,24 +79,35 @@ async fn fixture_password_hash() -> &'static str {
         .await
 }
 
-/// Matches [`collab_engine::limits::MAX_CHILD_CONCURRENCY`]: parallel tests in one
-/// binary must not storm past the process-wide live-helper cap. Reserve one slot per
-/// hub/server (four for `collab_lifecycle_max_rooms_then_reuse_after_leave`). CI/local
-/// full-suite runs may still use `--test-threads=8` to reduce debug-helper CPU contention.
-static HELPER_CHILD_CAPACITY: LazyLock<Arc<Semaphore>> =
-    LazyLock::new(|| Arc::new(Semaphore::new(collab_engine::limits::MAX_CHILD_CONCURRENCY)));
+/// Parallel tests in one binary must not storm past the process-wide live-helper cap.
+/// Reserve one slot per hub/server (four for `collab_lifecycle_max_rooms_then_reuse_after_leave`).
+static HELPER_CHILD_CAPACITY: LazyLock<Mutex<(usize, Arc<Semaphore>)>> =
+    LazyLock::new(|| Mutex::new((0, Arc::new(Semaphore::new(1)))));
+
+fn helper_capacity_semaphore(cap: usize) -> Arc<Semaphore> {
+    let cap = cap.max(1);
+    let mut guard = HELPER_CHILD_CAPACITY.lock().expect("helper capacity");
+    if guard.0 != cap {
+        guard.0 = cap;
+        guard.1 = Arc::new(Semaphore::new(cap));
+        collab_engine::process::set_max_child_concurrency(cap);
+    }
+    guard.1.clone()
+}
 
 struct HelperChildCapacityHold {
+    #[allow(dead_code)]
     permits: Vec<OwnedSemaphorePermit>,
 }
 
 impl HelperChildCapacityHold {
-    async fn reserve(room_slots: usize) -> Self {
-        let room_slots = room_slots.min(collab_engine::limits::MAX_CHILD_CONCURRENCY);
+    async fn reserve(room_slots: usize, cap: usize) -> Self {
+        let semaphore = helper_capacity_semaphore(cap);
+        let room_slots = room_slots.min(cap);
         let mut permits = Vec::with_capacity(room_slots);
         for _ in 0..room_slots {
             permits.push(
-                HELPER_CHILD_CAPACITY
+                semaphore
                     .clone()
                     .acquire_owned()
                     .await
@@ -111,7 +123,8 @@ async fn new_test_collab_hub(
     pool: PgPool,
     reserved_helpers: usize,
 ) -> (CollabHub, HelperChildCapacityHold) {
-    let capacity = HelperChildCapacityHold::reserve(reserved_helpers).await;
+    let capacity =
+        HelperChildCapacityHold::reserve(reserved_helpers, config.max_child_concurrency).await;
     (CollabHub::new(config, pool), capacity)
 }
 
@@ -284,7 +297,7 @@ async fn setup_owner_session(harness: &TestDb) -> SessionFixture {
     )
     .bind(user_id)
     .bind(format!("owner-{user_id}@example.com"))
-    .bind(&hash)
+    .bind(hash)
     .bind("Owner")
     .execute(&admin)
     .await
@@ -337,6 +350,10 @@ fn test_collab_config_with_revoke(
         engine_bin: engine_bin(),
         limits: collab_engine::Limits::for_tests(),
         max_rooms,
+        max_child_concurrency: fvoci_server::collab::config::derive_max_child_concurrency(
+            max_rooms,
+        ),
+        memory_budget_bytes: fvoci_server::collab::config::DEFAULT_MEMORY_BUDGET_BYTES,
         max_collab_sockets: max_rooms * 16,
         max_collab_sockets_per_session: 4,
         max_connections_per_room: 16,
@@ -571,7 +588,7 @@ async fn collab_app_state(
     let pool = pool::connect_app(app_url).await.expect("app pool");
     let (collab, helper_capacity) = if with_collab {
         let cfg = test_collab_config(4, 30_000);
-        let capacity = HelperChildCapacityHold::reserve(1).await;
+        let capacity = HelperChildCapacityHold::reserve(1, cfg.max_child_concurrency).await;
         (
             Some(Arc::new(CollabHub::new(cfg, pool.clone()))),
             Some(capacity),
@@ -605,6 +622,7 @@ async fn collab_app_state(
 struct TestServer {
     addr: SocketAddr,
     collab: Option<Arc<CollabHub>>,
+    #[allow(dead_code)]
     helper_capacity: Option<HelperChildCapacityHold>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
@@ -667,7 +685,7 @@ async fn start_product_test_server(app_url: &str, with_collab: bool) -> TestServ
 }
 
 async fn start_configured_test_server(app_url: &str, cfg: CollabConfig) -> TestServer {
-    let helper_capacity = HelperChildCapacityHold::reserve(1).await;
+    let helper_capacity = HelperChildCapacityHold::reserve(1, cfg.max_child_concurrency).await;
     let state = collab_app_state_with_config(app_url, cfg).await;
     start_test_server(state, Some(helper_capacity)).await
 }
@@ -1148,6 +1166,59 @@ async fn collab_nonmember_is_denied() {
     harness.cleanup().await;
 }
 
+async fn wait_for_capacity_retry_close_without_auth_denied(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    within: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), ws.next()).await {
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                let code = ws_close_code(&frame);
+                assert_eq!(
+                    code, 1013,
+                    "capacity refusal CloseFrame {code} ({:?}), expected 1013; reason {:?}",
+                    frame.code, frame.reason
+                );
+                return;
+            }
+            Ok(Some(Ok(Message::Close(None)))) => {
+                panic!("Close without code, expected CloseFrame 1013 try again later");
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) => {
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::Auth(AuthMessage::PermissionDenied { reason }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    panic!(
+                        "capacity refusal must not send PermissionDenied ({reason}); expected Close 1013"
+                    );
+                }
+                if let Ok(WireFrame::Document {
+                    message: DocumentMessage::Auth(AuthMessage::Authenticated { scope }),
+                    ..
+                }) = fvoci_server::collab::wire::decode(&bytes)
+                {
+                    panic!("capacity refusal must not authenticate (scope={scope})");
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(None) => {
+                panic!("bare TCP EOF without CloseFrame, expected close code 1013");
+            }
+            Ok(Some(Err(err))) => {
+                panic!("websocket error before CloseFrame 1013: {err}");
+            }
+            Err(_) => {}
+        }
+    }
+    panic!("did not receive CloseFrame 1013 within {within:?}");
+}
+
 async fn wait_for_unavailable_close_without_auth_denied(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -1300,9 +1371,9 @@ async fn collab_ws_missing_helper_closes_1011_then_valid_join() {
 }
 
 #[tokio::test]
-async fn collab_ws_room_full_closes_1011_without_auth_denied() {
+async fn collab_ws_room_full_closes_1013_without_auth_denied() {
     run_lifecycle_test(
-        "collab_ws_room_full_closes_1011_without_auth_denied",
+        "collab_ws_room_full_closes_1013_without_auth_denied",
         async {
             let harness = TestDb::bootstrap().await;
             let docs = setup_wiki_doc_batch(&harness, 2).await;
@@ -1319,7 +1390,7 @@ async fn collab_ws_room_full_closes_1011_without_auth_denied() {
                 .send(Message::Binary(auth_token_frame(&second_key, 52).into()))
                 .await
                 .unwrap();
-            wait_for_unavailable_close_without_auth_denied(&mut second, Duration::from_secs(5))
+            wait_for_capacity_retry_close_without_auth_denied(&mut second, Duration::from_secs(5))
                 .await;
             drop(first);
             server.shutdown().await;
@@ -1743,6 +1814,24 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
         wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
         assert_eq!(hub.available_room_slots(), 1);
         assert!(hub_join(&mut leases, &hub, &docs[4], 2).await.is_ok());
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_memory_budget_refusal_frees_room_slot() {
+    run_lifecycle_test("collab_memory_budget_refusal_frees_room_slot", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let mut cfg = test_collab_config(4, 200);
+        cfg.memory_budget_bytes = 1;
+        let (hub, _helper_capacity) = new_test_collab_hub(cfg, wiki.session.pool.clone(), 1).await;
+        let mut leases = DirectHubLeases::new();
+        let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
+        assert!(matches!(denied, Err(JoinError::CapacityRetry)));
+        assert_eq!(hub.available_room_slots(), 4);
         hub.shutdown().await;
         harness.cleanup().await;
     })
@@ -2353,7 +2442,7 @@ async fn setup_second_member(harness: &TestDb, wiki: &WikiDocFixture) -> Session
     )
     .bind(user_id)
     .bind(format!("member-{user_id}@example.com"))
-    .bind(&hash)
+    .bind(hash)
     .bind("Peer")
     .execute(&admin)
     .await

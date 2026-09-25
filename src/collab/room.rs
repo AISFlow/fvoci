@@ -736,6 +736,8 @@ pub enum JoinError {
     AdmissionDenied,
     UnsupportedKind,
     RoomFull,
+    /// Hub room count, helper child cap, or aggregate memory budget exhausted.
+    CapacityRetry,
     EngineUnavailable,
     WriterStale,
     DbError,
@@ -987,8 +989,18 @@ pub async fn spawn_room(
     live_conns: Arc<AtomicUsize>,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
     wait_spawn_room_block(document_id).await;
-    let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
-        .map_err(|_| JoinError::EngineUnavailable)?;
+    let engine = match EngineBridge::spawn(config.engine_bin.clone(), config.limits) {
+        Ok(engine) => engine,
+        Err(report) => {
+            if matches!(
+                report.outcome,
+                collab_engine::EngineStatus::ResourceLimit { .. }
+            ) {
+                return Err(JoinError::CapacityRetry);
+            }
+            return Err(JoinError::EngineUnavailable);
+        }
+    };
     let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
     let (finished_tx, finished_rx) = oneshot::channel();
     let actor = RoomActor {

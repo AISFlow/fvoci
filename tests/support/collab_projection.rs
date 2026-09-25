@@ -368,6 +368,10 @@ pub fn test_collab_config(max_rooms: usize, idle_evict_ms: u64) -> CollabConfig 
         engine_bin: fvoci_server::collab::config::require_collab_engine_for_tests(),
         limits: collab_engine::Limits::for_tests(),
         max_rooms,
+        max_child_concurrency: fvoci_server::collab::config::derive_max_child_concurrency(
+            max_rooms,
+        ),
+        memory_budget_bytes: fvoci_server::collab::config::DEFAULT_MEMORY_BUDGET_BYTES,
         max_collab_sockets: max_rooms * 16,
         max_collab_sockets_per_session: 4,
         max_connections_per_room: 16,

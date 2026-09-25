@@ -14,12 +14,14 @@ use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore}
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::collab::admission::memory_budget_exceeded;
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
 use crate::collab::room::{
     CapturedRevision, ConnectionLease, JoinDelivery, JoinError, RevisionCaptureError,
     RevisionRestoreError, RoomHandle, RoomJoin, RoomKey,
 };
+use crate::db::collab::estimate_persisted_collab_bytes;
 use crate::db::collab::resolve_collab_admission;
 
 #[cfg(feature = "db-tests")]
@@ -286,6 +288,7 @@ pub struct CollabHub {
 
 impl CollabHub {
     pub fn new(config: CollabConfig, pool: PgPool) -> Self {
+        config.apply_runtime_limits();
         let room_cap = config.max_rooms;
         let rooms = Arc::new(RwLock::new(HashMap::new()));
         let room_permits = Arc::new(Semaphore::new(room_cap));
@@ -1152,6 +1155,13 @@ impl CollabHub {
             drop(pooled);
             self.fail_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
+        }
+        let persisted_bytes = estimate_persisted_collab_bytes(&self.pool, key.0, key.1)
+            .await
+            .map_err(|_| JoinError::DbError)?;
+        if memory_budget_exceeded(self.config.memory_budget_bytes, persisted_bytes) {
+            self.fail_starting(key, &slot).await;
+            return Err(JoinError::CapacityRetry);
         }
         let guard = match RoomGuard::try_lock_pooled(pooled, key.1).await {
             Ok(Some(guard)) => guard,

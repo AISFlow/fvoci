@@ -174,8 +174,23 @@ cargo build --bin collab-engine --features worker
 export FVOCI_COLLAB_ENGINE="$PWD/target/debug/collab-engine"
 ```
 
-Optional tuning: `FVOCI_COLLAB_MAX_ROOMS` (default 4), `FVOCI_COLLAB_MAX_CONNECTIONS`,
-`FVOCI_COLLAB_IDLE_MS`, `FVOCI_COLLAB_REVOKE_POLL_MS`.
+Optional tuning:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `FVOCI_COLLAB_MAX_ROOMS` | 64 (clamp 1–512) | Hub room slots; immediate refusal when full |
+| `FVOCI_COLLAB_MAX_CHILDREN` | `max_rooms + headroom` | Process-wide live helper cap (headroom ≈ `max(4, max_rooms/2)`) |
+| `FVOCI_COLLAB_MEMORY_BUDGET` | 2 GiB | Aggregate admission: sum live helper VmRSS plus `max(16 MiB, 14× persisted bytes)` per room start |
+| `FVOCI_COLLAB_MAX_CONNECTIONS` | 32 | Per-room WebSocket members |
+| `FVOCI_COLLAB_IDLE_MS` | 30000 | Idle room eviction |
+| `FVOCI_COLLAB_REVOKE_POLL_MS` | 5000 | ACL revoke poll |
+
+Capacity refusals close WebSocket clients with **1013** “try again later” (retryable).
+Per-child limits stay unchanged (AS 1 GiB, observed RSS kill 512 MiB, 8 s wall, 256-op recycle).
+Helpers set `oom_score_adj=1000` so cgroup OOM prefers a helper over `fvoci-server`.
+The server raises soft `RLIMIT_NOFILE` to the hard limit at startup.
+
+Heavy load probe (not CI): `scripts/collab-capacity-probe.sh` (release helper, many rooms/peers).
 
 `FVOCI_SHUTDOWN_DEADLINE_MS` sets the whole server shutdown deadline (default
 30000, positive milliseconds). SIGTERM/Ctrl+C stops collaboration admission

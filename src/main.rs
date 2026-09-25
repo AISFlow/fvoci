@@ -85,6 +85,7 @@ struct DrainOutcome {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    collab_engine::process::raise_nofile_to_hard_limit();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("fvoci_server=info".parse()?))
         .init();
