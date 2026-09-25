@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 export function createE2eUser(
   email: string,
@@ -38,6 +38,13 @@ export function createE2eUser(
       stdio: "pipe",
     },
   );
+}
+
+// Logout ends on /login once the session is gone; navigating earlier races the
+// in-flight logout and /login redirects the still-authenticated page away.
+export async function logout(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "로그아웃" }).click();
+  await expect(page).toHaveURL(/\/login$/);
 }
 
 export async function login(page: Page, email: string, password: string): Promise<void> {

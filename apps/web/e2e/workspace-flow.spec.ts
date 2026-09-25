@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser, login } from "./helpers";
+import { createE2eUser, login, logout } from "./helpers";
 
 const admin = {
   email: "Admin@Example.COM",
@@ -118,7 +118,7 @@ test("readonly member sees read-only settings and refreshed name after admin edi
   await page.getByRole("button", { name: "저장" }).click();
   await expect(page.getByText("저장했습니다")).toBeVisible();
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, readonlyMember.email, readonlyMember.password);
   await page.goto("/w/acme/settings");
   await expect(page.getByRole("main").getByText(memberVisibleName)).toBeVisible();
