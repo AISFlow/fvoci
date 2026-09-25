@@ -22,7 +22,7 @@ use crate::db::context::{session_is_live, set_tenant};
 use crate::db::documents::{document_permission, membership_role, workspace_is_live};
 use crate::db::group_grants::guest_wiki_document_ids_select_sql;
 use crate::db::projects::{project_permission, LockedProject};
-use crate::db::workspace::WorkspaceRole;
+use crate::db::workspace::{list_workspaces_for_user, WorkspaceRole};
 use crate::display_id::format_display_id;
 use crate::projects::ProjectPermission;
 use crate::search::meili::{
@@ -155,6 +155,24 @@ pub struct WorkspaceSearchRequest<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct GlobalSearchRequest<'a> {
+    pub actor_user_id: Uuid,
+    pub session_id: Uuid,
+    pub q: &'a str,
+    pub r#type: SearchTypeFilter,
+    pub tag: Option<Uuid>,
+    pub cursor: Option<&'a str>,
+    pub limit: u32,
+    pub meili: &'a MeiliConfig,
+}
+
+#[derive(Debug, Clone)]
+struct VisibleWorkspaceAcl {
+    workspace_id: Uuid,
+    acl: SearchAcl,
+}
+
+#[derive(Debug, Clone)]
 struct SearchAcl {
     project_ids: Vec<Uuid>,
     include_wiki: bool,
@@ -197,6 +215,7 @@ struct CursorPayload {
 struct CursorFingerprint {
     qh: String,
     r#type: SearchTypeFilter,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ws: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pj: Option<String>,
@@ -270,6 +289,94 @@ pub async fn query_workspace_search(
     let items = finish_items(input.workspace_id, &prepared, scanned.items);
     let next_cursor = scanned.next_off.map(|off| encode_cursor(off, &filters));
     Ok(Ok(SearchResultPage { items, next_cursor }))
+}
+
+pub async fn query_global_search(
+    pool: &PgPool,
+    input: GlobalSearchRequest<'_>,
+) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
+    let prepared = match prepare_global_query(&input) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => {
+            return Ok(Ok(SearchResultPage {
+                items: Vec::new(),
+                next_cursor: None,
+            }));
+        }
+        Err(err) => return Ok(Err(err)),
+    };
+
+    let visible = load_visible_acls(pool, input.actor_user_id, input.session_id).await?;
+    if visible.is_empty() {
+        return Ok(Ok(SearchResultPage {
+            items: Vec::new(),
+            next_cursor: None,
+        }));
+    }
+
+    let filters = global_search_filters(&input, &visible);
+    if let Some(cursor) = input.cursor {
+        if !cursor_matches(cursor, &filters) {
+            return Ok(Err(SearchQueryError::InvalidCursor));
+        }
+    }
+
+    let scanned = match scan_lexical_global(pool, input.meili, &input, &visible, &prepared).await {
+        Ok(page) => page,
+        Err(ScanError::Meili(error)) => {
+            tracing::warn!(error = %error, "meili search unavailable");
+            return Ok(Err(SearchQueryError::MeiliUnavailable));
+        }
+        Err(ScanError::Db(error)) => return Err(error),
+    };
+    let items = finish_items_global(&prepared, scanned.items);
+    let next_cursor = scanned.next_off.map(|off| encode_cursor(off, &filters));
+    Ok(Ok(SearchResultPage { items, next_cursor }))
+}
+
+fn prepare_global_query(
+    input: &GlobalSearchRequest<'_>,
+) -> Result<Option<PreparedQuery>, SearchQueryError> {
+    let limit = input.limit.clamp(1, 50);
+    let raw = input.q.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let raw: String = raw.chars().take(200).collect();
+    let title_prefix = raw
+        .strip_prefix('^')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(200).collect::<String>());
+    let q = title_prefix.clone().unwrap_or(raw);
+    if q.is_empty() {
+        return Ok(None);
+    }
+    let chosung = is_chosung_query(&q);
+    if chosung && q.chars().filter(|c| !c.is_whitespace()).count() < CHOSUNG_MIN_LENGTH {
+        return Ok(None);
+    }
+    if chosung && input.r#type == SearchTypeFilter::Attachment {
+        return Ok(None);
+    }
+    let stem = if chosung {
+        String::new()
+    } else {
+        stem_text(&q)
+    };
+    let offset = match input.cursor {
+        None => 0,
+        Some(cursor) => decode_cursor_offset(cursor)?,
+    };
+    Ok(Some(PreparedQuery {
+        q,
+        stem,
+        chosung,
+        title_prefix,
+        r#type: input.r#type,
+        limit,
+        offset,
+    }))
 }
 
 fn prepare_query(
@@ -428,6 +535,74 @@ fn scope_key(acl: &SearchAcl) -> String {
     )
 }
 
+fn global_scope_key(scopes: &[(Uuid, String)]) -> String {
+    let mut sorted = scopes.to_vec();
+    sorted.sort_by_key(|a| a.0);
+    sorted
+        .iter()
+        .map(|(workspace_id, key)| format!("{workspace_id}:{key}"))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn global_search_filters(
+    input: &GlobalSearchRequest<'_>,
+    visible: &[VisibleWorkspaceAcl],
+) -> CursorFingerprint {
+    let scope = global_scope_key(
+        &visible
+            .iter()
+            .map(|entry| (entry.workspace_id, scope_key(&entry.acl)))
+            .collect::<Vec<_>>(),
+    );
+    let qh_src = match input.tag {
+        Some(tag) => format!("{}\0tag:{tag}", input.q),
+        None => input.q.to_string(),
+    };
+    CursorFingerprint {
+        qh: fnv1a(&qh_src),
+        r#type: input.r#type,
+        ws: None,
+        pj: None,
+        mode: "lexical".to_string(),
+        sh: fnv1a(&scope),
+    }
+}
+
+async fn load_visible_acls(
+    pool: &PgPool,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Vec<VisibleWorkspaceAcl>, sqlx::Error> {
+    let mut listed = list_workspaces_for_user(pool, actor_user_id).await?;
+    listed.sort_by(|a, b| a.slug.cmp(&b.slug).then_with(|| a.id.cmp(&b.id)));
+    let mut visible = Vec::new();
+    for workspace in listed {
+        let mut tx = pool.begin().await?;
+        set_tenant(&mut tx, workspace.id).await?;
+        if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+            tx.rollback().await?;
+            continue;
+        }
+        if !workspace_is_live(&mut tx, workspace.id).await? {
+            tx.rollback().await?;
+            continue;
+        }
+        let role = membership_role(&mut tx, workspace.id, actor_user_id).await?;
+        let Some(role) = role else {
+            tx.rollback().await?;
+            continue;
+        };
+        let acl = load_search_acl(&mut tx, workspace.id, actor_user_id, role, None).await?;
+        tx.commit().await?;
+        visible.push(VisibleWorkspaceAcl {
+            workspace_id: workspace.id,
+            acl,
+        });
+    }
+    Ok(visible)
+}
+
 fn search_filters(input: &WorkspaceSearchRequest<'_>, acl: &SearchAcl) -> CursorFingerprint {
     let qh_src = match input.tag {
         Some(tag) => format!("{}\0tag:{tag}", input.q),
@@ -501,6 +676,159 @@ fn meili_scope(workspace_id: Uuid, acl: &SearchAcl) -> MeiliSearchScope {
 struct ScannedPage {
     items: Vec<(MeiliHit, HydratedRow)>,
     next_off: Option<u32>,
+}
+
+struct ScannedGlobalPage {
+    items: Vec<(MeiliHit, HydratedRow)>,
+    next_off: Option<u32>,
+}
+
+async fn scan_lexical_global(
+    pool: &PgPool,
+    meili: &MeiliConfig,
+    input: &GlobalSearchRequest<'_>,
+    visible: &[VisibleWorkspaceAcl],
+    prepared: &PreparedQuery,
+) -> Result<ScannedGlobalPage, ScanError> {
+    let workspace_ids: HashSet<String> = visible
+        .iter()
+        .map(|entry| entry.workspace_id.to_string())
+        .collect();
+    let scopes: Vec<MeiliSearchScope> = visible
+        .iter()
+        .map(|entry| meili_scope(entry.workspace_id, &entry.acl))
+        .collect();
+    let acl_by_ws: HashMap<Uuid, SearchAcl> = visible
+        .iter()
+        .map(|entry| (entry.workspace_id, entry.acl.clone()))
+        .collect();
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut offset = prepared.offset;
+    let mut scanned = 0u32;
+    let mut pages = 0u32;
+    let t0 = Instant::now();
+    let mut meili_exhausted = false;
+
+    while items.len() < prepared.limit as usize
+        && scanned < MAX_CANDIDATES
+        && pages < MAX_MEILI_PAGES
+        && t0.elapsed().as_millis() < u128::from(MAX_SEARCH_MS)
+        && offset < MEILI_MAX_TOTAL_HITS
+    {
+        let want = MEILI_PAGE
+            .min(MEILI_MAX_TOTAL_HITS.saturating_sub(offset))
+            .min(MAX_CANDIDATES.saturating_sub(scanned));
+        if want == 0 {
+            break;
+        }
+        let res = search_meili(
+            meili,
+            &MeiliSearchInput {
+                q: prepared.q.clone(),
+                stem: prepared.stem.clone(),
+                scopes: scopes.clone(),
+                kind: prepared.r#type.meili_kind(),
+                limit: want,
+                offset,
+            },
+        )
+        .await?;
+        pages += 1;
+        scanned += res.hits.len() as u32;
+        if res.hits.is_empty() {
+            meili_exhausted = true;
+            break;
+        }
+
+        let mut unique = Vec::new();
+        for (i, raw) in res.hits.iter().enumerate() {
+            if !accept_hit(raw, &workspace_ids, prepared.r#type) {
+                continue;
+            }
+            let key = format!(
+                "{}:{}",
+                raw.workspace_id,
+                hit_key(raw.kind, &raw.resource_id)
+            );
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            unique.push((key, raw.clone(), offset + i as u32));
+        }
+
+        let mut grouped: HashMap<Uuid, Vec<MeiliHit>> = HashMap::new();
+        for (_, hit, _) in &unique {
+            let Ok(workspace_id) = Uuid::parse_str(&hit.workspace_id) else {
+                continue;
+            };
+            grouped.entry(workspace_id).or_default().push(hit.clone());
+        }
+
+        let mut by_key = HashMap::new();
+        for (workspace_id, hits) in grouped {
+            let Some(acl) = acl_by_ws.get(&workspace_id) else {
+                continue;
+            };
+            let rows = hydrate_hits_for_workspace(
+                pool,
+                workspace_id,
+                input.actor_user_id,
+                input.session_id,
+                None,
+                acl,
+                &hits,
+            )
+            .await
+            .map_err(ScanError::Db)?;
+            for row in rows {
+                by_key.insert(
+                    format!(
+                        "{workspace_id}:{}",
+                        hit_key(kind_of(row.r#type), &row.id.to_string())
+                    ),
+                    row,
+                );
+            }
+        }
+
+        let mut stopped_mid = false;
+        let mut next_off = offset + res.hits.len() as u32;
+        for (u, (key, hit, at)) in unique.iter().enumerate() {
+            let Some(row) = by_key.get(key) else {
+                continue;
+            };
+            if items.len() >= prepared.limit as usize {
+                stopped_mid = true;
+                next_off = *at;
+                for rest in unique.iter().skip(u) {
+                    seen.remove(&rest.0);
+                }
+                break;
+            }
+            items.push((hit.clone(), row.clone()));
+        }
+        if stopped_mid {
+            return Ok(ScannedGlobalPage {
+                items,
+                next_off: Some(next_off),
+            });
+        }
+        match res.next_offset {
+            None => {
+                meili_exhausted = true;
+                break;
+            }
+            Some(next) => offset = next,
+        }
+    }
+
+    let next_off = if items.len() == prepared.limit as usize && !meili_exhausted {
+        Some(offset)
+    } else {
+        None
+    };
+    Ok(ScannedGlobalPage { items, next_off })
 }
 
 async fn scan_lexical(
@@ -687,9 +1015,44 @@ fn finish_items(
         .collect()
 }
 
+fn finish_items_global(
+    prepared: &PreparedQuery,
+    rows: Vec<(MeiliHit, HydratedRow)>,
+) -> Vec<SearchResultItem> {
+    rows.into_iter()
+        .filter_map(|(hit, row)| {
+            let workspace_id = Uuid::parse_str(&hit.workspace_id).ok()?;
+            finish_items(workspace_id, prepared, vec![(hit, row)])
+                .into_iter()
+                .next()
+        })
+        .collect()
+}
+
 async fn hydrate_hits(
     pool: &PgPool,
     input: &WorkspaceSearchRequest<'_>,
+    acl: &SearchAcl,
+    hits: &[MeiliHit],
+) -> Result<Vec<HydratedRow>, sqlx::Error> {
+    hydrate_hits_for_workspace(
+        pool,
+        input.workspace_id,
+        input.actor_user_id,
+        input.session_id,
+        input.project_id,
+        acl,
+        hits,
+    )
+    .await
+}
+
+async fn hydrate_hits_for_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    project_filter: Option<Uuid>,
     acl: &SearchAcl,
     hits: &[MeiliHit],
 ) -> Result<Vec<HydratedRow>, sqlx::Error> {
@@ -697,19 +1060,29 @@ async fn hydrate_hits(
         return Ok(Vec::new());
     }
     let mut tx = pool.begin().await?;
-    set_tenant(&mut tx, input.workspace_id).await?;
-    if !session_is_live(&mut tx, input.actor_user_id, input.session_id).await? {
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(Vec::new());
     }
-    let rows = hydrate_in_tx(&mut tx, input, acl, hits).await?;
+    let rows = hydrate_in_tx(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        project_filter,
+        acl,
+        hits,
+    )
+    .await?;
     tx.commit().await?;
     Ok(rows)
 }
 
 async fn hydrate_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    input: &WorkspaceSearchRequest<'_>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    project_filter: Option<Uuid>,
     acl: &SearchAcl,
     hits: &[MeiliHit],
 ) -> Result<Vec<HydratedRow>, sqlx::Error> {
@@ -744,12 +1117,22 @@ async fn hydrate_in_tx(
               AND d.id = ANY($2)
             "#,
         )
-        .bind(input.workspace_id)
+        .bind(workspace_id)
         .bind(&doc_ids)
         .fetch_all(&mut **tx)
         .await?;
         for (id, title, body, project_id, number, updated_at, project_key) in rows {
-            if !visible_after_hydrate(tx, input, acl, project_id, Some(id)).await? {
+            if !visible_after_hydrate(
+                tx,
+                workspace_id,
+                actor_user_id,
+                project_filter,
+                acl,
+                project_id,
+                Some(id),
+            )
+            .await?
+            {
                 continue;
             }
             loaded.insert(
@@ -790,12 +1173,22 @@ async fn hydrate_in_tx(
               AND t.id = ANY($2)
             "#,
         )
-        .bind(input.workspace_id)
+        .bind(workspace_id)
         .bind(&task_ids)
         .fetch_all(&mut **tx)
         .await?;
         for (id, title, project_id, number, updated_at, project_key) in rows {
-            if !visible_after_hydrate(tx, input, acl, Some(project_id), None).await? {
+            if !visible_after_hydrate(
+                tx,
+                workspace_id,
+                actor_user_id,
+                project_filter,
+                acl,
+                Some(project_id),
+                None,
+            )
+            .await?
+            {
                 continue;
             }
             loaded.insert(
@@ -853,7 +1246,7 @@ async fn hydrate_in_tx(
               AND a.id = ANY($2)
             "#,
         )
-        .bind(input.workspace_id)
+        .bind(workspace_id)
         .bind(&att_ids)
         .fetch_all(&mut **tx)
         .await?;
@@ -869,7 +1262,17 @@ async fn hydrate_in_tx(
             project_key,
         ) in rows
         {
-            if !visible_after_hydrate(tx, input, acl, project_id, Some(document_id)).await? {
+            if !visible_after_hydrate(
+                tx,
+                workspace_id,
+                actor_user_id,
+                project_filter,
+                acl,
+                project_id,
+                Some(document_id),
+            )
+            .await?
+            {
                 continue;
             }
             loaded.insert(
@@ -885,6 +1288,106 @@ async fn hydrate_in_tx(
                     number: Some(number),
                     project_key,
                     extract_status: Some(extract_status),
+                    updated_at,
+                },
+            );
+        }
+    }
+
+    let comment_ids: Vec<Uuid> = hits
+        .iter()
+        .filter(|h| h.kind == SearchSourceKind::Comment)
+        .filter_map(|h| Uuid::parse_str(&h.resource_id).ok())
+        .collect();
+    if !comment_ids.is_empty() {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                String,
+                Option<Uuid>,
+                Option<Uuid>,
+                Option<Uuid>,
+                i32,
+                DateTime<Utc>,
+                Option<String>,
+            ),
+        >(
+            r#"
+            SELECT c.id, d.title, c.body, d.project_id, c.document_id, NULL::uuid AS task_id,
+                   d.number, date_trunc('milliseconds', c.updated_at), p.key
+            FROM fvoci.comments c
+            JOIN fvoci.documents d
+              ON d.workspace_id = c.workspace_id AND d.id = c.document_id
+            LEFT JOIN fvoci.projects p
+              ON p.workspace_id = d.workspace_id AND p.id = d.project_id AND p.deleted_at IS NULL
+            WHERE c.workspace_id = $1
+              AND c.document_id IS NOT NULL
+              AND d.deleted_at IS NULL
+              AND d.status <> 'archived'
+              AND c.id = ANY($2)
+            UNION ALL
+            SELECT c.id, t.title, c.body, t.project_id, NULL::uuid AS document_id, c.task_id,
+                   t.number, date_trunc('milliseconds', c.updated_at), p.key
+            FROM fvoci.comments c
+            JOIN fvoci.tasks t
+              ON t.workspace_id = c.workspace_id AND t.id = c.task_id
+            LEFT JOIN fvoci.projects p
+              ON p.workspace_id = t.workspace_id AND p.id = t.project_id AND p.deleted_at IS NULL
+            WHERE c.workspace_id = $1
+              AND c.task_id IS NOT NULL
+              AND t.deleted_at IS NULL
+              AND t.archived_at IS NULL
+              AND c.id = ANY($2)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&comment_ids)
+        .fetch_all(&mut **tx)
+        .await?;
+        for (id, title, body, project_id, document_id, task_id, number, updated_at, project_key) in
+            rows
+        {
+            let visible = if document_id.is_some() {
+                visible_after_hydrate(
+                    tx,
+                    workspace_id,
+                    actor_user_id,
+                    project_filter,
+                    acl,
+                    project_id,
+                    document_id,
+                )
+                .await?
+            } else {
+                visible_after_hydrate(
+                    tx,
+                    workspace_id,
+                    actor_user_id,
+                    project_filter,
+                    acl,
+                    project_id,
+                    None,
+                )
+                .await?
+            };
+            if !visible {
+                continue;
+            }
+            loaded.insert(
+                hit_key(SearchSourceKind::Comment, &id.to_string()),
+                HydratedRow {
+                    r#type: SearchTypeFilter::Comment,
+                    id,
+                    title,
+                    body,
+                    project_id,
+                    document_id,
+                    task_id,
+                    number: Some(number),
+                    project_key,
+                    extract_status: None,
                     updated_at,
                 },
             );
@@ -907,12 +1410,14 @@ async fn hydrate_in_tx(
 
 async fn visible_after_hydrate(
     tx: &mut Transaction<'_, Postgres>,
-    input: &WorkspaceSearchRequest<'_>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    project_filter: Option<Uuid>,
     acl: &SearchAcl,
     project_id: Option<Uuid>,
     document_id: Option<Uuid>,
 ) -> Result<bool, sqlx::Error> {
-    if let Some(requested) = input.project_id {
+    if let Some(requested) = project_filter {
         match project_id {
             Some(current) if current == requested => {}
             _ => return Ok(false),
@@ -923,11 +1428,10 @@ async fn visible_after_hydrate(
             if !acl.project_ids.contains(&pid) {
                 return Ok(false);
             }
-            let Some(locked) = load_live_project(tx, input.workspace_id, pid).await? else {
+            let Some(locked) = load_live_project(tx, workspace_id, pid).await? else {
                 return Ok(false);
             };
-            let permission =
-                project_permission(tx, input.workspace_id, input.actor_user_id, &locked).await?;
+            let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
             Ok(permission.at_least(ProjectPermission::View))
         }
         None => {
@@ -937,14 +1441,8 @@ async fn visible_after_hydrate(
             if !acl.include_wiki && !acl.wiki_document_ids.contains(&document_id) {
                 return Ok(false);
             }
-            let permission = document_permission(
-                tx,
-                input.workspace_id,
-                input.actor_user_id,
-                document_id,
-                true,
-            )
-            .await?;
+            let permission =
+                document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
             Ok(permission.at_least(ProjectPermission::View))
         }
     }

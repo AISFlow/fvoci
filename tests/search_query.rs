@@ -195,6 +195,48 @@ fn contains_id(body: &Value, id: Uuid) -> bool {
     ids_of(body).iter().any(|found| found == &id.to_string())
 }
 
+fn comment_source(
+    workspace_id: Uuid,
+    project_id: Option<Uuid>,
+    document_id: Option<Uuid>,
+    task_id: Option<Uuid>,
+    comment_id: Uuid,
+    title: &str,
+    body: &str,
+) -> SearchSource {
+    let text = index_document_text(title, body, "");
+    SearchSource {
+        id: search_source_id(SearchSourceKind::Comment, &comment_id.to_string(), None),
+        kind: SearchSourceKind::Comment,
+        workspace_id: workspace_id.to_string(),
+        project_id: project_id.map(|id| id.to_string()),
+        document_id: document_id.map(|id| id.to_string()),
+        task_id: task_id.map(|id| id.to_string()),
+        comment_id: Some(comment_id.to_string()),
+        attachment_id: None,
+        chunk_no: None,
+        title: text.title,
+        body: text.body,
+        chosung: text.chosung,
+        stem: text.stem,
+        updated_at: 1,
+    }
+}
+
+async fn global_search(
+    app: axum::Router,
+    cookie: &str,
+    q: &str,
+    extra: &str,
+) -> (StatusCode, Value) {
+    let path = if extra.is_empty() {
+        format!("/api/v1/search?q={}", urlencoding(q))
+    } else {
+        format!("/api/v1/search?q={}&{extra}", urlencoding(q))
+    };
+    json_request(app, "GET", &path, None, Some(cookie)).await
+}
+
 async fn search(
     app: axum::Router,
     cookie: &str,
@@ -779,6 +821,317 @@ async fn search_guest_wiki_group_grant_is_hydrated() {
     assert!(
         contains_id(&after, wiki_id),
         "guest wiki group grant missing from search: {after:?}"
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn search_comment_hits_follow_parent_permission() {
+    let harness = TestDb::bootstrap().await;
+    let (_, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let meili = test_meili_config();
+    ensure_meili_index(&meili)
+        .await
+        .unwrap_or_else(|e| panic!("ensure index: {e}"));
+    let app = search_router(search_state(&harness.app_url, Some(meili.clone())).await);
+    let admin = admin_pool(&harness).await;
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "cmt-guest").await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "cmt-member").await;
+
+    let public_project =
+        create_project(app.clone(), &owner_cookie, workspace_id, "CMT", "workspace").await;
+    let public_id = Uuid::parse_str(public_project["id"].as_str().unwrap()).unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{public_id}/members"),
+        Some(json!({"userId": guest.user_id.to_string(), "role": "viewer"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let token = format!("cmt{}", Uuid::now_v7().simple());
+    let wiki_id = Uuid::now_v7();
+    insert_wiki_document(
+        &admin,
+        workspace_id,
+        wiki_id,
+        owner_id,
+        401,
+        &format!("{token} wiki"),
+        "wiki parent",
+    )
+    .await;
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{wiki_id}/comments"),
+        Some(json!({"body": format!("{token} wiki-comment")})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let wiki_comment_id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+
+    let (status, live_task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{public_id}/tasks"),
+        Some(json!({"title": format!("{token} task")})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{live_task:?}");
+    let live_task_id = Uuid::parse_str(live_task["id"].as_str().unwrap()).unwrap();
+    let (status, task_comment) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{live_task_id}/comments"),
+        Some(json!({"body": format!("{token} task-comment")})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task_comment:?}");
+    let task_comment_id = Uuid::parse_str(task_comment["id"].as_str().unwrap()).unwrap();
+
+    upsert_meili_sources(
+        &meili,
+        &[
+            comment_source(
+                workspace_id,
+                None,
+                Some(wiki_id),
+                None,
+                wiki_comment_id,
+                &format!("{token} wiki"),
+                &format!("{token} wiki-comment"),
+            ),
+            comment_source(
+                workspace_id,
+                Some(public_id),
+                None,
+                Some(live_task_id),
+                task_comment_id,
+                &format!("{token} task"),
+                &format!("{token} task-comment"),
+            ),
+        ],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("upsert_meili_sources: {e}"));
+
+    let (status, owner_hits) = search(
+        app.clone(),
+        &owner_cookie,
+        workspace_id,
+        &token,
+        "type=comment",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_hits:?}");
+    assert!(contains_id(&owner_hits, wiki_comment_id), "{owner_hits:?}");
+    assert!(contains_id(&owner_hits, task_comment_id), "{owner_hits:?}");
+    let wiki_hit = owner_hits["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == wiki_comment_id.to_string())
+        .unwrap();
+    assert_eq!(wiki_hit["type"], "comment");
+    assert_eq!(wiki_hit["documentId"], wiki_id.to_string());
+    assert!(wiki_hit["taskId"].is_null());
+    assert_eq!(wiki_hit["displayId"], "WIKI-401");
+
+    let (status, member_hits) = search(
+        app.clone(),
+        &member.cookie,
+        workspace_id,
+        &token,
+        "type=comment",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{member_hits:?}");
+    assert!(
+        contains_id(&member_hits, wiki_comment_id),
+        "{member_hits:?}"
+    );
+    assert!(
+        contains_id(&member_hits, task_comment_id),
+        "{member_hits:?}"
+    );
+
+    let (status, guest_hits) = search(
+        app.clone(),
+        &guest.cookie,
+        workspace_id,
+        &token,
+        "type=comment",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{guest_hits:?}");
+    assert!(
+        !contains_id(&guest_hits, wiki_comment_id),
+        "guest saw wiki comment without grant: {guest_hits:?}"
+    );
+    assert!(contains_id(&guest_hits, task_comment_id), "{guest_hits:?}");
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups"),
+        Some(json!({"name": "댓글뷰어"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let group_id = created["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/groups/{group_id}/members"),
+        Some(json!({"userId": guest.user_id.to_string()})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{wiki_id}/groups"),
+        Some(json!({"groupId": group_id, "role": "viewer"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, after) = search(app, &guest.cookie, workspace_id, &token, "type=comment").await;
+    assert_eq!(status, StatusCode::OK, "{after:?}");
+    assert!(
+        contains_id(&after, wiki_comment_id),
+        "guest wiki comment group grant missing: {after:?}"
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn search_global_query_cross_workspace_and_leak() {
+    let harness = TestDb::bootstrap().await;
+    let (_, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let meili = test_meili_config();
+    ensure_meili_index(&meili)
+        .await
+        .unwrap_or_else(|e| panic!("ensure index: {e}"));
+    let app = search_router(search_state(&harness.app_url, Some(meili.clone())).await);
+    let admin = admin_pool(&harness).await;
+    let outsider = add_workspace_user(&admin, workspace_id, "member", "global-out").await;
+
+    let (status, other_ws) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"name": "Other", "slug": "othergs"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{other_ws:?}");
+    let other_workspace_id = Uuid::parse_str(other_ws["id"].as_str().unwrap()).unwrap();
+
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/members/{}",
+            outsider.user_id
+        ),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let token = format!("glox{}", Uuid::now_v7().simple());
+    let first_id = Uuid::now_v7();
+    let second_id = Uuid::now_v7();
+    insert_wiki_document(
+        &admin,
+        workspace_id,
+        first_id,
+        owner_id,
+        501,
+        &format!("{token} first"),
+        "first body",
+    )
+    .await;
+    insert_wiki_document(
+        &admin,
+        other_workspace_id,
+        second_id,
+        owner_id,
+        502,
+        &format!("{token} second"),
+        "second body",
+    )
+    .await;
+    upsert_meili_sources(
+        &meili,
+        &[
+            document_source(
+                workspace_id,
+                None,
+                first_id,
+                &format!("{token} first"),
+                "first body",
+            ),
+            document_source(
+                other_workspace_id,
+                None,
+                second_id,
+                &format!("{token} second"),
+                "second body",
+            ),
+        ],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("upsert_meili_sources: {e}"));
+
+    let (status, owner_hits) = global_search(app.clone(), &owner_cookie, &token, "").await;
+    assert_eq!(status, StatusCode::OK, "{owner_hits:?}");
+    assert!(contains_id(&owner_hits, first_id), "{owner_hits:?}");
+    assert!(contains_id(&owner_hits, second_id), "{owner_hits:?}");
+    let first_hit = owner_hits["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == first_id.to_string())
+        .unwrap();
+    assert_eq!(first_hit["workspaceId"], workspace_id.to_string());
+
+    let (status, lexical) = global_search(app.clone(), &owner_cookie, &token, "mode=lexical").await;
+    assert_eq!(status, StatusCode::OK, "{lexical:?}");
+    assert!(contains_id(&lexical, first_id), "{lexical:?}");
+
+    let (status, outsider_hits) = global_search(app.clone(), &outsider.cookie, &token, "").await;
+    assert_eq!(status, StatusCode::OK, "{outsider_hits:?}");
+    assert!(
+        !contains_id(&outsider_hits, first_id),
+        "removed member still sees first workspace: {outsider_hits:?}"
+    );
+    assert!(
+        !contains_id(&outsider_hits, second_id),
+        "removed member still sees second workspace: {outsider_hits:?}"
+    );
+
+    let (status, workspace_only) = search(app, &owner_cookie, workspace_id, &token, "").await;
+    assert_eq!(status, StatusCode::OK, "{workspace_only:?}");
+    assert!(contains_id(&workspace_only, first_id), "{workspace_only:?}");
+    assert!(
+        !contains_id(&workspace_only, second_id),
+        "workspace search leaked other workspace: {workspace_only:?}"
     );
 
     admin.close().await;
