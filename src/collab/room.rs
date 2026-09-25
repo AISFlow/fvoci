@@ -974,7 +974,6 @@ struct RoomActor {
     primary_dirty: bool,
     client_id_owner: HashMap<u32, (Uuid, Instant)>,
     shutting_down: bool,
-    last_acl_poll: Instant,
     pending_awareness: VecDeque<Vec<u8>>,
     flushing_awareness: bool,
 }
@@ -1018,7 +1017,6 @@ pub async fn spawn_room(
         primary_dirty: false,
         client_id_owner: HashMap::new(),
         shutting_down: false,
-        last_acl_poll: Instant::now(),
         pending_awareness: VecDeque::new(),
         flushing_awareness: false,
     };
@@ -1199,12 +1197,10 @@ impl RoomActor {
         matches!(exit, RoomExit::Clean) && engine_stop_ok
     }
 
+    /// Called on every tick of the room's `revoke_poll_ms` interval (the only
+    /// caller). The interval alone sets the cadence; a second elapsed-time gate
+    /// here skipped every other tick and doubled revocation latency.
     async fn poll_acl(&mut self) {
-        let interval = Duration::from_millis(self.config.revoke_poll_ms);
-        if self.last_acl_poll.elapsed() < interval {
-            return;
-        }
-        self.last_acl_poll = Instant::now();
         let mut to_close = Vec::new();
         let snapshots = self
             .connections

@@ -45,6 +45,12 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   "limit.seats": "seat limit reached",
   "limit.guests": "guest limit reached",
   internal_error: "error.http.fallback",
+  document_version_mismatch: "document version mismatch (optimistic lock)",
+  wip_limit_exceeded: "wip limit exceeded",
+  task_hierarchy_violation: "task hierarchy violation",
+  invalid_recurrence_preset: "invalid recurrence preset",
+  task_archived: "task is archived — read-only",
+  status_not_in_project_workflow: "status not in project workflow",
 };
 
 export function tProblemTitle(
