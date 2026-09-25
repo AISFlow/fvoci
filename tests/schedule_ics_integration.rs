@@ -374,7 +374,8 @@ async fn ics_feed_token_visibility_caldav_and_pat_scopes() {
     assert!(member_ics.contains(&format!("UID:{}@fvoci", visible["id"].as_str().unwrap())));
     assert!(!member_ics.contains(&format!("UID:{}@fvoci", secret["id"].as_str().unwrap())));
 
-    let (status, _, _) = raw_request(app.clone(), "GET", "/api/v1/ics/not-a-real-token", None).await;
+    let (status, _, _) =
+        raw_request(app.clone(), "GET", "/api/v1/ics/not-a-real-token", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, write_pat) = json_request(
