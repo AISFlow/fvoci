@@ -396,7 +396,8 @@ all three helpers and enables them via the defaults above.
 
 ### Bootstrap
 
-1. Copy `infra/rust/.env.example` to `infra/rust/.env` and replace placeholders.
+1. Generate `infra/rust/.env` with `fvoci-migrate --init-env` (above), or copy
+   `infra/rust/.env.example` to `infra/rust/.env` and replace placeholders.
    Keep `POSTGRES_*` as the migration owner credentials. Create the dedicated app
    role only through the init path below — never grant superuser or `BYPASSRLS` to
    the app role.
@@ -584,6 +585,64 @@ offline test commands are in `scripts/prepare-extract-helper.sh` and
 `scripts/run-extract-tests.sh`; the latter must fail if required DB/helper inputs
 are absent. These integration commands are being wired with the pending native
 job submission and are not yet a released support claim.
+
+## Operator commands (`fvoci-migrate`)
+
+The source's `fvoci <command>` CLI maps onto `fvoci-migrate`, the one-shot
+operator binary already shipped in the image and used by the Compose `init`
+job, backup and restore (the server binary stays single-purpose):
+
+| Source | Rust | Environment |
+| --- | --- | --- |
+| `fvoci init` | `fvoci-migrate --init-env --public-origin <url> --out <path> [--yes]` | none |
+| `fvoci doctor` | `fvoci-migrate --doctor` | the server's |
+| `fvoci bootstrap` (migrate) | `fvoci-migrate`, then `--grant-app-role <role>` | owner `DATABASE_URL` |
+| `fvoci search-rebuild [workspaceId]` | `fvoci-migrate --rebuild-search [workspace-id]` | owner `DATABASE_URL`, Meili |
+| `fvoci outbox-recover` | `fvoci-migrate --recover-outbox ...` | owner `DATABASE_URL` |
+| `fvoci backup <collect\|restore\|...>` | `scripts/backup.sh`, `scripts/restore.sh` (below) | Compose project |
+| — (restore check) | `fvoci-migrate --verify-storage` | the server's |
+
+Not ported: `secrets audit/rotate`, `reindex` (extract re-enqueue), `healthcheck`
+and the split worker roles (`worker`, `compact`, `thumbnail`, `collab`); the Rust
+server runs those jobs in-process.
+
+**`--init-env`** writes the Compose env file from `infra/rust/.env.example` with
+fresh secrets: `POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
+(64 hex), `PASSWORD_PEPPER_KEYS` and `ENCRYPTION_KEYS` (`{"install":"<64 hex>"}`),
+`FVOCI_PUBLIC_ORIGIN`, and `FVOCI_COOKIE_SECURE=true` for an https origin (a
+loopback `http://` origin also sets `FVOCI_PUBLISH_PORT` to its port). The file
+is created mode 0600 and renamed into place; an existing file is kept unless
+`--yes`. Only the path is printed. It replaces step 1 of "Bootstrap" below:
+
+```sh
+cargo run --release --bin fvoci-migrate -- --init-env \
+  --public-origin https://fvoci.example.com --out infra/rust/.env
+```
+
+Back up the generated file with the database backups: the pepper and
+encryption keys cannot be regenerated.
+
+**`--doctor`** checks the server's environment without starting it and prints
+`{"ok":true|false,"checks":[{"name","ok","detail"?}]}`; the exit code is 1 when
+any check fails. Each setting is checked on its own so every problem is named:
+`env` (the server's full config parse), `password_pepper_keys` and
+`encryption_keys` (published development keys fail), `public_origin` (plain
+http off loopback, or https without secure cookies, fail), `identity`,
+`integrations`, `database` (connect with `DATABASE_APP_URL`), `app_role`
+(no superuser/`BYPASSRLS`, not the schema owner), `schema_version` (migrated to
+this build), `pg_connection_budget` (collab rooms + pool + reserve ≤
+`max_connections`), `storage` (local directory or S3 bucket probe),
+`meilisearch` (the scoped key reads its index), `smtp` (connect/EHLO/STARTTLS
+when offered; no mail sent), `document_convert` (one real conversion),
+`collab_engine` (spawn and ping; a set path that is not a file fails because
+the server would silently disable collaboration) and `extractor`. Optional
+features that are unset report `disabled (...)`. Nothing is created, migrated or
+sent, and database URLs in details are masked.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --doctor
+```
 
 ## Product MCP server (`fvoci-mcp`)
 

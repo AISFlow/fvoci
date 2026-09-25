@@ -1128,6 +1128,21 @@ async fn with_op_deadline<T>(
         .unwrap_or(Err(MeiliError::Timeout))
 }
 
+/// Read-only reachability and key check (`fvoci-migrate --doctor`): the
+/// scoped key must be able to read its index. A missing index is not an error
+/// here — the server creates it lazily.
+pub async fn probe_meili_index(config: &MeiliConfig) -> Result<(), MeiliError> {
+    with_op_deadline(async {
+        let path = format!("/indexes/{}", config.index_uid);
+        let resp = meili_request(config, reqwest::Method::GET, &path, None).await?;
+        match resp.status {
+            200 | 404 => Ok(()),
+            status => Err(MeiliError::Http(status)),
+        }
+    })
+    .await
+}
+
 pub async fn ensure_meili_index(config: &MeiliConfig) -> Result<(), MeiliError> {
     with_op_deadline(ensure_meili_index_op(config)).await
 }

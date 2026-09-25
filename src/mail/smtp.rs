@@ -72,3 +72,22 @@ async fn send_mail_inner(
         }
     })
 }
+
+/// Connection check for `fvoci-migrate --doctor`: connect, EHLO and STARTTLS
+/// when offered (the same transport settings as sending), then QUIT. Sends no
+/// mail. The error is a short code without server text.
+pub async fn probe_smtp(smtp: &SmtpConfig) -> Result<(), String> {
+    let tls = TlsParameters::new(smtp.host.clone()).map_err(|_| "tls_config".to_string())?;
+    let transport: AsyncSmtpTransport<Tokio1Executor> =
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(smtp.host.as_str())
+            .port(smtp.port)
+            .tls(Tls::Opportunistic(tls))
+            .timeout(Some(SMTP_TIMEOUT))
+            .build();
+    match tokio::time::timeout(SMTP_SESSION_TIMEOUT, transport.test_connection()).await {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err("smtp_not_ready".into()),
+        Ok(Err(_)) => Err("smtp_connect_failed".into()),
+        Err(_) => Err("smtp_timeout".into()),
+    }
+}
