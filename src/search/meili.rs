@@ -5,7 +5,7 @@
 //! (`searchMeiliVector`, embedding upsert besides a null `_vectors` slot)
 //! is intentionally not ported.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -511,50 +511,65 @@ async fn wait_meili_tasks_inner(config: &MeiliConfig, uids: &[u64]) -> Result<()
         return Ok(());
     }
     let deadline = Instant::now() + Duration::from_millis(MEILI_OP_TIMEOUT_MS);
-    let uids_param = uids
+    let wanted: HashSet<u64> = uids.iter().copied().collect();
+    let uids_param = wanted
         .iter()
         .map(|uid| uid.to_string())
         .collect::<Vec<_>>()
         .join(",");
+    let page_limit = wanted.len().clamp(1, 1000);
     let mut poll_ms = TASK_POLL_MIN_MS;
     loop {
         if Instant::now() >= deadline {
             return Err(MeiliError::Timeout);
         }
-        let got = meili_request(
-            config,
-            reqwest::Method::GET,
-            &format!("/tasks?uids={uids_param}"),
-            None,
-        )
-        .await?;
-        if got.status != 200 {
-            return Err(MeiliError::Http(got.status));
-        }
-        let results = got
-            .json
-            .get("results")
-            .and_then(Value::as_array)
-            .ok_or(MeiliError::Protocol)?;
-        if results.len() != uids.len() {
-            return Err(MeiliError::Protocol);
+        let mut by_uid: HashMap<u64, String> = HashMap::new();
+        let mut from: Option<u64> = None;
+        loop {
+            let mut path = format!("/tasks?uids={uids_param}&limit={page_limit}");
+            if let Some(from_uid) = from {
+                path.push_str(&format!("&from={from_uid}"));
+            }
+            let got = meili_request(config, reqwest::Method::GET, &path, None).await?;
+            if got.status != 200 {
+                return Err(MeiliError::Http(got.status));
+            }
+            let results = got
+                .json
+                .get("results")
+                .and_then(Value::as_array)
+                .ok_or(MeiliError::Protocol)?;
+            for task in results {
+                let Some(uid) = task.get("uid").and_then(Value::as_u64) else {
+                    continue;
+                };
+                if !wanted.contains(&uid) {
+                    continue;
+                }
+                let status = task
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                by_uid.insert(uid, status);
+            }
+            let next = got.json.get("next").and_then(Value::as_u64);
+            match next {
+                Some(next_uid) if by_uid.len() < wanted.len() && !results.is_empty() => {
+                    from = Some(next_uid);
+                }
+                _ => break,
+            }
         }
         let mut pending = false;
-        for task in results {
-            let status = task.get("status").and_then(Value::as_str).unwrap_or("");
-            match status {
-                "succeeded" => {}
-                "failed" | "canceled" => {
-                    let code = task
-                        .get("error")
-                        .and_then(|e| e.get("code"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown");
-                    let task_uid = task.get("uid").and_then(Value::as_u64).unwrap_or(0);
-                    tracing::warn!(task_uid, code, "meili task {status}");
+        for uid in &wanted {
+            match by_uid.get(uid).map(String::as_str) {
+                Some("succeeded") => {}
+                Some("failed") | Some("canceled") => {
+                    tracing::warn!(task_uid = uid, "meili task failed");
                     return Err(MeiliError::TaskFailed);
                 }
-                _ => pending = true,
+                Some(_) | None => pending = true,
             }
         }
         if !pending {

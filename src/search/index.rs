@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -21,7 +22,7 @@ use crate::search::meili::{
     delete_all_meili_documents, delete_meili_by_filter, delete_meili_sources,
     enqueue_delete_meili_by_filter, enqueue_delete_meili_sources, enqueue_upsert_meili_sources,
     ensure_meili_index, meili_eq, search_source_id, upsert_meili_sources, wait_meili_tasks,
-    MeiliConfig, MeiliError, SearchSource, SearchSourceKind,
+    MeiliConfig, MeiliError, SearchSource, SearchSourceKind, MEILI_OP_TIMEOUT_MS,
 };
 use crate::search::text::index_document_text;
 
@@ -79,6 +80,10 @@ impl OutboxConsumer for SearchIndexConsumer {
                 Err(err) => (0, Some(OutboxProcessError::Delivery(err.to_string()))),
             }
         })
+    }
+
+    fn batch_time_budget(&self) -> Option<Duration> {
+        Some(Duration::from_millis(MEILI_OP_TIMEOUT_MS))
     }
 }
 
@@ -140,17 +145,43 @@ fn batch_coalesce_key(event: &OutboxEvent) -> Option<BatchCoalesceKey> {
     resource_from_event(event).map(BatchCoalesceKey::Resource)
 }
 
-fn coalesce_search_index_events(events: &[OutboxEvent]) -> Vec<OutboxEvent> {
+struct CoalescedSearchEvent {
+    event: OutboxEvent,
+    subtree: bool,
+    body_only: bool,
+}
+
+fn event_refresh_flags(event: &OutboxEvent) -> (bool, bool) {
+    let subtree = moved_across_project(event);
+    let body_only = resource_from_event(event)
+        .is_some_and(|resource| resource.kind == SearchSourceKind::Document)
+        && document_body_only(event);
+    (subtree, body_only)
+}
+
+fn coalesce_search_index_events(events: &[OutboxEvent]) -> Vec<CoalescedSearchEvent> {
     let mut order: Vec<BatchCoalesceKey> = Vec::new();
-    let mut latest: HashMap<BatchCoalesceKey, OutboxEvent> = HashMap::new();
+    let mut latest: HashMap<BatchCoalesceKey, CoalescedSearchEvent> = HashMap::new();
     for event in events {
         let Some(key) = batch_coalesce_key(event) else {
             continue;
         };
-        if !latest.contains_key(&key) {
-            order.push(key.clone());
+        let (subtree, body_only) = event_refresh_flags(event);
+        if let Some(existing) = latest.get_mut(&key) {
+            existing.event = event.clone();
+            existing.subtree |= subtree;
+            existing.body_only &= body_only;
+            continue;
         }
-        latest.insert(key, event.clone());
+        order.push(key.clone());
+        latest.insert(
+            key,
+            CoalescedSearchEvent {
+                event: event.clone(),
+                subtree,
+                body_only,
+            },
+        );
     }
 
     let deleted_workspaces: HashSet<Uuid> = order
@@ -172,7 +203,7 @@ fn coalesce_search_index_events(events: &[OutboxEvent]) -> Vec<OutboxEvent> {
                 !deleted_workspaces.contains(&resource.workspace_id)
             }
         })
-        .filter_map(|key| latest.get(&key).cloned())
+        .filter_map(|key| latest.remove(&key))
         .collect()
 }
 
@@ -190,8 +221,8 @@ async fn deliver_search_index_batch(
         meili,
         uids: Vec::new(),
     };
-    for event in &coalesced {
-        apply_search_index_event_batch(pool, &mut sink, event).await?;
+    for item in &coalesced {
+        apply_search_index_event_batch(pool, &mut sink, item).await?;
     }
     sink.finish().await?;
     Ok(())
@@ -200,8 +231,9 @@ async fn deliver_search_index_batch(
 async fn apply_search_index_event_batch(
     pool: &PgPool,
     sink: &mut MeiliBatchSink<'_>,
-    event: &OutboxEvent,
+    item: &CoalescedSearchEvent,
 ) -> Result<(), SearchIndexError> {
+    let event = &item.event;
     if event.verb == "workspace.deleted" {
         if let Some(workspace_id) = event.workspace_id {
             with_workspace_lock(pool, workspace_id, || async {
@@ -236,11 +268,10 @@ async fn apply_search_index_event_batch(
         }
     }
     if let Some(resource) = resource_from_event(event) {
-        if resource.kind == SearchSourceKind::Document && document_body_only(event) {
+        if resource.kind == SearchSourceKind::Document && item.body_only {
             refresh_document_body_only_batch(pool, sink, resource).await?;
         } else {
-            refresh_search_resource_batch(pool, sink, resource, moved_across_project(event))
-                .await?;
+            refresh_search_resource_batch(pool, sink, resource, item.subtree).await?;
         }
     }
     Ok(())
@@ -818,4 +849,110 @@ async fn rebuild_search_page(
 
 pub fn search_index_consumer(meili: MeiliConfig) -> Arc<dyn OutboxConsumer> {
     Arc::new(SearchIndexConsumer::new(meili))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::{json, Value};
+
+    fn test_event(
+        verb: &str,
+        payload: Value,
+        resource_id: Uuid,
+        workspace_id: Uuid,
+    ) -> OutboxEvent {
+        OutboxEvent {
+            snapshot_xmin: "1".into(),
+            id: Uuid::now_v7(),
+            seq: 1,
+            xact: "1".into(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: None,
+            verb: verb.into(),
+            target_type: Some("document".into()),
+            target_id: Some(resource_id),
+            payload,
+            channel: "system".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn coalesce_move_then_update_keeps_subtree() {
+        let workspace_id = Uuid::now_v7();
+        let document_id = Uuid::now_v7();
+        let old_project = Uuid::now_v7();
+        let new_project = Uuid::now_v7();
+        let events = [
+            test_event(
+                "document.moved",
+                json!({
+                    "oldProjectId": old_project,
+                    "newProjectId": new_project,
+                }),
+                document_id,
+                workspace_id,
+            ),
+            test_event(
+                "document.updated",
+                json!({ "collab": true }),
+                document_id,
+                workspace_id,
+            ),
+        ];
+        let coalesced = coalesce_search_index_events(&events);
+        assert_eq!(coalesced.len(), 1);
+        assert!(coalesced[0].subtree);
+        assert!(!coalesced[0].body_only);
+    }
+
+    #[test]
+    fn coalesce_title_then_collab_is_full_refresh() {
+        let workspace_id = Uuid::now_v7();
+        let document_id = Uuid::now_v7();
+        let events = [
+            test_event(
+                "document.updated",
+                json!({ "title": "renamed" }),
+                document_id,
+                workspace_id,
+            ),
+            test_event(
+                "document.collab_update_appended",
+                json!({ "seq": 1 }),
+                document_id,
+                workspace_id,
+            ),
+        ];
+        let coalesced = coalesce_search_index_events(&events);
+        assert_eq!(coalesced.len(), 1);
+        assert!(!coalesced[0].subtree);
+        assert!(!coalesced[0].body_only);
+    }
+
+    #[test]
+    fn coalesce_two_collab_events_stay_body_only() {
+        let workspace_id = Uuid::now_v7();
+        let document_id = Uuid::now_v7();
+        let events = [
+            test_event(
+                "document.collab_update_appended",
+                json!({ "seq": 1 }),
+                document_id,
+                workspace_id,
+            ),
+            test_event(
+                "document.collab_update_appended",
+                json!({ "seq": 2 }),
+                document_id,
+                workspace_id,
+            ),
+        ];
+        let coalesced = coalesce_search_index_events(&events);
+        assert_eq!(coalesced.len(), 1);
+        assert!(!coalesced[0].subtree);
+        assert!(coalesced[0].body_only);
+    }
 }

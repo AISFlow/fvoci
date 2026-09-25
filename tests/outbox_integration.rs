@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use fvoci_server::db::outbox::{
     advance_cursor, advance_cursor_tx, claim_retries, ensure_consumer, fetch_cursor,
-    fetch_failure_state, insert_test_event, is_outbox_xid_epoch_mismatch, lease_consumer,
-    read_events, record_failure, release_consumer, requeue, OUTBOX_MAX_ATTEMPTS,
+    fetch_event_by_id, fetch_failure_state, insert_test_event, is_outbox_xid_epoch_mismatch,
+    is_processed, lease_consumer, read_events, record_failure, release_consumer, requeue,
+    OUTBOX_DEFAULT_BATCH, OUTBOX_LEASE_SECS, OUTBOX_MAX_ATTEMPTS,
 };
 use fvoci_server::db::outbox_recover::{recover_outbox, RecoverOutboxOptions};
 use fvoci_server::db::{migrate, pool};
@@ -1790,5 +1791,227 @@ async fn r11_requeue_waits_for_the_skip_and_then_redelivers() {
     assert_eq!(claimed[0].event_id, e);
 
     app.close().await;
+    harness.cleanup().await;
+}
+
+struct BatchRecordingExternal {
+    name: String,
+    fail_id: Option<Uuid>,
+    max_attempts: i32,
+    batch_sizes: Mutex<Vec<usize>>,
+}
+
+impl BatchRecordingExternal {
+    fn new(name: &str, fail_id: Option<Uuid>, max_attempts: i32) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            fail_id,
+            max_attempts,
+            batch_sizes: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl OutboxConsumer for BatchRecordingExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn max_attempts(&self) -> i32 {
+        self.max_attempts
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.fail_id == Some(event.id) {
+                Err(OutboxProcessError::Delivery(
+                    "injected middle failure".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        lease_owner: Uuid,
+        events: &'a [fvoci_server::db::outbox::OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        self.batch_sizes
+            .lock()
+            .expect("batch sizes")
+            .push(events.len());
+        Box::pin(async move {
+            let mut done = 0usize;
+            for event in events {
+                match self.deliver(pool, lease_owner, event).await {
+                    Ok(()) => done += 1,
+                    Err(err) => return (done, Some(err)),
+                }
+            }
+            (done, None)
+        })
+    }
+}
+
+#[tokio::test]
+async fn production_lease_delivers_more_than_one_event_per_batch() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let consumer = BatchRecordingExternal::new("batchprod", None, OUTBOX_MAX_ATTEMPTS);
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        ids.push(
+            insert_test_event(&app, "test.batch", json!({ "n": n }))
+                .await
+                .expect("insert"),
+        );
+    }
+
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(OUTBOX_LEASE_SECS as u64),
+            batch_limit: OUTBOX_DEFAULT_BATCH,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![consumer.clone() as Arc<dyn OutboxConsumer>],
+    )
+    .expect("dispatcher");
+
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let ids = ids.clone();
+        Box::pin(async move {
+            for id in ids {
+                if !is_processed(&pool, "batchprod", id).await.unwrap_or(false) {
+                    return false;
+                }
+            }
+            true
+        })
+    })
+    .await;
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    let sizes = consumer.batch_sizes.lock().expect("sizes").clone();
+    assert!(
+        sizes.iter().any(|&n| n > 1),
+        "production 30s lease must pass more than one event to deliver_batch, got {sizes:?}"
+    );
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn deliver_batch_prefix_marks_and_dead_letters_the_failed_event() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        ids.push(
+            insert_test_event(&app, "test.prefix", json!({ "n": n }))
+                .await
+                .expect("insert"),
+        );
+    }
+    let fail_id = ids[2];
+    let consumer = BatchRecordingExternal::new("batchprefix", Some(fail_id), 3);
+
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(OUTBOX_LEASE_SECS as u64),
+            batch_limit: OUTBOX_DEFAULT_BATCH,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![consumer.clone() as Arc<dyn OutboxConsumer>],
+    )
+    .expect("dispatcher");
+
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        let ids = ids.clone();
+        Box::pin(async move {
+            for (i, id) in ids.iter().enumerate() {
+                if i == 2 {
+                    continue;
+                }
+                if !is_processed(&pool, "batchprefix", *id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+            }
+            fetch_failure_state(&pool, "batchprefix", ids[2])
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.dead_at.is_some())
+        })
+    })
+    .await;
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    assert!(is_processed(&app, "batchprefix", ids[0]).await.expect("p0"));
+    assert!(is_processed(&app, "batchprefix", ids[1]).await.expect("p1"));
+    assert!(!is_processed(&app, "batchprefix", fail_id)
+        .await
+        .expect("p2"));
+    assert!(is_processed(&app, "batchprefix", ids[3]).await.expect("p3"));
+    assert!(is_processed(&app, "batchprefix", ids[4]).await.expect("p4"));
+    let failure = fetch_failure_state(&app, "batchprefix", fail_id)
+        .await
+        .expect("failure")
+        .expect("row");
+    assert!(
+        failure.dead_at.is_some(),
+        "failed middle event is dead-lettered"
+    );
+
+    let last = fetch_event_by_id(&app, ids[4])
+        .await
+        .expect("last")
+        .expect("row");
+    let cursor = fetch_cursor(&admin, "batchprefix").await.expect("cursor");
+    assert_eq!(cursor, Some((last.xact, last.seq)));
+
+    let sizes = consumer.batch_sizes.lock().expect("sizes").clone();
+    assert!(
+        sizes.iter().any(|&n| n > 1),
+        "prefix failure must be observed on a chunk larger than 1, got {sizes:?}"
+    );
+
+    app.close().await;
+    admin.close().await;
     harness.cleanup().await;
 }

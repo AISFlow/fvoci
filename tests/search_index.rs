@@ -17,8 +17,9 @@ use fvoci_server::search::index::{
     SEARCH_INDEX_CONSUMER,
 };
 use fvoci_server::search::meili::{
-    delete_all_meili_documents, ensure_meili_index, search_meili, search_source_id, MeiliConfig,
-    MeiliSearchInput, MeiliSearchScope, SearchSourceKind,
+    delete_all_meili_documents, ensure_meili_index, search_meili, search_source_id,
+    wait_meili_tasks, MeiliConfig, MeiliError, MeiliSearchInput, MeiliSearchScope,
+    SearchSourceKind,
 };
 use rand::RngCore;
 use serde_json::{json, Value};
@@ -395,6 +396,71 @@ async fn meili_doc(meili: &MeiliConfig, id: &str) -> Value {
         .expect("get document");
     assert_eq!(resp.status().as_u16(), 200, "get document {id}");
     resp.json().await.expect("json")
+}
+
+async fn enqueue_raw_documents(meili: &MeiliConfig, docs: Value) -> u64 {
+    let url = format!("{}/indexes/{}/documents", meili.url, meili.index_uid);
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(meili.api_key())
+        .json(&docs)
+        .send()
+        .await
+        .expect("enqueue raw");
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.expect("enqueue json");
+    assert!(
+        (200..300).contains(&status),
+        "enqueue HTTP {status}: {body}"
+    );
+    body.get("taskUid")
+        .and_then(Value::as_u64)
+        .expect("taskUid")
+}
+
+fn raw_meili_doc(id: &str, title: &str) -> Value {
+    json!({
+        "id": id,
+        "kind": "document",
+        "title": title,
+        "_vectors": { "attachments": null },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_project_document(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    owner_id: Uuid,
+    doc_id: Uuid,
+    parent_id: Option<Uuid>,
+    path: &str,
+    title: &str,
+    number: i32,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, project_id, number,
+            status, schema_version, text, chosung, created_by, content_json, kind
+        ) VALUES (
+            $1, $2, $3, $4, $5, 'V', $6, $7, 'published', 1, $3, '', $8,
+            '{"type":"doc","content":[]}'::jsonb, 'wiki'
+        )
+        "#,
+    )
+    .bind(doc_id)
+    .bind(workspace_id)
+    .bind(title)
+    .bind(path)
+    .bind(parent_id)
+    .bind(project_id)
+    .bind(number)
+    .bind(owner_id)
+    .execute(admin)
+    .await
+    .expect("project document");
 }
 
 async fn wait_until<F>(timeout: Duration, what: &str, mut predicate: F)
@@ -1228,105 +1294,61 @@ async fn burst_of_events_converges_with_one_meili_wait() {
 #[tokio::test]
 async fn failed_middle_batch_event_never_marks_processed_and_retries_converge() {
     let harness = TestDb::bootstrap().await;
-    let admin = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&harness.admin_url)
-        .await
-        .expect("admin");
-    let app = pool::connect_app(&harness.app_url).await.expect("app");
     let meili = test_meili();
     ensure_meili_index(&meili).await.expect("ensure");
-    let fixture = seed(&admin, "qvoxmid").await;
 
-    let good_a = Uuid::now_v7();
-    let bad_id = Uuid::now_v7();
-    let good_c = Uuid::now_v7();
-    let huge = "x".repeat(9 * 1024 * 1024);
-    for (doc_id, title, number) in [
-        (good_a, "mid-a", 2),
-        (bad_id, huge.as_str(), 3),
-        (good_c, "mid-c", 4),
-    ] {
-        sqlx::query(
-            r#"
-            INSERT INTO fvoci.documents (
-                id, workspace_id, title, path, parent_id, sort_key, project_id, number,
-                status, schema_version, text, chosung, created_by, content_json, kind
-            ) VALUES (
-                $1, $2, $3, $4, NULL, 'V', NULL, $5, 'published', 1, $3, '', $6,
-                '{"type":"doc","content":[]}'::jsonb, 'wiki'
-            )
-            "#,
-        )
-        .bind(doc_id)
-        .bind(fixture.workspace_id)
-        .bind(title)
-        .bind(path_label(doc_id))
-        .bind(number)
-        .bind(fixture.owner_id)
-        .execute(&admin)
+    let uid_ok_a = enqueue_raw_documents(&meili, json!([raw_meili_doc("doc_ok_a", "ok-a")])).await;
+    let uid_bad =
+        enqueue_raw_documents(&meili, json!([raw_meili_doc("bad id!", "middle-fail")])).await;
+    let uid_ok_c = enqueue_raw_documents(&meili, json!([raw_meili_doc("doc_ok_c", "ok-c")])).await;
+    assert_ne!(uid_ok_a, 0);
+    assert_ne!(uid_bad, 0);
+    assert_ne!(uid_ok_c, 0);
+
+    let err = wait_meili_tasks(&meili, &[uid_ok_a, uid_bad, uid_ok_c])
         .await
-        .expect("doc");
-    }
-    let events = [
-        insert_event(
-            &admin,
-            fixture.workspace_id,
-            "document.created",
-            "document",
-            good_a,
-        )
-        .await,
-        insert_event(
-            &admin,
-            fixture.workspace_id,
-            "document.created",
-            "document",
-            bad_id,
-        )
-        .await,
-        insert_event(
-            &admin,
-            fixture.workspace_id,
-            "document.created",
-            "document",
-            good_c,
-        )
-        .await,
-    ];
+        .expect_err("middle uid must fail the wait even if the last task succeeds");
+    assert_eq!(
+        err,
+        MeiliError::TaskFailed,
+        "async Meili rejection, not a pre-enqueue DocumentTooLarge: {err}"
+    );
 
-    let consumer = search_index_consumer(meili.clone());
-    let owner = Uuid::now_v7();
-    let (done, err) = consumer.deliver_batch(&app, owner, &events).await;
-    assert_eq!(done, 0, "oversized middle doc must fail the whole batch");
-    assert!(err.is_some(), "batch must return an error");
-
-    for event in &events {
-        assert!(
-            !is_processed(&app, SEARCH_INDEX_CONSUMER, event.id)
-                .await
-                .expect("processed"),
-            "failed batch must not mark event {} processed",
-            event.id
-        );
-    }
-
-    sqlx::query("UPDATE fvoci.documents SET title = $1, text = $1 WHERE id = $2")
-        .bind("mid-b-fixed")
-        .bind(bad_id)
-        .execute(&admin)
+    wait_meili_tasks(&meili, &[uid_ok_a, uid_ok_c])
         .await
-        .expect("fix middle doc");
+        .expect("good prefix and suffix tasks still succeed on retry");
+    let ids = meili_ids(&meili).await;
+    assert!(ids.contains(&"doc_ok_a".to_string()), "{ids:?}");
+    assert!(ids.contains(&"doc_ok_c".to_string()), "{ids:?}");
+    assert!(!ids.iter().any(|id| id.contains(' ')), "{ids:?}");
 
-    let (done, err) = consumer.deliver_batch(&app, owner, &events).await;
-    assert_eq!(done, events.len());
-    assert!(err.is_none(), "fixed batch must succeed: {:?}", err);
+    harness.cleanup().await;
+}
 
-    let hits = search_hits(&meili, fixture.workspace_id, fixture.project_id, "mid-").await;
-    assert_eq!(hits.len(), 3);
+#[tokio::test]
+async fn wait_meili_tasks_verifies_more_than_twenty_uids() {
+    let harness = TestDb::bootstrap().await;
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
 
-    app.close().await;
-    admin.close().await;
+    let mut uids = Vec::new();
+    for i in 0..25 {
+        let uid = enqueue_raw_documents(
+            &meili,
+            json!([raw_meili_doc(
+                &format!("doc_page_{i}"),
+                &format!("page-{i}")
+            )]),
+        )
+        .await;
+        uids.push(uid);
+    }
+    wait_meili_tasks(&meili, &uids)
+        .await
+        .expect("waiting on 25 uids must page past Meili's default limit of 20");
+    let ids = meili_ids(&meili).await;
+    assert_eq!(ids.len(), 25, "{ids:?}");
+
     harness.cleanup().await;
 }
 
@@ -1342,68 +1364,343 @@ async fn parallel_dispatchers_do_not_cross_talk_in_one_process() {
     let app_b = pool::connect_app(&harness.app_url).await.expect("app b");
     let meili_a = test_meili();
     let meili_b = test_meili();
+    let meili_fail = test_meili();
     ensure_meili_index(&meili_a).await.expect("ensure a");
     ensure_meili_index(&meili_b).await.expect("ensure b");
+    ensure_meili_index(&meili_fail).await.expect("ensure fail");
     let fixture_a = seed(&admin, "qvoxpara").await;
     let fixture_b = seed(&admin, "qvoxparb").await;
 
-    let event_a = insert_event(
-        &admin,
-        fixture_a.workspace_id,
-        "document.created",
-        "document",
-        fixture_a.wiki_id,
-    )
-    .await;
-    let event_b = insert_event(
-        &admin,
-        fixture_b.workspace_id,
-        "document.created",
-        "document",
-        fixture_b.wiki_id,
-    )
-    .await;
+    let mut batch_a = Vec::new();
+    let mut batch_b = Vec::new();
+    for i in 0..3 {
+        let doc_a = Uuid::now_v7();
+        let doc_b = Uuid::now_v7();
+        insert_project_document(
+            &admin,
+            fixture_a.workspace_id,
+            fixture_a.project_id,
+            fixture_a.owner_id,
+            doc_a,
+            None,
+            &path_label(doc_a),
+            &format!("qvoxpara-{i}"),
+            i + 20,
+        )
+        .await;
+        insert_project_document(
+            &admin,
+            fixture_b.workspace_id,
+            fixture_b.project_id,
+            fixture_b.owner_id,
+            doc_b,
+            None,
+            &path_label(doc_b),
+            &format!("qvoxparb-{i}"),
+            i + 20,
+        )
+        .await;
+        batch_a.push(
+            insert_event(
+                &admin,
+                fixture_a.workspace_id,
+                "document.created",
+                "document",
+                doc_a,
+            )
+            .await,
+        );
+        batch_b.push(
+            insert_event(
+                &admin,
+                fixture_b.workspace_id,
+                "document.created",
+                "document",
+                doc_b,
+            )
+            .await,
+        );
+    }
+
+    let uid_ok =
+        enqueue_raw_documents(&meili_fail, json!([raw_meili_doc("parallel_ok", "ok")])).await;
+    let uid_bad =
+        enqueue_raw_documents(&meili_fail, json!([raw_meili_doc("bad id!", "fail")])).await;
+    let uid_ok2 =
+        enqueue_raw_documents(&meili_fail, json!([raw_meili_doc("parallel_ok2", "ok2")])).await;
 
     let consumer_a = search_index_consumer(meili_a.clone());
     let consumer_b = search_index_consumer(meili_b.clone());
-    let batch_a = [event_a];
-    let batch_b = [event_b];
-    let (res_a, res_b) = tokio::join!(
+    let fail_uids = [uid_ok, uid_bad, uid_ok2];
+    let (res_a, res_b, wait_fail) = tokio::join!(
         consumer_a.deliver_batch(&app_a, Uuid::now_v7(), &batch_a),
         consumer_b.deliver_batch(&app_b, Uuid::now_v7(), &batch_b),
+        wait_meili_tasks(&meili_fail, &fail_uids),
     );
-    assert_eq!(res_a.0, 1);
-    assert!(res_a.1.is_none());
-    assert_eq!(res_b.0, 1);
-    assert!(res_b.1.is_none());
+    assert_eq!(res_a.0, 3);
+    assert!(res_a.1.is_none(), "A failed: {:?}", res_a.1);
+    assert_eq!(res_b.0, 3);
+    assert!(res_b.1.is_none(), "B failed: {:?}", res_b.1);
+    assert_eq!(
+        wait_fail.expect_err("shared last-uid wait would hide the middle failure"),
+        MeiliError::TaskFailed
+    );
 
+    let hits_a = search_hits(
+        &meili_a,
+        fixture_a.workspace_id,
+        fixture_a.project_id,
+        "qvoxpara",
+    )
+    .await;
+    let hits_b = search_hits(
+        &meili_b,
+        fixture_b.workspace_id,
+        fixture_b.project_id,
+        "qvoxparb",
+    )
+    .await;
+    assert_eq!(hits_a.len(), 3, "A must contain its own batch: {hits_a:?}");
+    assert_eq!(hits_b.len(), 3, "B must contain its own batch: {hits_b:?}");
     assert!(
-        !search_hits(
+        search_hits(
             &meili_a,
             fixture_b.workspace_id,
             fixture_b.project_id,
-            &fixture_b.token
+            "qvoxparb"
         )
         .await
-        .iter()
-        .any(|h| h.contains(&fixture_b.token)),
-        "index A must not contain B's document"
+        .is_empty(),
+        "index A must not contain B's documents"
     );
     assert!(
-        !search_hits(
+        search_hits(
             &meili_b,
             fixture_a.workspace_id,
             fixture_a.project_id,
-            &fixture_a.token
+            "qvoxpara"
         )
         .await
-        .iter()
-        .any(|h| h.contains(&fixture_a.token)),
-        "index B must not contain A's document"
+        .is_empty(),
+        "index B must not contain A's documents"
     );
 
     app_a.close().await;
     app_b.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn batch_coalesce_keeps_subtree_after_move_then_update() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxcoal").await;
+
+    let parent_id = Uuid::now_v7();
+    let child_id = Uuid::now_v7();
+    let new_project = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.projects (id, workspace_id, key, name, visibility, created_by)
+        VALUES ($1, $2, 'CD', 'Moved', 'private', $3)
+        "#,
+    )
+    .bind(new_project)
+    .bind(fixture.workspace_id)
+    .bind(fixture.owner_id)
+    .execute(&admin)
+    .await
+    .expect("new project");
+
+    let parent_path = path_label(parent_id);
+    insert_project_document(
+        &admin,
+        fixture.workspace_id,
+        fixture.project_id,
+        fixture.owner_id,
+        parent_id,
+        None,
+        &parent_path,
+        "coal-parent",
+        20,
+    )
+    .await;
+    insert_project_document(
+        &admin,
+        fixture.workspace_id,
+        fixture.project_id,
+        fixture.owner_id,
+        child_id,
+        Some(parent_id),
+        &format!("{parent_path}.{}", path_label(child_id)),
+        "coal-child",
+        21,
+    )
+    .await;
+
+    let consumer = search_index_consumer(meili.clone());
+    let created = [
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "document.created",
+            "document",
+            parent_id,
+        )
+        .await,
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "document.created",
+            "document",
+            child_id,
+        )
+        .await,
+    ];
+    let (done, err) = consumer.deliver_batch(&app, Uuid::now_v7(), &created).await;
+    assert_eq!(done, 2);
+    assert!(err.is_none(), "{err:?}");
+
+    sqlx::query("UPDATE fvoci.documents SET project_id = $1 WHERE id = ANY($2)")
+        .bind(new_project)
+        .bind([parent_id, child_id])
+        .execute(&admin)
+        .await
+        .expect("move subtree in pg");
+
+    let mut moved = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.moved",
+        "document",
+        parent_id,
+    )
+    .await;
+    moved.payload = json!({
+        "oldProjectId": fixture.project_id.to_string(),
+        "newProjectId": new_project.to_string(),
+    });
+    let mut updated = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.updated",
+        "document",
+        parent_id,
+    )
+    .await;
+    updated.payload = json!({ "collab": true });
+    let (done, err) = consumer
+        .deliver_batch(&app, Uuid::now_v7(), &[moved, updated])
+        .await;
+    assert_eq!(done, 2);
+    assert!(err.is_none(), "{err:?}");
+
+    let child_doc = meili_doc(
+        &meili,
+        &search_source_id(SearchSourceKind::Document, &child_id.to_string(), None),
+    )
+    .await;
+    assert_eq!(
+        child_doc.get("projectId").and_then(Value::as_str),
+        Some(new_project.to_string().as_str()),
+        "subtree refresh must follow a later body-only update: {child_doc}"
+    );
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn batch_coalesce_title_then_collab_refreshes_comments() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxtitle").await;
+
+    let consumer = search_index_consumer(meili.clone());
+    let created = [
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "document.created",
+            "document",
+            fixture.wiki_id,
+        )
+        .await,
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "comment.created",
+            "comment",
+            fixture.comment_id,
+        )
+        .await,
+    ];
+    let (done, err) = consumer.deliver_batch(&app, Uuid::now_v7(), &created).await;
+    assert_eq!(done, 2);
+    assert!(err.is_none());
+
+    sqlx::query("UPDATE fvoci.documents SET title = 'qvoxtitle-new' WHERE id = $1")
+        .bind(fixture.wiki_id)
+        .execute(&admin)
+        .await
+        .expect("rename");
+
+    let mut titled = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.updated",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+    titled.payload = json!({ "title": "qvoxtitle-new" });
+    let mut collab = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.collab_update_appended",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+    collab.payload = json!({ "seq": 1 });
+    let (done, err) = consumer
+        .deliver_batch(&app, Uuid::now_v7(), &[titled, collab])
+        .await;
+    assert_eq!(done, 2);
+    assert!(err.is_none(), "{err:?}");
+
+    let comment = meili_doc(
+        &meili,
+        &search_source_id(
+            SearchSourceKind::Comment,
+            &fixture.comment_id.to_string(),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        comment.get("title").and_then(Value::as_str),
+        Some("qvoxtitle-new"),
+        "title change must not be demoted to body-only by a later collab event: {comment}"
+    );
+
+    app.close().await;
     admin.close().await;
     harness.cleanup().await;
 }

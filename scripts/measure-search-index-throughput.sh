@@ -4,7 +4,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="$(openssl rand -hex 8)"
-TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fvoci-meili-bench-${RUN_ID}}"
+CREATED_TARGET=0
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+  TARGET_DIR="/tmp/fvoci-meili-bench-${RUN_ID}"
+  CREATED_TARGET=1
+else
+  TARGET_DIR="$CARGO_TARGET_DIR"
+fi
 export CARGO_TARGET_DIR="$TARGET_DIR"
 
 now_ms() {
@@ -104,7 +110,9 @@ measure_rust_path() {
 }
 
 cleanup_target() {
-  rm -rf "$TARGET_DIR"
+  if [[ "$CREATED_TARGET" == 1 ]]; then
+    rm -rf "$TARGET_DIR"
+  fi
 }
 trap cleanup_target EXIT
 
