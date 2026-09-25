@@ -1,5 +1,6 @@
 //! Outbox search indexer: state-based refresh under a per-workspace session lock.
 
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,16 +18,17 @@ use crate::db::search_index::{
 };
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
 use crate::search::meili::{
-    delete_all_meili_documents, delete_meili_by_filter, delete_meili_sources, ensure_meili_index,
-    meili_eq, search_source_id, upsert_meili_sources, MeiliConfig, MeiliError, SearchSource,
-    SearchSourceKind,
+    delete_all_meili_documents, delete_meili_by_filter, delete_meili_sources,
+    enqueue_delete_meili_by_filter, enqueue_delete_meili_sources, enqueue_upsert_meili_sources,
+    ensure_meili_index, meili_eq, search_source_id, upsert_meili_sources, wait_meili_tasks,
+    MeiliConfig, MeiliError, SearchSource, SearchSourceKind,
 };
 use crate::search::text::index_document_text;
 
 pub const SEARCH_INDEX_CONSUMER: &str = "search-index";
 const REBUILD_PAGE: i64 = 200;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SearchResourceRef {
     pub kind: SearchSourceKind,
     pub workspace_id: Uuid,
@@ -52,14 +54,6 @@ impl OutboxConsumer for SearchIndexConsumer {
         DeliveryMode::External
     }
 
-    fn external_batch_meili_writes(&self) -> bool {
-        true
-    }
-
-    fn meili_batch_flush_config(&self) -> Option<MeiliConfig> {
-        Some(self.meili.clone())
-    }
-
     fn deliver<'a>(
         &'a self,
         pool: &'a PgPool,
@@ -72,6 +66,332 @@ impl OutboxConsumer for SearchIndexConsumer {
                 .map_err(|err| OutboxProcessError::Delivery(err.to_string()))
         })
     }
+
+    fn deliver_batch<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        _lease_owner: Uuid,
+        events: &'a [OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            match deliver_search_index_batch(pool, &self.meili, events).await {
+                Ok(()) => (events.len(), None),
+                Err(err) => (0, Some(OutboxProcessError::Delivery(err.to_string()))),
+            }
+        })
+    }
+}
+
+struct MeiliBatchSink<'a> {
+    meili: &'a MeiliConfig,
+    uids: Vec<u64>,
+}
+
+impl<'a> MeiliBatchSink<'a> {
+    async fn upsert_sources(&mut self, docs: &[SearchSource]) -> Result<(), SearchIndexError> {
+        let new = enqueue_upsert_meili_sources(self.meili, docs).await?;
+        self.uids.extend(new);
+        Ok(())
+    }
+
+    async fn delete_sources(&mut self, ids: &[String]) -> Result<(), SearchIndexError> {
+        let uid = enqueue_delete_meili_sources(self.meili, ids).await?;
+        if uid != 0 {
+            self.uids.push(uid);
+        }
+        Ok(())
+    }
+
+    async fn delete_by_filter(&mut self, filter: &str) -> Result<(), SearchIndexError> {
+        let uid = enqueue_delete_meili_by_filter(self.meili, filter).await?;
+        self.uids.push(uid);
+        Ok(())
+    }
+
+    async fn finish(self) -> Result<(), SearchIndexError> {
+        wait_meili_tasks(self.meili, &self.uids).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BatchCoalesceKey {
+    WorkspaceDelete(Uuid),
+    ProjectLifecycle {
+        workspace_id: Uuid,
+        project_id: Uuid,
+    },
+    Resource(SearchResourceRef),
+}
+
+fn batch_coalesce_key(event: &OutboxEvent) -> Option<BatchCoalesceKey> {
+    if event.verb == "workspace.deleted" {
+        return event.workspace_id.map(BatchCoalesceKey::WorkspaceDelete);
+    }
+    if event.verb == "project.deleted" || event.verb == "project.restored" {
+        return event
+            .workspace_id
+            .zip(event.target_id)
+            .map(|(ws, project)| BatchCoalesceKey::ProjectLifecycle {
+                workspace_id: ws,
+                project_id: project,
+            });
+    }
+    resource_from_event(event).map(BatchCoalesceKey::Resource)
+}
+
+fn coalesce_search_index_events(events: &[OutboxEvent]) -> Vec<OutboxEvent> {
+    let mut order: Vec<BatchCoalesceKey> = Vec::new();
+    let mut latest: HashMap<BatchCoalesceKey, OutboxEvent> = HashMap::new();
+    for event in events {
+        let Some(key) = batch_coalesce_key(event) else {
+            continue;
+        };
+        if !latest.contains_key(&key) {
+            order.push(key.clone());
+        }
+        latest.insert(key, event.clone());
+    }
+
+    let deleted_workspaces: HashSet<Uuid> = order
+        .iter()
+        .filter_map(|key| match key {
+            BatchCoalesceKey::WorkspaceDelete(ws) => Some(*ws),
+            _ => None,
+        })
+        .collect();
+
+    order
+        .into_iter()
+        .filter(|key| match key {
+            BatchCoalesceKey::WorkspaceDelete(_) => true,
+            BatchCoalesceKey::ProjectLifecycle { workspace_id, .. } => {
+                !deleted_workspaces.contains(workspace_id)
+            }
+            BatchCoalesceKey::Resource(resource) => {
+                !deleted_workspaces.contains(&resource.workspace_id)
+            }
+        })
+        .filter_map(|key| latest.get(&key).cloned())
+        .collect()
+}
+
+async fn deliver_search_index_batch(
+    pool: &PgPool,
+    meili: &MeiliConfig,
+    events: &[OutboxEvent],
+) -> Result<(), SearchIndexError> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    ensure_meili_index(meili).await?;
+    let coalesced = coalesce_search_index_events(events);
+    let mut sink = MeiliBatchSink {
+        meili,
+        uids: Vec::new(),
+    };
+    for event in &coalesced {
+        apply_search_index_event_batch(pool, &mut sink, event).await?;
+    }
+    sink.finish().await?;
+    Ok(())
+}
+
+async fn apply_search_index_event_batch(
+    pool: &PgPool,
+    sink: &mut MeiliBatchSink<'_>,
+    event: &OutboxEvent,
+) -> Result<(), SearchIndexError> {
+    if event.verb == "workspace.deleted" {
+        if let Some(workspace_id) = event.workspace_id {
+            with_workspace_lock(pool, workspace_id, || async {
+                sink.delete_by_filter(&meili_eq("workspaceId", &workspace_id.to_string())?)
+                    .await?;
+                Ok(())
+            })
+            .await?;
+        }
+        return Ok(());
+    }
+    if event.verb == "project.deleted" || event.verb == "project.restored" {
+        if let (Some(workspace_id), Some(project_id)) = (event.workspace_id, event.target_id) {
+            with_workspace_lock(pool, workspace_id, || async {
+                sink.delete_by_filter(&meili_eq("projectId", &project_id.to_string())?)
+                    .await?;
+                upsert_pages_batch(
+                    pool,
+                    sink,
+                    workspace_id,
+                    SourceScope {
+                        project_id: Some(project_id),
+                        ..SourceScope::default()
+                    },
+                    None,
+                )
+                .await?;
+                Ok(())
+            })
+            .await?;
+            return Ok(());
+        }
+    }
+    if let Some(resource) = resource_from_event(event) {
+        if resource.kind == SearchSourceKind::Document && document_body_only(event) {
+            refresh_document_body_only_batch(pool, sink, resource).await?;
+        } else {
+            refresh_search_resource_batch(pool, sink, resource, moved_across_project(event))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn upsert_pages_batch(
+    pool: &PgPool,
+    sink: &mut MeiliBatchSink<'_>,
+    workspace_id: Uuid,
+    scope: SourceScope,
+    parent: Option<SearchResourceRef>,
+) -> Result<&'static str, SearchIndexError> {
+    let mut after: Option<SearchIndexCursor> = None;
+    let mut any = false;
+    loop {
+        let batch = list_sources(
+            pool,
+            workspace_id,
+            after.as_ref(),
+            related_page_limit(),
+            &scope,
+        )
+        .await?;
+        if batch.is_empty() {
+            return Ok(if any { "ok" } else { "empty" });
+        }
+        any = true;
+        let docs: Vec<SearchSource> = batch.iter().map(to_meili).collect();
+        sink.upsert_sources(&docs).await?;
+        if let Some(parent) = parent {
+            let live = load_sources(pool, parent.workspace_id, parent.kind, parent.id).await?;
+            if live.is_empty() {
+                delete_absent_batch(sink, parent).await?;
+                return Ok("gone");
+            }
+        }
+        let last = batch.last().expect("non-empty");
+        if (batch.len() as i64) < related_page_limit() {
+            return Ok("ok");
+        }
+        after = Some(cursor_of(last));
+    }
+}
+
+async fn delete_absent_batch(
+    sink: &mut MeiliBatchSink<'_>,
+    resource: SearchResourceRef,
+) -> Result<(), SearchIndexError> {
+    if resource.kind == SearchSourceKind::Comment {
+        sink.delete_sources(&[search_source_id(
+            SearchSourceKind::Comment,
+            &resource.id.to_string(),
+            None,
+        )])
+        .await?;
+        return Ok(());
+    }
+    sink.delete_by_filter(&absence_filter(resource)?).await?;
+    Ok(())
+}
+
+async fn refresh_document_body_only_batch(
+    pool: &PgPool,
+    sink: &mut MeiliBatchSink<'_>,
+    resource: SearchResourceRef,
+) -> Result<(), SearchIndexError> {
+    with_workspace_lock(pool, resource.workspace_id, || async {
+        let current = load_sources(
+            pool,
+            resource.workspace_id,
+            SearchSourceKind::Document,
+            resource.id,
+        )
+        .await?;
+        if current.is_empty() {
+            delete_absent_batch(sink, resource).await?;
+            return Ok(());
+        }
+        let docs: Vec<SearchSource> = current.iter().map(to_meili).collect();
+        sink.upsert_sources(&docs).await?;
+        Ok(())
+    })
+    .await
+}
+
+async fn refresh_search_resource_batch(
+    pool: &PgPool,
+    sink: &mut MeiliBatchSink<'_>,
+    resource: SearchResourceRef,
+    subtree: bool,
+) -> Result<(), SearchIndexError> {
+    with_workspace_lock(pool, resource.workspace_id, || async {
+        if resource.kind == SearchSourceKind::Document || resource.kind == SearchSourceKind::Task {
+            let scope = if resource.kind == SearchSourceKind::Document {
+                SourceScope {
+                    document_id: Some(resource.id),
+                    subtree,
+                    ..SourceScope::default()
+                }
+            } else {
+                SourceScope {
+                    task_id: Some(resource.id),
+                    ..SourceScope::default()
+                }
+            };
+            let outcome =
+                upsert_pages_batch(pool, sink, resource.workspace_id, scope, Some(resource))
+                    .await?;
+            if outcome == "empty" {
+                delete_absent_batch(sink, resource).await?;
+            }
+            return Ok(());
+        }
+        let current = load_sources(pool, resource.workspace_id, resource.kind, resource.id).await?;
+        if current.is_empty() {
+            delete_absent_batch(sink, resource).await?;
+            return Ok(());
+        }
+        let docs: Vec<SearchSource> = current.iter().map(to_meili).collect();
+        sink.upsert_sources(&docs).await?;
+        if resource.kind == SearchSourceKind::Attachment {
+            let chunks: Vec<i32> = current.iter().filter_map(|row| row.chunk_no).collect();
+            if chunks.iter().any(|n| *n < 0) {
+                return Err(SearchIndexError::Other(
+                    "invalid attachment search chunk number".into(),
+                ));
+            }
+            let obsolete = if chunks.is_empty() {
+                "chunkNo IS NOT NULL".to_string()
+            } else {
+                let list = chunks
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("(chunkNo NOT IN [{list}] OR chunkNo IS NULL)")
+            };
+            let filter = format!(
+                "{} AND {} AND {obsolete}",
+                meili_eq("workspaceId", &resource.workspace_id.to_string())?,
+                meili_eq("attachmentId", &resource.id.to_string())?,
+            );
+            sink.delete_by_filter(&filter).await?;
+        }
+        let again = load_sources(pool, resource.workspace_id, resource.kind, resource.id).await?;
+        if again.is_empty() {
+            delete_absent_batch(sink, resource).await?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[derive(Debug, thiserror::Error)]

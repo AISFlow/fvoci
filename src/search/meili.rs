@@ -48,46 +48,6 @@ static SOURCE_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static ENSURE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-/// Deferred Meili task waits: CE runs one global queue, so waiting only on the
-/// last enqueued task in a batch preserves ordering while avoiding N× latency.
-#[derive(Debug, Default)]
-struct MeiliWriteBatch {
-    pending: Vec<u64>,
-}
-
-impl MeiliWriteBatch {
-    fn record(&mut self, task_uid: u64) {
-        self.pending.push(task_uid);
-    }
-
-    async fn flush(&mut self, config: &MeiliConfig) -> Result<(), MeiliError> {
-        if let Some(&last) = self.pending.last() {
-            wait_meili_task(config, last).await?;
-        }
-        self.pending.clear();
-        Ok(())
-    }
-}
-
-static MEILI_WRITE_BATCH: LazyLock<tokio::sync::Mutex<Option<MeiliWriteBatch>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(None));
-
-pub async fn begin_meili_write_batch() {
-    *MEILI_WRITE_BATCH.lock().await = Some(MeiliWriteBatch::default());
-}
-
-pub async fn finish_meili_write_batch(config: &MeiliConfig) -> Result<(), MeiliError> {
-    let batch = MEILI_WRITE_BATCH.lock().await.take();
-    if let Some(mut batch) = batch {
-        batch.flush(config).await?;
-    }
-    Ok(())
-}
-
-async fn meili_write_batch_active() -> bool {
-    MEILI_WRITE_BATCH.lock().await.is_some()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeiliError {
     FilterAttr,
@@ -194,7 +154,7 @@ impl MeiliConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SearchSourceKind {
     Document,
@@ -523,18 +483,17 @@ async fn wait_meili_task_inner(
     }
 }
 
-async fn record_meili_task(config: &MeiliConfig, task_uid: u64) -> Result<(), MeiliError> {
-    if meili_write_batch_active().await {
-        MEILI_WRITE_BATCH
-            .lock()
-            .await
-            .as_mut()
-            .expect("meili write batch")
-            .record(task_uid);
-        Ok(())
-    } else {
-        wait_meili_task(config, task_uid).await
+async fn enqueue_meili(
+    config: &MeiliConfig,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<u64, MeiliError> {
+    let got = meili_request(config, method, path, body).await?;
+    if got.status != 200 && got.status != 201 && got.status != 202 {
+        return Err(MeiliError::Http(got.status));
     }
+    task_uid_of(&got.json)
 }
 
 async fn enqueue_and_wait(
@@ -543,11 +502,67 @@ async fn enqueue_and_wait(
     path: &str,
     body: Option<&Value>,
 ) -> Result<(), MeiliError> {
-    let got = meili_request(config, method, path, body).await?;
-    if got.status != 200 && got.status != 201 && got.status != 202 {
-        return Err(MeiliError::Http(got.status));
+    let uid = enqueue_meili(config, method, path, body).await?;
+    wait_meili_task(config, uid).await
+}
+
+async fn wait_meili_tasks_inner(config: &MeiliConfig, uids: &[u64]) -> Result<(), MeiliError> {
+    if uids.is_empty() {
+        return Ok(());
     }
-    record_meili_task(config, task_uid_of(&got.json)?).await
+    let deadline = Instant::now() + Duration::from_millis(MEILI_OP_TIMEOUT_MS);
+    let uids_param = uids
+        .iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut poll_ms = TASK_POLL_MIN_MS;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(MeiliError::Timeout);
+        }
+        let got = meili_request(
+            config,
+            reqwest::Method::GET,
+            &format!("/tasks?uids={uids_param}"),
+            None,
+        )
+        .await?;
+        if got.status != 200 {
+            return Err(MeiliError::Http(got.status));
+        }
+        let results = got
+            .json
+            .get("results")
+            .and_then(Value::as_array)
+            .ok_or(MeiliError::Protocol)?;
+        if results.len() != uids.len() {
+            return Err(MeiliError::Protocol);
+        }
+        let mut pending = false;
+        for task in results {
+            let status = task.get("status").and_then(Value::as_str).unwrap_or("");
+            match status {
+                "succeeded" => {}
+                "failed" | "canceled" => {
+                    let code = task
+                        .get("error")
+                        .and_then(|e| e.get("code"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let task_uid = task.get("uid").and_then(Value::as_u64).unwrap_or(0);
+                    tracing::warn!(task_uid, code, "meili task {status}");
+                    return Err(MeiliError::TaskFailed);
+                }
+                _ => pending = true,
+            }
+        }
+        if !pending {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+        poll_ms = (poll_ms * 2).min(TASK_POLL_MAX_MS);
+    }
 }
 
 async fn create_index_if_missing(config: &MeiliConfig) -> Result<(), MeiliError> {
@@ -591,16 +606,17 @@ async fn ensure_meili_index_op(config: &MeiliConfig) -> Result<(), MeiliError> {
     Ok(())
 }
 
-async fn upsert_meili_sources_op(
+async fn upsert_meili_sources_enqueue(
     config: &MeiliConfig,
     docs: &[SearchSource],
-) -> Result<(), MeiliError> {
+) -> Result<Vec<u64>, MeiliError> {
     if docs.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let encoded: Vec<Value> = docs.iter().map(meili_document).collect::<Result<_, _>>()?;
     let mut batch: Vec<Value> = Vec::new();
     let mut bytes = 2usize;
+    let mut uids = Vec::new();
     for doc in encoded {
         let item = serde_json::to_vec(&doc)
             .map_err(|_| MeiliError::Protocol)?
@@ -610,28 +626,38 @@ async fn upsert_meili_sources_op(
         }
         let extra = item + if batch.is_empty() { 0 } else { 1 };
         if !batch.is_empty() && bytes.saturating_add(extra) > MEILI_UPSERT_MAX_BYTES {
-            enqueue_and_wait(
+            let uid = enqueue_meili(
                 config,
                 reqwest::Method::POST,
                 &config.index_path("/documents"),
                 Some(&Value::Array(std::mem::take(&mut batch))),
             )
             .await?;
+            uids.push(uid);
             bytes = 2;
         }
         batch.push(doc);
         bytes = bytes.saturating_add(extra);
     }
     if !batch.is_empty() {
-        enqueue_and_wait(
+        let uid = enqueue_meili(
             config,
             reqwest::Method::POST,
             &config.index_path("/documents"),
             Some(&Value::Array(batch)),
         )
         .await?;
+        uids.push(uid);
     }
-    Ok(())
+    Ok(uids)
+}
+
+async fn upsert_meili_sources_op(
+    config: &MeiliConfig,
+    docs: &[SearchSource],
+) -> Result<(), MeiliError> {
+    let uids = upsert_meili_sources_enqueue(config, docs).await?;
+    wait_meili_tasks_inner(config, &uids).await
 }
 
 async fn delete_meili_sources_op(config: &MeiliConfig, ids: &[String]) -> Result<(), MeiliError> {
@@ -1108,6 +1134,56 @@ pub async fn upsert_meili_sources(
     docs: &[SearchSource],
 ) -> Result<(), MeiliError> {
     with_op_deadline(upsert_meili_sources_op(config, docs)).await
+}
+
+pub async fn enqueue_upsert_meili_sources(
+    config: &MeiliConfig,
+    docs: &[SearchSource],
+) -> Result<Vec<u64>, MeiliError> {
+    with_op_deadline(upsert_meili_sources_enqueue(config, docs)).await
+}
+
+pub async fn enqueue_delete_meili_sources(
+    config: &MeiliConfig,
+    ids: &[String],
+) -> Result<u64, MeiliError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    with_op_deadline(enqueue_meili(
+        config,
+        reqwest::Method::POST,
+        &config.index_path("/documents/delete-batch"),
+        Some(&json!(ids)),
+    ))
+    .await
+}
+
+pub async fn enqueue_delete_meili_by_filter(
+    config: &MeiliConfig,
+    filter: &str,
+) -> Result<u64, MeiliError> {
+    with_op_deadline(enqueue_meili(
+        config,
+        reqwest::Method::POST,
+        &config.index_path("/documents/delete"),
+        Some(&json!({ "filter": filter })),
+    ))
+    .await
+}
+
+pub async fn enqueue_delete_all_meili_documents(config: &MeiliConfig) -> Result<u64, MeiliError> {
+    with_op_deadline(enqueue_meili(
+        config,
+        reqwest::Method::DELETE,
+        &config.index_path("/documents"),
+        None,
+    ))
+    .await
+}
+
+pub async fn wait_meili_tasks(config: &MeiliConfig, uids: &[u64]) -> Result<(), MeiliError> {
+    with_op_deadline(wait_meili_tasks_inner(config, uids)).await
 }
 
 pub async fn search_meili(

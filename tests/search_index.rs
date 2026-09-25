@@ -6,8 +6,8 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use fvoci_server::db::attachment_extract::{finish_extract, ExtractClaim, FinishExtract};
+use fvoci_server::db::outbox::is_processed;
 use fvoci_server::db::outbox::{fetch_cursor, fetch_failure_state, OutboxEvent};
-use fvoci_server::db::outbox::{is_processed, mark_processed};
 use fvoci_server::db::{migrate, pool};
 use fvoci_server::outbox::spawn_outbox_dispatcher;
 use fvoci_server::outbox::OutboxDispatcherSettings;
@@ -17,9 +17,8 @@ use fvoci_server::search::index::{
     SEARCH_INDEX_CONSUMER,
 };
 use fvoci_server::search::meili::{
-    begin_meili_write_batch, delete_all_meili_documents, ensure_meili_index,
-    finish_meili_write_batch, search_meili, search_source_id, MeiliConfig, MeiliSearchInput,
-    MeiliSearchScope, SearchSourceKind,
+    delete_all_meili_documents, ensure_meili_index, search_meili, search_source_id, MeiliConfig,
+    MeiliSearchInput, MeiliSearchScope, SearchSourceKind,
 };
 use rand::RngCore;
 use serde_json::{json, Value};
@@ -30,8 +29,8 @@ use uuid::Uuid;
 
 /// One Meili CE + one Postgres accept these tests; running them in parallel
 /// makes `meili_down_retries_*` miss its 15s dispatcher wait while other
-/// cases create indexes and upsert. Hold this for the whole TestDb lifetime
-/// so the wait still matches CI without raising timeouts.
+/// cases create indexes and upsert. Kept after removing the process-wide Meili
+/// write-batch static: shared CE/Postgres contention is unchanged.
 static SEARCH_INDEX_EXCLUSIVE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 struct TestDb {
@@ -1206,26 +1205,18 @@ async fn burst_of_events_converges_with_one_meili_wait() {
         );
     }
 
+    let consumer = search_index_consumer(meili.clone());
     let started = std::time::Instant::now();
-    begin_meili_write_batch().await;
-    for event in &events {
-        process_search_index_event(&app, &meili, event)
-            .await
-            .expect("index");
-    }
-    finish_meili_write_batch(&meili).await.expect("flush");
+    let (done, err) = consumer.deliver_batch(&app, Uuid::now_v7(), &events).await;
     let elapsed = started.elapsed();
+    assert_eq!(done, n);
+    assert!(err.is_none(), "batch delivery failed: {:?}", err);
     assert!(
         elapsed < Duration::from_secs(6),
         "burst took {:?}; expected one Meili wait chain",
         elapsed
     );
 
-    for event in &events {
-        mark_processed(&app, SEARCH_INDEX_CONSUMER, event.id)
-            .await
-            .expect("mark");
-    }
     let hits = search_hits(&meili, fixture.workspace_id, fixture.project_id, "burst-").await;
     assert_eq!(hits.len(), n);
 
@@ -1235,7 +1226,7 @@ async fn burst_of_events_converges_with_one_meili_wait() {
 }
 
 #[tokio::test]
-async fn failed_meili_flush_never_marks_events_processed() {
+async fn failed_middle_batch_event_never_marks_processed_and_retries_converge() {
     let harness = TestDb::bootstrap().await;
     let admin = PgPoolOptions::new()
         .max_connections(4)
@@ -1243,34 +1234,264 @@ async fn failed_meili_flush_never_marks_events_processed() {
         .await
         .expect("admin");
     let app = pool::connect_app(&harness.app_url).await.expect("app");
-    let good = test_meili();
-    ensure_meili_index(&good).await.expect("ensure");
-    let fixture = seed(&admin, "qvoxfail").await;
-    let event = insert_event(
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxmid").await;
+
+    let good_a = Uuid::now_v7();
+    let bad_id = Uuid::now_v7();
+    let good_c = Uuid::now_v7();
+    let huge = "x".repeat(9 * 1024 * 1024);
+    for (doc_id, title, number) in [
+        (good_a, "mid-a", 2),
+        (bad_id, huge.as_str(), 3),
+        (good_c, "mid-c", 4),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.documents (
+                id, workspace_id, title, path, parent_id, sort_key, project_id, number,
+                status, schema_version, text, chosung, created_by, content_json, kind
+            ) VALUES (
+                $1, $2, $3, $4, NULL, 'V', NULL, $5, 'published', 1, $3, '', $6,
+                '{"type":"doc","content":[]}'::jsonb, 'wiki'
+            )
+            "#,
+        )
+        .bind(doc_id)
+        .bind(fixture.workspace_id)
+        .bind(title)
+        .bind(path_label(doc_id))
+        .bind(number)
+        .bind(fixture.owner_id)
+        .execute(&admin)
+        .await
+        .expect("doc");
+    }
+    let events = [
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "document.created",
+            "document",
+            good_a,
+        )
+        .await,
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "document.created",
+            "document",
+            bad_id,
+        )
+        .await,
+        insert_event(
+            &admin,
+            fixture.workspace_id,
+            "document.created",
+            "document",
+            good_c,
+        )
+        .await,
+    ];
+
+    let consumer = search_index_consumer(meili.clone());
+    let owner = Uuid::now_v7();
+    let (done, err) = consumer.deliver_batch(&app, owner, &events).await;
+    assert_eq!(done, 0, "oversized middle doc must fail the whole batch");
+    assert!(err.is_some(), "batch must return an error");
+
+    for event in &events {
+        assert!(
+            !is_processed(&app, SEARCH_INDEX_CONSUMER, event.id)
+                .await
+                .expect("processed"),
+            "failed batch must not mark event {} processed",
+            event.id
+        );
+    }
+
+    sqlx::query("UPDATE fvoci.documents SET title = $1, text = $1 WHERE id = $2")
+        .bind("mid-b-fixed")
+        .bind(bad_id)
+        .execute(&admin)
+        .await
+        .expect("fix middle doc");
+
+    let (done, err) = consumer.deliver_batch(&app, owner, &events).await;
+    assert_eq!(done, events.len());
+    assert!(err.is_none(), "fixed batch must succeed: {:?}", err);
+
+    let hits = search_hits(&meili, fixture.workspace_id, fixture.project_id, "mid-").await;
+    assert_eq!(hits.len(), 3);
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn parallel_dispatchers_do_not_cross_talk_in_one_process() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app_a = pool::connect_app(&harness.app_url).await.expect("app a");
+    let app_b = pool::connect_app(&harness.app_url).await.expect("app b");
+    let meili_a = test_meili();
+    let meili_b = test_meili();
+    ensure_meili_index(&meili_a).await.expect("ensure a");
+    ensure_meili_index(&meili_b).await.expect("ensure b");
+    let fixture_a = seed(&admin, "qvoxpara").await;
+    let fixture_b = seed(&admin, "qvoxparb").await;
+
+    let event_a = insert_event(
         &admin,
-        fixture.workspace_id,
+        fixture_a.workspace_id,
         "document.created",
         "document",
-        fixture.wiki_id,
+        fixture_a.wiki_id,
+    )
+    .await;
+    let event_b = insert_event(
+        &admin,
+        fixture_b.workspace_id,
+        "document.created",
+        "document",
+        fixture_b.wiki_id,
     )
     .await;
 
-    let bad = MeiliConfig::new(
-        "http://127.0.0.1:57998".into(),
-        "test-key-at-least-16".into(),
-        good.index_uid.clone(),
+    let consumer_a = search_index_consumer(meili_a.clone());
+    let consumer_b = search_index_consumer(meili_b.clone());
+    let batch_a = [event_a];
+    let batch_b = [event_b];
+    let (res_a, res_b) = tokio::join!(
+        consumer_a.deliver_batch(&app_a, Uuid::now_v7(), &batch_a),
+        consumer_b.deliver_batch(&app_b, Uuid::now_v7(), &batch_b),
     );
-    begin_meili_write_batch().await;
-    let err = process_search_index_event(&app, &bad, &event).await;
-    assert!(err.is_err(), "unreachable meili should fail enqueue");
-    let _ = finish_meili_write_batch(&bad).await;
+    assert_eq!(res_a.0, 1);
+    assert!(res_a.1.is_none());
+    assert_eq!(res_b.0, 1);
+    assert!(res_b.1.is_none());
 
     assert!(
-        !is_processed(&app, SEARCH_INDEX_CONSUMER, event.id)
-            .await
-            .expect("processed check"),
-        "failed delivery must not mark processed"
+        !search_hits(
+            &meili_a,
+            fixture_b.workspace_id,
+            fixture_b.project_id,
+            &fixture_b.token
+        )
+        .await
+        .iter()
+        .any(|h| h.contains(&fixture_b.token)),
+        "index A must not contain B's document"
     );
+    assert!(
+        !search_hits(
+            &meili_b,
+            fixture_a.workspace_id,
+            fixture_a.project_id,
+            &fixture_a.token
+        )
+        .await
+        .iter()
+        .any(|h| h.contains(&fixture_a.token)),
+        "index B must not contain A's document"
+    );
+
+    app_a.close().await;
+    app_b.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn deliver_batch_respects_lease_equal_to_meili_timeout() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure");
+    let fixture = seed(&admin, "qvoxlease").await;
+
+    let mut events = Vec::new();
+    for i in 0..3 {
+        let doc_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.documents (
+                id, workspace_id, title, path, parent_id, sort_key, project_id, number,
+                status, schema_version, text, chosung, created_by, content_json, kind
+            ) VALUES (
+                $1, $2, $3, $4, NULL, 'V', NULL, $5, 'published', 1, $3, '', $6,
+                '{"type":"doc","content":[]}'::jsonb, 'wiki'
+            )
+            "#,
+        )
+        .bind(doc_id)
+        .bind(fixture.workspace_id)
+        .bind(format!("lease-{i}"))
+        .bind(path_label(doc_id))
+        .bind(i + 2)
+        .bind(fixture.owner_id)
+        .execute(&admin)
+        .await
+        .expect("doc");
+        events.push(
+            insert_event(
+                &admin,
+                fixture.workspace_id,
+                "document.created",
+                "document",
+                doc_id,
+            )
+            .await,
+        );
+    }
+
+    let consumer = search_index_consumer(meili.clone());
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(30),
+            batch_limit: 10,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![consumer],
+    )
+    .expect("dispatcher");
+
+    wait_until(
+        Duration::from_secs(20),
+        "lease-bound batch delivered",
+        || {
+            let pool = app.clone();
+            let ids = events.iter().map(|e| e.id).collect::<Vec<_>>();
+            Box::pin(async move {
+                for id in ids {
+                    if !is_processed(&pool, SEARCH_INDEX_CONSUMER, id)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+        },
+    )
+    .await;
+
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
 
     app.close().await;
     admin.close().await;
@@ -1340,14 +1561,13 @@ async fn throughput_probe() {
             .await,
         );
     }
+    let consumer = search_index_consumer(meili.clone());
     let t2 = std::time::Instant::now();
-    begin_meili_write_batch().await;
-    for event in &batch_events {
-        process_search_index_event(&app, &meili, event)
-            .await
-            .expect("batch index");
-    }
-    finish_meili_write_batch(&meili).await.expect("flush");
+    let (done, err) = consumer
+        .deliver_batch(&app, Uuid::now_v7(), &batch_events)
+        .await;
+    assert_eq!(done, batch_events.len());
+    assert!(err.is_none());
     let batch_ms = t2.elapsed().as_millis();
 
     println!(

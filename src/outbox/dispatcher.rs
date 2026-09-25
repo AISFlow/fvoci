@@ -7,7 +7,7 @@ use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::db::outbox::{
@@ -16,6 +16,7 @@ use crate::db::outbox::{
     record_failure, release_consumer, OutboxEvent, OUTBOX_DEFAULT_BATCH, OUTBOX_FAILURE_BACKOFF_MS,
     OUTBOX_LEASE_SECS, OUTBOX_MAX_ATTEMPTS,
 };
+use crate::search::meili::MEILI_OP_TIMEOUT_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryMode {
@@ -40,17 +41,6 @@ pub trait OutboxConsumer: Send + Sync {
         OUTBOX_MAX_ATTEMPTS
     }
 
-    /// When true, the dispatcher defers Meili task waits across events in one
-    /// read batch and flushes once before marking any of them processed.
-    fn external_batch_meili_writes(&self) -> bool {
-        false
-    }
-
-    /// Meili client used to flush a deferred write batch for this consumer.
-    fn meili_batch_flush_config(&self) -> Option<crate::search::meili::MeiliConfig> {
-        None
-    }
-
     /// Deliver one event. For `PgOnly`, implementations must apply their effect
     /// and advance the cursor in the same transaction via `advance_cursor_tx`.
     /// Retrying an event at or below the cursor is allowed only after a
@@ -64,6 +54,26 @@ pub trait OutboxConsumer: Send + Sync {
         lease_owner: Uuid,
         event: &'a OutboxEvent,
     ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>>;
+
+    /// Deliver a read batch in order. Returns how many leading events are durably
+    /// done (all their external effects confirmed), plus the first error if any.
+    fn deliver_batch<'a>(
+        &'a self,
+        pool: &'a PgPool,
+        lease_owner: Uuid,
+        events: &'a [OutboxEvent],
+    ) -> Pin<Box<dyn Future<Output = (usize, Option<OutboxProcessError>)> + Send + 'a>> {
+        Box::pin(async move {
+            let mut done = 0usize;
+            for event in events {
+                match self.deliver(pool, lease_owner, event).await {
+                    Ok(()) => done += 1,
+                    Err(err) => return (done, Some(err)),
+                }
+            }
+            (done, None)
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,7 +229,7 @@ async fn process_consumer_cycle(
     let events = match read_events(pool, consumer.name(), settings.batch_limit).await {
         Ok(events) => events,
         Err(err) if is_outbox_xid_epoch_mismatch(&err) => {
-            error!(
+            tracing::error!(
                 consumer = consumer.name(),
                 "outbox xid epoch mismatch; refuse to advance; run fvoci-migrate --recover-outbox"
             );
@@ -230,29 +240,77 @@ async fn process_consumer_cycle(
 
     let mut worked = process_retries(settings, pool, consumer, owner, cancel).await?;
 
-    let batch_meili = consumer.delivery_mode() == DeliveryMode::External
-        && consumer.external_batch_meili_writes();
-    let meili_flush = if batch_meili {
-        crate::search::meili::begin_meili_write_batch().await;
-        consumer.meili_batch_flush_config()
+    if consumer.delivery_mode() == DeliveryMode::External {
+        worked |=
+            process_external_events(settings, pool, consumer, owner, cancel, ttl_secs, events)
+                .await?;
     } else {
-        None
-    };
+        for event in events {
+            if cancel.is_cancelled() {
+                let _ = release_consumer(pool, consumer.name(), owner).await?;
+                return Ok(true);
+            }
+            if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
+                return Ok(worked);
+            }
 
-    let mut delivered: Vec<OutboxEvent> = Vec::new();
-    let mut delivery_failed: Option<(OutboxEvent, OutboxProcessError)> = None;
+            let failure = fetch_failure_state(pool, consumer.name(), event.id).await?;
+            if failure.as_ref().is_some_and(|row| row.dead_at.is_some()) {
+                let _ =
+                    advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await?;
+                worked = true;
+                continue;
+            }
+            if failure
+                .as_ref()
+                .is_some_and(|row| row.next_attempt_at > Utc::now())
+            {
+                return Ok(worked);
+            }
+
+            worked = true;
+            if let Err(err) = deliver_one(pool, consumer, owner, &event).await {
+                warn!(
+                    consumer = consumer.name(),
+                    event_id = %event.id,
+                    error = %err,
+                    "outbox delivery failed"
+                );
+                handle_failure(settings, pool, consumer, owner, &event, &err.to_string()).await?;
+                break;
+            }
+            let _ = clear_failure(pool, consumer.name(), event.id).await?;
+        }
+    }
+
+    Ok(worked)
+}
+
+async fn process_external_events(
+    settings: &OutboxDispatcherSettings,
+    pool: &PgPool,
+    consumer: &Arc<dyn OutboxConsumer>,
+    owner: Uuid,
+    cancel: &CancellationToken,
+    ttl_secs: i64,
+    events: Vec<OutboxEvent>,
+) -> Result<bool, sqlx::Error> {
+    let mut worked = false;
+    let mut pending: Vec<OutboxEvent> = Vec::new();
 
     for event in events {
         if cancel.is_cancelled() {
-            if let Some(meili) = meili_flush.clone() {
-                let _ = flush_meili_write_batch(Some(meili)).await;
+            if !pending.is_empty() {
+                deliver_external_batch(settings, pool, consumer, owner, ttl_secs, &pending).await?;
             }
             let _ = release_consumer(pool, consumer.name(), owner).await?;
             return Ok(true);
         }
         if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
-            if let Some(meili) = meili_flush.clone() {
-                let _ = flush_meili_write_batch(Some(meili)).await;
+            if !pending.is_empty() {
+                worked |=
+                    deliver_external_batch(settings, pool, consumer, owner, ttl_secs, &pending)
+                        .await?;
             }
             return Ok(worked);
         }
@@ -267,65 +325,117 @@ async fn process_consumer_cycle(
             .as_ref()
             .is_some_and(|row| row.next_attempt_at > Utc::now())
         {
-            if let Some(meili) = meili_flush.clone() {
-                let _ = flush_meili_write_batch(Some(meili)).await;
+            if !pending.is_empty() {
+                worked |=
+                    deliver_external_batch(settings, pool, consumer, owner, ttl_secs, &pending)
+                        .await?;
             }
             return Ok(worked);
         }
 
-        worked = true;
-        match deliver_external_body(pool, consumer, owner, &event).await {
-            Ok(()) => delivered.push(event),
-            Err(err) => {
-                delivery_failed = Some((event, err));
-                break;
+        if is_processed(pool, consumer.name(), event.id).await? {
+            if !advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await? {
+                warn!(
+                    consumer = consumer.name(),
+                    event_id = %event.id,
+                    "cursor advance rejected for already-processed event"
+                );
+                if !pending.is_empty() {
+                    worked |=
+                        deliver_external_batch(settings, pool, consumer, owner, ttl_secs, &pending)
+                            .await?;
+                }
+                return Ok(worked);
             }
-        }
-    }
-
-    if let Some(meili) = meili_flush {
-        if let Err(err) = flush_meili_write_batch(Some(meili)).await {
-            let blame = delivery_failed
-                .as_ref()
-                .map(|(event, _)| event)
-                .or_else(|| delivered.last())
-                .expect("batch flush without deliveries");
-            warn!(
-                consumer = consumer.name(),
-                event_id = %blame.id,
-                error = %err,
-                "outbox delivery failed"
-            );
-            handle_failure(settings, pool, consumer, owner, blame, &err.to_string()).await?;
-            return Ok(worked);
-        }
-    }
-
-    for event in delivered {
-        if let Err(err) = finalize_external_delivery(pool, consumer, owner, &event).await {
-            warn!(
+            debug!(
                 consumer = consumer.name(),
                 event_id = %event.id,
-                error = %err,
-                "outbox delivery failed"
+                xact = %event.xact,
+                seq = event.seq,
+                "outbox event already processed"
             );
-            handle_failure(settings, pool, consumer, owner, &event, &err.to_string()).await?;
-            return Ok(worked);
+            worked = true;
+            continue;
         }
-        let _ = clear_failure(pool, consumer.name(), event.id).await?;
+
+        pending.push(event);
     }
 
-    if let Some((event, err)) = delivery_failed {
-        warn!(
-            consumer = consumer.name(),
-            event_id = %event.id,
-            error = %err,
-            "outbox delivery failed"
-        );
-        handle_failure(settings, pool, consumer, owner, &event, &err.to_string()).await?;
+    if !pending.is_empty() {
+        worked |=
+            deliver_external_batch(settings, pool, consumer, owner, ttl_secs, &pending).await?;
     }
 
     Ok(worked)
+}
+
+fn external_deliver_chunk_len(settings: &OutboxDispatcherSettings, pending_len: usize) -> usize {
+    let lease_ms = settings.lease_ttl.as_millis().max(1);
+    let op_ms = MEILI_OP_TIMEOUT_MS as u128;
+    if lease_ms <= op_ms {
+        // One overall external op deadline must fit inside the lease.
+        pending_len.min(1)
+    } else {
+        let max_by_lease = (lease_ms / op_ms).max(1) as usize;
+        pending_len
+            .min(max_by_lease)
+            .min(settings.batch_limit.max(1) as usize)
+    }
+}
+
+async fn deliver_external_batch(
+    settings: &OutboxDispatcherSettings,
+    pool: &PgPool,
+    consumer: &Arc<dyn OutboxConsumer>,
+    owner: Uuid,
+    ttl_secs: i64,
+    pending: &[OutboxEvent],
+) -> Result<bool, sqlx::Error> {
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    if !lease_consumer(pool, consumer.name(), owner, ttl_secs).await? {
+        return Ok(false);
+    }
+
+    let chunk_len = external_deliver_chunk_len(settings, pending.len());
+    let chunk = &pending[..chunk_len];
+    let (done, err) = consumer.deliver_batch(pool, owner, chunk).await;
+
+    for event in chunk.iter().take(done) {
+        let _ = mark_processed(pool, consumer.name(), event.id).await?;
+        if !advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await? {
+            warn!(
+                consumer = consumer.name(),
+                event_id = %event.id,
+                "cursor advance rejected after external delivery"
+            );
+            return Ok(true);
+        }
+        let _ = clear_failure(pool, consumer.name(), event.id).await?;
+        debug!(
+            consumer = consumer.name(),
+            event_id = %event.id,
+            xact = %event.xact,
+            seq = event.seq,
+            "outbox event delivered"
+        );
+    }
+
+    if let Some(err) = err {
+        let failed = chunk
+            .get(done)
+            .expect("deliver_batch error without failed event");
+        warn!(
+            consumer = consumer.name(),
+            event_id = %failed.id,
+            error = %err,
+            "outbox delivery failed"
+        );
+        handle_failure(settings, pool, consumer, owner, failed, &err.to_string()).await?;
+    }
+
+    Ok(true)
 }
 
 async fn process_retries(
@@ -378,18 +488,7 @@ async fn deliver_retry(
     Ok(())
 }
 
-async fn flush_meili_write_batch(
-    meili: Option<crate::search::meili::MeiliConfig>,
-) -> Result<(), OutboxProcessError> {
-    if let Some(meili) = meili {
-        crate::search::meili::finish_meili_write_batch(&meili)
-            .await
-            .map_err(|err| OutboxProcessError::Delivery(err.to_string()))?;
-    }
-    Ok(())
-}
-
-async fn deliver_external_body(
+async fn deliver_one(
     pool: &PgPool,
     consumer: &Arc<dyn OutboxConsumer>,
     owner: Uuid,
@@ -404,45 +503,16 @@ async fn deliver_external_body(
                         "cursor advance rejected for already-processed event".into(),
                     ));
                 }
-                debug!(
-                    consumer = consumer.name(),
-                    event_id = %event.id,
-                    xact = %event.xact,
-                    seq = event.seq,
-                    "outbox event already processed"
-                );
                 return Ok(());
             }
             consumer.deliver(pool, owner, event).await?;
+            let _ = mark_processed(pool, consumer.name(), event.id).await?;
+            if !advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await? {
+                return Err(OutboxProcessError::Delivery(
+                    "cursor advance rejected after external delivery".into(),
+                ));
+            }
         }
-    }
-    Ok(())
-}
-
-async fn finalize_external_delivery(
-    pool: &PgPool,
-    consumer: &Arc<dyn OutboxConsumer>,
-    owner: Uuid,
-    event: &OutboxEvent,
-) -> Result<(), OutboxProcessError> {
-    if consumer.delivery_mode() != DeliveryMode::External {
-        debug!(
-            consumer = consumer.name(),
-            event_id = %event.id,
-            xact = %event.xact,
-            seq = event.seq,
-            "outbox event delivered"
-        );
-        return Ok(());
-    }
-    if is_processed(pool, consumer.name(), event.id).await? {
-        return Ok(());
-    }
-    let _ = mark_processed(pool, consumer.name(), event.id).await?;
-    if !advance_cursor(pool, consumer.name(), owner, &event.xact, event.seq).await? {
-        return Err(OutboxProcessError::Delivery(
-            "cursor advance rejected after external delivery".into(),
-        ));
     }
     debug!(
         consumer = consumer.name(),
