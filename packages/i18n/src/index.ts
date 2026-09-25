@@ -78,3 +78,90 @@ export function formatPersonName(
   if (family === "") return given;
   return locale === "ko" ? `${family}${given}` : `${given} ${family}`;
 }
+
+function payloadString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function roParticle(word: string): string {
+  const code = [...word].at(-1)?.codePointAt(0) ?? 0;
+  if (code < 0xac00 || code > 0xd7a3) return t("particle.euroParen");
+  return (code - 0xac00) % 28 === 0 ? t("particle.ro") : t("particle.euro");
+}
+
+const ROLE_LABEL = {
+  lead: "projectRole.lead",
+  member: "projectRole.member",
+  viewer: "projectRole.viewer",
+} as const satisfies Record<string, I18nKey>;
+
+function roleLabel(payload: Record<string, unknown>): string | null {
+  const raw = payloadString(payload.role);
+  if (raw === null || !(raw in ROLE_LABEL)) return null;
+  return t(ROLE_LABEL[raw as keyof typeof ROLE_LABEL]);
+}
+
+function taskRef(payload: Record<string, unknown>): string | null {
+  const title = payloadString(payload.title);
+  const number = typeof payload.number === "number" ? `#${payload.number}` : null;
+  if (title && number) return `${number} 「${title}」`;
+  if (title) return `「${title}」`;
+  return number;
+}
+
+export function notificationMessage(item: {
+  verb: string;
+  payload: Record<string, unknown> | null | undefined;
+}): string {
+  const payload = item.payload ?? {};
+  const ref = taskRef(payload);
+  switch (item.verb) {
+    case "task.created":
+      return ref ? t("notif.task.created.ref", { ref }) : t("notif.task.created");
+    case "task.updated": {
+      const fromName = payloadString(payload.fromName);
+      const toName = payloadString(payload.toName);
+      if (fromName && toName) {
+        return ref
+          ? t("notif.task.status", { ref, from: fromName, to: toName })
+          : t("notif.task.statusPlain", { from: fromName, to: toName });
+      }
+      return ref ? t("notif.task.assignee.ref", { ref }) : t("notif.task.assignee");
+    }
+    case "task.deleted":
+      return typeof payload.number === "number"
+        ? t("notif.task.deleted.number", { number: payload.number })
+        : t("notif.task.deleted");
+    case "project_member.added":
+    case "project_member.role_changed": {
+      const name = payloadString(payload.projectName);
+      const role = roleLabel(payload);
+      const target = name ? t("notif.project.named", { name }) : t("nav.projects");
+      const added = item.verb === "project_member.added";
+      if (role === null) {
+        return added
+          ? t("notif.project.added", { target })
+          : t("notif.project.role.changed", { target });
+      }
+      const opts = { target, role, particle: roParticle(role) };
+      return added
+        ? t("notif.project.added.role", opts)
+        : t("notif.project.role.changed.role", opts);
+    }
+    case "invitation.accepted":
+      return t("notif.invite.accepted");
+    case "comment.created": {
+      if (payloadString(payload.parentId)) return t("notif.comment.reply");
+      if (payloadString(payload.taskId)) return t("notif.comment.task");
+      if (payloadString(payload.documentId)) return t("notif.comment.document");
+      return t("notif.comment.created");
+    }
+    case "comment.resolved": {
+      if (payloadString(payload.taskId)) return t("notif.comment.resolved.task");
+      if (payloadString(payload.documentId)) return t("notif.comment.resolved.document");
+      return t("notif.comment.resolved");
+    }
+    default:
+      return t("notif.generic");
+  }
+}

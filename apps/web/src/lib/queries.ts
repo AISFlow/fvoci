@@ -83,6 +83,61 @@ export function invitationPublicQuery(token: string) {
   });
 }
 
+export type NotificationFilter = "all" | "unread" | "archived";
+
+export function notificationListQuery(
+  workspaceId: string,
+  filter: NotificationFilter,
+  cursor?: string,
+) {
+  return queryOptions({
+    queryKey: ["notifications", workspaceId, filter, cursor ?? ""] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/notifications", {
+          params: {
+            path: { workspace_id: workspaceId },
+            query: {
+              filter,
+              ...(cursor ? { cursor } : {}),
+            },
+          },
+        }),
+      ),
+    enabled: Boolean(workspaceId),
+    retry: false,
+  });
+}
+
+export function notificationUnreadCountQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["notifications-unread", workspaceId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/notifications/unread-count", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    enabled: Boolean(workspaceId),
+    retry: false,
+    refetchInterval: 30_000,
+  });
+}
+
+export function notificationPrefsQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["notification-prefs", workspaceId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/notification-prefs", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    enabled: Boolean(workspaceId),
+    retry: false,
+  });
+}
+
 export function workspaceApiTokensQuery(workspaceId: string) {
   return queryOptions({
     queryKey: ["workspaces", workspaceId, "api-tokens"],

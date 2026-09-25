@@ -5,17 +5,19 @@ import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { SearchCommand } from "@/features/workspace/search-command";
-import { projectsPath, searchPath, settingsPath, wikiPath } from "@/lib/href";
+import { NotificationBell } from "@/features/notifications/notification-bell";
+import { projectsPath, searchPath, settingsPath, wikiPath, notificationsPath } from "@/lib/href";
 import { api, ProblemError, problemMessage } from "@/lib/api";
 import { workspacesQuery } from "@/lib/queries";
 import "@/features/workspace/workspace-aux.css";
 
-export type WorkspaceNav = "wiki" | "settings" | "projects" | "search";
+export type WorkspaceNav = "wiki" | "settings" | "projects" | "search" | "notifications";
 
 function landingPath(slug: string, activeNav: WorkspaceNav): string {
   if (activeNav === "settings") return settingsPath(slug);
   if (activeNav === "projects") return projectsPath(slug);
   if (activeNav === "search") return searchPath(slug);
+  if (activeNav === "notifications") return notificationsPath(slug);
   return wikiPath(slug);
 }
 
@@ -132,6 +134,7 @@ export function WorkspaceShell({
             <span className="workspace-shell__name">{workspaceName}</span>
           )}
           <SearchCommand slug={slug} workspaceId={workspaceId} />
+          <NotificationBell slug={slug} workspaceId={workspaceId} />
           <Button
             type="button"
             size="sm"

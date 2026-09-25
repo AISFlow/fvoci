@@ -15,7 +15,7 @@ import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features
 import { TaskDetailView } from "@/features/tasks/task-detail";
 import { lookupQuery, resolveLookupTarget } from "@/features/tasks/lookup";
 import { taskListQuery, taskQuery, projectLabelsQuery, projectMilestonesQuery } from "@/features/tasks/queries";
-import { membersQuery } from "@/lib/queries";
+import { membersQuery, meQuery } from "@/lib/queries";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
@@ -53,6 +53,7 @@ export function TaskDetailPage() {
   );
   const parentItems = mergeTaskListPages(taskPages.data?.pages ?? [])?.items ?? [];
   const members = useQuery(membersQuery(workspace?.id ?? ""));
+  const me = useQuery(meQuery);
   const labels = useQuery(
     projectLabelsQuery(workspace?.id ?? "", project?.id ?? task.data?.projectId ?? ""),
   );
@@ -218,11 +219,13 @@ export function TaskDetailPage() {
       {item && task.data ? (
         <TaskDetailView
           slug={slug}
+          workspaceId={workspace.id}
+          projectId={projectId}
           projectKey={project?.key ?? item.prefix}
           projectName={project?.name}
+          currentUserId={me.data?.userId ?? ""}
           task={task.data}
           statuses={workflow.data?.statuses ?? []}
-          parentItems={parentItems}
           members={members.data?.items ?? []}
           labels={labels.data?.items ?? []}
           milestones={milestones.data?.items ?? []}

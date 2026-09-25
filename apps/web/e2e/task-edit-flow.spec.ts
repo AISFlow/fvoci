@@ -137,9 +137,10 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
   }).toBe("high:2026-01-31:null");
 
   await page.getByTestId("task-edit-type").selectOption("subtask");
-  await expect(page.getByTestId("task-edit-parent")).toHaveValue("");
-  await expect(page.getByTestId("task-edit-parent").locator(`option[value="${parentTaskId}"]`)).toHaveCount(1);
-  await page.getByTestId("task-edit-parent").selectOption(parentTaskId);
+  await expect(page.getByTestId("task-edit-parent")).toContainText("상위 태스크 없음");
+  await page.getByTestId("task-edit-parent").click();
+  await page.getByTestId("task-edit-parent-search").fill("부모 일");
+  await page.locator(".task-parent-select__panel").getByRole("option", { name: /부모 일/ }).click();
   await page.getByTestId("task-edit-hierarchy-save").click();
   await expect.poll(async () => {
     const detail = await taskDetail(page, wsId, taskId);
@@ -148,7 +149,7 @@ test("task edit flow covers fields, hierarchy, conflicts, trash and restore", as
   await expect(page.getByTestId("task-edit-type")).toHaveValue("subtask");
 
   await page.getByTestId("task-edit-type").selectOption("task");
-  await expect(page.getByTestId("task-edit-parent")).toHaveValue("");
+  await expect(page.getByTestId("task-edit-parent")).toContainText("상위 태스크 없음");
   await page.getByTestId("task-edit-hierarchy-save").click();
   await expect.poll(async () => {
     const detail = await taskDetail(page, wsId, taskId);
