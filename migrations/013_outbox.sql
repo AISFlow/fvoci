@@ -150,7 +150,9 @@ BEGIN
         RETURN;
     END IF;
 
-    IF v_last_xact >= v_xmin
+    -- Only xids from the future (at or past xmax) mean another cluster's epoch;
+    -- a cursor at or above xmin is still waiting on running transactions.
+    IF v_last_xact >= pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot())
        OR EXISTS (
             SELECT 1
             FROM fvoci.events AS e
@@ -480,7 +482,6 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
-    v_xmin xid8;
     v_xmax xid8;
     v_last xid8;
     v_prev text;
@@ -488,7 +489,6 @@ DECLARE
 BEGIN
     v_prev := COALESCE(pg_catalog.current_setting('app.system_ctx', true), '');
     PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
-    SELECT pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot()) INTO v_xmin;
     SELECT pg_catalog.pg_snapshot_xmax(pg_catalog.pg_current_snapshot()) INTO v_xmax;
 
     SELECT c.last_xact
@@ -496,7 +496,7 @@ BEGIN
     FROM fvoci.outbox_consumers AS c
     WHERE c.consumer = p_consumer;
 
-    mismatched := COALESCE(v_last >= v_xmin, false)
+    mismatched := COALESCE(v_last >= v_xmax, false)
         OR EXISTS (SELECT 1 FROM fvoci.events AS e WHERE e.xact >= v_xmax);
 
     PERFORM pg_catalog.set_config('app.system_ctx', v_prev, true);

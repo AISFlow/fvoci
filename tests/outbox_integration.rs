@@ -1253,6 +1253,46 @@ async fn pg_only_already_applied_failure_is_idempotent() {
 }
 
 #[tokio::test]
+async fn cursor_waiting_on_an_older_running_transaction_is_not_an_epoch_mismatch() {
+    // After --recover-outbox the cursor sits at the recovery xid; any transaction
+    // older than it that is still open (in any database) keeps xmin below it.
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    ensure_consumer(&app, "search-index").await.expect("ensure");
+
+    let mut older = admin.begin().await.expect("older tx");
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&mut *older)
+        .await
+        .expect("assign older xid");
+    sqlx::query(
+        "UPDATE fvoci.outbox_consumers SET last_xact = pg_current_xact_id(), last_seq = 0 \
+         WHERE consumer = 'search-index'",
+    )
+    .execute(&admin)
+    .await
+    .expect("cursor at a newer committed xid");
+
+    assert!(!xid_epoch_mismatch(&app, "search-index")
+        .await
+        .expect("mismatch check"));
+    assert!(read_events(&app, "search-index", 10)
+        .await
+        .expect("read while waiting")
+        .is_empty());
+
+    older.rollback().await.expect("rollback older");
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
     let harness = TestDb::bootstrap().await;
     let admin = PgPoolOptions::new()
