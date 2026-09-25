@@ -201,8 +201,9 @@ async fn seed(admin: &PgPool, token: &str) -> Fixture {
     .await
     .expect("project");
     sqlx::query(
-        "INSERT INTO fvoci.project_members (workspace_id, project_id, user_id, role) VALUES ($1,$2,$3,'lead')",
+        "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES ($1,$2,$3,$4,'lead')",
     )
+    .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(project_id)
     .bind(user_id)

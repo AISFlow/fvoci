@@ -42,10 +42,11 @@ use uuid::Uuid;
 use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::{
-    empty_document_json, lock_membership_users, membership_role_for_update, recheck_session,
-    wiki_can_edit, workspace_is_live,
+    document_permission, empty_document_json, lock_membership_users, membership_role_for_update,
+    recheck_session, workspace_is_live,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::projects::ProjectPermission;
 
 pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
 
@@ -465,15 +466,21 @@ async fn authorize_wiki_collab_write(
         return Ok(Err(CollabDbError::NotFound));
     }
     let role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_edit(role) {
+    if role.is_none() {
         return Ok(Err(CollabDbError::Forbidden));
     }
+    // Existence (tenant, trash, wiki) decides NotFound before permission decides Forbidden.
     let doc = lock_wiki_document_for_update(tx, workspace_id, document_id).await?;
     let Some((project_id, status, deleted_at)) = doc else {
         return Ok(Err(CollabDbError::NotFound));
     };
     if deleted_at.is_some() || project_id.is_some() {
         return Ok(Err(CollabDbError::NotFound));
+    }
+    let permission =
+        document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission.at_least(ProjectPermission::Edit) {
+        return Ok(Err(CollabDbError::Forbidden));
     }
     if status == "archived" {
         return Ok(Err(CollabDbError::Forbidden));
@@ -503,7 +510,7 @@ async fn authorize_wiki_collab_read(
         return Ok(Err(CollabDbError::NotFound));
     }
     let role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_edit(role) {
+    if role.is_none() {
         return Ok(Err(CollabDbError::NotFound));
     }
     let doc = lock_wiki_document_for_update(tx, workspace_id, document_id).await?;
@@ -511,6 +518,11 @@ async fn authorize_wiki_collab_read(
         return Ok(Err(CollabDbError::NotFound));
     };
     if deleted_at.is_some() || project_id.is_some() {
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let permission =
+        document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission.at_least(ProjectPermission::View) {
         return Ok(Err(CollabDbError::NotFound));
     }
     Ok(Ok(()))
@@ -1201,7 +1213,13 @@ pub async fn resolve_collab_admission(
         return Ok(Err(CollabDbError::NotFound));
     }
     let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_edit(role) {
+    if role.is_none() {
+        tx.rollback().await?;
+        return Ok(Err(CollabDbError::NotFound));
+    }
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
     }
@@ -1217,7 +1235,7 @@ pub async fn resolve_collab_admission(
     let archived = status == "archived";
     tx.commit().await?;
     Ok(Ok(CollabAdmission {
-        read_only: archived,
+        read_only: archived || !permission.at_least(ProjectPermission::Edit),
         archived,
     }))
 }

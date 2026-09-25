@@ -14,10 +14,11 @@ use crate::attachments::{
 use crate::attachments::{LocalStorage, StorageError};
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::{
-    lock_membership_users, membership_role, membership_role_for_update, recheck_session,
-    session_is_live, wiki_can_edit, workspace_is_live,
+    document_permission, lock_membership_users, membership_role_for_update, recheck_session,
+    session_is_live, workspace_is_live,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::projects::ProjectPermission;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadMeta {
@@ -233,8 +234,9 @@ async fn require_upload_access(
     actor_user_id: Uuid,
     att: &AttachmentRow,
 ) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
-    let role = membership_role_for_update(tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_edit(role) {
+    let permission =
+        document_permission(tx, workspace_id, actor_user_id, att.document_id, true).await?;
+    if !permission.at_least(ProjectPermission::Edit) {
         return Ok(Err(AttachmentDbError::Forbidden));
     }
     if att.uploader_id != actor_user_id {
@@ -252,8 +254,9 @@ async fn require_view_access(
     actor_user_id: Uuid,
     att: &AttachmentRow,
 ) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
-    let role = membership_role(tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_edit(role) {
+    let permission =
+        document_permission(tx, workspace_id, actor_user_id, att.document_id, true).await?;
+    if !permission.at_least(ProjectPermission::View) {
         return Ok(Err(AttachmentDbError::Forbidden));
     }
     if !parent_document_live(tx, workspace_id, att.document_id).await? {
@@ -368,8 +371,10 @@ pub async fn create_upload(
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::NotFound));
     }
-    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_edit(role) {
+    membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission.at_least(ProjectPermission::Edit) {
         tx.rollback().await?;
         return Ok(Err(AttachmentDbError::Forbidden));
     }

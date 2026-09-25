@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
+import { ProjectGroupsSection } from "@/features/projects/project-groups";
 import {
   backlogStatusId,
   findProjectByKey,
@@ -18,6 +19,11 @@ import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { formatDisplayId, itemPath, parseRef, projectsPath } from "@/lib/href";
 import "@/features/projects/projects.css";
+
+function roleAtLeast(role: string, minimum: string): boolean {
+  const order = ["guest", "member", "admin", "owner"];
+  return order.indexOf(role) >= order.indexOf(minimum);
+}
 
 export function ProjectTasksPage() {
   const { ref } = useParams<{ ref: string }>();
@@ -159,6 +165,13 @@ export function ProjectTasksPage() {
               }
             }}
           />
+          {workspace ? (
+            <ProjectGroupsSection
+              workspaceId={workspace.id}
+              projectId={project.id}
+              canManage={roleAtLeast(workspace.role, "admin")}
+            />
+          ) : null}
         </div>
       ) : null}
     </WorkspaceShell>
