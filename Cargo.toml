@@ -179,3 +179,8 @@ required-features = ["db-tests"]
 name = "outbox_integration"
 path = "tests/outbox_integration.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "notification_integration"
+path = "tests/notification_integration.rs"
+required-features = ["db-tests"]
