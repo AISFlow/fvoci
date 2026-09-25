@@ -167,7 +167,87 @@ pub struct LoginBody {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct LoginResponse {
+    /// Null when the account has MFA enabled: the session is issued by
+    /// `/auth/mfa/verify` with `mfaToken` (source `loginOutput`).
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mfa_token: Option<String>,
+}
+
+impl LoginResponse {
+    pub fn session(user_id: uuid::Uuid) -> Self {
+        Self {
+            user_id: Some(user_id.to_string()),
+            mfa_token: None,
+        }
+    }
+
+    pub fn challenge(mfa_token: String) -> Self {
+        Self {
+            user_id: None,
+            mfa_token: Some(mfa_token),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SessionIssuedOutput {
     pub user_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MfaVerifyBody {
+    pub mfa_token: String,
+    /// Six-digit TOTP or a recovery code (`xxxx-xxxx-xxxx`).
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MfaSetupBody {
+    /// Null for an account without a password.
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub current_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MfaEnableBody {
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MfaDisableBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub current_password: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MfaStatusOutput {
+    pub enabled: bool,
+    pub recovery_codes_left: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MfaSetupOutput {
+    pub secret: String,
+    pub otpauth_uri: String,
+    pub recovery_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1919,6 +1999,41 @@ pub struct IdentityOutput {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct IdentitiesOutput {
     pub items: Vec<IdentityOutput>,
+}
+
+/// Source `workspaceOidcInput`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceOidcBody {
+    /// http(s) URL, at most 2048 characters; trailing slashes are dropped.
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceOidcOutput {
+    pub issuer: String,
+    pub client_id: String,
+    pub label: String,
+}
+
+/// All null when the workspace has no configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct WorkspaceOidcGetOutput {
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub issuer: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub client_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3610,7 +3610,9 @@ fn download_attachment() {}
 
 #[cfg(feature = "api-schema")]
 pub fn spec_json() -> String {
-    ApiDoc::openapi().to_pretty_json().expect("openapi json")
+    let mut doc = ApiDoc::openapi();
+    doc.merge(crate::api::openapi_identity::IdentityApiDoc::openapi());
+    doc.to_pretty_json().expect("openapi json")
 }
 
 #[cfg(feature = "api-schema")]

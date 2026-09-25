@@ -10,7 +10,7 @@ use crate::db::context::{
     set_invitation_token_hash, set_self_user, set_tenant,
 };
 use crate::db::identity::{
-    find_user_id_by_email, issue_session, password_hash_by_id, rehash_password_if_unchanged,
+    find_user_id_by_email, password_hash_by_id, rehash_password_if_unchanged,
 };
 use crate::db::quota::{acquire_admission_lock, require_membership_admission, QuotaError};
 use crate::db::workspace::{
@@ -31,6 +31,8 @@ pub enum InvitationDbError {
     ConsentRequired,
     SeatLimit,
     GuestLimit,
+    /// OIDC invite: the external identity already belongs to an account.
+    AlreadyLinked,
 }
 
 pub struct InvitationRow {
@@ -83,7 +85,8 @@ struct NewAccount {
     email: String,
     given_name: String,
     family_name: Option<String>,
-    password_hash: String,
+    /// None for an account created through an external identity.
+    password_hash: Option<String>,
     defaults: crate::settings::DefaultsUserSettings,
 }
 
@@ -259,7 +262,7 @@ pub async fn accept_invitation(
     keys: &Keyring,
     raw_token: &str,
     request: AcceptInvitationRequest<'_>,
-) -> Result<Result<(Uuid, String), InvitationDbError>, sqlx::Error> {
+) -> Result<Result<crate::db::mfa::Issued, InvitationDbError>, sqlx::Error> {
     let invitation = match load_invitation_by_token(pool, raw_token).await? {
         Ok(row) => row,
         Err(err) => return Ok(Err(err)),
@@ -316,7 +319,7 @@ pub async fn accept_invitation(
                 .family_name
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
-            password_hash,
+            password_hash: Some(password_hash),
             defaults: request.defaults.clone(),
         });
     }
@@ -326,6 +329,7 @@ pub async fn accept_invitation(
         &invitation,
         user_id,
         new_account,
+        None,
         request.client_ip,
         request.consents,
     )
@@ -336,10 +340,109 @@ pub async fn accept_invitation(
     if let Some((expected, replacement)) = rehash {
         let _ = rehash_password_if_unchanged(pool, user_id, &replacement, &expected).await;
     }
-    match issue_session(pool, user_id).await? {
-        Some(token) => Ok(Ok((user_id, token))),
+    match crate::db::mfa::issue_session_or_challenge(
+        pool,
+        user_id,
+        "invitation",
+        crate::db::mfa::IssueOptions::default(),
+    )
+    .await?
+    {
+        Some(issued) => Ok(Ok(issued)),
         None => Ok(Err(InvitationDbError::Unauthorized)),
     }
+}
+
+/// Source `acceptInviteWithIdentity` after the provider exchange.
+pub struct IdentityAcceptRequest<'a> {
+    pub token_hash: &'a str,
+    pub provider: &'a str,
+    /// Provider subject (invite links never carry a workspace prefix).
+    pub subject: &'a str,
+    pub link_email: Option<&'a str>,
+    pub given_name: Option<&'a str>,
+    pub client_ip: Option<&'a str>,
+    pub consents: &'a [(String, i32)],
+    pub defaults: &'a crate::settings::DefaultsUserSettings,
+}
+
+/// Grants the invitation to the account behind an external identity. An
+/// existing account must already own that identity; otherwise a new
+/// password-less account is created with the link. Returns the user id; the
+/// caller issues the session through the MFA gate.
+pub async fn accept_invitation_with_identity(
+    pool: &PgPool,
+    request: IdentityAcceptRequest<'_>,
+) -> Result<Result<Uuid, InvitationDbError>, sqlx::Error> {
+    let invitation = match load_invitation_by_hash(pool, request.token_hash).await? {
+        Ok(row) => row,
+        Err(err) => return Ok(Err(err)),
+    };
+    let required = crate::db::legal::required_latest(pool).await?;
+    if !crate::db::legal::covers_required(&required, request.consents) {
+        return Ok(Err(InvitationDbError::ConsentRequired));
+    }
+    let existing = find_user_id_by_email(pool, &invitation.email).await?;
+    let link = crate::db::oidc::find_link(pool, request.provider, request.subject).await?;
+    if let Some((user_id, suspended_at)) = existing {
+        if link.as_ref().map(|l| l.user_id) != Some(user_id) || suspended_at.is_some() {
+            return Ok(Err(InvitationDbError::Unauthorized));
+        }
+        return Ok(grant_membership(
+            pool,
+            &invitation,
+            user_id,
+            None,
+            None,
+            request.client_ip,
+            request.consents,
+        )
+        .await?
+        .map(|()| user_id));
+    }
+    if email_exists(pool, &invitation.email).await? {
+        return Ok(Err(InvitationDbError::Unauthorized));
+    }
+    if link.is_some() {
+        return Ok(Err(InvitationDbError::AlreadyLinked));
+    }
+    let user_id = Uuid::now_v7();
+    let given_name = request
+        .given_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| name.chars().take(100).collect::<String>())
+        .unwrap_or_else(|| email_local_part(&invitation.email));
+    let new_account = NewAccount {
+        email: invitation.email.clone(),
+        given_name,
+        family_name: None,
+        password_hash: None,
+        defaults: request.defaults.clone(),
+    };
+    let link = crate::db::oidc::NewLink {
+        user_id,
+        provider: request.provider,
+        subject: request.subject,
+        email: request.link_email,
+        workspace_id: None,
+    };
+    Ok(grant_membership(
+        pool,
+        &invitation,
+        user_id,
+        Some(new_account),
+        Some(&link),
+        request.client_ip,
+        request.consents,
+    )
+    .await?
+    .map(|()| user_id))
+}
+
+/// Source `emailLocalPart`: the display name fallback for a new account.
+pub fn email_local_part(email: &str) -> String {
+    email.split('@').next().unwrap_or(email).to_string()
 }
 
 async fn grant_membership(
@@ -347,6 +450,7 @@ async fn grant_membership(
     invitation: &InvitationRow,
     user_id: Uuid,
     new_account: Option<NewAccount>,
+    link: Option<&crate::db::oidc::NewLink<'_>>,
     client_ip: Option<&str>,
     consents: &[(String, i32)],
 ) -> Result<Result<(), InvitationDbError>, sqlx::Error> {
@@ -471,6 +575,14 @@ async fn grant_membership(
         },
     )
     .await?;
+    // Source acceptInviteWithIdentity: the new account's link commits with
+    // its membership.
+    if let Some(link) = link {
+        if !crate::db::oidc::insert_link(&mut tx, link).await? {
+            tx.rollback().await?;
+            return Ok(Err(InvitationDbError::AlreadyLinked));
+        }
+    }
     // Signup consents commit with the membership (source grantMembership).
     if !consents.is_empty() {
         set_self_user(&mut tx, user_id).await?;
@@ -499,7 +611,14 @@ async fn load_invitation_by_token(
     pool: &PgPool,
     raw_token: &str,
 ) -> Result<Result<InvitationRow, InvitationDbError>, sqlx::Error> {
-    let token_hash = hash_token(raw_token);
+    load_invitation_by_hash(pool, &hash_token(raw_token)).await
+}
+
+async fn load_invitation_by_hash(
+    pool: &PgPool,
+    token_hash: &str,
+) -> Result<Result<InvitationRow, InvitationDbError>, sqlx::Error> {
+    let token_hash = token_hash.to_string();
     let mut tx = pool.begin().await?;
     set_invitation_token_hash(&mut tx, &token_hash).await?;
     let row = fetch_invitation_by_hash(&mut tx, &token_hash).await?;

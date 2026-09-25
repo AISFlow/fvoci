@@ -8,6 +8,10 @@ import { cn } from "@/lib/cn";
 
 export const authPrimaryButtonClass = "h-11 w-full text-ui font-medium";
 export const authOutlineButtonClass = "h-11 w-full text-ui";
+// Anchor styled like an outline button: OIDC starts are plain browser
+// navigations, not fetches.
+export const authOutlineLinkClass =
+  "inline-flex h-11 w-full items-center justify-center rounded-md border border-border bg-background px-6 text-ui font-medium transition-colors hover:bg-accent hover:text-foreground";
 
 export function AuthField({
   id,
