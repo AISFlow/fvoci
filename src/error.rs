@@ -48,6 +48,8 @@ pub enum ProblemCode {
     ImportFailed,
     UnsupportedMediaType,
     UploadCapacityExceeded,
+    AiUnavailable,
+    IntegrationUnavailable,
     ConfirmInvalid,
     OwnerTransferRequired,
     LastInstanceAdmin,
@@ -115,6 +117,8 @@ impl ProblemCode {
             Self::ImportFailed => "import_failed",
             Self::UnsupportedMediaType => "unsupported_media_type",
             Self::UploadCapacityExceeded => "upload_capacity_exceeded",
+            Self::AiUnavailable => "ai_unavailable",
+            Self::IntegrationUnavailable => "integration_unavailable",
             Self::ConfirmInvalid => "confirm_invalid",
             Self::OwnerTransferRequired => "owner_transfer_required",
             Self::LastInstanceAdmin => "last_instance_admin",
@@ -186,6 +190,8 @@ impl ProblemCode {
             Self::ImportFailed => "import failed",
             Self::UnsupportedMediaType => "unsupported media type",
             Self::UploadCapacityExceeded => "upload capacity exceeded — retry",
+            Self::AiUnavailable => "ai unavailable",
+            Self::IntegrationUnavailable => "integration unavailable",
             Self::ConfirmInvalid => "confirm_invalid",
             Self::OwnerTransferRequired => "owner_transfer_required",
             Self::LastInstanceAdmin => "last_instance_admin",
@@ -254,7 +260,9 @@ impl ProblemCode {
             Self::UnsupportedMediaType | Self::UnsupportedBrandingAssetType => {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE
             }
-            Self::UploadCapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
+            Self::UploadCapacityExceeded | Self::AiUnavailable | Self::IntegrationUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::MfaCodeInvalid => StatusCode::BAD_REQUEST,

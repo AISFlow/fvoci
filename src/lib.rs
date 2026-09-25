@@ -12,6 +12,7 @@ pub mod http;
 pub mod ics;
 pub mod identity;
 pub mod import_job;
+pub mod integrations;
 pub mod jobs;
 pub mod mail;
 pub mod notifications;

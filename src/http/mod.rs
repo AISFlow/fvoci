@@ -95,14 +95,42 @@ async fn canonicalize_bearer_path(req: Request, next: Next) -> Response {
 }
 
 pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
-    let identity = std::sync::Arc::new(crate::identity::Identity::disabled(&state.public_origin));
-    router_with_identity(state, static_dir, identity)
+    router_with_integrations(
+        state,
+        static_dir,
+        std::sync::Arc::new(crate::integrations::Integrations::disabled()),
+    )
 }
 
-/// The full router with MFA / OIDC settings (`ENCRYPTION_KEYS`, `OIDC_*`).
+/// `router` with integration settings (webhook keys, GitHub App, AI).
+pub fn router_with_integrations(
+    state: AppState,
+    static_dir: Option<PathBuf>,
+    integrations: std::sync::Arc<crate::integrations::Integrations>,
+) -> Router {
+    let identity = std::sync::Arc::new(crate::identity::Identity::disabled(&state.public_origin));
+    router_with_settings(state, static_dir, integrations, identity)
+}
+
+/// `router` with MFA / OIDC settings (`ENCRYPTION_KEYS`, `OIDC_*`).
 pub fn router_with_identity(
     state: AppState,
     static_dir: Option<PathBuf>,
+    identity: std::sync::Arc<crate::identity::Identity>,
+) -> Router {
+    router_with_settings(
+        state,
+        static_dir,
+        std::sync::Arc::new(crate::integrations::Integrations::disabled()),
+        identity,
+    )
+}
+
+/// The full router: integration and identity settings.
+pub fn router_with_settings(
+    state: AppState,
+    static_dir: Option<PathBuf>,
+    integrations: std::sync::Arc<crate::integrations::Integrations>,
     identity: std::sync::Arc<crate::identity::Identity>,
 ) -> Router {
     let collab = Router::new()
@@ -130,6 +158,7 @@ pub fn router_with_identity(
         .merge(routes::comments::router())
         .merge(routes::api_tokens::router())
         .merge(routes::ics::router())
+        .merge(routes::integrations::router(integrations))
         .merge(routes::stars::router())
         .merge(routes::share::router())
         .merge(routes::admin::router())

@@ -191,7 +191,7 @@ fn referenced_objects(statement: &str) -> Vec<String> {
     names
 }
 
-async fn app_state(app_url: &str) -> AppState {
+pub async fn app_state(app_url: &str) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     let storage_root = std::env::temp_dir().join(format!("fvoci-proj-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
