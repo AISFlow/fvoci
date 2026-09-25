@@ -97,6 +97,12 @@ pub struct CollabConfig {
     pub rpc_timeout_ms: u64,
 }
 
+fn parse_max_rooms(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_MAX_ROOMS)
+        .clamp(1, MAX_MAX_ROOMS)
+}
+
 impl CollabConfig {
     pub fn from_env() -> Option<Self> {
         let raw = env::var("FVOCI_COLLAB_ENGINE").ok()?;
@@ -108,11 +114,7 @@ impl CollabConfig {
         if !engine_bin.is_file() {
             return None;
         }
-        let max_rooms = env::var("FVOCI_COLLAB_MAX_ROOMS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_ROOMS)
-            .clamp(1, MAX_MAX_ROOMS);
+        let max_rooms = parse_max_rooms(env::var("FVOCI_COLLAB_MAX_ROOMS").ok().as_deref());
         let max_child_concurrency = env::var("FVOCI_COLLAB_MAX_CHILDREN")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -286,16 +288,9 @@ mod config_tests {
 
     #[test]
     fn max_rooms_env_clamps_to_ceiling() {
-        let engine = require_collab_engine_for_tests();
-        let key = "FVOCI_COLLAB_MAX_ROOMS";
-        let prior = env::var(key).ok();
-        unsafe { env::set_var(key, "9999") };
-        unsafe { env::set_var("FVOCI_COLLAB_ENGINE", engine.to_string_lossy().as_ref()) };
-        let cfg = CollabConfig::from_env().expect("collab config");
-        assert_eq!(cfg.max_rooms, MAX_MAX_ROOMS);
-        match prior {
-            Some(value) => unsafe { env::set_var(key, value) },
-            None => unsafe { env::remove_var(key) },
-        }
+        assert_eq!(parse_max_rooms(Some("9999")), MAX_MAX_ROOMS);
+        assert_eq!(parse_max_rooms(Some("0")), 1);
+        assert_eq!(parse_max_rooms(Some("not-a-number")), DEFAULT_MAX_ROOMS);
+        assert_eq!(parse_max_rooms(None), DEFAULT_MAX_ROOMS);
     }
 }

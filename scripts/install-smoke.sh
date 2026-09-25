@@ -34,6 +34,10 @@ require_cmd() {
 
 cleanup() {
   local status=$?
+  if (( status != 0 )); then
+    echo "== server/init logs (last 200 lines)" >&2
+    "${COMPOSE[@]}" logs --no-color --tail 200 init server >&2 || true
+  fi
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -f "$ENV_FILE"
   if (( status != 0 )); then
