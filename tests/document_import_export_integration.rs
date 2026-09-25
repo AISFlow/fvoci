@@ -11,7 +11,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use fvoci_server::attachments::LocalStorage;
+use fvoci_server::attachments::ObjectStorage;
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
 use fvoci_server::db::documents::ImportFence;
@@ -69,7 +69,7 @@ struct Fixture {
     pool: PgPool,
     admin: PgPool,
     settings: ImportJobSettings,
-    storage: LocalStorage,
+    storage: ObjectStorage,
     runner: Option<ImportJobHandle>,
 }
 
@@ -138,7 +138,7 @@ async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixture {
     let pool = pool::connect_app(&harness.app_url).await.expect("app pool");
     let storage_root = std::env::temp_dir().join(format!("fvoci-import-export-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    let storage = LocalStorage::new(storage_root);
+    let storage = ObjectStorage::local(storage_root);
     let runner =
         spawn_runner.then(|| spawn_import_job(pool.clone(), settings.clone(), storage.clone()));
     let wake = runner

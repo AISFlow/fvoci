@@ -290,13 +290,8 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let import_extractor_available = import_settings
         .as_ref()
         .is_some_and(|settings| settings.extractor_bin.is_some());
-    let import_job = import_settings.map(|settings| {
-        spawn_import_job(
-            pool.clone(),
-            settings,
-            fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
-        )
-    });
+    let import_job =
+        import_settings.map(|settings| spawn_import_job(pool.clone(), settings, storage.clone()));
     let import_wake = import_job.as_ref().map(|job| job.wake.clone());
     let state = AppState {
         auth: Arc::new(AuthService {

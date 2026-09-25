@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::attachments::LocalStorage;
+use crate::attachments::ObjectStorage;
 use crate::db::attachment_extract::default_extract_limits;
 use crate::db::documents::ImportFence;
 use crate::db::import_jobs::{
@@ -102,7 +102,7 @@ impl ImportJobHandle {
 pub fn spawn_import_job(
     pool: PgPool,
     settings: ImportJobSettings,
-    storage: LocalStorage,
+    storage: ObjectStorage,
 ) -> ImportJobHandle {
     let cancel = CancellationToken::new();
     let wake = Arc::new(Notify::new());
@@ -119,7 +119,7 @@ pub fn spawn_import_job(
 async fn import_loop(
     pool: PgPool,
     settings: ImportJobSettings,
-    storage: LocalStorage,
+    storage: ObjectStorage,
     cancel: CancellationToken,
     wake: Arc<Notify>,
 ) {
@@ -146,7 +146,7 @@ async fn import_loop(
 pub async fn run_next_import(
     pool: &PgPool,
     settings: &ImportJobSettings,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     cancel: &CancellationToken,
 ) -> Result<bool, sqlx::Error> {
     let Some(claim) = claim_next_import_job(pool).await? else {
@@ -194,7 +194,7 @@ fn db_failed(err: sqlx::Error) -> RunError {
 async fn run_claimed(
     pool: &PgPool,
     settings: &ImportJobSettings,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     cancel: &CancellationToken,
     claim: &ImportClaim,
 ) {
@@ -257,7 +257,7 @@ async fn run_claimed(
 async fn run_claimed_inner(
     pool: &PgPool,
     settings: &ImportJobSettings,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     cancel: &CancellationToken,
     claim: &ImportClaim,
     created: &mut Vec<Uuid>,
@@ -554,7 +554,7 @@ pub struct CompensateOutcome {
 /// A row that is already gone counts as skipped, not failed.
 pub async fn compensate_import(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     workspace_id: Uuid,
     refs: &ImportJobRefs,
 ) -> CompensateOutcome {
@@ -587,7 +587,7 @@ pub async fn compensate_import(
 /// Source `sweepOrphanImports`, run by the daily maintenance sweep.
 pub async fn sweep_orphan_imports(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     cancel: &CancellationToken,
 ) -> Result<u32, sqlx::Error> {
     let mut swept = 0;
