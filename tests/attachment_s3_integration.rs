@@ -191,6 +191,9 @@ async fn app_state_with_part_size(
         collab: None,
         meili: None,
         mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+        document_convert: None,
+        import_wake: None,
+        import_extractor_available: false,
     }
 }
 

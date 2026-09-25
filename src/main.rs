@@ -16,8 +16,10 @@ use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
 use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
+use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
+use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
 use fvoci_server::jobs::{spawn_maintenance, MaintenanceHandle, MaintenanceSettings};
 use fvoci_server::outbox::{
     spawn_outbox_dispatcher, OutboxDispatcherHandle, OutboxDispatcherSettings,
@@ -89,6 +91,7 @@ struct DrainOutcome {
     extract: Result<(), String>,
     outbox: Result<(), String>,
     maintenance: Result<(), String>,
+    import: Result<(), String>,
 }
 
 #[tokio::main]
@@ -277,6 +280,19 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         storage.clone(),
         mailer.clone(),
     ));
+    let document_convert = ConvertClient::from_env();
+    if document_convert.is_some() {
+        tracing::info!("document convert helper enabled");
+    } else {
+        tracing::info!("document convert helper disabled (FVOCI_DOCUMENT_CONVERT_BIN unset)");
+    }
+    let import_settings = document_convert.clone().map(ImportJobSettings::from_env);
+    let import_extractor_available = import_settings
+        .as_ref()
+        .is_some_and(|settings| settings.extractor_bin.is_some());
+    let import_job =
+        import_settings.map(|settings| spawn_import_job(pool.clone(), settings, storage.clone()));
+    let import_wake = import_job.as_ref().map(|job| job.wake.clone());
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
@@ -291,6 +307,9 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         collab: collab.clone(),
         meili: config.meili.clone(),
         mailer,
+        document_convert,
+        import_wake,
+        import_extractor_available,
     };
 
     let deadline = config.shutdown_deadline;
@@ -299,11 +318,13 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
     let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
     let maintenance_task = Arc::new(tokio::sync::Mutex::new(maintenance));
+    let import_task = Arc::new(tokio::sync::Mutex::new(import_job));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
     let outbox_task_for_signal = outbox_task.clone();
     let maintenance_task_for_signal = maintenance_task.clone();
+    let import_task_for_signal = import_task.clone();
 
     let serve = announce_after_first_pending_poll(
         axum::serve(
@@ -321,6 +342,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             if let Some(job) = outbox_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
                 tracing::info!("outbox dispatcher shutdown started concurrently with HTTP drain");
+            }
+            if let Some(job) = import_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
+                tracing::info!("import runner shutdown started concurrently with HTTP drain");
             }
             if let Some(job) = maintenance_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
@@ -367,6 +392,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let extract = join_extract_finished(&extract_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
+                    let import = join_import_finished(&import_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve: map_serve_result(serve_result),
@@ -374,6 +400,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                         extract,
                         outbox,
                         maintenance,
+                        import,
                     }
                 },
                 Some(started),
@@ -398,6 +425,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let extract = join_extract_finished(&extract_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
+                    let import = join_import_finished(&import_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve,
@@ -405,6 +433,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                         extract,
                         outbox,
                         maintenance,
+                        import,
                     }
                 },
                 started,
@@ -450,6 +479,16 @@ async fn join_maintenance_finished(
     maintenance_task: &tokio::sync::Mutex<Option<MaintenanceHandle>>,
 ) -> Result<(), String> {
     if let Some(job) = maintenance_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await?;
+    }
+    Ok(())
+}
+
+async fn join_import_finished(
+    import_task: &tokio::sync::Mutex<Option<ImportJobHandle>>,
+) -> Result<(), String> {
+    if let Some(job) = import_task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;
     }
@@ -522,6 +561,7 @@ where
                 .or_else(|| extract_failure_error(outcome.extract))
                 .or_else(|| extract_failure_error(outcome.outbox))
                 .or_else(|| extract_failure_error(outcome.maintenance))
+                .or_else(|| extract_failure_error(outcome.import))
             {
                 return Err(error);
             }
@@ -639,6 +679,7 @@ mod shutdown_outcome_tests {
                         extract: Ok(()),
                         outbox: Ok(()),
                         maintenance: Ok(()),
+                        import: Ok(()),
                     }
                 },
                 Some(Instant::now()),

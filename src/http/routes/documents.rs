@@ -16,12 +16,16 @@ use crate::api::dto::{
     MoveDocumentBody, OkResponse, PatchDocumentBody, RequiredNullable, SortDocumentBody,
     TrashItemResponse, TrashListResponse, TreeNodeResponse, TreeResponse,
 };
+use crate::attachments::content_disposition_attachment;
 use crate::auth::session::SessionUser;
 use crate::db::documents::{
     create_wiki_document, get_wiki_document, list_trashed_wiki_documents, list_wiki_ancestors,
     list_wiki_tree, move_wiki_document, reorder_wiki_document, restore_wiki_document,
     trash_wiki_document, update_wiki_document_meta, CreateDocumentInput, DocumentDbError,
     DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
+};
+use crate::documents::export::{
+    export_filename, render_document_export, ExportFormat, ExportRenderError,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
@@ -66,6 +70,22 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/body",
             get(get_body),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/md",
+            get(export_markdown),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/pdf",
+            get(export_pdf),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/docx",
+            get(export_docx),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/pptx",
+            get(export_pptx),
         )
 }
 
@@ -527,6 +547,134 @@ async fn list_trash(
         })),
         Err(err) => Err(map_document_error(err)),
     }
+}
+
+macro_rules! workspace_export_handler {
+    ($name:ident, $format:expr) => {
+        async fn $name(
+            State(state): State<AppState>,
+            headers: HeaderMap,
+            jar: CookieJar,
+            Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+        ) -> Result<Response, DocumentApiError> {
+            export_document(
+                &state,
+                &headers,
+                &jar,
+                workspace_id,
+                None,
+                document_id,
+                $format,
+            )
+            .await
+        }
+    };
+}
+
+workspace_export_handler!(export_markdown, ExportFormat::Markdown);
+workspace_export_handler!(export_pdf, ExportFormat::Pdf);
+workspace_export_handler!(export_docx, ExportFormat::Docx);
+workspace_export_handler!(export_pptx, ExportFormat::Pptx);
+
+/// Shared by workspace and project routes (source: one per-user budget for both).
+pub(crate) async fn export_document(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    workspace_id: Uuid,
+    project_id: Option<Uuid>,
+    document_id: Uuid,
+    format: ExportFormat,
+) -> Result<Response, DocumentApiError> {
+    let (_user, user_id, session_id) = require_session(
+        state,
+        headers,
+        jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
+        Some(workspace_id),
+    )
+    .await?;
+    if let Err(retry_after) = state
+        .rate_limiter
+        .allow_window(
+            &format!("doc-export-user:{user_id}"),
+            10,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+    {
+        return Err(AppError::rate_limited(retry_after).into());
+    }
+    let result = match project_id {
+        None => {
+            get_wiki_document(
+                &state.auth.db.pool,
+                workspace_id,
+                user_id,
+                session_id,
+                document_id,
+            )
+            .await
+        }
+        Some(project_id) => {
+            crate::db::project_documents::get_project_document(
+                &state.auth.db.pool,
+                workspace_id,
+                project_id,
+                document_id,
+                user_id,
+                session_id,
+            )
+            .await
+        }
+    }
+    .map_err(internal)?;
+    let meta = match result {
+        Ok(meta) => meta,
+        Err(err) => return Err(map_document_error(err)),
+    };
+    let Some(convert) = state.document_convert.as_ref() else {
+        tracing::error!("document export requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
+        return Err(AppError::internal().into());
+    };
+    let rendered =
+        match render_document_export(convert, format, &meta.title, &meta.content_json).await {
+            Ok(v) => v,
+            Err(ExportRenderError::InvalidInput) => {
+                return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+            }
+            Err(ExportRenderError::TooLarge) => {
+                return Err(DocumentApiError::Coded {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    code: "document_body_exceeds_document_max_body_bytes",
+                    title: "document body exceeds document max body bytes".to_string(),
+                    params: None,
+                });
+            }
+            Err(ExportRenderError::Failed) => {
+                return Err(AppError::internal().into());
+            }
+        };
+    let filename = export_filename(&meta.title, &rendered.ext);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_str(&rendered.content_type).map_err(|_| AppError::internal())?,
+    );
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition_attachment(&filename))
+            .map_err(|_| AppError::internal())?,
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok((StatusCode::OK, headers, rendered.bytes).into_response())
 }
 
 async fn get_body(

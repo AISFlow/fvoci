@@ -19,10 +19,13 @@ use crate::db::project_documents::{
     create_project_document, get_project_document, list_project_document_tree,
     move_project_document, update_project_document_meta,
 };
+use crate::documents::export::ExportFormat;
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
-use crate::http::routes::documents::{map_document_error, meta_response, DocumentApiError};
+use crate::http::routes::documents::{
+    export_document, map_document_error, meta_response, DocumentApiError,
+};
 use crate::http::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -39,7 +42,50 @@ pub fn router() -> Router<AppState> {
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/move",
             post(move_document),
         )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/md",
+            get(export_markdown),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/pdf",
+            get(export_pdf),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/docx",
+            get(export_docx),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/pptx",
+            get(export_pptx),
+        )
 }
+
+macro_rules! project_export_handler {
+    ($name:ident, $format:expr) => {
+        async fn $name(
+            State(state): State<AppState>,
+            headers: HeaderMap,
+            jar: CookieJar,
+            Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+        ) -> Result<Response, DocumentApiError> {
+            export_document(
+                &state,
+                &headers,
+                &jar,
+                workspace_id,
+                Some(project_id),
+                document_id,
+                $format,
+            )
+            .await
+        }
+    };
+}
+
+project_export_handler!(export_markdown, ExportFormat::Markdown);
+project_export_handler!(export_pdf, ExportFormat::Pdf);
+project_export_handler!(export_docx, ExportFormat::Docx);
+project_export_handler!(export_pptx, ExportFormat::Pptx);
 
 async fn list_tree(
     State(state): State<AppState>,

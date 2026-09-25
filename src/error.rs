@@ -45,6 +45,8 @@ pub enum ProblemCode {
     ProjectArchived,
     RestoreRejected,
     CollabTimeoutRetry,
+    ImportFailed,
+    UnsupportedMediaType,
     UploadCapacityExceeded,
     InternalError,
 }
@@ -91,6 +93,8 @@ impl ProblemCode {
             Self::ProjectArchived => "project_archived",
             Self::RestoreRejected => "restore_rejected",
             Self::CollabTimeoutRetry => "collab_timeout_retry",
+            Self::ImportFailed => "import_failed",
+            Self::UnsupportedMediaType => "unsupported_media_type",
             Self::UploadCapacityExceeded => "upload_capacity_exceeded",
             Self::InternalError => "internal_error",
         }
@@ -139,6 +143,8 @@ impl ProblemCode {
             Self::ProjectArchived => "project archived",
             Self::RestoreRejected => "restore rejected",
             Self::CollabTimeoutRetry => "collab timeout — retry",
+            Self::ImportFailed => "import failed",
+            Self::UnsupportedMediaType => "unsupported media type",
             Self::UploadCapacityExceeded => "upload capacity exceeded — retry",
             Self::InternalError => "internal error",
         }
@@ -176,6 +182,8 @@ impl ProblemCode {
             Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
             Self::Conflict | Self::ProjectArchived | Self::RestoreRejected => StatusCode::CONFLICT,
             Self::CollabTimeoutRetry => StatusCode::GATEWAY_TIMEOUT,
+            Self::ImportFailed => StatusCode::BAD_REQUEST,
+            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::UploadCapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,

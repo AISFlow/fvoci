@@ -23,6 +23,7 @@ import { collabBadge } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
 import { collabUserOf, setTitleEditing, useCollabSession } from "./collab-session";
 import { RevisionPanel } from "./revision-panel";
+import { DocumentExportMenu } from "./document-export-menu";
 import "./document-shell.css";
 
 type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
@@ -342,6 +343,12 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
               <span className="document-page__badge">{t("doc.readOnly")}</span>
             ) : null}
           </div>
+          <DocumentExportMenu
+            workspaceId={workspaceId}
+            documentId={documentId}
+            title={title}
+            persistNow={canPersist ? persistBody : undefined}
+          />
           {!readOnly ? (
             <div className="document-page__lifecycle" aria-label={t("doc.move.title")}>
               <label className="document-page__field">

@@ -234,6 +234,7 @@ pub struct DailySweepStats {
     pub notifications_archived: u32,
     pub processed: u32,
     pub digests_sent: u32,
+    pub imports_swept: u32,
 }
 
 /// Claim the daily sweep lock, run every job, then release. `None` means
@@ -314,6 +315,18 @@ async fn run_daily_jobs(
                 stats.processed = deleted;
             }
             Err(err) => warn!(error = %err, "maintenance.processed_gc_failed"),
+        }
+    }
+
+    // Source `sweepOrphanImports` runs in the same daily sweep, with storage
+    // available because compensation may delete attachment objects.
+    if !cancel.is_cancelled() {
+        match crate::import_job::sweep_orphan_imports(pool, storage, cancel).await {
+            Ok(swept) => {
+                info!(swept, "maintenance.import_sweep");
+                stats.imports_swept = swept;
+            }
+            Err(err) => warn!(error = %err, "maintenance.import_sweep_failed"),
         }
     }
 
