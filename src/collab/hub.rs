@@ -1137,7 +1137,7 @@ impl CollabHub {
             return Err(JoinError::EngineUnavailable);
         }
 
-        let pooled = tokio::select! {
+        let mut pooled = tokio::select! {
             biased;
             result = self.pool.acquire() => match result {
                 Ok(pooled) => pooled,
@@ -1156,10 +1156,17 @@ impl CollabHub {
             self.fail_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
         }
-        let persisted_bytes = estimate_persisted_collab_bytes(&self.pool, key.0, key.1)
-            .await
-            .map_err(|_| JoinError::DbError)?;
+        let persisted_bytes = match estimate_persisted_collab_bytes(&mut pooled, key.0, key.1).await
+        {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                drop(pooled);
+                self.fail_starting(key, &slot).await;
+                return Err(JoinError::DbError);
+            }
+        };
         if memory_budget_exceeded(self.config.memory_budget_bytes, persisted_bytes) {
+            drop(pooled);
             self.fail_starting(key, &slot).await;
             return Err(JoinError::CapacityRetry);
         }

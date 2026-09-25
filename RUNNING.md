@@ -178,8 +178,8 @@ Optional tuning:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `FVOCI_COLLAB_MAX_ROOMS` | 64 (clamp 1–512) | Hub room slots; immediate refusal when full |
-| `FVOCI_COLLAB_MAX_CHILDREN` | `max_rooms + headroom` | Process-wide live helper cap (headroom ≈ `max(4, max_rooms/2)`) |
+| `FVOCI_COLLAB_MAX_ROOMS` | 30 (clamp 1–512) | Hub room slots; immediate refusal when full. Default fits stock PostgreSQL `max_connections=100`; the 64-room capacity probe sets `64` and needs a higher Postgres limit. |
+| `FVOCI_COLLAB_MAX_CHILDREN` | primary + validator headroom | Bounds the validator helper pool only. Primary cap is `max_rooms + 4` for offline revision capture headroom. |
 | `FVOCI_COLLAB_MEMORY_BUDGET` | 2 GiB | Aggregate admission: sum live helper VmRSS plus `max(16 MiB, 14× persisted bytes)` per room start |
 | `FVOCI_COLLAB_MAX_CONNECTIONS` | 32 | Per-room WebSocket members |
 | `FVOCI_COLLAB_IDLE_MS` | 30000 | Idle room eviction |
@@ -203,20 +203,23 @@ COLLAB_PROBE_ROOMS=5 ./scripts/collab-capacity-probe.sh
 Environment: `COLLAB_PROBE_ROOMS`, `COLLAB_PROBE_PEERS`, `COLLAB_PROBE_DURATION_SECS` (minimum 180),
 `COLLAB_PROBE_OPEN_CONCURRENCY`, `FVOCI_COLLAB_MAX_ROOMS`, `FVOCI_COLLAB_ENGINE`,
 `RUST_LOG` (default `collab.stage=info` for per-stage breakdown),
-`FVOCI_TEST_PG_MAX_CONNECTIONS` (probe script only; default 120 — each live room holds one PG
+`FVOCI_TEST_PG_MAX_CONNECTIONS` (probe script only; default 150 — each live room holds one PG
 connection via `RoomGuard`, so docker Postgres must exceed room count plus app pool and reserve).
-`scripts/start-test-postgres.sh` keeps default `max_connections=100` for ordinary DB tests.
+`scripts/start-test-postgres.sh` defaults to `max_connections=150` when unset; ordinary DB tests
+that do not set `FVOCI_TEST_PG_MAX_CONNECTIONS` inherit that value.
 
-PostgreSQL coupling at server startup: `FVOCI_COLLAB_MAX_ROOMS` (default 64) must fit
-`max_connections` together with the app pool (10) and a 10-connection reserve; the server refuses
-to start when the sum exceeds `SHOW max_connections`. Compose raises Postgres to 120 with a
-matching comment.
+PostgreSQL coupling at server startup: with collab enabled, `FVOCI_COLLAB_MAX_ROOMS` must fit
+`max_connections` together with the app pool (`max(16, max_rooms)`) and a 10-connection reserve;
+the server refuses to start when the sum exceeds `SHOW max_connections`. The default 30 rooms need
+70 connections (30 + 30 + 10). The verified 64-room probe needs 138 (`64 + 64 + 10`); compose sets
+Postgres `max_connections=150`.
 
 The probe checks achieved rate ≥ 0.95 edits/s/room, zero writer loss, zero **1011** closes under
 load, room-capacity **1013**, slot reuse after idle eviction, exact hostile 5/5 isolation with
 victim recovery, and prints `PROBE_SUMMARY` plus `collab.stage` tracing lines for validate /
 auth_tx / append_tx / apply / broadcast timings. Full logs are saved under
-`/home/kinesis/orca/fvoci-evidence/collab-capacity-probe-<timestamp>.log`.
+`${FVOCI_EVIDENCE_DIR:-target/collab-probe-logs}/collab-capacity-probe-<timestamp>.log`
+(set `FVOCI_EVIDENCE_DIR` for a custom directory).
 
 `FVOCI_SHUTDOWN_DEADLINE_MS` sets the whole server shutdown deadline (default
 30000, positive milliseconds). SIGTERM/Ctrl+C stops collaboration admission

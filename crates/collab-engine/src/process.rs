@@ -987,8 +987,25 @@ pub fn raise_nofile_to_hard_limit() {
 fn apply_child_oom_score_adj() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let path = format!("/proc/{}/oom_score_adj", std::process::id());
-        std::fs::write(path, "1000")?;
+        let pid = std::process::id();
+        let path = format!("/proc/{pid}/oom_score_adj\0");
+        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_WRONLY) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let value = b"1000";
+        let written =
+            unsafe { libc::write(fd, value.as_ptr() as *const libc::c_void, value.len()) };
+        let close_err = unsafe { libc::close(fd) };
+        if written < 0 || close_err != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if written as usize != value.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short write to oom_score_adj",
+            ));
+        }
         Ok(())
     }
     #[cfg(not(target_os = "linux"))]

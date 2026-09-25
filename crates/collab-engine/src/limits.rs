@@ -62,10 +62,6 @@ pub const MAX_PROJECT_STRING_BYTES: u64 = MAX_PROJECT_JSON_BYTES;
 /// Product derives the limit from `FVOCI_COLLAB_MAX_ROOMS` plus headroom.
 pub const DEFAULT_MAX_CHILD_CONCURRENCY: usize = 8;
 
-/// Legacy name kept for tests and documentation. Prefer
-/// [`crate::process::max_child_concurrency`].
-pub const MAX_CHILD_CONCURRENCY: usize = DEFAULT_MAX_CHILD_CONCURRENCY;
-
 /// Minimum per-room memory reservation for aggregate admission.
 pub const MIN_ROOM_MEMORY_RESERVATION_BYTES: u64 = 16 * 1024 * 1024;
 

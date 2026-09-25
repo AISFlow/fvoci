@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use collab_engine::b64;
@@ -76,108 +75,7 @@ pub(crate) fn classify_admission_snapshot(
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ValidateStageTimings {
-    pub slot_wait_us: u64,
-    pub spawn_us: u64,
     pub load_us: u64,
-    pub snapshot_us: u64,
-}
-
-/// Per-room warm validator for pre-commit admission (I1–I5: one child per room, reload full bundle each edit, kill on reject/unavailable).
-pub struct RoomAdmissionValidator {
-    session: Option<EngineSession>,
-}
-
-impl RoomAdmissionValidator {
-    pub fn spawn(
-        engine_bin: &Path,
-        product_limits: Limits,
-    ) -> Result<(Self, SpawnPhaseTimings), BundleValidation> {
-        let limits = admission_limits(product_limits);
-        let (session, timings) = spawn_validator(engine_bin, limits)?;
-        Ok((
-            Self {
-                session: Some(session),
-            },
-            timings,
-        ))
-    }
-
-    pub fn validate_bundle(
-        &mut self,
-        snapshot: &[u8],
-        committed_tail: &[Vec<u8>],
-        candidate: &[u8],
-    ) -> (BundleValidation, ValidateStageTimings) {
-        if candidate.is_empty() {
-            return (BundleValidation::Rejected, ValidateStageTimings::default());
-        }
-        let Some(session) = self.session.as_mut() else {
-            return (
-                BundleValidation::EngineUnavailable,
-                ValidateStageTimings::default(),
-            );
-        };
-        let mut tail = committed_tail.to_vec();
-        tail.push(candidate.to_vec());
-        let load_started = Instant::now();
-        let load = session.call(&Request::Load {
-            snapshot_b64: Some(snapshot.to_vec()),
-            tail_b64: tail,
-            encoding: 1,
-        });
-        let load_us = load_started.elapsed().as_micros() as u64;
-        if let Err(outcome) = classify_admission_load(&load.outcome) {
-            if let Some(mut session) = self.session.take() {
-                session.kill_and_reap();
-            }
-            return (
-                outcome,
-                ValidateStageTimings {
-                    load_us,
-                    ..ValidateStageTimings::default()
-                },
-            );
-        }
-        let snapshot_started = Instant::now();
-        let snap = session.call(&Request::Snapshot);
-        let snapshot_us = snapshot_started.elapsed().as_micros() as u64;
-        let outcome = match &snap.outcome {
-            EngineStatus::Ok {
-                update_b64: Some(bytes_b64),
-                ..
-            } => classify_admission_snapshot(snap.outcome.clone(), b64::decode(bytes_b64)),
-            other => classify_admission_snapshot(other.clone(), Ok(Vec::new())),
-        };
-        if outcome != BundleValidation::Ok {
-            if let Some(mut session) = self.session.take() {
-                session.kill_and_reap();
-            }
-        }
-        (
-            outcome,
-            ValidateStageTimings {
-                load_us,
-                snapshot_us,
-                ..ValidateStageTimings::default()
-            },
-        )
-    }
-
-    pub fn kill(&mut self) {
-        if let Some(mut session) = self.session.take() {
-            session.kill_and_reap();
-        }
-    }
-
-    fn session_alive(&self) -> bool {
-        self.session.is_some()
-    }
-}
-
-impl Drop for RoomAdmissionValidator {
-    fn drop(&mut self) {
-        self.kill();
-    }
 }
 
 fn spawn_validator(
@@ -240,7 +138,7 @@ pub fn validate_recovery_bundle_blocking_with_timings(
         return (BundleValidation::Rejected, ValidateStageTimings::default());
     }
     let limits = admission_limits(product_limits);
-    let (mut session, spawn_timings) = match spawn_validator(engine_bin, limits) {
+    let (mut session, _spawn_timings) = match spawn_validator(engine_bin, limits) {
         Ok(pair) => pair,
         Err(outcome) => return (outcome, ValidateStageTimings::default()),
     };
@@ -255,19 +153,11 @@ pub fn validate_recovery_bundle_blocking_with_timings(
     let load_us = load_started.elapsed().as_micros() as u64;
     if let Err(outcome) = classify_admission_load(&load.outcome) {
         session.kill_and_reap();
-        return (
-            outcome,
-            ValidateStageTimings {
-                slot_wait_us: spawn_timings.slot_wait_us,
-                spawn_us: spawn_timings.spawn_us,
-                load_us,
-                snapshot_us: 0,
-            },
-        );
+        return (outcome, ValidateStageTimings { load_us });
     }
     let snapshot_started = Instant::now();
     let snap = session.call(&Request::Snapshot);
-    let snapshot_us = snapshot_started.elapsed().as_micros() as u64;
+    let _snapshot_us = snapshot_started.elapsed().as_micros() as u64;
     session.kill_and_reap();
     let outcome = match &snap.outcome {
         EngineStatus::Ok {
@@ -276,15 +166,7 @@ pub fn validate_recovery_bundle_blocking_with_timings(
         } => classify_admission_snapshot(snap.outcome.clone(), b64::decode(bytes_b64)),
         other => classify_admission_snapshot(other.clone(), Ok(Vec::new())),
     };
-    (
-        outcome,
-        ValidateStageTimings {
-            slot_wait_us: spawn_timings.slot_wait_us,
-            spawn_us: spawn_timings.spawn_us,
-            load_us,
-            snapshot_us,
-        },
-    )
+    (outcome, ValidateStageTimings { load_us })
 }
 
 pub async fn validate_recovery_bundle(
@@ -314,69 +196,6 @@ pub async fn validate_recovery_bundle_with_timings(
 ) -> (BundleValidation, ValidateStageTimings) {
     tokio::task::spawn_blocking(move || {
         validate_recovery_bundle_blocking_with_timings(
-            &engine_bin,
-            product_limits,
-            &snapshot,
-            &committed_tail,
-            &candidate,
-        )
-    })
-    .await
-    .unwrap_or((
-        BundleValidation::EngineUnavailable,
-        ValidateStageTimings::default(),
-    ))
-}
-
-fn validate_recovery_bundle_warm_blocking_with_timings(
-    validator: &Arc<Mutex<Option<RoomAdmissionValidator>>>,
-    engine_bin: &Path,
-    product_limits: Limits,
-    snapshot: &[u8],
-    committed_tail: &[Vec<u8>],
-    candidate: &[u8],
-) -> (BundleValidation, ValidateStageTimings) {
-    if candidate.is_empty() {
-        return (BundleValidation::Rejected, ValidateStageTimings::default());
-    }
-    let mut guard = validator
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.as_ref().is_none_or(|warm| !warm.session_alive()) {
-        *guard = None;
-        match RoomAdmissionValidator::spawn(engine_bin, product_limits) {
-            Ok((warm, spawn_timings)) => {
-                *guard = Some(warm);
-                let (outcome, mut timings) = guard
-                    .as_mut()
-                    .expect("warm validator just installed")
-                    .validate_bundle(snapshot, committed_tail, candidate);
-                timings.slot_wait_us = spawn_timings.slot_wait_us;
-                timings.spawn_us = spawn_timings.spawn_us;
-                (outcome, timings)
-            }
-            Err(outcome) => (outcome, ValidateStageTimings::default()),
-        }
-    } else {
-        guard
-            .as_mut()
-            .expect("warm validator present")
-            .validate_bundle(snapshot, committed_tail, candidate)
-    }
-}
-
-/// Validate using a per-room warm validator (lazy spawn on first edit, kill on reject/unavailable).
-pub async fn validate_recovery_bundle_warm_with_timings(
-    validator: Arc<Mutex<Option<RoomAdmissionValidator>>>,
-    engine_bin: std::path::PathBuf,
-    product_limits: Limits,
-    snapshot: Vec<u8>,
-    committed_tail: Vec<Vec<u8>>,
-    candidate: Vec<u8>,
-) -> (BundleValidation, ValidateStageTimings) {
-    tokio::task::spawn_blocking(move || {
-        validate_recovery_bundle_warm_blocking_with_timings(
-            &validator,
             &engine_bin,
             product_limits,
             &snapshot,

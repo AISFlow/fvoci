@@ -13,7 +13,8 @@ export FVOCI_COLLAB_MAX_ROOMS="${FVOCI_COLLAB_MAX_ROOMS:-64}"
 export FVOCI_TEST_PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-150}"
 export RUST_LOG="${RUST_LOG:-collab.stage=info}"
 
-LOG_DIR="${FVOCI_EVIDENCE_DIR:-/home/kinesis/orca/fvoci-evidence}"
+LOG_DIR="${FVOCI_EVIDENCE_DIR:-$ROOT/target/collab-probe-logs}"
+mkdir -p "$LOG_DIR"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_PATH="${LOG_DIR}/collab-capacity-probe-${STAMP}.log"
 

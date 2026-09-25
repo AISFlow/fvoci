@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
+use collab_engine::limits::room_memory_reservation_bytes;
 use collab_engine::outcome::EngineStatus;
 use collab_engine::process::{EngineSession, SpawnRequest};
 use collab_engine::protocol::Request;
@@ -35,6 +36,7 @@ use fvoci_server::collab::wire::{
 use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
 use fvoci_server::db::collab::{
+    arm_force_estimate_fail, disarm_force_estimate_fail, estimate_persisted_collab_bytes,
     load_collab_document, resolve_collab_admission, COLLAB_ROOM_SESSION_LOCK_NAMESPACE,
 };
 use fvoci_server::db::collab_delivery::{
@@ -1842,6 +1844,351 @@ async fn collab_memory_budget_refusal_frees_room_slot() {
         harness.cleanup().await;
     })
     .await;
+}
+
+struct GuestCollabSession {
+    session_token: String,
+    group_id: Uuid,
+}
+
+async fn admin_seed_document_state_bytes(
+    admin_url: &str,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    state_len: usize,
+) {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(admin_url)
+        .await
+        .unwrap();
+    let state = vec![0xABu8; state_len];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (
+            workspace_id, document_id, state, writer_generation, snapshot_cutoff_seq, tail_seq
+        ) VALUES ($1, $2, $3, 1, 0, 0)
+        ON CONFLICT (workspace_id, document_id) DO UPDATE
+        SET state = EXCLUDED.state
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(state)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+}
+
+async fn setup_guest_with_wiki_group_edit(
+    harness: &TestDb,
+    wiki: &WikiDocFixture,
+) -> GuestCollabSession {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let guest_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, $3)")
+        .bind(guest_id)
+        .bind(format!("guest-{guest_id}@example.com"))
+        .bind("Guest")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'guest')",
+    )
+    .bind(wiki.session.workspace_id)
+    .bind(guest_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let group_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.groups (id, workspace_id, name) VALUES ($1, $2, $3)")
+        .bind(group_id)
+        .bind(wiki.session.workspace_id)
+        .bind("wiki-editors")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.group_members (workspace_id, group_id, user_id) VALUES ($1, $2, $3)",
+    )
+    .bind(wiki.session.workspace_id)
+    .bind(group_id)
+    .bind(guest_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let member_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_members (id, workspace_id, document_id, group_id, role)
+        VALUES ($1, $2, $3, $4, 'member')
+        "#,
+    )
+    .bind(member_id)
+    .bind(wiki.session.workspace_id)
+    .bind(wiki.document_id)
+    .bind(group_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let token = new_token();
+    let session_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fvoci.sessions (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, now() + interval '1 hour')",
+    )
+    .bind(session_id)
+    .bind(guest_id)
+    .bind(&token.hash)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    GuestCollabSession {
+        session_token: token.token,
+        group_id,
+    }
+}
+
+fn huge_varint_memory_candidate() -> Vec<u8> {
+    vec![0xff, 0xff, 0xff, 0xff, 0x0f]
+}
+
+#[tokio::test]
+async fn collab_guest_group_grant_can_append_and_revoke_rejects() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let guest = setup_guest_with_wiki_group_edit(&harness, &wiki).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let update = sample_hi_update();
+
+    let mut writer = connect_member(addr, &guest.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 701).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "guest with group edit grant must append through collab"
+    );
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM fvoci.document_members WHERE workspace_id = $1 AND document_id = $2 AND group_id = $3",
+    )
+    .bind(wiki.session.workspace_id)
+    .bind(wiki.document_id)
+    .bind(guest.group_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &update).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), true).await;
+
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_persisted_estimate_nonzero_under_rls() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    admin_seed_document_state_bytes(
+        &harness.admin_url,
+        wiki.session.workspace_id,
+        wiki.document_id,
+        4096,
+    )
+    .await;
+    let mut conn = wiki.session.pool.acquire().await.unwrap();
+    let estimate =
+        estimate_persisted_collab_bytes(&mut conn, wiki.session.workspace_id, wiki.document_id)
+            .await
+            .expect("estimate");
+    assert!(
+        estimate >= 4096,
+        "RLS-aware estimate must include seeded snapshot bytes, got {estimate}"
+    );
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_memory_budget_uses_persisted_factor_not_floor_only() {
+    run_lifecycle_test(
+        "collab_memory_budget_uses_persisted_factor_not_floor_only",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let persisted = 2 * 1024 * 1024;
+            admin_seed_document_state_bytes(
+                &harness.admin_url,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                persisted,
+            )
+            .await;
+            let reservation = room_memory_reservation_bytes(persisted as u64);
+            assert!(
+                reservation > collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES,
+                "2 MiB persisted must exceed the 16 MiB floor via the 14× factor"
+            );
+        let mut tight_cfg = test_collab_config(4, 200);
+        tight_cfg.memory_budget_bytes = 20 * 1024 * 1024;
+        let tight_budget = tight_cfg.memory_budget_bytes;
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(tight_cfg, wiki.session.pool.clone(), 1).await;
+        let mut leases = DirectHubLeases::new();
+        let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
+        assert!(matches!(denied, Err(JoinError::CapacityRetry)));
+        assert_eq!(hub.available_room_slots(), 4);
+        assert!(
+            collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES < tight_budget,
+            "20 MiB budget would admit the 16 MiB floor alone; denial must come from 14× persisted"
+        );
+        hub.shutdown().await;
+        harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_estimate_fail_frees_room_slot() {
+    run_lifecycle_test("collab_estimate_fail_frees_room_slot", async {
+        let harness = TestDb::bootstrap().await;
+        let wiki = setup_wiki_doc(&harness).await;
+        let (hub, _helper_capacity) =
+            new_test_collab_hub(test_collab_config(4, 200), wiki.session.pool.clone(), 1).await;
+        arm_force_estimate_fail();
+        let mut leases = DirectHubLeases::new();
+        let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
+        disarm_force_estimate_fail();
+        assert!(matches!(denied, Err(JoinError::DbError)));
+        assert_eq!(hub.available_room_slots(), 4);
+        hub.shutdown().await;
+        harness.cleanup().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn collab_user_reject_budget_survives_reconnect() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let hostile = invalid_utf8_update_candidate();
+
+    for client_id in 1..=8u32 {
+        let mut writer = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut writer, &routing_key, client_id).await;
+        writer
+            .send(Message::Binary(
+                sync_update_frame(&routing_key, &hostile).into(),
+            ))
+            .await
+            .unwrap();
+        wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), true).await;
+    }
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 709).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &hostile).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), false).await;
+
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_primary_huge_varint_memory_rejected_1008() {
+    let harness = TestDb::bootstrap().await;
+    let wiki = setup_wiki_doc(&harness).await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let addr = server.addr;
+    let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
+    let poison = huge_varint_memory_candidate();
+    let valid = sample_hi_update();
+
+    let mut writer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 801).await;
+    let mut peer = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut peer, &routing_key, 802).await;
+
+    let load_before = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &poison).into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), true).await;
+
+    let load_after = load_collab_document(
+        &wiki.session.pool,
+        wiki.session.workspace_id,
+        wiki.session.user_id,
+        wiki.session.session_id,
+        wiki.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(load_after.snapshot, load_before.snapshot);
+    assert_eq!(load_after.tail_seq, load_before.tail_seq);
+
+    let mut recovery = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut recovery, &routing_key, 803).await;
+    recovery
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &valid).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut recovery, Duration::from_secs(5)).await,
+        "room must keep editing after primary reload rejects huge-varint candidate"
+    );
+
+    server.shutdown().await;
+    harness.cleanup().await;
 }
 
 #[tokio::test]

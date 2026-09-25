@@ -45,7 +45,7 @@ use crate::collab::derived_body::PreparedDerivedBody;
 use crate::db::context::{lock_key_from_uuid, set_tenant};
 use crate::db::documents::{
     document_permission, empty_document_json, lock_membership_users, membership_role_for_update,
-    recheck_session, wiki_can_edit, workspace_is_live,
+    recheck_session, workspace_is_live,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::projects::ProjectPermission;
@@ -757,30 +757,14 @@ pub async fn append_collab_update(
     pool: &PgPool,
     input: AppendCollabInput<'_>,
 ) -> Result<Result<AppendCollabResult, CollabDbError>, sqlx::Error> {
-    append_collab_update_timed(pool, input)
+    if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
+        return Ok(Err(CollabDbError::PayloadTooLarge));
+    }
+    let timings = CollabDbStageTimings::default();
+    let tx = pool.begin().await?;
+    append_collab_update_in_tx(tx, input, timings)
         .await
         .map(|(result, _)| result)
-}
-
-/// Same as [`append_collab_update`] with per-phase DB timings for `collab.stage` tracing.
-pub async fn append_collab_update_timed(
-    pool: &PgPool,
-    input: AppendCollabInput<'_>,
-) -> Result<
-    (
-        Result<AppendCollabResult, CollabDbError>,
-        CollabDbStageTimings,
-    ),
-    sqlx::Error,
-> {
-    let mut timings = CollabDbStageTimings::default();
-    if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
-        return Ok((Err(CollabDbError::PayloadTooLarge), timings));
-    }
-    let pool_started = Instant::now();
-    let tx = pool.begin().await?;
-    timings.pool_wait_us = pool_started.elapsed().as_micros() as u64;
-    append_collab_update_in_tx(tx, input, timings).await
 }
 
 /// Append on a room's dedicated session connection (no pool acquire).
@@ -838,7 +822,7 @@ async fn append_collab_update_in_tx(
         return Ok((Err(CollabDbError::NotFound), timings));
     }
     let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
-    if !wiki_can_edit(role) {
+    if role.is_none() {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::Forbidden), timings));
     }
@@ -850,6 +834,12 @@ async fn append_collab_update_in_tx(
     if deleted_at.is_some() || project_id.is_some() {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::NotFound), timings));
+    }
+    let permission =
+        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
+    if !permission.at_least(ProjectPermission::Edit) {
+        tx.rollback().await?;
+        return Ok((Err(CollabDbError::Forbidden), timings));
     }
     if status == "archived" {
         tx.rollback().await?;
@@ -1293,43 +1283,7 @@ pub async fn resolve_collab_admission(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
-    resolve_collab_admission_timed(pool, workspace_id, actor_user_id, session_id, document_id)
-        .await
-        .map(|(result, _)| result)
-}
-
-/// Same as [`resolve_collab_admission`] with per-phase DB timings for `collab.stage` tracing.
-pub async fn resolve_collab_admission_timed(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-) -> Result<(Result<CollabAdmission, CollabDbError>, CollabDbStageTimings), sqlx::Error> {
-    let mut timings = CollabDbStageTimings::default();
-    let pool_started = Instant::now();
     let tx = pool.begin().await?;
-    timings.pool_wait_us = pool_started.elapsed().as_micros() as u64;
-    resolve_collab_admission_tx(
-        tx,
-        workspace_id,
-        actor_user_id,
-        session_id,
-        document_id,
-        timings,
-    )
-    .await
-}
-
-/// Admission check on a room's dedicated session connection (no pool acquire).
-pub async fn resolve_collab_admission_on_conn_timed(
-    conn: &mut PgConnection,
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    session_id: Uuid,
-    document_id: Uuid,
-) -> Result<(Result<CollabAdmission, CollabDbError>, CollabDbStageTimings), sqlx::Error> {
-    let tx = conn.begin().await?;
     resolve_collab_admission_tx(
         tx,
         workspace_id,
@@ -1339,6 +1293,7 @@ pub async fn resolve_collab_admission_on_conn_timed(
         CollabDbStageTimings::default(),
     )
     .await
+    .map(|(result, _)| result)
 }
 
 async fn resolve_collab_admission_tx(
@@ -1464,12 +1419,33 @@ pub async fn load_collab_readonly(
     Ok(Ok(load))
 }
 
+#[cfg(feature = "db-tests")]
+static FORCE_ESTIMATE_FAIL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "db-tests")]
+pub fn arm_force_estimate_fail() {
+    FORCE_ESTIMATE_FAIL.store(true, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(feature = "db-tests")]
+pub fn disarm_force_estimate_fail() {
+    FORCE_ESTIMATE_FAIL.store(false, std::sync::atomic::Ordering::Release);
+}
+
 /// Best-effort persisted collab bytes for memory admission (snapshot + tail payloads).
+/// Must run on a connection with tenant context (`set_tenant`) so RLS returns rows.
 pub async fn estimate_persisted_collab_bytes(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
+    #[cfg(feature = "db-tests")]
+    if FORCE_ESTIMATE_FAIL.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(sqlx::Error::Protocol("forced estimate fail".into()));
+    }
+    let mut tx = conn.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
     let row: Option<(i64, i64)> = sqlx::query_as(
         r#"
         SELECT
@@ -1487,8 +1463,9 @@ pub async fn estimate_persisted_collab_bytes(
     )
     .bind(workspace_id)
     .bind(document_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(match row {
         Some((snapshot_len, tail_len)) => (snapshot_len + tail_len) as u64,
         None => 2,
