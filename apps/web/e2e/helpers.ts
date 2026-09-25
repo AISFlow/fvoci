@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { expect, type Page } from "@playwright/test";
 
-export type CapturedMail = { from: string; to: string; data: string; ts: number };
+export type CapturedMail = { from: string; to: string; data: string; text: string; ts: number };
 
 export function capturedMails(): CapturedMail[] {
   const capture = process.env.FVOCI_E2E_SMTP_CAPTURE;

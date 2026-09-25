@@ -65,6 +65,7 @@ lettre = { version = "0.11", default-features = false, features = ["smtp-transpo
 tokio-tungstenite = "=0.29.0"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
+mailparse = "0.16"
 
 [features]
 db-tests = []

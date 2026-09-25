@@ -6,12 +6,21 @@ client. Do not log envelope secrets beyond the captured file the caller owns."""
 from __future__ import annotations
 
 import argparse
+import email
+import email.policy
 import json
 import socket
 import sys
 import threading
 import time
 
+
+
+def decoded_text(data: str) -> str:
+    msg = email.message_from_string(data, policy=email.policy.default)
+    body = msg.get_body(preferencelist=("plain",))
+    content = body.get_content() if body is not None else ""
+    return f"Subject: {msg.get('subject', '')}\n\n{content}"
 
 def send_line(conn: socket.socket, line: str) -> None:
     conn.sendall(f"{line}\r\n".encode("utf-8"))
@@ -57,10 +66,13 @@ def handle_client(conn: socket.socket, capture_path: str) -> None:
                         if body_line.startswith("."):
                             body_line = body_line[1:]
                         data_lines.append(body_line)
+                    data = "\n".join(data_lines)
                     record = {
                         "from": mail_from,
                         "to": rcpt_to,
-                        "data": "\n".join(data_lines),
+                        "data": data,
+                        # Decoded as a mail client shows it (RFC 2047 subject, transfer encoding).
+                        "text": decoded_text(data),
                         "ts": time.time(),
                     }
                     with open(capture_path, "a", encoding="utf-8") as out:

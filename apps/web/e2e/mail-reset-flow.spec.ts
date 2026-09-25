@@ -40,9 +40,9 @@ test("invitation email is delivered and password reset uses the captured link", 
   await expect(inviteLink).toBeVisible();
 
   const inviteMail = await waitForCapturedMail(
-    (mail) => mail.to === invited.email && mail.data.includes("/invite/"),
+    (mail) => mail.to === invited.email && mail.text.includes("/invite/"),
   );
-  expect(inviteMail.data).toContain("Subject: 워크스페이스 초대");
+  expect(inviteMail.text).toContain("Subject: 워크스페이스 초대");
 
   await page.getByRole("button", { name: "로그아웃" }).click();
   await expect(page).toHaveURL(/\/login$/);
@@ -55,11 +55,11 @@ test("invitation email is delivered and password reset uses the captured link", 
   ).toBeVisible();
 
   const resetMail = await waitForCapturedMail((mail) =>
-    mail.data.includes("/reset-password?token="),
+    mail.text.includes("/reset-password?token="),
   );
   expect(resetMail.to.toLowerCase()).toBe("admin@example.com");
-  expect(resetMail.data).toContain("Subject: FVOCI 비밀번호 재설정");
-  const tokenMatch = resetMail.data.match(/reset-password\?token=([A-Za-z0-9_-]+)/);
+  expect(resetMail.text).toContain("Subject: FVOCI 비밀번호 재설정");
+  const tokenMatch = resetMail.text.match(/reset-password\?token=([A-Za-z0-9_-]+)/);
   expect(tokenMatch?.[1]).toBeTruthy();
   const token = tokenMatch![1];
 

@@ -35,6 +35,21 @@ struct CapturedMail {
     data: String,
 }
 
+impl CapturedMail {
+    /// The message as a mail client shows it: decoded subject and plain body.
+    fn text(&self) -> String {
+        let parsed = mailparse::parse_mail(self.data.as_bytes()).expect("parse captured mail");
+        let subject = parsed
+            .headers
+            .iter()
+            .find(|h| h.get_key().eq_ignore_ascii_case("subject"))
+            .map(|h| h.get_value())
+            .unwrap_or_default();
+        let body = parsed.get_body().expect("decode captured body");
+        format!("Subject: {subject}\n\n{body}")
+    }
+}
+
 struct SmtpSink {
     port: u16,
     mails: Arc<Mutex<Vec<CapturedMail>>>,
@@ -473,8 +488,8 @@ async fn invitation_sends_mail_and_smtp_failure_sets_mail_delayed() {
     assert!(body["mailDelayed"].is_null());
     let accept_url = body["acceptUrl"].as_str().unwrap();
     let mail = sink.wait_for(|mail| mail.to == "invitee@example.com").await;
-    assert!(mail.data.contains("Subject: 워크스페이스 초대"));
-    assert!(mail.data.contains(accept_url));
+    assert!(mail.text().contains("Subject: 워크스페이스 초대"));
+    assert!(mail.text().contains(accept_url));
 
     let reject = RejectingSmtp::spawn().await;
     let app = router(
@@ -540,12 +555,12 @@ async fn password_reset_hides_enumeration_hashes_token_revokes_sessions() {
     assert!(known_elapsed >= Duration::from_millis(100));
 
     let mail = sink
-        .wait_for(|mail| mail.data.contains("/reset-password?token="))
+        .wait_for(|mail| mail.text().contains("/reset-password?token="))
         .await;
     assert_eq!(mail.to, "admin@example.com");
-    assert!(mail.data.contains("Subject: FVOCI 비밀번호 재설정"));
-    let token = extract_token(&mail.data);
-    assert!(!mail.data.contains(&hash_token(&token)));
+    assert!(mail.text().contains("Subject: FVOCI 비밀번호 재설정"));
+    let token = extract_token(&mail.text());
+    assert!(!mail.text().contains(&hash_token(&token)));
 
     let admin = harness.admin().await;
     let stored: String = sqlx::query_scalar("SELECT token_hash FROM fvoci.magic_tokens")
@@ -726,7 +741,7 @@ async fn mail_consumer_is_at_least_once_and_skips_after_processed_events() {
         .deliver(&app_pool, Uuid::now_v7(), event)
         .await
         .expect("first deliver");
-    sink.wait_for(|mail| mail.data.contains("소셜 로그인"))
+    sink.wait_for(|mail| mail.text().contains("소셜 로그인"))
         .await;
     assert_eq!(sink.snapshot().len(), 1);
 
