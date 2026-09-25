@@ -101,6 +101,10 @@ export function projectsPath(slug: string): string {
   return `/w/${slug.toLowerCase()}/projects`;
 }
 
+export function notificationsPath(slug: string): string {
+  return `/w/${slug.toLowerCase()}/notifications`;
+}
+
 export function searchPath(
   slug: string,
   params?: { q?: string; tab?: string; projectId?: string },

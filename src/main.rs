@@ -227,6 +227,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         }
     };
     let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
+    consumers.push(fvoci_server::notifications::notifications_consumer());
     if let Some(meili) = config.meili.clone() {
         consumers.push(fvoci_server::search::index::search_index_consumer(meili));
     }

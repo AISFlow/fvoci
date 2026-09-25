@@ -1,6 +1,7 @@
 import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import type { components } from "@/generated/api";
 import { api, ensureOk } from "@/lib/api";
+import { parentListViewQuery } from "./task-parent-query";
 
 export type TaskMeta = components["schemas"]["TaskMetaOutput"];
 export type TaskListItem = components["schemas"]["TaskListItemOutput"];
@@ -28,6 +29,36 @@ export function taskListQuery(workspaceId: string, projectId: string) {
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
     enabled: Boolean(workspaceId) && Boolean(projectId),
+    retry: false,
+  });
+}
+
+export function taskParentListQuery(
+  workspaceId: string,
+  projectId: string,
+  childType: string,
+  excludeTaskId: string,
+  title?: string,
+) {
+  const query = parentListViewQuery(childType, title);
+  return infiniteQueryOptions({
+    queryKey: ["task-parents", workspaceId, projectId, childType, excludeTaskId, title ?? ""] as const,
+    queryFn: async ({ pageParam }) =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks", {
+          params: {
+            path: { workspace_id: workspaceId, project_id: projectId },
+            query: {
+              query,
+              limit: 20,
+              ...(pageParam ? { cursor: pageParam } : {}),
+            },
+          },
+        }),
+      ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
+    enabled: Boolean(workspaceId) && Boolean(projectId) && childType !== "epic",
     retry: false,
   });
 }

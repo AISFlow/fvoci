@@ -2621,6 +2621,7 @@ pub async fn trash_task(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
+    let assignee_ids = list_task_assignee_ids(&mut tx, workspace_id, task_id).await?;
     record_task_event_and_audit(
         &mut tx,
         TaskChangeRecord {
@@ -2633,6 +2634,7 @@ pub async fn trash_task(
                 "taskId": task_id.to_string(),
                 "projectId": task.record.project_id.to_string(),
                 "number": task.record.number,
+                "assigneeIds": uuid_strings(&assignee_ids),
             }),
             client_ip,
         },

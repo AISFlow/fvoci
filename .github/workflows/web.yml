@@ -39,6 +39,10 @@ jobs:
             specs: e2e/workspace-groups-flow.spec.ts
           - flow: task-milestones-deps-flow
             specs: e2e/task-milestones-deps-flow.spec.ts
+          - flow: notifications-flow
+            specs: e2e/notifications-flow.spec.ts
+          - flow: task-comments-flow
+            specs: e2e/task-comments-flow.spec.ts
           - flow: wiki-lifecycle-flow
             specs: e2e/workspace-wiki-lifecycle.spec.ts
           - flow: comments-flow
