@@ -132,7 +132,9 @@ test("project home shows wiki, documents can be created and moved in the tree", 
   await page.locator("#project-lead").selectOption(leadUserId);
   await page.getByRole("dialog").getByRole("button", { name: "새 프로젝트" }).click();
 
-  await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/HOME$`));
+  // Create lands on the project's tasks, as in the source; the home is its own page.
+  await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/HOME/tasks$`));
+  await page.goto(`/w/${admin.workspaceSlug}/HOME`);
   await expect(page.getByRole("heading", { name: "Home Wiki" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
   await expect(page.getByText("비공개")).toBeVisible();
@@ -223,7 +225,8 @@ test("clone copies workflow labels and milestones but not tasks", async ({ page 
   await page.getByLabel("이름", { exact: true }).fill("Home Wiki (복사)");
   await page.getByRole("dialog").getByRole("button", { name: "복제" }).click();
 
-  await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/CPY$`));
+  await expect(page).toHaveURL(new RegExp(`/w/${admin.workspaceSlug}/CPY/tasks$`));
+  await page.goto(`/w/${admin.workspaceSlug}/CPY`);
   await expect(page.getByRole("heading", { name: "Home Wiki (복사)" })).toBeVisible();
 
   await openProjectTasks(page, "CPY");
@@ -304,7 +307,13 @@ test("viewer and non-member cannot create project documents", async ({ page }) =
   await page.goto(`/w/${admin.workspaceSlug}/HOME`);
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
   const beforeCount = await page.getByTestId(/^project-doc-HOME-/).count();
+  const refused = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/projects/${homeProject.id}/documents`) &&
+      response.request().method() === "POST",
+  );
   await page.getByRole("button", { name: "새 문서" }).click();
+  expect((await refused).status()).toBe(404);
   await expect(page.getByTestId(/^project-doc-HOME-/)).toHaveCount(beforeCount);
 
   const viewerCreate = await page.request.post(

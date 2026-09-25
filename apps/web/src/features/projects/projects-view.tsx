@@ -10,7 +10,7 @@ import { NativeModal } from "./native-modal";
 import "./projects.css";
 import type { CloneProjectBody, CreateProjectBody, ProjectListItem } from "./queries";
 import type { components } from "@/generated/api";
-import { projectPath } from "@/lib/href";
+import { projectTasksPath } from "@/lib/href";
 
 type Member = components["schemas"]["MemberResponse"];
 
@@ -71,7 +71,7 @@ export function ProjectsView({
         <ul className="project-list">
           {active.map((project) => (
             <li key={project.id}>
-              <Link to={projectPath(slug, project.key)} className="project-list__row">
+              <Link to={projectTasksPath(slug, project.key)} className="project-list__row">
                 <span className="project-list__key">{project.key}</span>
                 <span className="project-list__meta">
                   <span className="project-list__name">{project.name}</span>

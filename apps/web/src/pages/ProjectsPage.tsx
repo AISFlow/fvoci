@@ -7,7 +7,7 @@ import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk } from "@/lib/api";
 import { membersQuery, meQuery } from "@/lib/queries";
-import { projectPath } from "@/lib/href";
+import { projectTasksPath } from "@/lib/href";
 import type { CloneProjectBody } from "@/features/projects/queries";
 
 export function ProjectsPage() {
@@ -67,11 +67,11 @@ export function ProjectsPage() {
         }}
         onCreate={async (input) => {
           const project = await createProject.mutateAsync(input);
-          await navigate(projectPath(slug, project.key));
+          await navigate(projectTasksPath(slug, project.key));
         }}
         onClone={async (projectId, input) => {
           const project = await cloneProject.mutateAsync({ projectId, body: input });
-          await navigate(projectPath(slug, project.key));
+          await navigate(projectTasksPath(slug, project.key));
         }}
       />
     </WorkspaceShell>
