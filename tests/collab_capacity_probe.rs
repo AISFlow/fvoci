@@ -2,6 +2,7 @@
 #![cfg(feature = "db-tests")]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,16 +22,22 @@ use fvoci_server::collab::hub::CollabHub;
 use fvoci_server::collab::wire::{
     encode, AuthMessage, CollabKind, CollabRoomName, DocumentMessage, WireFrame,
 };
+use fvoci_server::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
+use fvoci_server::db::context::lock_key_from_uuid;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 
 mod support;
 
+use support::collab_process_server::{
+    collected_log_text, spawn_capacity_probe_server_process, wait_for_exit, wait_pids_exit,
+};
 use support::{
     complete_sync_handshake, connect_member, engine_fixture, invalid_utf8_update_candidate,
     setup_owner_session, sync_update_frame, test_collab_config, wait_for_sync_applied,
-    wait_for_sync_update, TestDb, TestRun, PEPPER,
+    wait_for_sync_update, wait_for_ws_close_code, TestDb, TestRun, PEPPER,
 };
 
 type Ws =
@@ -270,7 +277,15 @@ async fn writer_alive_locked(
     writer_alive(&mut guard, routing_key, marker, within).await
 }
 
-fn probe_open_failure_diag(hub: &Arc<CollabHub>, room_index: usize, reason: &str) {
+fn probe_open_failure_diag(hub: Option<&CollabHub>, room_index: usize, reason: &str) {
+    let (room_slots, collab_sockets, memory_budget_gib) = match hub {
+        Some(hub) => (
+            hub.available_room_slots(),
+            hub.available_collab_sockets(),
+            hub.config().memory_budget_bytes / (1024 * 1024 * 1024),
+        ),
+        None => (0, 0, 0),
+    };
     eprintln!(
         "probe open failure room_index={} reason={} primary_cap={} validator_cap={} child_rss={} room_slots={} collab_sockets={} memory_budget_gib={}",
         room_index,
@@ -278,9 +293,9 @@ fn probe_open_failure_diag(hub: &Arc<CollabHub>, room_index: usize, reason: &str
         max_child_concurrency(),
         max_validator_child_concurrency(),
         sum_live_children_rss_bytes(),
-        hub.available_room_slots(),
-        hub.available_collab_sockets(),
-        hub.config().memory_budget_bytes / (1024 * 1024 * 1024)
+        room_slots,
+        collab_sockets,
+        memory_budget_gib
     );
 }
 
@@ -381,7 +396,7 @@ async fn open_room_peers(
     doc: &ProbeDoc,
     peers: usize,
     room_index: usize,
-    hub: Arc<CollabHub>,
+    hub: Option<&CollabHub>,
 ) -> RoomPeers {
     let routing_key = room_key(doc.workspace_id, doc.document_id);
     let mut writer_ws = None;
@@ -410,7 +425,7 @@ async fn open_room_peers(
             ok
         };
         if !authed {
-            probe_open_failure_diag(&hub, room_index, &last_err);
+            probe_open_failure_diag(hub, room_index, &last_err);
         }
         assert!(
             authed,
@@ -449,6 +464,311 @@ struct SampleEvent {
 }
 
 const LATENCY_WAIT: Duration = Duration::from_secs(5);
+
+async fn document_tail_seq(admin: &PgPool, document_id: uuid::Uuid) -> i64 {
+    sqlx::query_scalar("SELECT tail_seq FROM fvoci.document_states WHERE document_id = $1")
+        .bind(document_id)
+        .fetch_optional(admin)
+        .await
+        .expect("tail_seq")
+        .unwrap_or(0)
+}
+
+async fn room_guard_held(admin: &PgPool, document_id: uuid::Uuid) -> bool {
+    let key = lock_key_from_uuid(document_id);
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND classid = $1::oid
+              AND objid = $2::oid
+              AND granted
+        )
+        "#,
+    )
+    .bind(COLLAB_ROOM_SESSION_LOCK_NAMESPACE)
+    .bind(key)
+    .fetch_one(admin)
+    .await
+    .expect("pg_locks")
+}
+
+async fn app_backend_connection_count(harness: &TestDb) -> i64 {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin pool");
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint
+        FROM pg_stat_activity
+        WHERE datname = $1
+          AND usename = $2
+          AND backend_type = 'client backend'
+        "#,
+    )
+    .bind(harness.db_name())
+    .bind(harness.role_name())
+    .fetch_one(&admin)
+    .await
+    .expect("app connections");
+    admin.close().await;
+    count
+}
+
+async fn wait_app_connections_cleared(harness: &TestDb, within: Duration) {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if app_backend_connection_count(harness).await == 0 {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "app role still has backend connections after shutdown: {}",
+        app_backend_connection_count(harness).await
+    );
+}
+
+async fn probe_process_sigterm_shutdown_phase(
+    harness: &TestDb,
+    docs: &[ProbeDoc],
+    max_rooms: usize,
+    peers: usize,
+    open_concurrency: usize,
+    shutdown_tick: u64,
+) -> Duration {
+    assert!(
+        max_rooms >= 64,
+        "process SIGTERM phase requires at least 64 rooms, got {max_rooms}"
+    );
+    const SHUTDOWN_DEADLINE_MS: u64 = 30_000;
+    let phase_started = Instant::now();
+    eprintln!(
+        "probe: process SIGTERM shutdown phase starting (rooms={} peers={})",
+        max_rooms, peers
+    );
+
+    let (mut server_child, proc_addr, server_logs) =
+        spawn_capacity_probe_server_process(harness, max_rooms, peers, SHUTDOWN_DEADLINE_MS);
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("shutdown phase admin pool");
+
+    let open_slots = Arc::new(tokio::sync::Semaphore::new(open_concurrency));
+    let mut shutdown_writers: Vec<(String, Arc<tokio::sync::Mutex<Ws>>)> =
+        Vec::with_capacity(max_rooms);
+    let mut shutdown_readers: Vec<Arc<tokio::sync::Mutex<Ws>>> = Vec::with_capacity(max_rooms);
+    for (index, doc) in docs[..max_rooms].iter().enumerate() {
+        let permit = open_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("shutdown open semaphore");
+        let doc = doc.clone();
+        let room = open_room_peers(proc_addr, &doc, peers, index, None).await;
+        drop(permit);
+        shutdown_writers.push((room.routing_key.clone(), room.writer));
+        shutdown_readers.push(room.reader);
+    }
+    eprintln!(
+        "probe: shutdown phase opened {} rooms × {} peers on process server",
+        max_rooms, peers
+    );
+
+    let inflight_stop = Arc::new(AtomicBool::new(false));
+    let inflight_writers = shutdown_writers.clone();
+    let inflight_watch = inflight_stop.clone();
+    let inflight_task = tokio::spawn(async move {
+        let mut tick = shutdown_tick;
+        while !inflight_watch.load(Ordering::Relaxed) {
+            for (routing_key, writer) in &inflight_writers {
+                let edit = marker_edit(tick);
+                let mut guard = writer.lock().await;
+                let _ = guard
+                    .send(Message::Binary(
+                        sync_update_frame(routing_key, &edit).into(),
+                    ))
+                    .await;
+            }
+            tick += 1;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    for (_, ws) in &shutdown_writers {
+        drain_ws_locked(ws, Duration::from_millis(100)).await;
+    }
+    for ws in &shutdown_readers {
+        drain_ws_locked(ws, Duration::from_millis(100)).await;
+    }
+
+    let marker_tick = shutdown_tick + 10_000;
+    let mut committed_tails = Vec::with_capacity(max_rooms);
+    for (index, (routing_key, writer)) in shutdown_writers.iter().enumerate() {
+        let marker = marker_edit(marker_tick + index as u64);
+        let mut guard = writer.lock().await;
+        guard
+            .send(Message::Binary(
+                sync_update_frame(routing_key, &marker).into(),
+            ))
+            .await
+            .expect("shutdown marker send");
+        assert!(
+            wait_for_sync_applied(&mut guard, Duration::from_secs(5)).await,
+            "shutdown marker must commit for room_index={index}"
+        );
+        committed_tails.push(document_tail_seq(&admin, docs[index].document_id).await);
+    }
+
+    let server_pid = server_child.pid().expect("process server pid");
+    let helpers = support::collab_process_server::collab_engine_descendants(server_pid);
+    assert!(
+        !helpers.is_empty(),
+        "64-room process server must own collab-engine children before SIGTERM"
+    );
+    server_child.helper_pids = helpers.clone();
+
+    let signaled = Instant::now();
+    server_child.send_sigterm();
+
+    let close_deadline = Duration::from_millis(SHUTDOWN_DEADLINE_MS);
+    let mut close_tasks = Vec::with_capacity(max_rooms * peers);
+    for (_, ws) in &shutdown_writers {
+        let ws = ws.clone();
+        close_tasks.push(tokio::spawn(async move {
+            let mut guard = ws.lock().await;
+            wait_for_ws_close_code(
+                &mut guard,
+                1001,
+                close_deadline,
+                false,
+                Some("server shutdown"),
+            )
+            .await;
+        }));
+    }
+    for ws in &shutdown_readers {
+        let ws = ws.clone();
+        close_tasks.push(tokio::spawn(async move {
+            let mut guard = ws.lock().await;
+            wait_for_ws_close_code(
+                &mut guard,
+                1001,
+                close_deadline,
+                false,
+                Some("server shutdown"),
+            )
+            .await;
+        }));
+    }
+    join_all(close_tasks)
+        .await
+        .into_iter()
+        .for_each(|result| result.expect("peer close waiter"));
+
+    let status = wait_for_exit(
+        &mut server_child,
+        Duration::from_millis(SHUTDOWN_DEADLINE_MS + 5_000),
+    );
+    let elapsed = signaled.elapsed();
+    let log_text = collected_log_text(&server_logs);
+    assert!(
+        status.success(),
+        "64-room SIGTERM must exit 0 within drain budget, got {status} elapsed={elapsed:?}; logs={log_text}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(SHUTDOWN_DEADLINE_MS + 2_000),
+        "SIGTERM drain took {elapsed:?}, budget={SHUTDOWN_DEADLINE_MS}ms"
+    );
+
+    wait_pids_exit(&helpers, Duration::from_secs(5));
+    for (index, doc) in docs[..max_rooms].iter().enumerate() {
+        assert!(
+            !room_guard_held(&admin, doc.document_id).await,
+            "room guard must be released after shutdown for room_index={index}"
+        );
+    }
+    admin.close().await;
+    wait_app_connections_cleared(harness, Duration::from_secs(30)).await;
+
+    let post_shutdown_admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("post-shutdown admin pool");
+    let mut post_shutdown_tails = Vec::with_capacity(max_rooms);
+    for (index, doc) in docs[..max_rooms].iter().enumerate() {
+        let tail = document_tail_seq(&post_shutdown_admin, doc.document_id).await;
+        assert!(
+            tail >= committed_tails[index],
+            "room_index={index} tail must not regress during shutdown drain (committed={}, post_shutdown={})",
+            committed_tails[index],
+            tail
+        );
+        post_shutdown_tails.push(tail);
+    }
+    post_shutdown_admin.close().await;
+
+    inflight_stop.store(true, Ordering::Relaxed);
+    let _ = inflight_task.await;
+
+    let (mut restart_child, restart_addr, _) =
+        spawn_capacity_probe_server_process(harness, max_rooms, peers, SHUTDOWN_DEADLINE_MS);
+    let recovery_admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("recovery admin pool");
+    let mut recovered = 0usize;
+    for (index, doc) in docs[..max_rooms].iter().enumerate() {
+        let routing_key = room_key(doc.workspace_id, doc.document_id);
+        let mut ws = connect_member(restart_addr, &doc.peers[0].token).await;
+        probe_auth_and_join(&mut ws, &routing_key, 200_000 + index as u32)
+            .await
+            .expect("post-restart auth");
+        complete_sync_handshake(&mut ws, &routing_key).await;
+        assert_eq!(
+            document_tail_seq(&recovery_admin, doc.document_id).await,
+            post_shutdown_tails[index],
+            "room_index={index} durable tail must match post-shutdown DB after restart"
+        );
+        assert!(
+            writer_alive(
+                &mut ws,
+                &routing_key,
+                &marker_edit(marker_tick + 20_000 + index as u64),
+                Duration::from_secs(5),
+            )
+            .await,
+            "room_index={index} must resume editing after restart"
+        );
+        recovered += 1;
+        let _ = ws.close(None).await;
+    }
+    assert_eq!(
+        recovered, max_rooms,
+        "every room must recover committed content and resume editing"
+    );
+    restart_child.kill_and_wait();
+    recovery_admin.close().await;
+
+    let phase_elapsed = phase_started.elapsed();
+    eprintln!(
+        "probe: process SIGTERM shutdown phase passed in {:?} ({} rooms, {} peers, exit 0, 1001 closes, guards released, app connections cleared, {}/{} rooms recovered)",
+        phase_elapsed,
+        max_rooms,
+        peers,
+        recovered,
+        max_rooms
+    );
+    phase_elapsed
+}
 
 fn hostile_sample_indices(max_rooms: usize) -> Vec<usize> {
     if max_rooms >= 64 {
@@ -537,7 +857,8 @@ async fn collab_capacity_probe() {
         let hub_for_open = hub.clone();
         let doc = doc.clone();
         let room = tokio::spawn(async move {
-            let peers = open_room_peers(addr, &doc, peers, room_index, hub_for_open).await;
+            let peers =
+                open_room_peers(addr, &doc, peers, room_index, Some(hub_for_open.as_ref())).await;
             drop(permit);
             peers
         })
@@ -797,7 +1118,7 @@ async fn collab_capacity_probe() {
             let key = (doc.workspace_id, doc.document_id);
             let _ = hub.execute_idle_evict_if_eligible(key).await;
         }
-        tokio::task::yield_now();
+        tokio::task::yield_now().await;
     }
     assert!(
         hub.available_room_slots() >= max_rooms,
@@ -811,7 +1132,7 @@ async fn collab_capacity_probe() {
             .acquire_owned()
             .await
             .expect("mass reconnect open semaphore");
-        let room = open_room_peers(addr, doc, peers, index, hub.clone()).await;
+        let room = open_room_peers(addr, doc, peers, index, Some(hub.as_ref())).await;
         drop(permit);
         writer_rooms.push((room.routing_key.clone(), room.writer));
         reader_rooms.push(room.reader);
@@ -869,6 +1190,30 @@ async fn collab_capacity_probe() {
         max_rooms + 1
     );
 
+    for (_, writer) in &writer_rooms {
+        let _ = writer.lock().await.close(None).await;
+    }
+    for reader in &reader_rooms {
+        let _ = reader.lock().await.close(None).await;
+    }
+    writer_rooms.clear();
+    reader_rooms.clear();
+    run.shutdown_last_server()
+        .await
+        .expect("shutdown in-process server before SIGTERM phase");
+    wait_app_connections_cleared(&run.harness, Duration::from_secs(30)).await;
+
+    let shutdown_phase_ms = probe_process_sigterm_shutdown_phase(
+        &run.harness,
+        &docs,
+        max_rooms,
+        peers,
+        open_concurrency,
+        tick,
+    )
+    .await
+    .as_millis();
+
     assert_eq!(
         latency_missed,
         0,
@@ -897,7 +1242,7 @@ async fn collab_capacity_probe() {
         latencies_ms.len()
     );
     eprintln!(
-        "PROBE_SUMMARY rooms={} peers={} duration_s={} edits={} achieved_rate_per_room={:.3} child_rss_bytes={} p50_apply_broadcast_ms={} p95_apply_broadcast_ms={} p99_apply_broadcast_ms={} latency_samples={} server_threads={} server_fds={} open_ms={} load_ms={} lost_writers={} closes_1011={} db_pool={}",
+        "PROBE_SUMMARY rooms={} peers={} duration_s={} edits={} achieved_rate_per_room={:.3} child_rss_bytes={} p50_apply_broadcast_ms={} p95_apply_broadcast_ms={} p99_apply_broadcast_ms={} latency_samples={} server_threads={} server_fds={} open_ms={} load_ms={} lost_writers={} closes_1011={} shutdown_sigterm_ms={} db_pool={}",
         max_rooms,
         peers,
         duration.as_secs(),
@@ -914,6 +1259,7 @@ async fn collab_capacity_probe() {
         load_started.elapsed().as_millis(),
         lost_writers,
         closes_1011,
+        shutdown_phase_ms,
         db_pool_size
     );
     eprintln!(

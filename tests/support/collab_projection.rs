@@ -518,6 +518,7 @@ impl TestServer {
             None => Ok(()),
         };
         self.hub.shutdown().await;
+        self.hub.pool().close().await;
         server_result
     }
 }

@@ -75,8 +75,8 @@ Attempts to enable warm validators on the hot path (lazy spawn, cap raised to 64
 
 ## 2026-09-25 — advisor capacity-3 gate fixes and re-verification
 
-Evidence log: `/home/kinesis/orca/fvoci-evidence/collab-capacity-probe-20260925T074123Z.log`  
-Branch: `fvoci/rust-collab-engine-capacity` (post-fix commit pending)
+Evidence log: `/home/kinesis/orca/fvoci-evidence/collab-capacity-probe-20260925T080903Z.log`  
+Branch: `fvoci/rust-collab-engine-capacity`
 
 ### Advisor gate changes (room.rs)
 
@@ -133,4 +133,18 @@ Merge bar: p95 ≤ 300 ms, rate ≥ 0.95/s/room (achieved **1.000**), 0 writer l
 | `collab-engine` crate tests | pass |
 | New `collab_product` gate tests (3) | pass |
 
-SIGTERM drain at 64 live rooms: covered by existing `collab_shutdown` process tests (normal SIGTERM exit 0, guard release); not duplicated inside the capacity probe.
+### Process SIGTERM shutdown phase (64 rooms × 2 peers)
+
+Final probe phase spawns a real `fvoci-server` child (`tests/support/collab_process_server.rs`, shared with `collab_shutdown`), opens 64 rooms × 2 peers with edits in flight, records per-room committed `tail_seq` markers, sends SIGTERM, and asserts:
+
+| Check | Result |
+| --- | --- |
+| Exit 0 within 30 s drain budget | pass (~31 s phase) |
+| All 128 peers Close 1001 `server shutdown` (no 1011, no bare EOF) | pass |
+| No `collab-engine` helper children after exit | pass |
+| No fvoci advisory room guards held | pass |
+| App-role `pg_stat_activity` backends cleared | pass |
+| Post-restart reload matches post-shutdown DB `tail_seq` per room | 64/64 |
+| Editing resumes on reconnect | 64/64 |
+
+Evidence: `PROBE_SUMMARY … shutdown_sigterm_ms=31288` in the log above.
