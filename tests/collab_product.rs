@@ -2113,15 +2113,31 @@ async fn collab_user_reject_budget_survives_reconnect() {
         wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), true).await;
     }
 
+    // Budget exhausted: even a valid update from the same user is refused
+    // (without the budget it would apply), across a fresh connection.
     let mut writer = connect_member(addr, &wiki.session.session_token).await;
     auth_and_join(&mut writer, &routing_key, 709).await;
     writer
         .send(Message::Binary(
-            sync_update_frame(&routing_key, &hostile).into(),
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
         ))
         .await
         .unwrap();
     wait_for_ws_close_code(&mut writer, 1008, Duration::from_secs(5), false).await;
+
+    // Another user in the same room keeps writing.
+    let other = setup_second_member(&harness, &wiki).await;
+    let mut peer = connect_member(addr, &other.session_token).await;
+    auth_and_join(&mut peer, &routing_key, 710).await;
+    peer.send(Message::Binary(
+        sync_update_frame(&routing_key, &sample_hi_update()).into(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut peer, Duration::from_secs(5)).await,
+        "a different user in the same room is not blocked by another user's budget"
+    );
 
     server.shutdown().await;
     harness.cleanup().await;
