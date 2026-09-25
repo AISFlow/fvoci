@@ -666,14 +666,24 @@ async fn pg_only_crash_between_effect_and_advance_rolls_back() {
     })
     .await;
 
-    let leftover: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM fvoci.outbox_failures WHERE consumer = 'exactly-once' AND event_id = $1",
-    )
-    .bind(event_id)
-    .fetch_one(&admin)
-    .await
-    .expect("cleared failure");
-    assert_eq!(leftover, 0);
+    // The dispatcher clears the failure row right after the delivery commits (a
+    // separate statement), so wait for it (bounded, read-only) rather than
+    // reading it at the instant the effect becomes visible.
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = admin.clone();
+        Box::pin(async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM fvoci.outbox_failures WHERE consumer = 'exactly-once' AND event_id = $1",
+            )
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("failures")
+                == 0
+        })
+    })
+    .await;
+    assert_eq!(delivery_count(&app, "exactly-once").await, 1);
 
     dispatcher.request_shutdown();
     dispatcher.join().await.expect("join");
