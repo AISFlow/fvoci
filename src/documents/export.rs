@@ -24,8 +24,6 @@ impl ExportFormat {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportRenderError {
-    #[error("convert unavailable")]
-    Unavailable,
     #[error("invalid document body")]
     InvalidInput,
     #[error("document too large")]
@@ -40,7 +38,7 @@ pub struct RenderedExport {
     pub ext: String,
 }
 
-pub fn render_document_export(
+pub async fn render_document_export(
     client: &ConvertClient,
     format: ExportFormat,
     title: &str,
@@ -51,13 +49,13 @@ pub fn render_document_export(
     if serialized.len() > DOCUMENT_MAX_BODY_BYTES {
         return Err(ExportRenderError::TooLarge);
     }
-    let (bytes, content_type, ext) = match client.export_binary(format.op(), title, content_json) {
-        Ok(v) => v,
-        Err(ConvertError::InvalidInput) => return Err(ExportRenderError::InvalidInput),
-        Err(ConvertError::TooLarge) => return Err(ExportRenderError::TooLarge),
-        Err(ConvertError::NotConfigured) => return Err(ExportRenderError::Unavailable),
-        Err(_) => return Err(ExportRenderError::Failed),
-    };
+    let (bytes, content_type, ext) =
+        match client.export_binary(format.op(), title, content_json).await {
+            Ok(v) => v,
+            Err(ConvertError::InvalidInput) => return Err(ExportRenderError::InvalidInput),
+            Err(ConvertError::TooLarge) => return Err(ExportRenderError::TooLarge),
+            Err(_) => return Err(ExportRenderError::Failed),
+        };
     Ok(RenderedExport {
         bytes,
         content_type,
@@ -65,15 +63,8 @@ pub fn render_document_export(
     })
 }
 
+/// Source `renderDocument*`: `${title}.${ext}`; quoting and RFC 5987
+/// encoding happen in `content_disposition_attachment`.
 pub fn export_filename(title: &str, ext: &str) -> String {
-    let base = title
-        .trim()
-        .replace(['/', '\\', '?', '%', '*', ':', '|', '"', '<', '>'], "_");
-    let clipped: String = base.chars().take(80).collect();
-    let stem = if clipped.is_empty() {
-        "export"
-    } else {
-        clipped.as_str()
-    };
-    format!("{stem}.{ext}")
+    format!("{title}.{ext}")
 }

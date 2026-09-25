@@ -2,11 +2,10 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as Y from "yjs";
 import { isTiptapDoc } from "@fvoci/editor/json";
 import { mdToTiptapJson } from "@fvoci/editor/markdown/parse";
 import { tiptapDocToMd } from "@fvoci/editor/md";
-import { tiptapJsonToYDoc } from "@fvoci/editor/collab-tiptap";
+import { tiptapJsonToYUpdate } from "@fvoci/editor/collab-tiptap";
 import { markdownToDocx } from "@fvoci/editor/export/docx";
 import { tiptapDocToPdf } from "@fvoci/editor/export/pdf";
 import { tiptapDocToPptx } from "@fvoci/editor/export/pptx";
@@ -55,7 +54,8 @@ function respond(ok, body) {
 }
 
 async function main() {
-	const raw = process.env.FVOCI_CONVERT_PAYLOAD ?? readFileSync(0, "utf8");
+	// The request always arrives on stdin (no argv/env size limits).
+	const raw = readFileSync(0, "utf8");
 	const req = JSON.parse(raw);
 	const op = req.op;
 	try {
@@ -67,8 +67,7 @@ async function main() {
 			if (!isTiptapDoc(req.contentJson)) {
 				return respond(false, { code: "invalid_input" });
 			}
-			const doc = tiptapJsonToYDoc(req.contentJson);
-			const update = Y.encodeStateAsUpdate(doc);
+			const update = tiptapJsonToYUpdate(req.contentJson);
 			return respond(true, { updateB64: Buffer.from(update).toString("base64") });
 		}
 		if (!isTiptapDoc(req.contentJson)) {

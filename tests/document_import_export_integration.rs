@@ -6,22 +6,32 @@ mod project_harness;
 
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use fvoci_server::attachments::LocalStorage;
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
+use fvoci_server::db::documents::ImportFence;
+use fvoci_server::db::import_jobs::{claim_next_import_job, finish_import_job, ImportStatus};
 use fvoci_server::db::{pool, Db};
 use fvoci_server::documents::convert::ConvertClient;
+use fvoci_server::documents::import_body::create_fenced_wiki_document;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
-use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings, ImportQueue};
-use project_harness::{json_request, setup_session, TestDb};
-use serde_json::json;
+use fvoci_server::import_job::{
+    run_next_import, spawn_import_job, sweep_orphan_imports, ImportJobHandle, ImportJobSettings,
+};
+use project_harness::{add_workspace_user, admin_pool, json_request, TestDb};
+use serde_json::{json, Value};
+use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+use uuid::Uuid;
 use zip::write::SimpleFileOptions;
-use zip::ZipWriter;
+use zip::{CompressionMethod, ZipWriter};
 
 const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
@@ -32,39 +42,119 @@ fn convert_client() -> ConvertClient {
     )
 }
 
-fn markdown_zip_bytes() -> Vec<u8> {
+fn zip_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut buf = Vec::new();
     {
         let mut zip = ZipWriter::new(std::io::Cursor::new(&mut buf));
-        let options = SimpleFileOptions::default();
-        zip.start_file("notes/hello.md", options)
-            .expect("zip entry");
-        zip.write_all(b"# Imported note\n\nFrom zip.")
-            .expect("zip write");
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (name, data) in files {
+            zip.start_file(*name, options).expect("zip entry");
+            zip.write_all(data).expect("zip write");
+        }
         zip.finish().expect("zip finish");
     }
     buf
 }
 
-async fn import_export_state(app_url: &str) -> (AppState, ImportJobHandle) {
+fn markdown_zip_bytes() -> Vec<u8> {
+    zip_bytes(&[("notes/hello.md", b"# Imported note\n\nFrom zip.")])
+}
+
+/// App plus the pieces needed to drive the async runner deterministically.
+struct Fixture {
+    app: axum::Router,
+    cookie: String,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    pool: PgPool,
+    admin: PgPool,
+    settings: ImportJobSettings,
+    storage: LocalStorage,
+    runner: Option<ImportJobHandle>,
+}
+
+impl Fixture {
+    async fn stop_runner(&mut self) {
+        if let Some(runner) = self.runner.take() {
+            runner.request_shutdown();
+            runner.join().await.expect("runner join");
+        }
+    }
+
+    async fn run_next(&self) -> bool {
+        run_next_import(
+            &self.pool,
+            &self.settings,
+            &self.storage,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run next import")
+    }
+
+    async fn job_status(&self, cookie: &str, job_id: &str) -> Value {
+        let (status, body) = json_request(
+            self.app.clone(),
+            "GET",
+            &format!("/api/v1/import/{job_id}?workspaceId={}", self.workspace_id),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    async fn import(&self, cookie: &str, body: Value) -> (StatusCode, Value) {
+        json_request(
+            self.app.clone(),
+            "POST",
+            "/api/v1/import",
+            Some(body),
+            Some(cookie),
+        )
+        .await
+    }
+
+    async fn document_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.documents WHERE workspace_id = $1")
+            .bind(self.workspace_id)
+            .fetch_one(&self.admin)
+            .await
+            .unwrap()
+    }
+}
+
+async fn fixture(harness: &TestDb) -> Fixture {
+    fixture_with_runner(harness, false).await
+}
+
+async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixture {
     let convert = convert_client();
-    let import_settings = ImportJobSettings::from_env(convert.clone());
-    let import_queue = ImportQueue::new();
-    let pool = pool::connect_app(app_url).await.expect("app pool");
-    let import_job = spawn_import_job(pool.clone(), import_settings.clone(), import_queue.clone());
-    let storage_root =
-        std::env::temp_dir().join(format!("fvoci-import-export-{}", uuid::Uuid::now_v7()));
+    let settings = ImportJobSettings {
+        poll_interval: Duration::from_millis(200),
+        ..ImportJobSettings::from_env(convert.clone())
+    };
+    let pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let storage_root = std::env::temp_dir().join(format!("fvoci-import-export-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
+    let storage = LocalStorage::new(storage_root);
+    let runner =
+        spawn_runner.then(|| spawn_import_job(pool.clone(), settings.clone(), storage.clone()));
+    let wake = runner
+        .as_ref()
+        .map(|handle| handle.wake.clone())
+        .unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
     let state = AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool),
+            db: Db::new(pool.clone()),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
         }),
         branding_name: "FVOCI".to_string(),
         public_origin: "http://localhost".to_string(),
         cookie_secure: false,
         rate_limiter: RateLimiter::new(),
-        storage: fvoci_server::attachments::LocalStorage::new(storage_root),
+        storage: storage.clone(),
         upload: fvoci_server::attachments::UploadLimits {
             part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
             max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
@@ -72,15 +162,11 @@ async fn import_export_state(app_url: &str) -> (AppState, ImportJobHandle) {
         },
         collab: None,
         meili: None,
+        mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
         document_convert: Some(convert),
-        import_settings: Some(import_settings),
-        import_queue,
+        import_wake: Some(wake),
+        import_extractor_available: false,
     };
-    (state, import_job)
-}
-
-async fn setup_import_export(harness: &TestDb) -> (axum::Router, String, uuid::Uuid) {
-    let (state, _import_job) = import_export_state(&harness.app_url).await;
     let app = fvoci_server::http::router(state, None);
     let response = app
         .clone()
@@ -105,50 +191,60 @@ async fn setup_import_export(harness: &TestDb) -> (axum::Router, String, uuid::U
         )
         .await
         .expect("setup");
-    let cookie_hdr = response
+    let cookie = response
         .headers()
         .get("set-cookie")
         .and_then(|v| v.to_str().ok())
         .expect("set-cookie")
-        .to_string();
-    let cookie = cookie_hdr
         .split(';')
         .next()
-        .unwrap_or("")
+        .unwrap()
         .split('=')
         .nth(1)
-        .unwrap_or("")
+        .unwrap()
         .to_string();
-    let admin = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&harness.admin_url)
-        .await
-        .unwrap();
-    let ws: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+    let admin = admin_pool(harness).await;
+    let (workspace_id,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let (user_id,): (Uuid,) = sqlx::query_as("SELECT id FROM fvoci.users LIMIT 1")
         .fetch_one(&admin)
         .await
         .unwrap();
-    admin.close().await;
-    (app, cookie, ws.0)
+    Fixture {
+        app,
+        cookie,
+        user_id,
+        workspace_id,
+        pool,
+        admin,
+        settings,
+        storage,
+        runner,
+    }
 }
 
-async fn raw_get(
+async fn raw_request(
     app: axum::Router,
+    method: &str,
     path: &str,
     cookie: Option<&str>,
-    auth: Option<&str>,
+    content_type: Option<&str>,
+    body: Body,
 ) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
     let mut builder = Request::builder()
-        .method("GET")
+        .method(method)
         .uri(path)
         .header("origin", "http://localhost");
     if let Some(cookie) = cookie {
-        builder = builder.header("cookie", format!("fvoci_session={}", cookie));
+        builder = builder.header("cookie", format!("fvoci_session={cookie}"));
     }
-    if let Some(auth) = auth {
-        builder = builder.header("authorization", auth);
+    if let Some(content_type) = content_type {
+        builder = builder.header("content-type", content_type);
     }
-    let mut request = builder.body(Body::empty()).unwrap();
+    let mut request = builder.body(body).unwrap();
     request
         .extensions_mut()
         .insert(axum::extract::ConnectInfo(project_harness::test_peer()));
@@ -162,120 +258,806 @@ async fn raw_get(
     (status, bytes, headers)
 }
 
+async fn job_row(admin: &PgPool, job_id: Uuid) -> (String, bool, i16, Value) {
+    sqlx::query_as(
+        "SELECT status, payload IS NOT NULL, attempts, created_refs FROM fvoci.import_jobs WHERE id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(admin)
+    .await
+    .unwrap()
+}
+
+async fn document_exists(admin: &PgPool, id: &str) -> bool {
+    let id: Uuid = id.parse().unwrap();
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fvoci.documents WHERE id = $1")
+        .bind(id)
+        .fetch_one(admin)
+        .await
+        .unwrap()
+        == 1
+}
+
 #[tokio::test]
-async fn markdown_zip_import_creates_documents_with_body() {
+async fn markdown_zip_import_status_reads_completed() {
     let harness = TestDb::bootstrap().await;
-    let (app, cookie, workspace_id) = setup_import_export(&harness).await;
-    let zip_b64 = B64.encode(markdown_zip_bytes());
-
-    let (status, body) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/import",
-        Some(json!({
-            "workspaceId": workspace_id,
-            "source": "markdown-zip",
-            "zipBase64": zip_b64
-        })),
-        Some(&cookie),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "import failed: {body}");
+    let fx = fixture(&harness).await;
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "markdown-zip",
+                "zipBase64": B64.encode(markdown_zip_bytes())
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["status"], "completed");
-    let doc_ids = body["createdDocumentIds"].as_array().expect("doc ids");
-    assert_eq!(doc_ids.len(), 1);
-    let doc_id = doc_ids[0].as_str().unwrap();
+    let doc_id = body["createdDocumentIds"][0].as_str().unwrap().to_string();
 
-    let (status, body) = json_request(
-        app.clone(),
+    // B1: the terminal transition is really persisted under FORCE RLS.
+    let job = fx
+        .job_status(&fx.cookie, body["id"].as_str().unwrap())
+        .await;
+    assert_eq!(job["status"], "completed", "{job}");
+
+    let (status, meta) = json_request(
+        fx.app.clone(),
         "GET",
-        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}"),
+        &format!("/api/v1/workspaces/{}/documents/{doc_id}", fx.workspace_id),
         None,
-        Some(&cookie),
+        Some(&fx.cookie),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["title"], "hello");
-
-    let (status, body) = json_request(
-        app.clone(),
+    assert_eq!(meta["title"], "hello");
+    let (status, doc_body) = json_request(
+        fx.app.clone(),
         "GET",
-        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/body"),
+        &format!(
+            "/api/v1/workspaces/{}/documents/{doc_id}/body",
+            fx.workspace_id
+        ),
         None,
-        Some(&cookie),
+        Some(&fx.cookie),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let content = body["contentJson"]["content"].as_array().expect("content");
-    assert!(!content.is_empty());
-
+    assert!(!doc_body["contentJson"]["content"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     harness.cleanup().await;
 }
 
 #[tokio::test]
-async fn export_markdown_returns_attachment_bytes() {
+async fn markdown_zip_failure_marks_job_failed_and_returns_import_failed() {
     let harness = TestDb::bootstrap().await;
-    let (app, cookie, workspace_id) = setup_import_export(&harness).await;
-    let zip_b64 = B64.encode(markdown_zip_bytes());
-    let (status, import_body) = json_request(
-        app.clone(),
-        "POST",
-        "/api/v1/import",
-        Some(json!({
-            "workspaceId": workspace_id,
-            "source": "markdown-zip",
-            "zipBase64": zip_b64
-        })),
-        Some(&cookie),
+    let fx = fixture(&harness).await;
+    // The third page exceeds DOCUMENT_MAX_BODY_BYTES (1 MiB).
+    let huge = "a".repeat(1024 * 1024 + 16);
+    let zip = zip_bytes(&[
+        ("a.md", b"# one"),
+        ("b.md", b"# two"),
+        ("c.md", huge.as_bytes()),
+    ]);
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "markdown-zip",
+                "zipBase64": B64.encode(zip)
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "import_failed");
+    let statuses: Vec<(String,)> =
+        sqlx::query_as("SELECT status FROM fvoci.import_jobs WHERE workspace_id = $1")
+            .bind(fx.workspace_id)
+            .fetch_all(&fx.admin)
+            .await
+            .unwrap();
+    assert_eq!(statuses, vec![("failed".to_string(),)]);
+    // Source contract: the request-driven markdown path does not compensate.
+    let titles: Vec<(String,)> = sqlx::query_as(
+        "SELECT title FROM fvoci.documents WHERE workspace_id = $1 AND title IN ('a','b','c') ORDER BY title",
     )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let doc_id = import_body["createdDocumentIds"][0].as_str().unwrap();
+    .bind(fx.workspace_id)
+    .fetch_all(&fx.admin)
+    .await
+    .unwrap();
+    assert_eq!(titles, vec![("a".into(),), ("b".into(),), ("c".into(),)]);
+    harness.cleanup().await;
+}
 
-    let (status, bytes, headers) = raw_get(
-        app.clone(),
-        &format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/md"),
-        Some(&cookie),
+#[tokio::test]
+async fn async_office_import_runs_through_spawned_runner() {
+    let harness = TestDb::bootstrap().await;
+    let mut fx = fixture_with_runner(&harness, true).await;
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "office-file",
+                "fileName": "회의록.md",
+                "zipBase64": B64.encode("# 회의록\n\n본문 내용")
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["status"], "running");
+    let job_id = body["id"].as_str().unwrap().to_string();
+    let mut last = Value::Null;
+    for _ in 0..150 {
+        last = fx.job_status(&fx.cookie, &job_id).await;
+        if last["status"] != "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(last["status"], "completed", "{last}");
+    let doc_id = last["createdDocumentIds"][0].as_str().unwrap();
+    let (_, meta) = json_request(
+        fx.app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{}/documents/{doc_id}", fx.workspace_id),
         None,
+        Some(&fx.cookie),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let content_type = headers.get("content-type").and_then(|v| v.to_str().ok());
-    assert!(
-        content_type.is_some_and(|v| v.starts_with("text/markdown")),
-        "unexpected content-type: {content_type:?}"
+    assert_eq!(meta["title"], "회의록");
+    let (status, has_payload, attempts, _) = job_row(&fx.admin, job_id.parse().unwrap()).await;
+    assert_eq!(
+        (status.as_str(), has_payload, attempts),
+        ("completed", false, 1)
     );
-    let text = String::from_utf8(bytes).expect("utf8");
-    assert!(text.contains("Imported note"));
+    fx.stop_runner().await;
+    harness.cleanup().await;
+}
 
+#[tokio::test]
+async fn async_notion_failure_marks_failed_and_compensates() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let before = fx.document_count().await;
+    let huge = "b".repeat(1024 * 1024 + 16);
+    let zip = zip_bytes(&[
+        ("Root 0123456789abcdef.md", b"# root"),
+        ("Root 0123456789abcdef/Big 89abcdef.md", huge.as_bytes()),
+    ]);
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "notion-zip",
+                "zipBase64": B64.encode(zip)
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(fx.run_next().await);
+    let job = fx
+        .job_status(&fx.cookie, body["id"].as_str().unwrap())
+        .await;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(
+        fx.document_count().await,
+        before,
+        "created pages were compensated"
+    );
+    let (_, has_payload, _, _) =
+        job_row(&fx.admin, body["id"].as_str().unwrap().parse().unwrap()).await;
+    assert!(!has_payload, "terminal rows drop the upload");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn notion_import_builds_nested_hierarchy_with_clean_titles() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let zip = zip_bytes(&[
+        (
+            "Export/Root 0123456789abcdef0123456789abcdef/Child aaaaaaaa/Grand bbbbbbbbcccc.md",
+            b"# grand",
+        ),
+        ("Export/Root 0123456789abcdef0123456789abcdef.md", b"# root"),
+        (
+            "Export/Root 0123456789abcdef0123456789abcdef/Child aaaaaaaa.md",
+            b"# child",
+        ),
+    ]);
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "notion-zip",
+                "zipBase64": B64.encode(zip)
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(fx.run_next().await);
+    let job = fx
+        .job_status(&fx.cookie, body["id"].as_str().unwrap())
+        .await;
+    assert_eq!(job["status"], "completed", "{job}");
+    let rows: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, title, parent_id FROM fvoci.documents WHERE workspace_id = $1 AND title IN ('Root','Child','Grand')",
+    )
+    .bind(fx.workspace_id)
+    .fetch_all(&fx.admin)
+    .await
+    .unwrap();
+    let find = |t: &str| rows.iter().find(|r| r.1 == t).unwrap().clone();
+    let (root, _, root_parent) = find("Root");
+    let (child, _, child_parent) = find("Child");
+    let (_, _, grand_parent) = find("Grand");
+    assert_eq!(root_parent, None);
+    assert_eq!(child_parent, Some(root));
+    assert_eq!(grand_parent, Some(child));
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn crashed_run_is_recovered_by_the_next_claim() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "office-file",
+                "fileName": "note.md",
+                "zipBase64": B64.encode("# note")
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+
+    // First run: claims, creates one document under the lease, then "dies".
+    let claim = claim_next_import_job(&fx.pool)
+        .await
+        .unwrap()
+        .expect("claim");
+    assert_eq!(claim.job_id, job_id);
+    let orphan = create_fenced_wiki_document(
+        &fx.pool,
+        fx.workspace_id,
+        claim.created_by,
+        claim.session_id,
+        "orphan",
+        None,
+        ImportFence {
+            job_id,
+            lease_token: claim.lease_token,
+        },
+    )
+    .await
+    .expect("fenced create");
+    let (_, _, _, refs) = job_row(&fx.admin, job_id).await;
+    assert_eq!(refs["documentIds"], json!([orphan.to_string()]));
+    // A live lease is not stolen by another claim.
+    assert!(claim_next_import_job(&fx.pool).await.unwrap().is_none());
+    sqlx::query(
+        "UPDATE fvoci.import_jobs SET lease_until = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+
+    // Recovery: the next claim compensates the dead run, then completes.
+    assert!(fx.run_next().await);
+    assert!(!document_exists(&fx.admin, &orphan.to_string()).await);
+    let job = fx.job_status(&fx.cookie, &job_id.to_string()).await;
+    assert_eq!(job["status"], "completed", "{job}");
+    let (_, _, attempts, refs) = job_row(&fx.admin, job_id).await;
+    assert_eq!(attempts, 2);
+    let docs = refs["documentIds"].as_array().unwrap();
+    assert_eq!(docs.len(), 1);
+    assert!(document_exists(&fx.admin, docs[0].as_str().unwrap()).await);
+    // The dead run's late writes are fenced out.
+    assert!(!finish_import_job(&fx.pool, &claim, ImportStatus::Failed)
+        .await
+        .unwrap());
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn expired_lease_is_swept_failed_and_compensated() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let (_, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "office-file",
+                "fileName": "note.txt",
+                "zipBase64": B64.encode("plain")
+            }),
+        )
+        .await;
+    let job_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    let claim = claim_next_import_job(&fx.pool)
+        .await
+        .unwrap()
+        .expect("claim");
+    let orphan = create_fenced_wiki_document(
+        &fx.pool,
+        fx.workspace_id,
+        claim.created_by,
+        claim.session_id,
+        "orphan",
+        None,
+        ImportFence {
+            job_id,
+            lease_token: claim.lease_token,
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE fvoci.import_jobs SET lease_until = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+
+    let swept = sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(swept, 1);
+    assert!(!document_exists(&fx.admin, &orphan.to_string()).await);
+    let (status, has_payload, _, _) = job_row(&fx.admin, job_id).await;
+    assert_eq!((status.as_str(), has_payload), ("failed", false));
+    // Idempotent, and the late worker is fenced.
+    assert_eq!(
+        sweep_orphan_imports(&fx.pool, &fx.storage, &CancellationToken::new())
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        !finish_import_job(&fx.pool, &claim, ImportStatus::Completed)
+            .await
+            .unwrap()
+    );
+    let fenced = create_fenced_wiki_document(
+        &fx.pool,
+        fx.workspace_id,
+        claim.created_by,
+        claim.session_id,
+        "late",
+        None,
+        ImportFence {
+            job_id,
+            lease_token: claim.lease_token,
+        },
+    )
+    .await;
+    assert!(matches!(
+        fenced,
+        Err(fvoci_server::documents::import_body::ImportBodyError::Fenced)
+    ));
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn demoted_admin_job_fails_at_execution() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let admin_user = add_workspace_user(&fx.admin, fx.workspace_id, "admin", "importer").await;
+    let (status, body) = fx
+        .import(
+            &admin_user.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "office-file",
+                "fileName": "note.md",
+                "zipBase64": B64.encode("# note")
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    sqlx::query("UPDATE fvoci.memberships SET role = 'member' WHERE user_id = $1")
+        .bind(admin_user.user_id)
+        .execute(&fx.admin)
+        .await
+        .unwrap();
+    let before = fx.document_count().await;
+    assert!(fx.run_next().await);
+    let job = fx
+        .job_status(&fx.cookie, body["id"].as_str().unwrap())
+        .await;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(fx.document_count().await, before);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn import_body_contract_auth_first_415_413_and_strict_schema() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let path = "/api/v1/import";
+    // Unauthenticated: 401 before the (oversized) body is read.
+    let (status, _, _) = raw_request(
+        fx.app.clone(),
+        "POST",
+        path,
+        None,
+        Some("application/json"),
+        Body::from(vec![b'x'; 4 * 1024 * 1024]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, bytes, _) = raw_request(
+        fx.app.clone(),
+        "POST",
+        path,
+        Some(&fx.cookie),
+        Some("text/plain"),
+        Body::from("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+        "unsupported_media_type"
+    );
+    let limit = fvoci_server::http::routes::import::IMPORT_BODY_MAX_BYTES;
+    let (status, _, _) = raw_request(
+        fx.app.clone(),
+        "POST",
+        path,
+        Some(&fx.cookie),
+        Some("application/json"),
+        Body::from(vec![b' '; limit + 1]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({"workspaceId": fx.workspace_id, "source": "markdown-zip", "zipBase64": "AA==", "extra": 1}),
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_input"))
+    );
+    let (status, _) = fx
+        .import(
+            &fx.cookie,
+            json!({"workspaceId": fx.workspace_id, "source": "office-file", "zipBase64": "AA==", "fileName": "x".repeat(256)}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Unsupported office formats fail up front instead of spinning.
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({"workspaceId": fx.workspace_id, "source": "office-file", "zipBase64": "AA==", "fileName": "deck.pptx"}),
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("import_failed"))
+    );
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn upload_over_axum_default_limit_is_accepted() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    // ~3 MiB of incompressible-ish base64 in a stored entry: well above
+    // axum's 2 MiB Json default, well below the 64 MiB import cap.
+    let mut noise = Vec::with_capacity(3 * 1024 * 1024);
+    let mut x: u32 = 0x1234_5678;
+    while noise.len() < 3 * 1024 * 1024 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        noise.extend_from_slice(&x.to_le_bytes());
+    }
+    let zip = {
+        let mut buf = Vec::new();
+        let mut zip = ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file("note.md", stored).unwrap();
+        zip.write_all(b"# big upload").unwrap();
+        zip.start_file("blob.bin", stored).unwrap();
+        zip.write_all(&noise).unwrap();
+        zip.finish().unwrap();
+        buf
+    };
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "markdown-zip",
+                "zipBase64": B64.encode(zip)
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["createdDocumentIds"].as_array().unwrap().len(), 1);
+    harness.cleanup().await;
+}
+
+/// One deflate entry inflating to `chunks` x 8 MiB of zeros. Compressing
+/// 1 GiB in a debug build is slow, so one sync-flushed 8 MiB block sequence is
+/// repeated (each copy only references zeros in the window) and closed with
+/// an empty final block. CRC is left 0: the reader, like the source, does not
+/// verify it, and the entry must be rejected before its end anyway.
+fn zero_bomb_zip(chunks: usize) -> Vec<u8> {
+    use flate2::{Compress, Compression, FlushCompress};
+    let zeros = vec![0u8; 8 * 1024 * 1024];
+    let mut block = Vec::with_capacity(64 * 1024);
+    let mut compress = Compress::new(Compression::best(), false);
+    compress
+        .compress_vec(&zeros, &mut block, FlushCompress::Sync)
+        .unwrap();
+    assert_eq!(compress.total_in() as usize, zeros.len());
+    let mut stream = Vec::with_capacity(block.len() * chunks + 2);
+    for _ in 0..chunks {
+        stream.extend_from_slice(&block);
+    }
+    stream.extend_from_slice(&[0x03, 0x00]);
+    let size = (zeros.len() * chunks) as u32;
+    let name = b"bomb.md";
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&8u16.to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&(stream.len() as u32).to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(name);
+    out.extend_from_slice(&stream);
+    let central_at = out.len() as u32;
+    out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&8u16.to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&(stream.len() as u32).to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(&[0; 12]);
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(name);
+    let central_len = out.len() as u32 - central_at;
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&central_len.to_le_bytes());
+    out.extend_from_slice(&central_at.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+#[test]
+fn zero_bomb_fixture_really_inflates_past_the_budget() {
+    // Sanity check of the fixture itself with a small copy count.
+    use std::io::Read;
+    let zip = zero_bomb_zip(2);
+    let start = 30 + "bomb.md".len();
+    let compressed = u32::from_le_bytes(zip[18..22].try_into().unwrap()) as usize;
+    let mut out = Vec::new();
+    flate2::read::DeflateDecoder::new(&zip[start..start + compressed])
+        .read_to_end(&mut out)
+        .unwrap();
+    assert_eq!(out.len(), 16 * 1024 * 1024);
+    assert!(out.iter().all(|b| *b == 0));
+}
+
+fn vm_hwm_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmHWM:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn real_zip_bomb_is_rejected_within_the_inflate_budget() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    // 1 GiB of zeros as one deflate entry of about 1 MiB (see `zero_bomb_zip`).
+    let bomb = zero_bomb_zip(128);
+    assert!(bomb.len() < 8 * 1024 * 1024, "bomb is {} bytes", bomb.len());
+    let before = vm_hwm_kib();
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "markdown-zip",
+                "zipBase64": B64.encode(&bomb)
+            }),
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("import_failed"))
+    );
+    let grown_mib = vm_hwm_kib().saturating_sub(before) / 1024;
+    // The inflate budget is 200 MiB; inflating the whole entry would be 1 GiB.
+    assert!(grown_mib < 600, "peak RSS grew by {grown_mib} MiB");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn document_over_128_kib_imports_and_exports() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let paragraph = "한글 문단과 English text 가 섞인 긴 본문입니다. ".repeat(40);
+    let markdown = (0..60)
+        .map(|i| format!("## 절 {i}\n\n{paragraph}\n"))
+        .collect::<String>();
+    assert!(markdown.len() > 200 * 1024 && markdown.len() < 1024 * 1024);
+    let (status, body) = fx
+        .import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "markdown-zip",
+                "zipBase64": B64.encode(zip_bytes(&[("회의록.md", markdown.as_bytes())]))
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let doc_id = body["createdDocumentIds"][0].as_str().unwrap().to_string();
+    for (format, content_type) in [
+        ("md", "text/markdown"),
+        ("pdf", "application/pdf"),
+        (
+            "docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+    ] {
+        let (status, bytes, headers) = raw_request(
+            fx.app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{}/documents/{doc_id}/{format}",
+                fx.workspace_id
+            ),
+            Some(&fx.cookie),
+            None,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{format}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let ct = headers["content-type"].to_str().unwrap();
+        assert!(ct.starts_with(content_type), "{format}: {ct}");
+        let disposition = headers["content-disposition"].to_str().unwrap();
+        assert!(
+            disposition.contains(&format!(
+                "filename*=UTF-8''%ED%9A%8C%EC%9D%98%EB%A1%9D.{format}"
+            )),
+            "{disposition}"
+        );
+        assert!(disposition.is_ascii());
+        if format == "md" {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("절 59"));
+        } else {
+            assert!(bytes.len() > 1000);
+        }
+    }
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn project_document_export_route() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let project = project_harness::create_project(
+        fx.app.clone(),
+        &fx.cookie,
+        fx.workspace_id,
+        "PRJ",
+        "workspace",
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (status, doc) = json_request(
+        fx.app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{}/projects/{project_id}/documents",
+            fx.workspace_id
+        ),
+        Some(json!({"title": "Spec"})),
+        Some(&fx.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{doc}");
+    let doc_id = doc["id"].as_str().unwrap();
+    let (status, bytes, _) = raw_request(
+        fx.app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{}/projects/{project_id}/documents/{doc_id}/md",
+            fx.workspace_id
+        ),
+        Some(&fx.cookie),
+        None,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(String::from_utf8(bytes).unwrap().starts_with("# Spec"));
+    // The workspace route does not serve project documents.
+    let (status, _, _) = raw_request(
+        fx.app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{}/documents/{doc_id}/md",
+            fx.workspace_id
+        ),
+        Some(&fx.cookie),
+        None,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     harness.cleanup().await;
 }
 
 #[tokio::test]
 async fn import_rejects_bearer_token() {
     let harness = TestDb::bootstrap().await;
-    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let fx = fixture(&harness).await;
     let (status, created) = json_request(
-        app.clone(),
+        fx.app.clone(),
         "POST",
-        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
-        Some(json!({
-            "name": "import",
-            "scopes": ["documents.read"]
-        })),
-        Some(&cookie),
+        &format!("/api/v1/workspaces/{}/api-tokens", fx.workspace_id),
+        Some(json!({ "name": "import", "scopes": ["documents.read"] })),
+        Some(&fx.cookie),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let secret = created["token"].as_str().unwrap();
-
     let (status, body, _) = project_harness::http_request(
-        app,
+        fx.app.clone(),
         "POST",
         "/api/v1/import",
         Some(
             json!({
-                "workspaceId": workspace_id,
+                "workspaceId": fx.workspace_id,
                 "source": "markdown-zip",
                 "zipBase64": B64.encode(markdown_zip_bytes())
             })
@@ -289,6 +1071,6 @@ async fn import_rejects_bearer_token() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_found");
-
+    let _ = fx.user_id;
     harness.cleanup().await;
 }

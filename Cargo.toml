@@ -47,7 +47,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "uuid", "chrono"] }
 thiserror = "2"
 time = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "fs", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "fs", "io-util", "process", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "fs", "limit"] }
@@ -58,7 +58,7 @@ url = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 bytes = "1"
 infer = "0.19"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 
@@ -67,6 +67,7 @@ tokio-tungstenite = "=0.29.0"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
 mailparse = "0.16"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [features]
 db-tests = []

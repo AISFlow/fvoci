@@ -723,6 +723,7 @@ dependencies = [
  "chrono",
  "collab-engine",
  "document-extract-client",
+ "flate2",
  "futures-util",
  "hex",
  "hmac",

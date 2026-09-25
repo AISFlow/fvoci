@@ -5,7 +5,6 @@ use crate::auth::AuthService;
 use crate::collab::CollabHub;
 use crate::documents::convert::ConvertClient;
 use crate::http::rate_limit::RateLimiter;
-use crate::import_job::{ImportJobSettings, ImportQueue};
 use crate::search::meili::MeiliConfig;
 
 #[derive(Clone)]
@@ -20,7 +19,10 @@ pub struct AppState {
     pub collab: Option<Arc<CollabHub>>,
     pub meili: Option<MeiliConfig>,
     pub document_convert: Option<ConvertClient>,
-    pub import_settings: Option<ImportJobSettings>,
-    pub import_queue: ImportQueue,
+    /// Wakes the async import runner; `None` = no runner in this process, so
+    /// office-file and notion-zip imports fail as unavailable (source).
+    pub import_wake: Option<Arc<tokio::sync::Notify>>,
+    /// Whether the HWP/HWPX extractor is configured for office-file imports.
+    pub import_extractor_available: bool,
     pub mailer: std::sync::Arc<crate::mail::Mailer>,
 }

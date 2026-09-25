@@ -16,6 +16,7 @@ use crate::api::dto::{
     MoveDocumentBody, OkResponse, PatchDocumentBody, RequiredNullable, SortDocumentBody,
     TrashItemResponse, TrashListResponse, TreeNodeResponse, TreeResponse,
 };
+use crate::attachments::content_disposition_attachment;
 use crate::auth::session::SessionUser;
 use crate::db::documents::{
     create_wiki_document, get_wiki_document, list_trashed_wiki_documents, list_wiki_ancestors,
@@ -548,88 +549,40 @@ async fn list_trash(
     }
 }
 
-async fn export_markdown(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
-) -> Result<Response, DocumentApiError> {
-    export_document(
-        &state,
-        peer,
-        &headers,
-        &jar,
-        workspace_id,
-        document_id,
-        ExportFormat::Markdown,
-    )
-    .await
+macro_rules! workspace_export_handler {
+    ($name:ident, $format:expr) => {
+        async fn $name(
+            State(state): State<AppState>,
+            headers: HeaderMap,
+            jar: CookieJar,
+            Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+        ) -> Result<Response, DocumentApiError> {
+            export_document(
+                &state,
+                &headers,
+                &jar,
+                workspace_id,
+                None,
+                document_id,
+                $format,
+            )
+            .await
+        }
+    };
 }
 
-async fn export_pdf(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
-) -> Result<Response, DocumentApiError> {
-    export_document(
-        &state,
-        peer,
-        &headers,
-        &jar,
-        workspace_id,
-        document_id,
-        ExportFormat::Pdf,
-    )
-    .await
-}
+workspace_export_handler!(export_markdown, ExportFormat::Markdown);
+workspace_export_handler!(export_pdf, ExportFormat::Pdf);
+workspace_export_handler!(export_docx, ExportFormat::Docx);
+workspace_export_handler!(export_pptx, ExportFormat::Pptx);
 
-async fn export_docx(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
-) -> Result<Response, DocumentApiError> {
-    export_document(
-        &state,
-        peer,
-        &headers,
-        &jar,
-        workspace_id,
-        document_id,
-        ExportFormat::Docx,
-    )
-    .await
-}
-
-async fn export_pptx(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
-) -> Result<Response, DocumentApiError> {
-    export_document(
-        &state,
-        peer,
-        &headers,
-        &jar,
-        workspace_id,
-        document_id,
-        ExportFormat::Pptx,
-    )
-    .await
-}
-
-async fn export_document(
+/// Shared by workspace and project routes (source: one per-user budget for both).
+pub(crate) async fn export_document(
     state: &AppState,
-    peer: SocketAddr,
     headers: &HeaderMap,
     jar: &CookieJar,
     workspace_id: Uuid,
+    project_id: Option<Uuid>,
     document_id: Uuid,
     format: ExportFormat,
 ) -> Result<Response, DocumentApiError> {
@@ -641,7 +594,6 @@ async fn export_document(
         Some(workspace_id),
     )
     .await?;
-    let _ = peer_ip(peer.ip());
     if let Err(retry_after) = state
         .rate_limiter
         .allow_window(
@@ -653,39 +605,56 @@ async fn export_document(
     {
         return Err(AppError::rate_limited(retry_after).into());
     }
-    let Some(convert) = state.document_convert.as_ref() else {
-        return Err(AppError::internal().into());
-    };
-    let result = get_wiki_document(
-        &state.auth.db.pool,
-        workspace_id,
-        user_id,
-        session_id,
-        document_id,
-    )
-    .await
+    let result = match project_id {
+        None => {
+            get_wiki_document(
+                &state.auth.db.pool,
+                workspace_id,
+                user_id,
+                session_id,
+                document_id,
+            )
+            .await
+        }
+        Some(project_id) => {
+            crate::db::project_documents::get_project_document(
+                &state.auth.db.pool,
+                workspace_id,
+                project_id,
+                document_id,
+                user_id,
+                session_id,
+            )
+            .await
+        }
+    }
     .map_err(internal)?;
     let meta = match result {
         Ok(meta) => meta,
         Err(err) => return Err(map_document_error(err)),
     };
-    let rendered = match render_document_export(convert, format, &meta.title, &meta.content_json) {
-        Ok(v) => v,
-        Err(ExportRenderError::InvalidInput) => {
-            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-        }
-        Err(ExportRenderError::TooLarge) => {
-            return Err(DocumentApiError::Coded {
-                status: StatusCode::PAYLOAD_TOO_LARGE,
-                code: "document_body_exceeds_document_max_body_bytes",
-                title: "document body exceeds document max body bytes".to_string(),
-                params: None,
-            });
-        }
-        Err(ExportRenderError::Unavailable | ExportRenderError::Failed) => {
-            return Err(AppError::internal().into());
-        }
+    let Some(convert) = state.document_convert.as_ref() else {
+        tracing::error!("document export requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
+        return Err(AppError::internal().into());
     };
+    let rendered =
+        match render_document_export(convert, format, &meta.title, &meta.content_json).await {
+            Ok(v) => v,
+            Err(ExportRenderError::InvalidInput) => {
+                return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+            }
+            Err(ExportRenderError::TooLarge) => {
+                return Err(DocumentApiError::Coded {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    code: "document_body_exceeds_document_max_body_bytes",
+                    title: "document body exceeds document max body bytes".to_string(),
+                    params: None,
+                });
+            }
+            Err(ExportRenderError::Failed) => {
+                return Err(AppError::internal().into());
+            }
+        };
     let filename = export_filename(&meta.title, &rendered.ext);
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -694,7 +663,7 @@ async fn export_document(
     );
     headers.insert(
         axum::http::header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+        HeaderValue::from_str(&content_disposition_attachment(&filename))
             .map_err(|_| AppError::internal())?,
     );
     headers.insert(

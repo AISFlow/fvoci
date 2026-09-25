@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
+# Installs the locked dependencies of the Node document convert helper and
+# prints FVOCI_DOCUMENT_CONVERT_BIN=<runner>. Any failure exits non-zero.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT/packages/editor"
-npm install --no-fund --no-audit
-cd "$ROOT/scripts/document-convert"
-npm install --no-fund --no-audit
-CONVERT="$ROOT/scripts/document-convert/convert.mjs"
 RUNNER="$ROOT/scripts/run-document-convert.sh"
-if [[ ! -f "$CONVERT" ]]; then
-  echo "missing document convert script at $CONVERT" >&2
+CONVERT="$ROOT/scripts/document-convert/convert.mjs"
+
+npm ci --prefix "$ROOT/packages/editor" --ignore-scripts --no-audit --no-fund >&2
+npm ci --prefix "$ROOT/scripts/document-convert" --ignore-scripts --no-audit --no-fund >&2
+
+[[ -f "$CONVERT" ]] || { echo "missing document convert script at $CONVERT" >&2; exit 1; }
+[[ -x "$RUNNER" ]] || { echo "document convert runner is not executable: $RUNNER" >&2; exit 1; }
+
+# Smoke: one real conversion proves node, tsx and the editor package resolve.
+if ! printf '%s' '{"op":"md_to_tiptap","markdown":"# ok"}' | "$RUNNER" | grep -q '"ok":true'; then
+  echo "document convert helper smoke test failed" >&2
   exit 1
 fi
-if [[ ! -x "$RUNNER" ]]; then
-  chmod +x "$RUNNER"
-fi
-export FVOCI_DOCUMENT_CONVERT_BIN="$RUNNER"
-echo "FVOCI_DOCUMENT_CONVERT_BIN=$FVOCI_DOCUMENT_CONVERT_BIN"
+echo "FVOCI_DOCUMENT_CONVERT_BIN=$RUNNER"
