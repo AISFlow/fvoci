@@ -9,8 +9,8 @@ use std::time::Duration;
 use fvoci_server::db::outbox::{
     advance_cursor, advance_cursor_tx, claim_retries, ensure_consumer, fetch_cursor,
     fetch_event_by_id, fetch_failure_state, insert_test_event, is_outbox_xid_epoch_mismatch,
-    is_processed, lease_consumer, read_events, record_failure, release_consumer, requeue,
-    OUTBOX_DEFAULT_BATCH, OUTBOX_LEASE_SECS, OUTBOX_MAX_ATTEMPTS,
+    is_processed, lease_consumer, mark_processed, read_events, record_failure, release_consumer,
+    requeue, OUTBOX_DEFAULT_BATCH, OUTBOX_LEASE_SECS, OUTBOX_MAX_ATTEMPTS,
 };
 use fvoci_server::db::outbox_recover::{recover_outbox, RecoverOutboxOptions};
 use fvoci_server::db::{migrate, pool};
@@ -2011,6 +2011,137 @@ async fn deliver_batch_prefix_marks_and_dead_letters_the_failed_event() {
         "prefix failure must be observed on a chunk larger than 1, got {sizes:?}"
     );
 
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// External consumer whose delivery of one event fails until released.
+struct GatedExternal {
+    name: String,
+    gated: Uuid,
+    open: AtomicBool,
+}
+
+impl OutboxConsumer for GatedExternal {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn delivery_mode(&self) -> DeliveryMode {
+        DeliveryMode::External
+    }
+
+    fn max_attempts(&self) -> i32 {
+        1000
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        _pool: &'a PgPool,
+        _lease_owner: Uuid,
+        event: &'a fvoci_server::db::outbox::OutboxEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), OutboxProcessError>> + Send + 'a>> {
+        Box::pin(async move {
+            if event.id == self.gated && !self.open.load(Ordering::SeqCst) {
+                Err(OutboxProcessError::Delivery("gated".into()))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+/// The cursor only covers a contiguous confirmed prefix: an already-processed
+/// event B behind an undelivered A must not move the cursor past A. (B processed
+/// while A is not happens when --recover-outbox replays a window in which B was
+/// delivered; here B is marked processed directly.)
+#[tokio::test]
+async fn cursor_never_passes_an_undelivered_event_ahead_of_processed_ones() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let a = insert_test_event(&app, "test.gap", json!({"n": "a"}))
+        .await
+        .expect("a");
+    let b = insert_test_event(&app, "test.gap", json!({"n": "b"}))
+        .await
+        .expect("b");
+    let c = insert_test_event(&app, "test.gap", json!({"n": "c"}))
+        .await
+        .expect("c");
+    ensure_consumer(&app, "gapcursor").await.expect("ensure");
+    assert!(mark_processed(&app, "gapcursor", b).await.expect("mark b"));
+    let consumer = Arc::new(GatedExternal {
+        name: "gapcursor".into(),
+        gated: a,
+        open: AtomicBool::new(false),
+    });
+    let settings = OutboxDispatcherSettings {
+        poll_interval: Duration::from_millis(20),
+        lease_ttl: Duration::from_secs(OUTBOX_LEASE_SECS as u64),
+        batch_limit: OUTBOX_DEFAULT_BATCH,
+        failure_backoff: Duration::from_millis(50),
+    };
+    let dispatcher = spawn_outbox_dispatcher(
+        settings.clone(),
+        app.clone(),
+        vec![consumer.clone() as Arc<dyn OutboxConsumer>],
+    )
+    .expect("dispatcher");
+    // A fails at least twice (retried, not dead) while B and C sit behind it.
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            fetch_failure_state(&pool, "gapcursor", a)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.attempts >= 2 && row.dead_at.is_none())
+        })
+    })
+    .await;
+    let before_a: bool = sqlx::query_scalar(
+        "SELECT (c.last_xact, c.last_seq) < (e.xact, e.seq) \
+         FROM fvoci.outbox_consumers c, fvoci.events e \
+         WHERE c.consumer = 'gapcursor' AND e.id = $1",
+    )
+    .bind(a)
+    .fetch_one(&admin)
+    .await
+    .expect("cursor vs A");
+    assert!(before_a, "cursor moved past undelivered A");
+    assert!(!is_processed(&app, "gapcursor", c).await.expect("c"));
+
+    // Restart the dispatcher (restart boundary), then let A through.
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+    consumer.open.store(true, Ordering::SeqCst);
+    let dispatcher = spawn_outbox_dispatcher(
+        settings,
+        app.clone(),
+        vec![consumer.clone() as Arc<dyn OutboxConsumer>],
+    )
+    .expect("dispatcher 2");
+    wait_until(DISPATCHER_WAIT, || {
+        let pool = app.clone();
+        Box::pin(async move {
+            is_processed(&pool, "gapcursor", a).await.unwrap_or(false)
+                && is_processed(&pool, "gapcursor", c).await.unwrap_or(false)
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join 2");
+    let c_row = fetch_event_by_id(&app, c).await.expect("c row").expect("c");
+    assert_eq!(
+        fetch_cursor(&admin, "gapcursor").await.expect("cursor"),
+        Some((c_row.xact, c_row.seq))
+    );
     app.close().await;
     admin.close().await;
     harness.cleanup().await;

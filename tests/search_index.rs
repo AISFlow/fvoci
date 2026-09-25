@@ -1961,3 +1961,232 @@ async fn cancelled_batch_releases_the_workspace_index_lock() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Batch delivery must leave the same searchable index as processing the same
+/// events one by one (state-based refresh; coalescing may not drop scopes).
+#[tokio::test]
+async fn batch_matches_sequential_processing_for_mixed_events() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let fixture = seed(&admin, "qvoxequiv").await;
+
+    // Final PG state after a rename, a body edit, then trash + restore.
+    sqlx::query("UPDATE fvoci.documents SET title = 'qvoxequiv renamed' WHERE id = $1")
+        .bind(fixture.wiki_id)
+        .execute(&admin)
+        .await
+        .expect("rename");
+    let ev = |verb: &'static str, ty: &'static str, id: Uuid| {
+        let admin = admin.clone();
+        async move { insert_event(&admin, fixture.workspace_id, verb, ty, id).await }
+    };
+    let mut events = vec![
+        ev("document.created", "document", fixture.wiki_id).await,
+        ev("comment.created", "comment", fixture.comment_id).await,
+        ev("attachment.created", "attachment", fixture.attachment_id).await,
+    ];
+    let mut renamed = ev("document.updated", "document", fixture.wiki_id).await;
+    renamed.payload = json!({ "title": "qvoxequiv renamed" });
+    let mut body = ev("document.updated", "document", fixture.wiki_id).await;
+    body.payload = json!({ "collab": true });
+    // Body-only edit last: coalescing to the last event alone would skip the
+    // rename's comment/attachment refresh.
+    events.push(ev("document.trashed", "document", fixture.wiki_id).await);
+    events.push(ev("document.restored", "document", fixture.wiki_id).await);
+    events.push(renamed);
+    events.push(body);
+
+    let sequential = test_meili();
+    ensure_meili_index(&sequential).await.expect("ensure seq");
+    for event in &events {
+        process_search_index_event(&app, &sequential, event)
+            .await
+            .expect("sequential");
+    }
+    let batched = test_meili();
+    ensure_meili_index(&batched).await.expect("ensure batch");
+    let (done, err) = search_index_consumer(batched.clone())
+        .deliver_batch(&app, Uuid::now_v7(), &events)
+        .await;
+    assert_eq!(done, events.len());
+    assert!(err.is_none(), "{err:?}");
+
+    let mut seq_ids = meili_ids(&sequential).await;
+    let mut batch_ids = meili_ids(&batched).await;
+    seq_ids.sort();
+    batch_ids.sort();
+    assert!(!seq_ids.is_empty());
+    assert_eq!(seq_ids, batch_ids, "same indexed resources");
+    for id in &seq_ids {
+        let mut a = meili_doc(&sequential, id).await;
+        let mut b = meili_doc(&batched, id).await;
+        for doc in [&mut a, &mut b] {
+            if let Some(map) = doc.as_object_mut() {
+                map.remove("_rankingScore");
+            }
+        }
+        assert_eq!(a, b, "document {id} differs between sequential and batch");
+    }
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// TCP proxy to the test Meilisearch that stops forwarding (hangs every open and
+/// new connection) once `hang` is set.
+async fn spawn_hanging_meili_proxy(
+    upstream: String,
+    hang: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> String {
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("proxy bind");
+    let addr = listener.local_addr().expect("proxy addr");
+    let upstream = upstream
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    tokio::spawn(async move {
+        loop {
+            let Ok((client, _)) = listener.accept().await else {
+                break;
+            };
+            let upstream = upstream.clone();
+            let hang = hang.clone();
+            tokio::spawn(async move {
+                let Ok(server) = tokio::net::TcpStream::connect(&upstream).await else {
+                    return;
+                };
+                let (mut cr, mut cw) = client.into_split();
+                let (mut sr, mut sw) = server.into_split();
+                let up_hang = hang.clone();
+                let up = tokio::spawn(async move {
+                    let mut buf = [0u8; 16 * 1024];
+                    loop {
+                        let n = match cr.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        if up_hang.load(Ordering::SeqCst) {
+                            std::future::pending::<()>().await;
+                        }
+                        if sw.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                let mut buf = [0u8; 16 * 1024];
+                loop {
+                    let n = match sr.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    if hang.load(Ordering::SeqCst) {
+                        std::future::pending::<()>().await;
+                    }
+                    if cw.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+                up.abort();
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// A batch cancelled while it holds the workspace index lock (its Meili call
+/// hangs past the lease-bound timeout) releases the lock: another session gets
+/// it within a bound, and no app backend still holds it.
+#[tokio::test]
+async fn batch_cancelled_while_holding_the_lock_releases_it() {
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin");
+    let app = pool::connect_app(&harness.app_url).await.expect("app");
+    let fixture = seed(&admin, "qvoxheld").await;
+    let real = test_meili();
+    let hang = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let proxy = spawn_hanging_meili_proxy(real.url.clone(), hang.clone()).await;
+    let meili = MeiliConfig::new(
+        proxy,
+        std::env::var("FVOCI_MEILI_KEY").expect("FVOCI_MEILI_KEY"),
+        real.index_uid.clone(),
+    );
+    // Warm the ensure cache through the proxy, then make Meili hang.
+    ensure_meili_index(&meili).await.expect("ensure via proxy");
+    hang.store(true, std::sync::atomic::Ordering::SeqCst);
+    let event = insert_event(
+        &admin,
+        fixture.workspace_id,
+        "document.created",
+        "document",
+        fixture.wiki_id,
+    )
+    .await;
+
+    let dispatcher = spawn_outbox_dispatcher(
+        OutboxDispatcherSettings {
+            poll_interval: Duration::from_millis(20),
+            lease_ttl: Duration::from_secs(2),
+            batch_limit: 10,
+            failure_backoff: Duration::from_millis(50),
+        },
+        app.clone(),
+        vec![search_index_consumer(meili.clone())],
+    )
+    .expect("dispatcher");
+    wait_until(Duration::from_secs(15), "held batch timed out", || {
+        let pool = app.clone();
+        let id = event.id;
+        Box::pin(async move {
+            fetch_failure_state(&pool, SEARCH_INDEX_CONSUMER, id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        })
+    })
+    .await;
+    dispatcher.request_shutdown();
+    dispatcher.join().await.expect("join");
+
+    let ns = fvoci_server::db::context::SEARCH_INDEX_LOCK_NAMESPACE;
+    let key = fvoci_server::db::context::lock_key_from_uuid(fixture.workspace_id);
+    // A different session acquires the lock within a bound (not re-entrancy).
+    let mut other = admin.acquire().await.expect("other session");
+    let got = tokio::time::timeout(
+        Duration::from_secs(5),
+        sqlx::query("SELECT pg_advisory_lock($1, $2)")
+            .bind(ns)
+            .bind(key)
+            .execute(&mut *other),
+    )
+    .await;
+    assert!(
+        matches!(got, Ok(Ok(_))),
+        "another session could not take the lock after the cancelled batch"
+    );
+    sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+        .bind(ns)
+        .bind(key)
+        .execute(&mut *other)
+        .await
+        .expect("unlock");
+    drop(other);
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}

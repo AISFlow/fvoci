@@ -751,11 +751,12 @@ pub struct RebuildOutcome {
     pub pages: usize,
 }
 
-/// Pool for [`rebuild_search_index`]: the rebuild lock, the per-workspace lock and
-/// one page transaction are held at the same time.
+/// Pool for [`rebuild_search_index`]: the per-workspace lock transaction and one
+/// page transaction are held at the same time; the rebuild lock takes a third
+/// connection that is detached from the pool (3 connections in total).
 pub async fn rebuild_pool(url: &str) -> Result<PgPool, sqlx::Error> {
     sqlx::postgres::PgPoolOptions::new()
-        .max_connections(3)
+        .max_connections(2)
         .connect(url)
         .await
 }
@@ -765,16 +766,17 @@ pub async fn rebuild_search_index(
     meili: &MeiliConfig,
     workspace_id: Option<Uuid>,
 ) -> Result<RebuildOutcome, SearchIndexError> {
-    let mut lock_conn = pool.acquire().await?;
+    // The rebuild lock lives on a connection detached from the pool: if this
+    // future is cancelled or the unlock fails, the connection is closed rather
+    // than returned to the pool still holding the session lock.
+    let mut lock_conn = pool.acquire().await?.detach();
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(SEARCH_REBUILD_LOCK_KEY)
-        .execute(&mut *lock_conn)
+        .execute(&mut lock_conn)
         .await?;
     let result = rebuild_search_index_inner(pool, meili, workspace_id).await;
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(SEARCH_REBUILD_LOCK_KEY)
-        .execute(&mut *lock_conn)
-        .await;
+    // Closing the session releases the lock whether or not an explicit unlock ran.
+    let _ = sqlx::Connection::close(lock_conn).await;
     result
 }
 
