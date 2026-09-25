@@ -19,7 +19,7 @@ use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
-use fvoci_server::http::{router_with_integrations, state::AppState};
+use fvoci_server::http::{router_with_settings, state::AppState};
 use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
 use fvoci_server::integrations::webhooks::WebhookSenderHandle;
 use fvoci_server::jobs::{spawn_maintenance, MaintenanceHandle, MaintenanceSettings};
@@ -333,6 +333,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let import_job =
         import_settings.map(|settings| spawn_import_job(pool.clone(), settings, storage.clone()));
     let import_wake = import_job.as_ref().map(|job| job.wake.clone());
+    let identity = Arc::new(fvoci_server::identity::Identity::from_env(&public_origin)?);
+    tracing::info!(
+        encryption_keys = identity.encryption_keys.is_some(),
+        oidc_providers = identity.oidc.providers.len(),
+        "identity settings loaded"
+    );
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
@@ -376,7 +382,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let serve = announce_after_first_pending_poll(
         axum::serve(
             listener,
-            router_with_integrations(state, config.static_dir.clone(), integrations)
+            router_with_settings(state, config.static_dir.clone(), integrations, identity)
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {

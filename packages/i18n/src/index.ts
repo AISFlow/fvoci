@@ -64,6 +64,17 @@ const PROBLEM_TITLES: Record<string, I18nKey> = {
   dependency_cycle: "dependency cycle",
   dependency_contradiction: "dependency contradiction",
   task_cannot_block_itself: "task cannot block itself",
+  mfa_invalid: "mfa_invalid",
+  mfa_already_enabled: "mfa_already_enabled",
+  mfa_password_invalid: "mfa_password_invalid",
+  mfa_reauth_required: "mfa_reauth_required",
+  mfa_code_invalid: "mfa_code_invalid",
+  mfa_not_setup: "mfa_not_setup",
+  mfa_confirm_invalid: "mfa_confirm_invalid",
+  mfa_not_enabled: "mfa_not_enabled",
+  oidc_last_method: "oidc_last_method",
+  identity_link_not_found: "identity link not found",
+  encryption_unavailable: "encryption_unavailable",
 };
 
 export function tProblemTitle(

@@ -12,13 +12,11 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::auth::token::{hash_token, new_token, token_hashes_eq, SESSION_TTL_SECS};
+use crate::auth::token::{hash_token, new_token, token_hashes_eq};
 use crate::db::context::{
     clear_self_user, lock_membership_users, recheck_session, set_self_user, set_system, set_tenant,
 };
-use crate::db::identity::{
-    append_audit, create_session, lock_sign_in, AuditAppend, INSTANCE_ADMIN_LOCK_KEY,
-};
+use crate::db::identity::{append_audit, lock_sign_in, AuditAppend, INSTANCE_ADMIN_LOCK_KEY};
 use crate::db::magic::{MagicPayload, MAGIC_KIND_EMAIL_CHANGE, MAGIC_KIND_LOGIN};
 use crate::db::quota::acquire_admission_lock;
 use crate::validate::normalize_email;
@@ -591,6 +589,17 @@ pub async fn anonymize_withdrawn_user(
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+    // Source: userMfa.remove + identityLinks.purgeAllByUserId. A pending
+    // challenge of a withdrawn account never completes (deleted_at) and the
+    // token GC removes it.
+    let previous = set_system(&mut tx).await?;
+    for sql in [
+        "DELETE FROM fvoci.user_mfa WHERE user_id = $1",
+        "DELETE FROM fvoci.identity_links WHERE user_id = $1",
+    ] {
+        sqlx::query(sql).bind(user_id).execute(&mut *tx).await?;
+    }
+    crate::db::context::restore_system(&mut tx, &previous).await?;
     if let Some(workspace_id) = current.personal_workspace_id {
         mark_personal_workspace_deleted(&mut tx, workspace_id).await?;
     }
@@ -824,65 +833,24 @@ pub async fn issue_login_token(
 }
 
 /// Source `issueSessionOrChallenge(..., "magic", ip, { generation,
-/// markEmailVerified: true })` without MFA (not ported).
+/// markEmailVerified: true })`.
 pub async fn complete_magic_login(
     pool: &PgPool,
     payload: &MagicPayload,
-) -> Result<Option<(Uuid, String)>, sqlx::Error> {
+) -> Result<Option<crate::db::mfa::Issued>, sqlx::Error> {
     if payload.kind != MAGIC_KIND_LOGIN {
         return Ok(None);
     }
-    let mut tx = pool.begin().await?;
-    lock_sign_in(&mut tx, payload.user_id).await?;
-    let row: Option<(i32, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT auth_generation, suspended_at FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(payload.user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    match row {
-        Some((generation, None)) if generation == payload.generation => {}
-        _ => {
-            tx.rollback().await?;
-            return Ok(None);
-        }
-    }
-    let verified: bool = sqlx::query_scalar("SELECT fvoci.app_user_mark_email_verified($1)")
-        .bind(payload.user_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if !verified {
-        tx.rollback().await?;
-        return Ok(None);
-    }
-    let token = new_token();
-    let expires_at = Utc::now() + Duration::seconds(SESSION_TTL_SECS);
-    create_session(
-        &mut tx,
-        Uuid::now_v7(),
+    crate::db::mfa::issue_session_or_challenge(
+        pool,
         payload.user_id,
-        &token.hash,
-        expires_at,
-    )
-    .await?;
-    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
-        .execute(&mut *tx)
-        .await?;
-    crate::db::identity::append_event(
-        &mut tx,
-        crate::db::identity::EventAppend {
-            id: Uuid::now_v7(),
-            workspace_id: None,
-            actor_user_id: Some(payload.user_id),
-            verb: "auth.login".to_string(),
-            target_type: Some("user".to_string()),
-            target_id: Some(payload.user_id),
-            payload: json!({ "userId": payload.user_id.to_string(), "method": "magic" }),
+        "magic",
+        crate::db::mfa::IssueOptions {
+            generation: Some(payload.generation),
+            mark_email_verified: true,
         },
     )
-    .await?;
-    tx.commit().await?;
-    Ok(Some((payload.user_id, token.token)))
+    .await
 }
 
 #[cfg(test)]

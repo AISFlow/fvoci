@@ -60,6 +60,19 @@ pub enum ProblemCode {
     SelfSuspension,
     UnsupportedBrandingAssetType,
     RawApplicationOctetStreamBodyRequired,
+    MfaCodeInvalid,
+    MfaNotSetup,
+    MfaConfirmInvalid,
+    MfaNotEnabled,
+    MfaPasswordInvalid,
+    MfaAlreadyEnabled,
+    MfaInvalid,
+    MfaReauthRequired,
+    ProviderNotConfigured,
+    IdentityLinkNotFound,
+    OidcLastMethod,
+    InvalidConsentsQuery,
+    EncryptionUnavailable,
     InternalError,
 }
 
@@ -122,6 +135,19 @@ impl ProblemCode {
             Self::RawApplicationOctetStreamBodyRequired => {
                 "raw_application_octet_stream_body_required"
             }
+            Self::MfaCodeInvalid => "mfa_code_invalid",
+            Self::MfaNotSetup => "mfa_not_setup",
+            Self::MfaConfirmInvalid => "mfa_confirm_invalid",
+            Self::MfaNotEnabled => "mfa_not_enabled",
+            Self::MfaPasswordInvalid => "mfa_password_invalid",
+            Self::MfaAlreadyEnabled => "mfa_already_enabled",
+            Self::MfaInvalid => "mfa_invalid",
+            Self::MfaReauthRequired => "mfa_reauth_required",
+            Self::ProviderNotConfigured => "provider_not_configured",
+            Self::IdentityLinkNotFound => "identity_link_not_found",
+            Self::OidcLastMethod => "oidc_last_method",
+            Self::InvalidConsentsQuery => "invalid_consents_query",
+            Self::EncryptionUnavailable => "encryption_unavailable",
             Self::InternalError => "internal_error",
         }
     }
@@ -186,6 +212,19 @@ impl ProblemCode {
             Self::RawApplicationOctetStreamBodyRequired => {
                 "raw application/octet-stream body required"
             }
+            Self::MfaCodeInvalid => "mfa_code_invalid",
+            Self::MfaNotSetup => "mfa_not_setup",
+            Self::MfaConfirmInvalid => "mfa_confirm_invalid",
+            Self::MfaNotEnabled => "mfa_not_enabled",
+            Self::MfaPasswordInvalid => "mfa_password_invalid",
+            Self::MfaAlreadyEnabled => "mfa_already_enabled",
+            Self::MfaInvalid => "mfa_invalid",
+            Self::MfaReauthRequired => "mfa_reauth_required",
+            Self::ProviderNotConfigured => "provider not configured",
+            Self::IdentityLinkNotFound => "identity link not found",
+            Self::OidcLastMethod => "oidc_last_method",
+            Self::InvalidConsentsQuery => "invalid consents query",
+            Self::EncryptionUnavailable => "encryption keys are not configured",
             Self::InternalError => "internal error",
         }
     }
@@ -242,6 +281,19 @@ impl ProblemCode {
             }
             Self::SubmittedPartsDoNotMatchUploadedParts => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
+            Self::MfaCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::MfaNotSetup => StatusCode::BAD_REQUEST,
+            Self::MfaConfirmInvalid => StatusCode::BAD_REQUEST,
+            Self::MfaNotEnabled => StatusCode::BAD_REQUEST,
+            Self::MfaPasswordInvalid => StatusCode::BAD_REQUEST,
+            Self::MfaAlreadyEnabled => StatusCode::CONFLICT,
+            Self::MfaInvalid => StatusCode::UNAUTHORIZED,
+            Self::MfaReauthRequired => StatusCode::UNAUTHORIZED,
+            Self::ProviderNotConfigured => StatusCode::NOT_FOUND,
+            Self::IdentityLinkNotFound => StatusCode::NOT_FOUND,
+            Self::OidcLastMethod => StatusCode::CONFLICT,
+            Self::InvalidConsentsQuery => StatusCode::BAD_REQUEST,
+            Self::EncryptionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

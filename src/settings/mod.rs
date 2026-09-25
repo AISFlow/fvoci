@@ -27,7 +27,7 @@ use crate::db::context::set_system;
 /// Enterprise features the admin form may unlock. The source reads them from a
 /// signed license (`packages/ee`); license verification is not ported, so the
 /// features this server implements are reported as enabled.
-pub const EE_FEATURES_ENABLED: [&str; 2] = ["audit", "branding"];
+pub const EE_FEATURES_ENABLED: [&str; 3] = ["audit", "branding", "workspaceSso"];
 
 /// Process-local boot snapshot shared by every clone of one `Db`.
 #[derive(Clone, Default)]

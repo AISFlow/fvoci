@@ -2164,6 +2164,14 @@ async fn migration_001_002_database_upgrades_to_003() {
         .await
         .unwrap();
     }
+    for table in ["user_mfa", "identity_links"] {
+        sqlx::query(&format!(
+            "DROP POLICY IF EXISTS owner_isolation ON fvoci.{table}"
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
     sqlx::query("ALTER TABLE fvoci.users DROP CONSTRAINT IF EXISTS users_personal_workspace_fk")
         .execute(&admin)
         .await
