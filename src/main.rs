@@ -100,6 +100,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool.close().await;
         return Err(message.into());
     }
+    if let Some(meili) = config.meili.as_ref() {
+        if let Err(error) = fvoci_server::search::meili::ensure_meili_index(meili).await {
+            pool.close().await;
+            return Err(format!("meilisearch index ensure failed: {error}").into());
+        }
+        tracing::info!(url = %meili.url, index = %meili.index_uid, "meilisearch enabled");
+    } else {
+        tracing::info!("meilisearch disabled (FVOCI_MEILI_URL unset)");
+    }
     run_server(config, pool).await
 }
 

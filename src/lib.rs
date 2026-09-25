@@ -8,5 +8,6 @@ pub mod display_id;
 pub mod error;
 pub mod http;
 pub mod projects;
+pub mod search;
 pub mod tasks;
 pub mod validate;
