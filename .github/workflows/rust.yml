@@ -105,7 +105,7 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_MEILI_URL: http://127.0.0.1:${{ job.services.meilisearch.ports['7700'] }}
           FVOCI_MEILI_KEY: ci-ephemeral-meili-master
-        run: cargo test --locked --offline --no-fail-fast --features db-tests --test db_integration --test document_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration --test task_labels_integration --test group_integration --test task_milestones_integration --test notification_integration --test schedule_ics_integration --test mail_integration --test invitation_integration --test search_meili --test comment_integration --test api_token_integration --test search_query --test outbox_integration --test search_index --test workspace_lifecycle
+        run: cargo test --locked --offline --no-fail-fast --features db-tests --test db_integration --test document_integration --test collab_integration --test attachment_integration --test attachment_extract_integration --test project_integration --test task_integration --test task_labels_integration --test group_integration --test task_milestones_integration --test notification_integration --test schedule_ics_integration --test mail_integration --test invitation_integration --test search_meili --test comment_integration --test api_token_integration --test search_query --test outbox_integration --test search_index --test workspace_lifecycle --test background_jobs
 
   collaboration:
     name: ${{ matrix.check }}
@@ -165,6 +165,6 @@ jobs:
           FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
         run: |
           set -o pipefail
-          cargo test --locked --offline --features db-tests --lib collab::validation::tests::validate_recovery_bundle_huge_varint_memory_is_rejected -- --exact | tee "$RUNNER_TEMP/native-admission-test.log"
+          cargo test --locked --offline --features db-tests --test collab_product collab_primary_huge_varint_memory_rejected_1008 -- --exact | tee "$RUNNER_TEMP/native-admission-test.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/native-admission-test.log"
           cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration

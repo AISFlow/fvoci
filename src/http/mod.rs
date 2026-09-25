@@ -45,6 +45,7 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::workspaces::router())
         .merge(routes::invitations::router())
         .merge(routes::projects::router())
+        .merge(routes::project_documents::router())
         .merge(routes::groups::router())
         .merge(routes::lookup::router())
         .merge(routes::notifications::router())

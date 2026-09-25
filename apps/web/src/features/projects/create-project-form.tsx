@@ -15,7 +15,11 @@ import {
   PROJECT_NAME_MAX,
   projectCreatePayload,
 } from "./create-payload";
+import { LeadSelect } from "./lead-select";
 import type { CreateProjectBody } from "./queries";
+import type { components } from "@/generated/api";
+
+type Member = components["schemas"]["MemberResponse"];
 
 const createSchema = z.object({
   key: z.string().min(1, "i18n:form.too_small"),
@@ -23,16 +27,21 @@ const createSchema = z.object({
   visibility: z.enum(["workspace", "private"]),
   description: z.string().max(PROJECT_DESCRIPTION_MAX, "i18n:form.too_big").optional(),
   icon: z.string().max(PROJECT_ICON_MAX, "i18n:form.too_big").optional(),
+  leadUserId: z.string().optional(),
 });
 
 type CreateForm = z.infer<typeof createSchema>;
 
 export function CreateProjectForm({
   pending,
+  members,
+  currentUserId,
   onSubmit,
   onCancel,
 }: {
   pending?: boolean;
+  members: readonly Member[];
+  currentUserId: string | null;
   onSubmit: (input: CreateProjectBody) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -45,6 +54,7 @@ export function CreateProjectForm({
       visibility: "workspace",
       description: "",
       icon: "",
+      leadUserId: currentUserId ?? undefined,
     },
   });
   const fieldError =
@@ -124,6 +134,13 @@ export function CreateProjectForm({
             <option value="private">{t("project.visibility.private")}</option>
           </select>
         </div>
+        <LeadSelect
+          id="project-lead"
+          value={form.watch("leadUserId")}
+          members={members}
+          disabled={pending || form.formState.isSubmitting}
+          onChange={(userId) => form.setValue("leadUserId", userId)}
+        />
       </div>
       <div className="project-form__field">
         <Label htmlFor="project-description">{t("project.description")}</Label>

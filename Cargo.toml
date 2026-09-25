@@ -138,6 +138,11 @@ path = "tests/collab_product.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "collab_capacity_probe"
+path = "tests/collab_capacity_probe.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "collab_projection"
 path = "tests/collab_projection.rs"
 required-features = ["db-tests"]

@@ -741,7 +741,20 @@ async fn mail_consumer_is_at_least_once_and_skips_after_processed_events() {
     fvoci_server::db::outbox::ensure_consumer(&app_pool, "mail")
         .await
         .unwrap();
-    let events = read_events(&app_pool, "mail", 100).await.unwrap();
+    // The relay reads settled events only (xact < cluster-wide snapshot xmin);
+    // another test database's open transaction can delay that briefly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let events = loop {
+        let events = read_events(&app_pool, "mail", 100).await.unwrap();
+        if events.iter().any(|event| event.id == event_id) {
+            break events;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mail consumer can read identity.linked"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
     let event = events
         .iter()
         .find(|event| event.id == event_id)
