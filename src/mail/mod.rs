@@ -18,7 +18,7 @@ use std::fmt;
 use std::sync::Arc;
 
 pub use consumer::{mail_consumer, MAIL_CONSUMER};
-pub use digest::{send_due_digests, spawn_digest_sweep, DigestSweepHandle};
+pub use digest::send_due_digests;
 
 pub const MAGIC_TTL_SECS: i64 = 15 * 60;
 pub const MAGIC_RESPONSE_DELAY_MS: u64 = 100;
