@@ -7,7 +7,7 @@ use crate::db::context::{
     set_tenant,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
-use crate::db::projects;
+use crate::db::projects::{self, visible_project_sql};
 use crate::db::quota::{
     acquire_admission_lock, require_membership_admission, require_new_instance_billable_user,
     QuotaError,
@@ -67,6 +67,7 @@ pub enum WorkspaceDbError {
     LastProjectLead,
     SeatLimit,
     GuestLimit,
+    InvalidInput,
 }
 
 pub struct WorkspaceListItem {
@@ -75,6 +76,8 @@ pub struct WorkspaceListItem {
     pub slug: String,
     pub role: WorkspaceRole,
     pub kind: String,
+    pub document_count: i32,
+    pub assigned_count: i32,
 }
 
 pub struct WorkspaceMeta {
@@ -231,15 +234,24 @@ pub async fn list_workspaces_for_user(
         .bind(workspace_id)
         .fetch_optional(&mut *tx)
         .await?;
-        tx.commit().await?;
-        if let Some((id, name, slug, kind)) = row {
-            items.push(WorkspaceListItem {
+        let item = if let Some((id, name, slug, kind)) = row {
+            let (document_count, assigned_count) =
+                workspace_card_counts_in_tx(&mut tx, workspace_id, user_id, role).await?;
+            Some(WorkspaceListItem {
                 id,
                 name,
                 slug,
                 role,
                 kind,
-            });
+                document_count,
+                assigned_count,
+            })
+        } else {
+            None
+        };
+        tx.commit().await?;
+        if let Some(item) = item {
+            items.push(item);
         }
     }
     Ok(items)
@@ -847,6 +859,280 @@ async fn count_owners(
     .fetch_one(&mut **tx)
     .await?;
     Ok(row.0)
+}
+
+const WORKSPACE_PURGE_AFTER_DAYS: i64 = 30;
+
+fn card_count_visible_sql(project_alias: &str) -> String {
+    visible_project_sql(project_alias, 2, 3)
+}
+
+async fn workspace_card_counts_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: WorkspaceRole,
+) -> Result<(i32, i32), sqlx::Error> {
+    let is_guest = role == WorkspaceRole::Guest;
+    let visible = card_count_visible_sql("p");
+    let document_sql = format!(
+        r#"
+        SELECT count(*)::bigint
+        FROM fvoci.documents d
+        WHERE d.workspace_id = $1
+          AND d.deleted_at IS NULL
+          AND (
+            (d.project_id IS NULL AND $2 = false)
+            OR (
+              d.project_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM fvoci.projects p
+                WHERE p.workspace_id = d.workspace_id
+                  AND p.id = d.project_id
+                  AND p.deleted_at IS NULL
+                  AND {visible}
+              )
+            )
+          )
+        "#
+    );
+    let assigned_sql = format!(
+        r#"
+        SELECT count(*)::bigint
+        FROM fvoci.tasks t
+        INNER JOIN fvoci.projects p
+          ON p.workspace_id = t.workspace_id
+         AND p.id = t.project_id
+         AND p.deleted_at IS NULL
+        WHERE t.workspace_id = $1
+          AND t.deleted_at IS NULL
+          AND t.archived_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM fvoci.task_assignees a
+            WHERE a.workspace_id = t.workspace_id
+              AND a.task_id = t.id
+              AND a.user_id = $3
+          )
+          AND EXISTS (
+            SELECT 1 FROM fvoci.statuses s_open
+            WHERE s_open.workspace_id = t.workspace_id
+              AND s_open.project_id = t.project_id
+              AND s_open.id = t.status_id
+              AND s_open.category NOT IN ('done', 'canceled')
+          )
+          AND {visible}
+        "#
+    );
+    let document_count: i64 = sqlx::query_scalar(&document_sql)
+        .bind(workspace_id)
+        .bind(is_guest)
+        .bind(user_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    let assigned_count: i64 = sqlx::query_scalar(&assigned_sql)
+        .bind(workspace_id)
+        .bind(is_guest)
+        .bind(user_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok((
+        i32::try_from(document_count).unwrap_or(i32::MAX),
+        i32::try_from(assigned_count).unwrap_or(i32::MAX),
+    ))
+}
+
+pub async fn trash_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    confirm_slug: &str,
+    client_ip: Option<&str>,
+) -> Result<Result<(), WorkspaceDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    acquire_admission_lock(&mut tx).await?;
+    let member_ids: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM fvoci.memberships WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let mut lock_ids: Vec<Uuid> = member_ids.into_iter().map(|(id,)| id).collect();
+    if !lock_ids.contains(&actor_user_id) {
+        lock_ids.push(actor_user_id);
+    }
+    lock_membership_users(&mut tx, &lock_ids).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    if !user_is_active(&mut tx, actor_user_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    let actor_role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    if !actor_role
+        .map(|role| role.at_least(WorkspaceRole::Owner))
+        .unwrap_or(false)
+    {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::Forbidden));
+    }
+    let locked = sqlx::query_as::<_, (String, String, Option<chrono::DateTime<chrono::Utc>>)>(
+        "SELECT slug, kind, deleted_at FROM fvoci.workspaces WHERE id = $1 FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((slug, kind, deleted_at)) = locked else {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
+    };
+    if deleted_at.is_some() {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
+    }
+    if kind == "personal" {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::PersonalImmutable));
+    }
+    if slug != confirm_slug {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::InvalidInput));
+    }
+    crate::db::invitations::remove_by_workspace(&mut tx, workspace_id).await?;
+    crate::db::api_tokens::remove_by_workspace(&mut tx, workspace_id).await?;
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+    let marked: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        UPDATE fvoci.workspaces
+        SET deleted_at = now(), updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if marked.is_none() {
+        tx.rollback().await?;
+        return Ok(Err(WorkspaceDbError::NotFound));
+    }
+    record_workspace_event_and_audit(
+        &mut tx,
+        WorkspaceChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "workspace.deleted",
+            target_type: "workspace",
+            target_id: workspace_id,
+            payload: json!({}),
+            client_ip,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(()))
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspacePurgeResult {
+    pub purged: bool,
+    pub storage_keys: Vec<String>,
+}
+
+pub async fn list_deleted_workspace_ids(
+    pool: &PgPool,
+    before: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::db::context::set_system(&mut tx).await?;
+    let rows = sqlx::query_as::<_, (Uuid,)>(
+        r#"
+        SELECT id
+        FROM fvoci.workspaces
+        WHERE deleted_at IS NOT NULL
+          AND (kind = 'personal' OR deleted_at <= $1)
+        ORDER BY deleted_at ASC, id ASC
+        "#,
+    )
+    .bind(before)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+pub async fn purge_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<WorkspacePurgeResult, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let previous = crate::db::context::set_system(&mut tx).await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let locked: Option<(Option<chrono::DateTime<chrono::Utc>>,)> =
+        sqlx::query_as("SELECT deleted_at FROM fvoci.workspaces WHERE id = $1 FOR UPDATE")
+            .bind(workspace_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((Some(_),)) = locked else {
+        crate::db::context::restore_system(&mut tx, &previous).await?;
+        tx.commit().await?;
+        return Ok(WorkspacePurgeResult {
+            purged: false,
+            storage_keys: Vec::new(),
+        });
+    };
+    let keys: Vec<(String,)> = sqlx::query_as(
+        "DELETE FROM fvoci.attachments WHERE workspace_id = $1 RETURNING storage_key",
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+    let deleted: Option<(Uuid,)> = sqlx::query_as(
+        "DELETE FROM fvoci.workspaces WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id",
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    crate::db::context::restore_system(&mut tx, &previous).await?;
+    if deleted.is_none() {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "workspaces.purge: locked workspace was not deleted".into(),
+        ));
+    }
+    tx.commit().await?;
+    Ok(WorkspacePurgeResult {
+        purged: true,
+        storage_keys: keys.into_iter().map(|(key,)| key).collect(),
+    })
+}
+
+pub async fn sweep_deleted_workspaces(
+    pool: &PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<WorkspacePurgeResult>, sqlx::Error> {
+    let cutoff = now - chrono::Duration::days(WORKSPACE_PURGE_AFTER_DAYS);
+    let ids = list_deleted_workspace_ids(pool, cutoff).await?;
+    let mut results = Vec::new();
+    for id in ids {
+        match purge_workspace(pool, id).await {
+            Ok(result) => results.push(result),
+            Err(err) => {
+                tracing::error!(workspace_id = %id, error = %err, "cleanup.workspace_purge_failed");
+            }
+        }
+    }
+    Ok(results)
 }
 
 async fn fetch_member(

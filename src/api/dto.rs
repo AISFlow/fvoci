@@ -428,6 +428,14 @@ pub struct PatchWorkspaceBody {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DeleteWorkspaceBody {
+    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = false))]
+    pub confirm_slug: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct MemberRoleBody {
     pub role: String,
 }

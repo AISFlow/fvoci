@@ -14,8 +14,8 @@ use crate::api::dto::{
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
     CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody, CreateMilestoneBody,
     CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
-    DocumentMetaResponse, ExpectedDatesBody, GroupListResponse, GroupMemberBody,
-    GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
+    DeleteWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody, GroupListResponse,
+    GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
     IcsTokenResponse, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
     InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LabelListResponse,
     LabelOutput, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
@@ -79,6 +79,7 @@ impl Modify for CookieSecurityAddon {
         create_workspace,
         get_workspace,
         patch_workspace,
+        delete_workspace,
         list_members,
         patch_member,
         remove_member,
@@ -201,6 +202,7 @@ impl Modify for CookieSecurityAddon {
             InvitationConsentItem,
             CreateWorkspaceBody,
             PatchWorkspaceBody,
+            DeleteWorkspaceBody,
             MemberRoleBody,
             CreateProjectBody,
             PatchProjectBody,
@@ -733,6 +735,25 @@ fn get_workspace() {}
     )
 )]
 fn patch_workspace() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}",
+    tag = "workspaces",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = DeleteWorkspaceBody,
+    responses(
+        (status = 200, description = "Workspace deleted", body = OkResponse),
+        (status = 400, description = "Invalid confirmation slug", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Insufficient permissions", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Personal workspace is immutable", body = ProblemResponse),
+    )
+)]
+fn delete_workspace() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
