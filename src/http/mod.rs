@@ -16,9 +16,68 @@ use axum::routing::get;
 use axum::Router;
 use tower_http::trace::TraceLayer;
 
+use axum::extract::State;
+use axum_extra::extract::CookieJar;
+
+use crate::auth::token::hash_token;
 use crate::collab::transport::collab_entry;
+use crate::error::{AppError, ProblemCode, API_PREFIX, SESSION_COOKIE};
 use crate::http::authz::canonicalize_api_token_path;
 use crate::http::state::AppState;
+
+/// API paths a signed-in user without the latest required consents may still
+/// use (source `CONSENT_ALLOWLIST`, `http-runtime.ts`; its health/ready/metrics
+/// entries have no counterpart on this server's API router).
+const CONSENT_ALLOWLIST: &[&str] = &[
+    "/setup",
+    "/branding",
+    "/legal",
+    "/auth/consents",
+    "/auth/logout",
+    "/auth/withdraw",
+    "/auth/cancel-withdraw",
+    "/me/export",
+];
+
+fn consent_exempt(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix(API_PREFIX) else {
+        return false;
+    };
+    CONSENT_ALLOWLIST.iter().any(|allowed| {
+        rest == *allowed
+            || rest
+                .strip_prefix(allowed)
+                .is_some_and(|r| r.starts_with('/'))
+    })
+}
+
+/// Source 428 gate: a request carrying a live session cookie whose user has
+/// not consented to the latest version of every required legal document is
+/// refused with `consent_required` before any route runs (collab included).
+/// API-token requests are not gated, like the source. A failing check fails
+/// closed with 500 rather than letting the request through.
+async fn consent_gate(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(cookie) = jar.get(SESSION_COOKIE).map(|c| c.value().to_string()) else {
+        return next.run(req).await;
+    };
+    if consent_exempt(req.uri().path()) {
+        return next.run(req).await;
+    }
+    match crate::db::legal::session_consent_pending(&state.auth.db.pool, &hash_token(&cookie)).await
+    {
+        Ok(false) => next.run(req).await,
+        Ok(true) => AppError::from_code(ProblemCode::ConsentRequired).into_response(),
+        Err(err) => {
+            tracing::error!("consent gate: {}", err);
+            AppError::internal().into_response()
+        }
+    }
+}
 
 async fn canonicalize_bearer_path(req: Request, next: Next) -> Response {
     let has_bearer = req
@@ -61,7 +120,10 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .merge(routes::ics::router())
         .merge(routes::stars::router())
         .merge(routes::share::router())
+        .merge(routes::admin::router())
+        .merge(routes::legal::router())
         .merge(collab)
+        .layer(middleware::from_fn_with_state(state.clone(), consent_gate))
         .layer(middleware::from_fn(canonicalize_bearer_path))
         .with_state(state);
 
@@ -70,4 +132,20 @@ pub fn router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         None => api.fallback(static_assets::unknown_api_fallback),
     };
     app.layer(TraceLayer::new_for_http())
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::consent_exempt;
+
+    #[test]
+    fn allowlist_matches_whole_segments_only() {
+        assert!(consent_exempt("/api/v1/auth/consents"));
+        assert!(consent_exempt("/api/v1/auth/consents/pending"));
+        assert!(consent_exempt("/api/v1/legal/terms/versions"));
+        assert!(!consent_exempt("/api/v1/legalese"));
+        assert!(!consent_exempt("/api/v1/auth/me"));
+        assert!(!consent_exempt("/api/v1/instance"));
+        assert!(!consent_exempt("/collab"));
+    }
 }

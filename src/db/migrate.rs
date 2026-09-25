@@ -33,6 +33,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/025_account_lifecycle.sql"),
         25,
     ),
+    (include_str!("../../migrations/026_admin_console.sql"), 26),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -456,6 +457,10 @@ mod tests {
         (
             25,
             "265edf3e23543c631c2f515607304e67edf056bab9f5537506739a8e5464d175",
+        ),
+        (
+            26,
+            "fc1035798930f9c1c96f654066a8552f03d0700be02199b7f2de9072fc75588d",
         ),
     ];
 

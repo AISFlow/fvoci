@@ -4,6 +4,134 @@
  */
 
 export interface paths {
+    "/api/v1/admin/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["admin_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/branding/assets/{asset}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["admin_upload_branding_asset"];
+        delete: operations["admin_remove_branding_asset"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/instance-admins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["admin_instance_admins"];
+        trace?: never;
+    };
+    "/api/v1/admin/instance-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["admin_instance_settings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["admin_update_instance_settings"];
+        trace?: never;
+    };
+    "/api/v1/admin/legal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["admin_publish_legal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/system": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["admin_system"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["admin_users"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["admin_update_users"];
+        trace?: never;
+    };
+    "/api/v1/admin/workspaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["admin_workspaces"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/cancel-withdraw": {
         parameters: {
             query?: never;
@@ -14,6 +142,38 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["cancel_withdraw"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/consents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["submit_consents"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/consents/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["pending_consents"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -228,6 +388,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/branding/{asset}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["branding_asset"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/ics/{token}": {
         parameters: {
             query?: never;
@@ -276,6 +452,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/instance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["instance_settings_public"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/invitations/{token}": {
         parameters: {
             query?: never;
@@ -302,6 +494,38 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["accept_invitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/legal/{kind}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["legal_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/legal/{kind}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["legal_versions"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -798,6 +1022,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["unresolve_comment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{workspace_id}/consents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workspace_consents"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2023,6 +2263,65 @@ export interface components {
             /** Format: uuid */
             userId: string;
         };
+        AdminInstanceSettingsOutput: {
+            eeFeatures: string[];
+            envApplied: string[];
+            overridden: string[];
+            restartRequired: string[];
+            values: components["schemas"]["SettingsValues"];
+            /** Format: int64 */
+            version: number;
+        };
+        AdminSystemOutput: {
+            /** Format: int64 */
+            documents: number;
+            /** Format: int64 */
+            tasks: number;
+            /** Format: int64 */
+            users: number;
+            /** Format: int64 */
+            workspaces: number;
+        };
+        AdminUserItemOutput: {
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            deletedAt?: string | null;
+            email: string;
+            /** Format: date-time */
+            eraseAt?: string | null;
+            familyName?: string | null;
+            givenName: string;
+            id: string;
+            instanceAdmin: boolean;
+            /** Format: date-time */
+            suspendedAt?: string | null;
+        };
+        AdminUserListResponse: {
+            items: components["schemas"]["AdminUserItemOutput"][];
+        };
+        /** @description Source `adminUserPatchInput`: at least one of the flags. */
+        AdminUserPatchBody: {
+            instanceAdmin?: boolean | null;
+            suspended?: boolean | null;
+            /** Format: uuid */
+            userId: string;
+        };
+        AdminUserPatchOutput: {
+            ok: boolean;
+            /** Format: date-time */
+            suspendedAt?: string | null;
+        };
+        AdminWorkspaceItemOutput: {
+            /** Format: date-time */
+            createdAt: string;
+            id: string;
+            name: string;
+            slug: string;
+        };
+        AdminWorkspaceListResponse: {
+            items: components["schemas"]["AdminWorkspaceItemOutput"][];
+        };
         AncestorResponse: {
             icon: string | null;
             id: string;
@@ -2097,18 +2396,64 @@ export interface components {
             /** Format: int32 */
             width: number;
         };
+        AttachmentPreviewSettings: {
+            mode: string;
+        };
         AttachmentUploadedPartResponse: {
             etag: string;
             /** Format: int32 */
             partNumber: number;
+        };
+        AuditLogItemOutput: {
+            actorUserId?: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            id: string;
+            ip?: string | null;
+            payload: Record<string, never>;
+            targetId?: string | null;
+            targetType?: string | null;
+            verb: string;
+            workspaceId?: string | null;
+        };
+        AuditLogListResponse: {
+            items: components["schemas"]["AuditLogItemOutput"][];
+            nextCursor?: string | null;
+        };
+        AuthSettings: {
+            /** Format: int64 */
+            passwordMinLength: number;
         };
         BodyResponse: {
             contentJson: unknown;
             /** Format: int32 */
             version: number;
         };
+        /**
+         * @description The identity the upload route recorded: storage key, digest, sniffed type.
+         *     Serving checks the digest, so a hand-written key cannot turn this public
+         *     route into a reader for another object.
+         */
+        BrandingAsset: {
+            /** Format: uuid */
+            key: string;
+            mime: string;
+            sha256: string;
+        };
         BrandingOutput: {
             name: string;
+        };
+        BrandingPatchInput: {
+            loginBrandText: string | null;
+            name: string;
+            smtpFromDisplay: string | null;
+        };
+        BrandingSettings: {
+            favicon?: components["schemas"]["BrandingAsset"] | null;
+            loginBrandText?: string | null;
+            logo?: components["schemas"]["BrandingAsset"] | null;
+            name: string;
+            smtpFromDisplay?: string | null;
         };
         CloneProjectBody: {
             description?: string | null;
@@ -2159,6 +2504,18 @@ export interface components {
         };
         CompleteAttachmentUploadBody: {
             parts: components["schemas"]["AttachmentCompletePartBody"][];
+        };
+        /** @description Items are non-strict objects in the source (extra keys are ignored). */
+        ConsentItemBody: {
+            kind: string;
+            /** Format: int64 */
+            version: number;
+        };
+        ConsentsPendingResponse: {
+            pending: components["schemas"]["LegalDocumentOutput"][];
+        };
+        ConsentsSubmitBody: {
+            items: components["schemas"]["ConsentItemBody"][];
         };
         CreateAttachmentUploadBody: {
             declaredMime?: string | null;
@@ -2267,6 +2624,14 @@ export interface components {
             /** Format: int64 */
             unreadCount: number;
         };
+        DefaultsUserSettings: {
+            locale: string;
+            /** Format: int64 */
+            textScale: number;
+            timezone: string;
+            /** Format: int64 */
+            weekStartsOn: number;
+        };
         DeleteWorkspaceBody: {
             confirmSlug: string;
         };
@@ -2301,6 +2666,9 @@ export interface components {
         EmailChangeBody: {
             newEmail: string;
         };
+        EmbedSettings: {
+            hosts: string[];
+        };
         ErasureScheduleOutput: {
             cancelToken: string;
             /** Format: date-time */
@@ -2315,6 +2683,9 @@ export interface components {
             dueDate: string | null;
             /** Format: date */
             startDate: string | null;
+        };
+        FeaturesSettings: {
+            ai: boolean;
         };
         GroupListResponse: {
             items: components["schemas"]["GroupOutput"][];
@@ -2342,6 +2713,11 @@ export interface components {
             canEdit: boolean;
             items: string[];
         };
+        I18nSettings: {
+            overrides: {
+                [key: string]: string;
+            };
+        };
         IcsTokenResponse: {
             url: string;
         };
@@ -2360,6 +2736,33 @@ export interface components {
             source: string;
             status: string;
             workspaceId: string;
+        };
+        InstanceAdminBody: {
+            /** Format: uuid */
+            userId: string;
+            value: boolean;
+        };
+        InstanceSettingsOutput: {
+            values: components["schemas"]["PublicSettingsValues"];
+            /** Format: int64 */
+            version: number;
+        };
+        /**
+         * @description OpenAPI shape of `PATCH /admin/instance-settings`: every key optional,
+         *     `null` resets it; `branding` has no asset leaves. The server validates the
+         *     raw JSON against the catalog.
+         */
+        InstanceSettingsPatchInput: {
+            attachmentPreview?: components["schemas"]["AttachmentPreviewSettings"] | null;
+            auth?: components["schemas"]["AuthSettings"] | null;
+            branding?: components["schemas"]["BrandingPatchInput"] | null;
+            "defaults.user"?: components["schemas"]["DefaultsUserSettings"] | null;
+            embed?: components["schemas"]["EmbedSettings"] | null;
+            features?: components["schemas"]["FeaturesSettings"] | null;
+            i18n?: components["schemas"]["I18nSettings"] | null;
+            operator?: components["schemas"]["OperatorSettings"] | null;
+            security?: components["schemas"]["SecuritySettings"] | null;
+            share?: components["schemas"]["SharePolicy"] | null;
         };
         InvitationAcceptBody: {
             consents?: components["schemas"]["InvitationConsentItem"][] | null;
@@ -2402,6 +2805,40 @@ export interface components {
             name: string;
             projectId: string;
         };
+        LegalDocumentOutput: {
+            bodyHtml: string;
+            /** Format: date-time */
+            effectiveAt: string;
+            kind: string;
+            /** Format: date-time */
+            publishedAt: string;
+            required: boolean;
+            title: string;
+            /** Format: int32 */
+            version: number;
+        };
+        LegalPublishBody: {
+            bodyMarkdown: string;
+            /** @description ISO 8601 UTC date-time (`Z`). */
+            effectiveAt: string;
+            kind: string;
+            required: boolean;
+            title: string;
+        };
+        LegalVersionMetaOutput: {
+            /** Format: date-time */
+            effectiveAt: string;
+            kind: string;
+            /** Format: date-time */
+            publishedAt: string;
+            required: boolean;
+            title: string;
+            /** Format: int32 */
+            version: number;
+        };
+        LegalVersionsResponse: {
+            versions: components["schemas"]["LegalVersionMetaOutput"][];
+        };
         LoginBody: {
             email: string;
             password: string;
@@ -2441,6 +2878,13 @@ export interface components {
         };
         MeLocateResponse: {
             workspaceId: string;
+        };
+        MemberConsentOutput: {
+            /** Format: date-time */
+            consentedAt: string;
+            kind: string;
+            /** Format: int32 */
+            version: number;
         };
         MemberResponse: {
             email: string;
@@ -2527,6 +2971,17 @@ export interface components {
         };
         OkResponse: {
             ok: boolean;
+        };
+        OperatorSettings: {
+            address?: string | null;
+            businessInfoUrl?: string | null;
+            businessName?: string | null;
+            hostingProvider?: string | null;
+            mailOrderNumber?: string | null;
+            phone?: string | null;
+            registrationNumber?: string | null;
+            representative?: string | null;
+            supportEmail?: string | null;
         };
         PasswordChangeBody: {
             /** @description `null` only for password-less accounts. */
@@ -2680,6 +3135,22 @@ export interface components {
             providers: components["schemas"]["ProviderOutput"][];
             workspaceSso: boolean;
         };
+        /** @description Public branding: asset delivery paths, never storage keys. */
+        PublicBrandingOutput: {
+            favicon?: string | null;
+            loginBrandText?: string | null;
+            logo?: string | null;
+            name: string;
+        };
+        PublicSettingsValues: {
+            attachmentPreview: components["schemas"]["AttachmentPreviewSettings"];
+            branding: components["schemas"]["PublicBrandingOutput"];
+            "defaults.user": components["schemas"]["DefaultsUserSettings"];
+            features: components["schemas"]["FeaturesSettings"];
+            operator: components["schemas"]["OperatorSettings"];
+            share: components["schemas"]["SharePolicy"];
+            webPushPublicKey?: string | null;
+        };
         PutAttachmentPartResponse: {
             etag: string;
         };
@@ -2762,6 +3233,9 @@ export interface components {
             match: boolean;
             text: string;
         };
+        SecuritySettings: {
+            contact?: string | null;
+        };
         SessionUserOutput: {
             email: string;
             /** Format: date-time */
@@ -2778,6 +3252,19 @@ export interface components {
             userId: string;
             /** Format: int32 */
             weekStartsOn: number;
+        };
+        /** @description The effective value of every key (serialized as the admin `values`). */
+        SettingsValues: {
+            attachmentPreview: components["schemas"]["AttachmentPreviewSettings"];
+            auth: components["schemas"]["AuthSettings"];
+            branding: components["schemas"]["BrandingSettings"];
+            "defaults.user": components["schemas"]["DefaultsUserSettings"];
+            embed: components["schemas"]["EmbedSettings"];
+            features: components["schemas"]["FeaturesSettings"];
+            i18n: components["schemas"]["I18nSettings"];
+            operator: components["schemas"]["OperatorSettings"];
+            security: components["schemas"]["SecuritySettings"];
+            share: components["schemas"]["SharePolicy"];
         };
         SetupBody: {
             email: string;
@@ -2826,6 +3313,17 @@ export interface components {
             id: string;
             projectId: string | null;
             workspaceId: string;
+        };
+        /**
+         * @description Instance share-link policy. Share-link routes read it through
+         *     [`crate::settings::share_policy`].
+         */
+        SharePolicy: {
+            /** Format: int64 */
+            defaultExpiresDays: number;
+            enabled: boolean;
+            /** Format: int64 */
+            maxExpiresDays: number;
         };
         SharePublicMetaOutput: {
             documentId: string | null;
@@ -3004,6 +3502,9 @@ export interface components {
             wipLimit: number | null;
             workflowId: string;
         };
+        WorkspaceConsentsResponse: {
+            members: components["schemas"]["WorkspaceMemberConsentsOutput"][];
+        };
         WorkspaceListItemResponse: {
             /** Format: int32 */
             assignedCount: number;
@@ -3017,6 +3518,10 @@ export interface components {
         };
         WorkspaceListResponse: {
             items: components["schemas"]["WorkspaceListItemResponse"][];
+        };
+        WorkspaceMemberConsentsOutput: {
+            consents: components["schemas"]["MemberConsentOutput"][];
+            userId: string;
         };
         WorkspaceMetaResponse: {
             id: string;
@@ -3042,6 +3547,627 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    admin_audit: {
+        parameters: {
+            query?: {
+                /** @description Page size 1-100 (default 50) */
+                limit?: number;
+                /** @description Keyset cursor */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Instance audit log, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditLogListResponse"];
+                };
+            };
+            /** @description Invalid query or cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Consent required */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_upload_branding_asset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description logo or favicon */
+                asset: string;
+            };
+            cookie?: never;
+        };
+        /** @description PNG, APNG, WebP or JPEG, at most 512 KiB */
+        requestBody: {
+            content: {
+                "application/octet-stream": number[];
+            };
+        };
+        responses: {
+            /** @description Settings after the upload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminInstanceSettingsOutput"];
+                };
+            };
+            /** @description Empty body or invalid asset */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Larger than 512 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not application/octet-stream or not a supported image */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_remove_branding_asset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description logo or favicon */
+                asset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Settings after the removal */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminInstanceSettingsOutput"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin or no asset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_instance_admins: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstanceAdminBody"];
+            };
+        };
+        responses: {
+            /** @description Flag set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Seat limit */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin or user not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description last_instance_admin */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_instance_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All settings with override state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminInstanceSettingsOutput"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_update_instance_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstanceSettingsPatchInput"];
+            };
+        };
+        responses: {
+            /** @description Settings after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminInstanceSettingsOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_publish_legal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LegalPublishBody"];
+            };
+        };
+        responses: {
+            /** @description Next version published */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegalDocumentOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_system: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Instance counts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSystemOutput"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_users: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Instance users */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserListResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_update_users: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminUserPatchBody"];
+            };
+        };
+        responses: {
+            /** @description User updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminUserPatchOutput"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Seat limit */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin or user not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description last_instance_admin or self_suspension */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    admin_workspaces: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Live workspaces */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminWorkspaceListResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not an instance admin */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     cancel_withdraw: {
         parameters: {
             query?: never;
@@ -3075,6 +4201,86 @@ export interface operations {
             };
             /** @description Rate limited */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    submit_consents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsentsSubmitBody"];
+            };
+        };
+        responses: {
+            /** @description Consents recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Origin mismatch */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    pending_consents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Required documents still to accept */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentsPendingResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3627,6 +4833,45 @@ export interface operations {
             };
         };
     };
+    branding_asset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description logo or favicon */
+                asset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Asset bytes (nosniff, CSP sandbox) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/*": unknown;
+                };
+            };
+            /** @description Not modified */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No asset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     get_ics_feed: {
         parameters: {
             query?: never;
@@ -3790,6 +5035,42 @@ export interface operations {
             };
         };
     };
+    instance_settings_public: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Public instance settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstanceSettingsOutput"];
+                };
+            };
+            /** @description Not modified */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Consent required (signed-in user) */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
     get_invitation: {
         parameters: {
             query?: never;
@@ -3894,6 +5175,82 @@ export interface operations {
             };
             /** @description Consent required */
             428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    legal_get: {
+        parameters: {
+            query?: {
+                /** @description Version (default latest) */
+                version?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Document kind */
+                kind: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Legal document */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegalDocumentOutput"];
+                };
+            };
+            /** @description Invalid kind or version */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    legal_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Document kind */
+                kind: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Published versions, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegalVersionsResponse"];
+                };
+            };
+            /** @description Invalid kind */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5761,6 +7118,47 @@ export interface operations {
                 };
             };
             /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    workspace_consents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Members' consents */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceConsentsResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or not a workspace admin */
             404: {
                 headers: {
                     [name: string]: unknown;

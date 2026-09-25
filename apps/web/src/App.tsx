@@ -22,6 +22,11 @@ import { MagicLinkPage } from "@/pages/MagicLinkPage";
 import { ConfirmEmailPage } from "@/pages/ConfirmEmailPage";
 import { CancelWithdrawPage } from "@/pages/CancelWithdrawPage";
 import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
+import { AdminPage } from "@/pages/AdminPage";
+import { AdminAuditPage } from "@/pages/AdminAuditPage";
+import { AdminLegalPage } from "@/pages/AdminLegalPage";
+import { ConsentPage } from "@/pages/ConsentPage";
+import { LegalPage } from "@/pages/LegalPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -61,6 +66,32 @@ export function App() {
             element={
               <SetupGuard>
                 <ResetPasswordPage />
+              </SetupGuard>
+            }
+          />
+          <Route path="/consent" element={<ConsentPage />} />
+          <Route path="/legal/:kind" element={<LegalPage />} />
+          <Route
+            path="/settings/admin"
+            element={
+              <SetupGuard>
+                <AdminPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/settings/audit"
+            element={
+              <SetupGuard>
+                <AdminAuditPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/settings/legal"
+            element={
+              <SetupGuard>
+                <AdminLegalPage />
               </SetupGuard>
             }
           />

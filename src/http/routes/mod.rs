@@ -1,4 +1,5 @@
 pub mod account;
+pub mod admin;
 pub mod api_tokens;
 pub mod attachments;
 pub mod auth;
@@ -8,6 +9,7 @@ pub mod groups;
 pub mod ics;
 pub mod import;
 pub mod invitations;
+pub mod legal;
 pub mod lookup;
 pub mod notifications;
 pub mod project_documents;

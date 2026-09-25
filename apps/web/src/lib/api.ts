@@ -1,10 +1,30 @@
 import { t, tProblemTitle } from "@fvoci/i18n";
 import createClient from "openapi-fetch";
 import type { components, paths } from "@/generated/api";
+import { CONSENT_PATH, consentUrl, isConsentRequired } from "@/lib/consent";
+
+/**
+ * Source 428 branch: a signed-in user with pending required legal documents
+ * gets `consent_required` on every gated request. Send them to the prompt with
+ * the current page as `returnTo`. The request never settles, so callers do not
+ * race the page change with their own error redirects (e.g. me → /login).
+ */
+export async function consentGate(response: Response): Promise<Response> {
+  if (response.status !== 428 || window.location.pathname === CONSENT_PATH) {
+    return response;
+  }
+  const body: unknown = await response
+    .clone()
+    .json()
+    .catch(() => null);
+  if (!isConsentRequired(response.status, body)) return response;
+  window.location.assign(consentUrl(window.location));
+  return new Promise<Response>(() => {});
+}
 
 export const api = createClient<paths>({
   credentials: "include",
-  fetch: (input) => globalThis.fetch(input),
+  fetch: async (input) => consentGate(await globalThis.fetch(input)),
 });
 
 type ProblemBody = components["schemas"]["ProblemResponse"];
