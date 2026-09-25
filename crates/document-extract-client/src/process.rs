@@ -596,7 +596,7 @@ fn apply_pre_exec_rlimits(cmd: &mut Command, limits: &Limits) -> Result<(), Stri
 /// `PR_SET_PDEATHSIG` is tied to the spawning thread, not to an arbitrary
 /// other thread of the parent process.
 #[cfg(target_os = "linux")]
-fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> {
+pub fn apply_parent_death_signal(expected_ppid: libc::pid_t) -> std::io::Result<()> {
     // SAFETY: `pre_exec` runs between fork and exec. Only async-signal-safe
     // libc is used: `syscall`, `getppid`, `raise`, `_exit`.
     unsafe {

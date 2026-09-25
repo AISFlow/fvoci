@@ -616,3 +616,99 @@ async fn preview_html_follows_the_mode_setting_and_escapes_text() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     c.done().await;
 }
+
+/// Review should-fix 3: images stored before 030 are queued for a thumbnail.
+#[tokio::test]
+async fn upgrade_to_030_queues_previews_for_stored_images() {
+    let db = TestDb::bootstrap_through(29).await;
+    let admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db.admin_url)
+        .await
+        .unwrap();
+    let (user_id, workspace_id, document_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'Up')")
+        .bind(user_id)
+        .bind(format!("up-{}@example.com", user_id.simple()))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, 'ws')")
+        .bind(workspace_id)
+        .bind(format!("p{}", &user_id.simple().to_string()[..16]))
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, project_id, number,
+            status, schema_version, text, chosung, created_by, content_json, kind
+        ) VALUES ($1, $2, 'Doc', $3, NULL, 'V', NULL, 1, 'published', 1, 'Doc', '', $4,
+            '{"type":"doc","content":[]}'::jsonb, 'wiki')"#,
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(document_id.simple().to_string())
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .expect("document");
+    let mut ids = Vec::new();
+    for (status, mime, image) in [
+        ("stored", "image/png", true),
+        ("stored", "image/webp", true),
+        ("stored", "application/x-hwp", false),
+        ("stored", "image/svg+xml", true),
+        ("uploading", "image/png", true),
+    ] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            r#"INSERT INTO fvoci.attachments (
+                id, workspace_id, document_id, uploader_id, status, name, mime,
+                size_bytes, reserved_size_bytes, storage_key, image, scan_status,
+                extract_status, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, 'f', $6, CASE WHEN $5 = 'stored' THEN 16 END, 16, $7, $8, 'skipped', 'skipped',
+                CASE WHEN $5 = 'stored' THEN now() END)"#,
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(document_id)
+        .bind(user_id)
+        .bind(status)
+        .bind(mime)
+        .bind(format!("attachments/{workspace_id}/{id}"))
+        .bind(image)
+        .execute(&admin)
+        .await
+        .expect("attachment");
+        ids.push(id);
+    }
+    fvoci_server::db::migrate::run_migrations_through(&db.admin_url, 30)
+        .await
+        .expect("migrate to 30");
+    let mut statuses = Vec::new();
+    for id in &ids {
+        let status: String =
+            sqlx::query_scalar("SELECT preview_status FROM fvoci.attachments WHERE id = $1")
+                .bind(id)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        statuses.push(status);
+    }
+    assert_eq!(
+        statuses,
+        vec!["pending", "pending", "skipped", "skipped", "skipped"],
+        "only stored images of supported types are queued"
+    );
+    admin.close().await;
+    db.cleanup().await;
+}

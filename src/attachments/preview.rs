@@ -277,7 +277,21 @@ pub async fn run_preview_helper(
             "preview input exceeds byte limit".into(),
         ));
     }
-    let mut child = tokio::process::Command::new(helper)
+    let mut command = tokio::process::Command::new(helper);
+    // The child dies with the server even on SIGKILL (it is otherwise bounded
+    // only by RLIMIT_CPU), as the document extract helper does.
+    #[cfg(target_os = "linux")]
+    {
+        let parent_pid = std::process::id() as i32;
+        // SAFETY: the closure runs between fork and exec and only calls the
+        // async-signal-safe prctl/getppid/raise/_exit wrapper.
+        unsafe {
+            command.pre_exec(move || {
+                document_extract_client::process::apply_parent_death_signal(parent_pid)
+            });
+        }
+    }
+    let mut child = command
         .arg(PREVIEW_HELPER_ARG)
         .arg("--max-input")
         .arg(limits.input_bytes.to_string())

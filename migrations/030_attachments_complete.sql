@@ -228,6 +228,15 @@ CREATE INDEX attachments_preview_pending_idx
     ON fvoci.attachments (completed_at, id)
     WHERE status = 'stored' AND preview_status = 'pending';
 
+-- Images stored before this migration get a thumbnail too: queue them for the
+-- preview job (the same eligible types as a new upload). attachments is not
+-- FORCE RLS, so the migration owner sees every row.
+UPDATE fvoci.attachments
+SET preview_status = 'pending'
+WHERE status = 'stored'
+  AND NOT (variants ? 'preview')
+  AND mime IN ('image/png', 'image/apng', 'image/jpeg', 'image/gif', 'image/tiff', 'image/bmp', 'image/webp');
+
 CREATE FUNCTION fvoci.app_claim_attachment_preview(p_lease_secs integer)
 RETURNS TABLE (
     workspace_id uuid,

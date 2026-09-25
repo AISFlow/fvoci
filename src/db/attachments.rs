@@ -1688,6 +1688,17 @@ async fn reclaim_one_object(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = lock.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
+    // Serialise with `publish_preview`, which holds this row while it
+    // publishes a journaled preview key: whoever locks first decides.
+    let still_journaled: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM fvoci.attachment_object_cleanups WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if still_journaled.is_none() {
+        tx.commit().await?;
+        return Ok(true);
+    }
     let referenced: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (

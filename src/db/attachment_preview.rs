@@ -120,6 +120,17 @@ pub async fn publish_preview(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, claim.workspace_id).await?;
+    // Hold the journal row first: once reclaim has taken it (and purged the
+    // object) the preview must not be published, whatever the timing.
+    let journal: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM fvoci.attachment_object_cleanups WHERE id = $1 FOR UPDATE")
+            .bind(journal_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if journal.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     let updated = sqlx::query(
         r#"
         UPDATE fvoci.attachments
@@ -143,10 +154,14 @@ pub async fn publish_preview(
         tx.rollback().await?;
         return Ok(false);
     }
-    sqlx::query("DELETE FROM fvoci.attachment_object_cleanups WHERE id = $1")
+    let removed = sqlx::query("DELETE FROM fvoci.attachment_object_cleanups WHERE id = $1")
         .bind(journal_id)
         .execute(&mut *tx)
         .await?;
+    if removed.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     tx.commit().await?;
     Ok(true)
 }
