@@ -229,8 +229,10 @@ fn string_claim(claims: &Value, name: &str) -> Option<String> {
 
 /// Provider claims are untrusted: only a well-formed address, lowercased
 /// (source `normalizeProviderEmail`).
+/// Stored emails are printable ASCII (the users / identity_links checks).
 pub fn normalize_provider_email(raw: Option<String>) -> Option<String> {
     raw.and_then(|email| crate::validate::normalize_email(&email).ok())
+        .filter(|email| email.bytes().all(|b| (b'!'..=b'~').contains(&b)))
 }
 
 /// `client_secret_basic` unless the provider only lists `client_secret_post`
@@ -412,6 +414,10 @@ mod tests {
             Some("kim@example.com".into())
         );
         assert_eq!(normalize_provider_email(Some("not an email".into())), None);
+        assert_eq!(
+            normalize_provider_email(Some("김@example.com".into())),
+            None
+        );
         assert_eq!(normalize_provider_email(None), None);
     }
 
