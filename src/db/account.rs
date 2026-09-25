@@ -224,6 +224,9 @@ pub(crate) struct AccountRecord<'a> {
     pub actor_user_id: Option<Uuid>,
     pub target_id: Uuid,
     pub payload: Value,
+    /// Audit copy of the payload when it must not repeat the event's personal
+    /// data (audit rows outlive anonymization). `None` reuses `payload`.
+    pub audit_payload: Option<Value>,
     pub ip: Option<&'a str>,
     pub channel: &'a str,
     pub workspace_id: Option<Uuid>,
@@ -262,7 +265,7 @@ pub(crate) async fn record_account_change(
             verb: record.verb.to_string(),
             target_type: Some(record.target_type.to_string()),
             target_id: Some(record.target_id),
-            payload: record.payload,
+            payload: record.audit_payload.unwrap_or(record.payload),
             ip: record.ip.map(str::to_string),
         },
     )
@@ -282,6 +285,7 @@ fn user_record<'a>(
         actor_user_id: actor,
         target_id: user_id,
         payload,
+        audit_payload: None,
         ip,
         channel: if actor.is_some() { "web" } else { "system" },
         workspace_id: None,
@@ -438,8 +442,9 @@ pub async fn cancel_withdraw(
         tx.rollback().await?;
         return Ok(CancelWithdrawOutcome::DeadlinePassed);
     }
-    let restored: bool = sqlx::query_scalar("SELECT fvoci.app_user_restore_withdrawn($1)")
+    let restored: bool = sqlx::query_scalar("SELECT fvoci.app_user_restore_withdrawn($1, $2)")
         .bind(user_id)
+        .bind(&hash)
         .fetch_one(&mut *tx)
         .await?;
     if !restored {
@@ -501,6 +506,7 @@ async fn mark_personal_workspace_deleted(
             actor_user_id: None,
             target_id: workspace_id,
             payload: json!({}),
+            audit_payload: None,
             ip: None,
             channel: "system",
             workspace_id: Some(workspace_id),
@@ -755,21 +761,21 @@ pub async fn complete_email_change(
         tx.rollback().await?;
         return Ok(None);
     }
-    record_account_change(
-        &mut tx,
-        user_record(
-            "user.email_changed",
-            Some(payload.user_id),
-            payload.user_id,
-            json!({
-                "userId": payload.user_id.to_string(),
-                "oldEmail": old_email,
-                "newEmail": new_email,
-            }),
-            ip,
-        ),
-    )
-    .await?;
+    // The outbox event keeps the source payload; the audit row, which is
+    // never erased, records the change without either address.
+    let mut record = user_record(
+        "user.email_changed",
+        Some(payload.user_id),
+        payload.user_id,
+        json!({
+            "userId": payload.user_id.to_string(),
+            "oldEmail": old_email,
+            "newEmail": new_email,
+        }),
+        ip,
+    );
+    record.audit_payload = Some(json!({ "userId": payload.user_id.to_string() }));
+    record_account_change(&mut tx, record).await?;
     tx.commit().await?;
     Ok(Some(EmailChanged { old_email }))
 }

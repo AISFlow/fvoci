@@ -146,8 +146,8 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_user_withdraw(uuid, timestamptz, text) FROM
 GRANT EXECUTE ON FUNCTION fvoci.app_user_withdraw(uuid, timestamptz, text) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_user_id_by_withdraw_cancel_token_hash(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_user_id_by_withdraw_cancel_token_hash(text) TO :"app_role";
-REVOKE EXECUTE ON FUNCTION fvoci.app_user_restore_withdrawn(uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION fvoci.app_user_restore_withdrawn(uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_restore_withdrawn(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_restore_withdrawn(uuid, text) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_user_anonymize(uuid, text, text, timestamptz, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_user_anonymize(uuid, text, text, timestamptz, timestamptz) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_user_update_email(uuid, text) FROM PUBLIC;

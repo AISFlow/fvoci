@@ -105,19 +105,32 @@ async fn my_memberships(pool: &PgPool, user_id: Uuid) -> Result<Vec<(Uuid, Strin
     Ok(rows)
 }
 
+/// Zone names PostgreSQL accepts for `AT TIME ZONE`, read once per process:
+/// scanning `pg_timezone_names` walks the zone database on every call.
+static TIME_ZONES: tokio::sync::OnceCell<HashSet<String>> = tokio::sync::OnceCell::const_new();
+
+async fn known_time_zones(pool: &PgPool) -> Result<&'static HashSet<String>, sqlx::Error> {
+    TIME_ZONES
+        .get_or_try_init(|| async {
+            let names: Vec<String> =
+                sqlx::query_scalar("SELECT name FROM pg_catalog.pg_timezone_names")
+                    .fetch_all(pool)
+                    .await?;
+            Ok(names.into_iter().collect())
+        })
+        .await
+}
+
 async fn user_time_zone(pool: &PgPool, user_id: Uuid) -> Result<String, sqlx::Error> {
+    let tz: Option<String> = sqlx::query_scalar("SELECT timezone FROM fvoci.users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
     // Source falls back to UTC; an unknown zone name must not fail the query.
-    let tz: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT tz.name FROM fvoci.users u
-        INNER JOIN pg_catalog.pg_timezone_names tz ON tz.name = u.timezone
-        WHERE u.id = $1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(tz.unwrap_or_else(|| "UTC".to_string()))
+    let known = known_time_zones(pool).await?;
+    Ok(tz
+        .filter(|name| known.contains(name))
+        .unwrap_or_else(|| "UTC".to_string()))
 }
 
 /// Current membership role and live workspace under the tenant context.

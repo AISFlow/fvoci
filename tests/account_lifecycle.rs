@@ -792,6 +792,17 @@ async fn withdraw_revokes_credentials_blocks_login_and_cancel_restores() {
         .await,
         1
     );
+    let audit: (Option<Uuid>, Value) = sqlx::query_as(
+        "SELECT actor_user_id, payload FROM fvoci.audit_log WHERE verb = 'user.withdraw_cancelled' AND target_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&h.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        audit,
+        (Some(user_id), json!({"userId": user_id.to_string()}))
+    );
     h.finish().await;
 }
 
@@ -887,6 +898,67 @@ async fn cancel_after_grace_period_is_not_found() {
         .await,
         1
     );
+    // The definers enforce the boundary themselves, as the app role:
+    // restore needs the matching hash and an unexpired grace period, and the
+    // anonymize cutoff cannot be moved past now - 14 days.
+    let hash = hash_token(&cancel_token);
+    for (candidate, deleted_sql) in [
+        (hash_token("other-token"), "now() - interval '1 day'"),
+        (
+            hash.clone(),
+            "now() - interval '14 days' - interval '1 second'",
+        ),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE fvoci.users SET deleted_at = {deleted_sql} WHERE id = $1"
+        ))
+        .bind(user_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+        let restored: bool = sqlx::query_scalar("SELECT fvoci.app_user_restore_withdrawn($1, $2)")
+            .bind(user_id)
+            .bind(&candidate)
+            .fetch_one(&h.app_pool)
+            .await
+            .unwrap();
+        assert!(!restored, "{deleted_sql}");
+    }
+    sqlx::query("UPDATE fvoci.users SET deleted_at = now() - interval '13 days' WHERE id = $1")
+        .bind(user_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let erased: bool = sqlx::query_scalar(
+        "SELECT fvoci.app_user_anonymize($1, 'x', $2, now(), now() + interval '30 days')",
+    )
+    .bind(user_id)
+    .bind("withdrawn-0123456789ab@withdrawn.invalid")
+    .fetch_one(&h.app_pool)
+    .await
+    .unwrap();
+    assert!(!erased, "anonymize before the grace period ended");
+    let restored: bool = sqlx::query_scalar("SELECT fvoci.app_user_restore_withdrawn($1, $2)")
+        .bind(user_id)
+        .bind(&hash)
+        .fetch_one(&h.app_pool)
+        .await
+        .unwrap();
+    assert!(restored);
+    for bad in [
+        "Upper@Example.com",
+        "no-at-sign",
+        "a@b@c",
+        "sp ace@example.com",
+    ] {
+        let err = sqlx::query_scalar::<_, String>("SELECT fvoci.app_user_update_email($1, $2)")
+            .bind(user_id)
+            .bind(bad)
+            .fetch_one(&h.app_pool)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid email"), "{bad}: {err}");
+    }
     h.finish().await;
 }
 
@@ -1044,6 +1116,56 @@ async fn maintenance_sweep_anonymizes_withdrawn_users_after_grace_period() {
     .execute(&h.admin)
     .await
     .unwrap();
+    let other_ws = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, 'elsewhere', 'Elsewhere')",
+    )
+    .bind(other_ws)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    let other_document = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, project_id, number, status,
+            schema_version, content_json, created_by
+        ) VALUES (
+            $1, $2, '다른 문서', $3, NULL, 'V', NULL, 1, 'published', 2,
+            '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, $4
+        )
+        "#,
+    )
+    .bind(other_document)
+    .bind(other_ws)
+    .bind(other_document.simple().to_string())
+    .bind(h.owner_id)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    let mut other_ids = Vec::new();
+    for (uploader, name) in [(due_id, "다른 곳 파일.pdf"), (h.owner_id, "타인.pdf")] {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.attachments (
+                id, workspace_id, document_id, uploader_id, status, name, reserved_size_bytes,
+                size_bytes, storage_key, completed_at
+            ) VALUES ($1, $2, $3, $4, 'stored', $5, 4, 4, $6, now())
+            "#,
+        )
+        .bind(id)
+        .bind(other_ws)
+        .bind(other_document)
+        .bind(uploader)
+        .bind(name)
+        .bind(Uuid::now_v7().to_string())
+        .execute(&h.admin)
+        .await
+        .unwrap();
+        other_ids.push(id);
+    }
+    let (other_attachment_id, bystander_attachment_id) = (other_ids[0], other_ids[1]);
     sqlx::query(
         "INSERT INTO fvoci.notifications (workspace_id, user_id, event_id, verb) VALUES ($1, $2, $3, 'comment.created')",
     )
@@ -1085,13 +1207,76 @@ async fn maintenance_sweep_anonymizes_withdrawn_users_after_grace_period() {
     .await
     .unwrap();
 
+    // Rows only the personal-workspace teardown removes (withdraw already
+    // deleted the user's own tokens and sent invitations): another inviter's
+    // invitation, a service API token and an ICS token on the membership.
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.invitations (id, workspace_id, email, role, token_hash, invited_by, expires_at)
+        VALUES ($1, $2, 'guest@example.com', 'member', $3, $4, now() + interval '1 day')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(personal_id)
+    .bind(hash_token("personal-invite"))
+    .bind(h.owner_id)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.api_tokens (id, workspace_id, user_id, token_hash, name, scopes) VALUES ($1, $2, NULL, $3, 'svc', ARRAY['documents.read'])",
+    )
+    .bind(Uuid::now_v7())
+    .bind(personal_id)
+    .bind(hash_token("personal-service-token"))
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.ics_tokens (id, workspace_id, user_id, token_hash) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(personal_id)
+    .bind(due_id)
+    .bind(hash_token("personal-ics"))
+    .execute(&h.admin)
+    .await
+    .unwrap();
+
+    // First the job step on its own, so the teardown is visible before the purge.
     let cancel = CancellationToken::new();
-    let stats = run_daily_sweep(&h.app_pool, &h.storage, &h.mailer, &cancel)
-        .await
-        .unwrap()
-        .expect("claimed daily sweep");
-    assert_eq!(stats.withdrawn_anonymized, 1);
-    assert!(stats.workspace.purged >= 1, "{stats:?}");
+    assert_eq!(
+        run_withdrawn_anonymize(&h.app_pool, Utc::now(), &cancel)
+            .await
+            .unwrap(),
+        1
+    );
+    for (table, column) in [
+        ("invitations", "workspace_id"),
+        ("api_tokens", "workspace_id"),
+        ("ics_tokens", "workspace_id"),
+        ("memberships", "workspace_id"),
+    ] {
+        let sql = format!("SELECT count(*) FROM fvoci.{table} WHERE {column} = $1");
+        assert_eq!(h.count(&sql, personal_id).await, 0, "{table}");
+    }
+    assert_eq!(
+        h.count(
+            "SELECT count(*) FROM fvoci.workspaces WHERE id = $1 AND kind = 'personal' AND deleted_at IS NOT NULL",
+            personal_id
+        )
+        .await,
+        1
+    );
+    // Team membership is kept, as in the source.
+    assert_eq!(
+        h.count(
+            "SELECT count(*) FROM fvoci.memberships WHERE user_id = $1",
+            due_id
+        )
+        .await,
+        1
+    );
 
     type Erased = (
         String,
@@ -1139,21 +1324,21 @@ async fn maintenance_sweep_anonymizes_withdrawn_users_after_grace_period() {
         .await,
         0
     );
-    let name: String = sqlx::query_scalar("SELECT name FROM fvoci.attachments WHERE id = $1")
-        .bind(attachment_id)
+    // Uploads are scrubbed in every workspace, including one the user never joined.
+    for id in [attachment_id, other_attachment_id] {
+        let name: String = sqlx::query_scalar("SELECT name FROM fvoci.attachments WHERE id = $1")
+            .bind(id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+        assert_eq!(name, "deleted");
+    }
+    let untouched: String = sqlx::query_scalar("SELECT name FROM fvoci.attachments WHERE id = $1")
+        .bind(bystander_attachment_id)
         .fetch_one(&h.admin)
         .await
         .unwrap();
-    assert_eq!(name, "deleted");
-    // Personal workspace marked deleted and purged by the same sweep.
-    assert_eq!(
-        h.count(
-            "SELECT count(*) FROM fvoci.workspaces WHERE id = $1",
-            personal_id
-        )
-        .await,
-        0
-    );
+    assert_eq!(untouched, "타인.pdf");
     for (verb, channel) in [("user.anonymized", "system")] {
         let row: (Option<Uuid>, String) = sqlx::query_as(
             "SELECT actor_user_id, channel FROM fvoci.events WHERE verb = $1 AND target_id = $2",
@@ -1199,6 +1384,14 @@ async fn maintenance_sweep_anonymizes_withdrawn_users_after_grace_period() {
     )
     .await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
+    // The definer caps the cutoff: a caller-supplied future "now" cannot erase
+    // the not-yet-due user early.
+    assert_eq!(
+        run_withdrawn_anonymize(&h.app_pool, Utc::now() + chrono::Duration::days(2), &cancel)
+            .await
+            .unwrap(),
+        0
+    );
     // A cancelled sweep does nothing.
     let cancelled = CancellationToken::new();
     cancelled.cancel();
@@ -1213,10 +1406,28 @@ async fn maintenance_sweep_anonymizes_withdrawn_users_after_grace_period() {
             .unwrap(),
         0
     );
+    // The scheduler's daily sweep runs the erasure step first, then purges the
+    // personal workspace marked deleted above.
+    let stats = run_daily_sweep(&h.app_pool, &h.storage, &h.mailer, &cancel)
+        .await
+        .unwrap()
+        .expect("claimed daily sweep");
+    assert_eq!(stats.withdrawn_anonymized, 1, "{stats:?}");
+    assert!(stats.workspace.purged >= 1, "{stats:?}");
     assert_eq!(
-        run_withdrawn_anonymize(&h.app_pool, Utc::now(), &cancel)
-            .await
-            .unwrap(),
+        h.count(
+            "SELECT count(*) FROM fvoci.workspaces WHERE id = $1",
+            personal_id
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        h.count(
+            "SELECT count(*) FROM fvoci.users WHERE id = $1 AND anonymized_at IS NOT NULL",
+            recent_id
+        )
+        .await,
         1
     );
     h.finish().await;
@@ -1410,6 +1621,21 @@ async fn password_change_keeps_current_session_and_revokes_others() {
         .await,
         1
     );
+    let event: (Option<Uuid>, Value, String) = sqlx::query_as(
+        "SELECT actor_user_id, payload, channel FROM fvoci.events WHERE verb = 'auth.password_changed' AND target_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&h.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        event,
+        (
+            Some(user_id),
+            json!({"userId": user_id.to_string()}),
+            "web".to_string()
+        )
+    );
     h.finish().await;
 }
 
@@ -1524,6 +1750,23 @@ async fn email_change_is_single_use_expires_and_hides_taken_addresses() {
         .await,
         1
     );
+    // The event keeps the source payload; the audit copy holds no address.
+    let event_payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM fvoci.events WHERE verb = 'user.email_changed' AND target_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&h.admin)
+    .await
+    .unwrap();
+    assert_eq!(event_payload["newEmail"], "new.address@example.com");
+    let audit_payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM fvoci.audit_log WHERE verb = 'user.email_changed' AND target_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&h.admin)
+    .await
+    .unwrap();
+    assert_eq!(audit_payload, json!({"userId": user_id.to_string()}));
     h.sink
         .wait_for(|m| m.to == email && m.text().contains("Subject: FVOCI 이메일 변경 완료 알림"))
         .await;
@@ -1846,7 +2089,26 @@ async fn providers_and_identities_report_password_only() {
 
 struct ZipEntry {
     name: String,
+    flags: usize,
     data: Vec<u8>,
+}
+
+/// Independent reader: CPython's zipfile tests every entry's CRC.
+fn external_zip_check(bytes: &[u8]) {
+    let path = std::env::temp_dir().join(format!("fvoci-export-{}.zip", Uuid::now_v7()));
+    std::fs::write(&path, bytes).unwrap();
+    let output = std::process::Command::new("python3")
+        .args(["-m", "zipfile", "-t"])
+        .arg(&path)
+        .output()
+        .expect("python3 is required for the external zip check");
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        output.status.success(),
+        "python3 -m zipfile -t failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Central-directory reader for the stored archives the export writes.
@@ -1869,10 +2131,18 @@ fn read_zip(bytes: &[u8]) -> Vec<ZipEntry> {
         let data_at = local + 30 + u16_at(local + 26) + u16_at(local + 28);
         let data = bytes[data_at..data_at + size].to_vec();
         assert_eq!(fvoci_server::export_zip::crc32(&data), crc, "crc {name}");
-        // Data descriptor follows the payload.
-        assert_eq!(u32_at(data_at + size), 0x0807_4b50, "descriptor {name}");
-        assert_eq!(u32_at(data_at + size + 4) as u32, crc);
-        entries.push(ZipEntry { name, data });
+        let flags = u16_at(at + 8);
+        assert_eq!(flags, u16_at(local + 6), "flags {name}");
+        if flags & 0x0008 != 0 {
+            // Streamed entry: a data descriptor follows the payload.
+            assert_eq!(u32_at(data_at + size), 0x0807_4b50, "descriptor {name}");
+            assert_eq!(u32_at(data_at + size + 4) as u32, crc);
+        } else {
+            // Known-size entry: the local header carries CRC and size.
+            assert_eq!(u32_at(local + 14) as u32, crc, "local crc {name}");
+            assert_eq!(u32_at(local + 22), size, "local size {name}");
+        }
+        entries.push(ZipEntry { name, flags, data });
         at += 46 + name_len + u16_at(at + 30) + u16_at(at + 32);
     }
     entries
@@ -2006,7 +2276,11 @@ async fn export_streams_profile_comments_and_attachments() {
         res.headers["content-disposition"],
         "attachment; filename=\"fvoci-export.zip\""
     );
+    external_zip_check(&res.bytes);
     let entries = read_zip(&res.bytes);
+    // Small JSON entries carry their sizes up front; streamed ones use descriptors.
+    let flags: Vec<usize> = entries.iter().map(|e| e.flags).collect();
+    assert_eq!(flags, vec![0x0800, 0x0808, 0x0800, 0x0808]);
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
         names,
@@ -2079,6 +2353,7 @@ async fn export_streams_profile_comments_and_attachments() {
         peer(71),
     )
     .await;
+    external_zip_check(&res.bytes);
     let entries = read_zip(&res.bytes);
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[1].data, b"[]\n");

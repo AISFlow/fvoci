@@ -108,7 +108,9 @@ AS $$
 $$;
 
 -- Source restoreWithdrawn: clear deleted_at and the one-time cancel token.
-CREATE FUNCTION fvoci.app_user_restore_withdrawn(p_id uuid)
+-- The definer itself requires the matching cancel hash and an unexpired grace
+-- period (source deadline: now < deleted_at + 14 days).
+CREATE FUNCTION fvoci.app_user_restore_withdrawn(p_id uuid, p_cancel_hash text)
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -117,20 +119,26 @@ AS $$
 DECLARE
     updated integer;
 BEGIN
+    IF p_cancel_hash IS NULL OR p_cancel_hash !~ '^[0-9a-f]{64}$' THEN
+        RETURN false;
+    END IF;
     UPDATE fvoci.users
     SET deleted_at = NULL,
         withdraw_cancel_token_hash = NULL,
         updated_at = now()
     WHERE id = p_id
+      AND withdraw_cancel_token_hash = p_cancel_hash
       AND deleted_at IS NOT NULL
+      AND deleted_at > now() - interval '14 days'
       AND anonymized_at IS NULL;
     GET DIAGNOSTICS updated = ROW_COUNT;
     RETURN updated = 1;
 END;
 $$;
 
--- Source anonymize: only a row withdrawn at or before p_due_before. Clears
--- name, email, password hash and the cancel token in one UPDATE.
+-- Source anonymize: only a row whose 14-day grace period has ended. The
+-- cutoff is capped inside the definer: a later p_due_before can never erase
+-- early. Clears name, email, password hash and the cancel token in one UPDATE.
 CREATE FUNCTION fvoci.app_user_anonymize(
     p_id uuid,
     p_given_name text,
@@ -163,7 +171,7 @@ BEGIN
         updated_at = now()
     WHERE id = p_id
       AND deleted_at IS NOT NULL
-      AND deleted_at <= p_due_before
+      AND deleted_at <= LEAST(p_due_before, now() - interval '14 days')
       AND anonymized_at IS NULL;
     GET DIAGNOSTICS updated = ROW_COUNT;
     RETURN updated = 1;
@@ -180,6 +188,15 @@ AS $$
 DECLARE
     updated integer;
 BEGIN
+    -- Same canonical form as users/magic_tokens: printable ASCII, lower case,
+    -- one local part and one domain.
+    IF p_email IS NULL
+       OR p_email !~ '^[!-~]+$'
+       OR p_email <> lower(p_email COLLATE "C")
+       OR p_email !~ '^[^@]+@[^@]+$'
+       OR length(p_email) > 320 THEN
+        RAISE EXCEPTION 'app_user_update_email: invalid email';
+    END IF;
     BEGIN
         UPDATE fvoci.users
         SET email = p_email,

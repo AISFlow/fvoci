@@ -741,10 +741,13 @@ impl ExportWriter {
         self.send(descriptor).await
     }
 
+    /// Small entry already in memory: sizes in the local header.
     async fn file(&mut self, name: &str, bytes: Bytes) -> Result<(), ExportFailure> {
-        self.begin(name).await?;
-        self.data(bytes).await?;
-        self.end().await
+        let chunk = self
+            .zip
+            .whole_entry(name, &bytes)
+            .map_err(|_| ExportFailure::Zip)?;
+        self.send(chunk).await
     }
 }
 

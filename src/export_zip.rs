@@ -1,9 +1,14 @@
 //! Streaming stored (method 0) ZIP writer for exports.
 //!
 //! Source `zipStore` (packages/core/src/zip-store.ts) builds the whole archive
-//! in memory. Here each entry is streamed with a data descriptor (general
-//! purpose flag bit 3) so memory stays bounded by one chunk; the central
-//! directory carries the real CRC and sizes. Entry names use the source
+//! in memory. Here small entries whose bytes are already in hand are written
+//! with CRC and sizes in the local header, like the source. Large entries
+//! (comment history, attachment payloads) stream with a data descriptor
+//! (general purpose flag bit 3) so memory stays bounded by one chunk; the
+//! central directory carries the real CRC and sizes. Central-directory
+//! readers (unzip, Python zipfile, OS archive tools) accept both; some
+//! streaming readers (e.g. Java `ZipInputStream`) refuse STORED entries with
+//! a descriptor. Entry names use the source
 //! `zipEntryName` / `zipSafeName` rules and the UTF-8 flag (bit 11). Like the
 //! source, the archive is zip32 only: an entry or offset past 4 GiB, or more
 //! than 65 535 entries, fails instead of writing a corrupt archive.
@@ -15,7 +20,8 @@ const DESCRIPTOR_SIG: u32 = 0x0807_4b50;
 const CENTRAL_SIG: u32 = 0x0201_4b50;
 const EOCD_SIG: u32 = 0x0605_4b50;
 const VERSION: u16 = 20;
-const FLAGS: u16 = 0x0808;
+const FLAG_UTF8: u16 = 0x0800;
+const FLAGS: u16 = FLAG_UTF8 | 0x0008;
 const ZIP32_MAX: u64 = 0xffff_ffff;
 const MAX_ENTRIES: usize = 0xffff;
 
@@ -108,6 +114,7 @@ pub enum ZipError {
 }
 
 struct CentralEntry {
+    flags: u16,
     name: Vec<u8>,
     crc: u32,
     size: u32,
@@ -182,6 +189,46 @@ impl ZipStream {
         Ok(Bytes::from(out))
     }
 
+    /// A complete entry with CRC and sizes in the local header (no data
+    /// descriptor). Returns header and data as one chunk.
+    pub fn whole_entry(&mut self, raw_name: &str, data: &[u8]) -> Result<Bytes, ZipError> {
+        if self.open.is_some() {
+            return Err(ZipError::EntryOpen);
+        }
+        if self.entries.len() >= MAX_ENTRIES {
+            return Err(ZipError::Overflow);
+        }
+        let name = zip_entry_name(raw_name).into_bytes();
+        let name_len = u16::try_from(name.len()).map_err(|_| ZipError::Overflow)?;
+        let offset = to_u32(self.offset)?;
+        let size = to_u32(data.len() as u64)?;
+        let crc = crc32(data);
+        let mut out = Vec::with_capacity(30 + name.len() + data.len());
+        put_u32(&mut out, LOCAL_SIG);
+        put_u16(&mut out, VERSION);
+        put_u16(&mut out, FLAG_UTF8);
+        put_u16(&mut out, 0);
+        put_u16(&mut out, 0);
+        put_u16(&mut out, 0);
+        put_u32(&mut out, crc);
+        put_u32(&mut out, size);
+        put_u32(&mut out, size);
+        put_u16(&mut out, name_len);
+        put_u16(&mut out, 0);
+        out.extend_from_slice(&name);
+        out.extend_from_slice(data);
+        to_u32(self.offset + out.len() as u64)?;
+        self.offset += out.len() as u64;
+        self.entries.push(CentralEntry {
+            flags: FLAG_UTF8,
+            name,
+            crc,
+            size,
+            offset,
+        });
+        Ok(Bytes::from(out))
+    }
+
     /// Accounts for `data` inside the open entry; the caller forwards `data`.
     pub fn entry_data(&mut self, data: &[u8]) -> Result<(), ZipError> {
         let open = self.open.as_mut().ok_or(ZipError::NoEntry)?;
@@ -202,6 +249,7 @@ impl ZipStream {
         put_u32(&mut out, size);
         put_u32(&mut out, size);
         self.entries.push(CentralEntry {
+            flags: FLAGS,
             name: open.name,
             crc,
             size,
@@ -221,7 +269,7 @@ impl ZipStream {
             put_u32(&mut out, CENTRAL_SIG);
             put_u16(&mut out, VERSION);
             put_u16(&mut out, VERSION);
-            put_u16(&mut out, FLAGS);
+            put_u16(&mut out, entry.flags);
             put_u16(&mut out, 0);
             put_u16(&mut out, 0);
             put_u16(&mut out, 0);
@@ -273,6 +321,21 @@ mod tests {
         assert_eq!(zip_safe_name("dir/../보고서.hwp"), "보고서.hwp");
         assert_eq!(zip_safe_name(".."), "file");
         assert_eq!(zip_safe_name("  "), "file");
+    }
+
+    #[test]
+    fn whole_entry_has_sizes_in_local_header() {
+        let mut zip = ZipStream::new();
+        let chunk = zip.whole_entry("p.json", b"{}\n").unwrap();
+        assert_eq!(u16::from_le_bytes([chunk[6], chunk[7]]), FLAG_UTF8);
+        assert_eq!(
+            u32::from_le_bytes(chunk[14..18].try_into().unwrap()),
+            crc32(b"{}\n")
+        );
+        assert_eq!(u32::from_le_bytes(chunk[18..22].try_into().unwrap()), 3);
+        assert_eq!(&chunk[chunk.len() - 3..], b"{}\n");
+        let tail = zip.finish().unwrap();
+        assert_eq!(u16::from_le_bytes([tail[8], tail[9]]), FLAG_UTF8);
     }
 
     #[test]
