@@ -156,6 +156,10 @@ test("workspace and global search find a document, task, comment, and attachment
   await expect(results.getByText(documentTitle).first()).toBeVisible({ timeout: 10_000 });
   await expect(results.getByText(taskTitle)).toBeVisible();
   await expect(results.getByText(attachmentName)).toBeVisible();
+  // Attachment hits open their parent document (the attachment viewer is not ported).
+  await results.getByRole("link", { name: new RegExp(attachmentName) }).click();
+  await expect(page).toHaveURL(/\/w\/acme\/[A-Z]+-\d+$/);
+  await expect(page.getByLabel("문서 제목")).toHaveValue(documentTitle);
 
   await logout(page);
   await login(page, outsider.email, outsider.password);
