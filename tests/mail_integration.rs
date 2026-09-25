@@ -559,6 +559,16 @@ async fn password_reset_hides_enumeration_hashes_token_revokes_sessions() {
         .await;
     assert_eq!(mail.to, "admin@example.com");
     assert!(mail.text().contains("Subject: FVOCI 비밀번호 재설정"));
+    let parsed = mailparse::parse_mail(mail.data.as_bytes()).expect("parse reset mail");
+    for header in ["Message-ID", "Date"] {
+        assert!(
+            parsed
+                .headers
+                .iter()
+                .any(|h| h.get_key().eq_ignore_ascii_case(header)),
+            "reset mail carries {header}"
+        );
+    }
     let token = extract_token(&mail.text());
     assert!(!mail.text().contains(&hash_token(&token)));
 

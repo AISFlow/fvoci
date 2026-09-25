@@ -12,6 +12,8 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use super::{MailSendError, SmtpConfig};
 
 const SMTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Whole-session bound, kept below the 30 s outbox lease.
+const SMTP_SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub async fn send_mail_op(
     smtp: &SmtpConfig,
@@ -41,6 +43,7 @@ async fn send_mail_inner(
         .map_err(|_| "invalid_from".to_string())?;
     let to: Mailbox = to.parse().map_err(|_| "invalid_recipient".to_string())?;
     let message = Message::builder()
+        .message_id(None)
         .from(from)
         .to(to)
         .subject(subject)
@@ -54,7 +57,10 @@ async fn send_mail_inner(
         .tls(Tls::Opportunistic(tls))
         .timeout(Some(SMTP_TIMEOUT))
         .build();
-    transport.send(message).await.map(|_| ()).map_err(|err| {
+    let sent = tokio::time::timeout(SMTP_SESSION_TIMEOUT, transport.send(message))
+        .await
+        .map_err(|_| "timeout".to_string())?;
+    sent.map(|_| ()).map_err(|err| {
         if err.is_permanent() {
             "permanent".to_string()
         } else if err.is_transient() {

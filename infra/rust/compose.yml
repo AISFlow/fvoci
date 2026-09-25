@@ -71,6 +71,9 @@ services:
       FVOCI_SHUTDOWN_DEADLINE_MS: ${FVOCI_SHUTDOWN_DEADLINE_MS:-30000}
       FVOCI_MEILI_URL: http://meilisearch:7700
       FVOCI_MEILI_KEY_FILE: /run/fvoci/meili/api_key
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_FROM: ${SMTP_FROM:-}
     volumes:
       - storage:/data/storage
       - meili_key:/run/fvoci/meili:ro
