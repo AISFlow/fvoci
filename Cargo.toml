@@ -193,6 +193,11 @@ path = "tests/schedule_ics_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "workspace_lifecycle"
+path = "tests/workspace_lifecycle.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "mail_integration"
 path = "tests/mail_integration.rs"
 required-features = ["db-tests"]

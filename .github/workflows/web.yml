@@ -47,6 +47,8 @@ jobs:
             specs: e2e/search-flow.spec.ts
           - flow: schedule-ics-flow
             specs: e2e/schedule-ics-flow.spec.ts
+          - flow: workspace-lifecycle-flow
+            specs: e2e/workspace-lifecycle-flow.spec.ts
           - flow: mail-reset-flow
             specs: e2e/mail-reset-flow.spec.ts
           - flow: wiki-lifecycle-flow
