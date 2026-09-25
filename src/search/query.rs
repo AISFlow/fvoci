@@ -172,6 +172,8 @@ struct VisibleWorkspaceAcl {
     acl: SearchAcl,
 }
 
+/// Readable scope of one workspace for the actor: live projects with at least
+/// view permission, and wiki documents (all for non-guests, group grants for guests).
 #[derive(Debug, Clone)]
 pub(crate) struct SearchAcl {
     pub(crate) project_ids: Vec<Uuid>,

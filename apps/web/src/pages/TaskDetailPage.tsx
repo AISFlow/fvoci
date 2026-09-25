@@ -22,6 +22,8 @@ import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { parseRef, projectsPath, projectTasksPath } from "@/lib/href";
 import { CommentPanel } from "@/features/comments/comment-panel";
+import { ShareDialog } from "@/features/share/share-dialog";
+import { StarToggle } from "@/features/share/star-toggle";
 import "@/features/projects/projects.css";
 
 export function TaskDetailPage() {
@@ -193,6 +195,18 @@ export function TaskDetailPage() {
           <header>
             <p className="task-home__note">{projectDocument.displayId}</p>
             <h1>{projectDocument.title}</h1>
+            <div className="flex flex-wrap gap-2">
+              <StarToggle workspaceId={workspace.id} type="document" targetId={projectDocument.id} />
+              {project?.canEdit ? (
+                <ShareDialog
+                  workspaceId={workspace.id}
+                  target={{
+                    documentId: projectDocument.id,
+                    projectId: projectDocument.projectId ?? project.id,
+                  }}
+                />
+              ) : null}
+            </div>
           </header>
           <p className="task-home__note">{t("task.document.unsupported")}</p>
           {me.data ? (

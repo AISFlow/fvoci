@@ -112,6 +112,8 @@ jobs:
             specs: e2e/api-token-flow.spec.ts
           - flow: import-export-flow
             specs: e2e/workspace-import-export.spec.ts
+          - flow: share-stars-flow
+            specs: e2e/share-stars-flow.spec.ts
           - flow: account-lifecycle-flow
             specs: e2e/account-lifecycle-flow.spec.ts
     runs-on: ubuntu-24.04

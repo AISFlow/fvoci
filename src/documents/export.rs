@@ -30,6 +30,8 @@ pub enum ExportRenderError {
     TooLarge,
     #[error("convert failed")]
     Failed,
+    #[error("convert helper busy")]
+    Busy,
 }
 
 pub struct RenderedExport {
@@ -54,6 +56,7 @@ pub async fn render_document_export(
             Ok(v) => v,
             Err(ConvertError::InvalidInput) => return Err(ExportRenderError::InvalidInput),
             Err(ConvertError::TooLarge) => return Err(ExportRenderError::TooLarge),
+            Err(ConvertError::Busy) => return Err(ExportRenderError::Busy),
             Err(_) => return Err(ExportRenderError::Failed),
         };
     Ok(RenderedExport {

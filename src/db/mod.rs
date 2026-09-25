@@ -30,6 +30,8 @@ pub mod projects;
 pub mod quota;
 pub mod revisions;
 pub mod search_index;
+pub mod share;
+pub mod stars;
 pub mod task_activity;
 pub mod tasks;
 pub mod user_export;
