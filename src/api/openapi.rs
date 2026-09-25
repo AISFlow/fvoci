@@ -20,18 +20,19 @@ use crate::api::dto::{
     InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
     LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
     MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
-    OkResponse, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
-    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
-    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
-    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
-    PutAttachmentPartResponse, ResumeAttachmentUploadResponse, RevisionCreateResponse,
-    RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
-    RevisionRestoreResponse, SearchItemOutput, SearchListResponse, SearchSnippetPiece,
-    SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, SortDocumentBody,
-    TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput,
-    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
-    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
-    WorkspaceListResponse, WorkspaceMetaResponse,
+    NotificationItemOutput, NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
+    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PatchCommentBody,
+    PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody, PatchProjectBody,
+    PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
+    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
+    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
+    ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
+    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
+    SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
+    SetupResponse, SetupStatusResponse, SortDocumentBody, TaskChildOutput, TaskChildProgressOutput,
+    TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
+    TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse, WorkflowOutput,
+    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -153,6 +154,13 @@ impl Modify for CookieSecurityAddon {
         resolve_comment,
         unresolve_comment,
         react_comment,
+        list_workspace_notifications,
+        unread_notification_count,
+        patch_notification,
+        read_all_notifications,
+        get_notification_prefs,
+        put_notification_prefs,
+        list_me_notifications,
     ),
     components(
         schemas(
@@ -227,6 +235,12 @@ impl Modify for CookieSecurityAddon {
             SearchSnippetPiece,
             SearchItemOutput,
             SearchListResponse,
+            NotificationItemOutput,
+            NotificationListResponse,
+            NotificationUnreadCountResponse,
+            NotificationPatchBody,
+            NotificationReadAllResponse,
+            NotificationPrefsBody,
             CreateDocumentBody,
             PatchDocumentBody,
             DocumentMetaResponse,
@@ -262,6 +276,7 @@ impl Modify for CookieSecurityAddon {
         (name = "documents", description = "Wiki documents"),
         (name = "attachments", description = "Wiki document attachments"),
         (name = "comments", description = "Document and task comments"),
+        (name = "notifications", description = "In-app notifications"),
     )
 )]
 pub struct ApiDoc;
@@ -435,6 +450,128 @@ fn unresolve_comment() {}
     )
 )]
 fn react_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/notifications",
+    tag = "notifications",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("filter" = Option<String>, Query, description = "all, unread, or archived"),
+        ("cursor" = Option<String>, Query, description = "Keyset cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size 1-100"),
+    ),
+    responses(
+        (status = 200, description = "Notification page", body = NotificationListResponse),
+        (status = 400, description = "Invalid cursor or query", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_workspace_notifications() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/notifications/unread-count",
+    tag = "notifications",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Unread count", body = NotificationUnreadCountResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn unread_notification_count() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/notifications/{id}",
+    tag = "notifications",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("id" = String, description = "Notification id"),
+    ),
+    request_body = NotificationPatchBody,
+    responses(
+        (status = 200, description = "Updated", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn patch_notification() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/notifications/read-all",
+    tag = "notifications",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Marked read", body = NotificationReadAllResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn read_all_notifications() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/notification-prefs",
+    tag = "notifications",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Notification prefs", body = NotificationPrefsBody),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_notification_prefs() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    put,
+    path = "/api/v1/workspaces/{workspace_id}/notification-prefs",
+    tag = "notifications",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = NotificationPrefsBody,
+    responses(
+        (status = 200, description = "Updated prefs", body = NotificationPrefsBody),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn put_notification_prefs() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/notifications",
+    tag = "notifications",
+    security(("fvoci_session" = [])),
+    params(
+        ("filter" = Option<String>, Query, description = "all, unread, or archived"),
+        ("cursor" = Option<String>, Query, description = "Keyset cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size 1-100"),
+    ),
+    responses(
+        (status = 200, description = "Merged notification page", body = NotificationListResponse),
+        (status = 400, description = "Invalid cursor or query", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+    )
+)]
+fn list_me_notifications() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

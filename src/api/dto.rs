@@ -227,6 +227,76 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct NotificationItemOutput {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub event_id: Uuid,
+    pub verb: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub actor_user_id: Option<Uuid>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub actor_given_name: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub actor_family_name: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub target_type: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub target_id: Option<Uuid>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub display_id: Option<String>,
+    pub payload: Value,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub read_at: Option<DateTime<Utc>>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub archived_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct NotificationListResponse {
+    pub items: Vec<NotificationItemOutput>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct NotificationUnreadCountResponse {
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct NotificationPatchBody {
+    #[serde(default)]
+    pub read: Option<bool>,
+    #[serde(default)]
+    pub archived: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct NotificationReadAllResponse {
+    pub updated: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct NotificationPrefsBody {
+    pub in_app: bool,
+    pub mail_immediate: bool,
+    pub mail_digest: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]

@@ -12,6 +12,7 @@ import { WikiPage } from "@/pages/WikiPage";
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
 import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
+import { NotificationsPage } from "@/pages/NotificationsPage";
 import { InvitePage } from "@/pages/InvitePage";
 
 const queryClient = new QueryClient({
@@ -66,6 +67,7 @@ export function App() {
             <Route path="search" element={<SearchPage />} />
             <Route path="trash" element={<TrashPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
+            <Route path="notifications" element={<NotificationsPage />} />
             <Route path=":ref/tasks" element={<ProjectTasksPage />} />
             <Route path=":ref" element={<WorkspaceRefPage />} />
           </Route>

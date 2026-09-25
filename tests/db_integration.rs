@@ -2135,6 +2135,14 @@ async fn migration_001_002_database_upgrades_to_003() {
         .execute(&admin)
         .await
         .unwrap();
+    sqlx::query("DROP POLICY IF EXISTS owner_isolation ON fvoci.notifications")
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DROP POLICY IF EXISTS owner_isolation ON fvoci.notification_prefs")
+        .execute(&admin)
+        .await
+        .unwrap();
     sqlx::query("ALTER TABLE fvoci.users DROP CONSTRAINT IF EXISTS users_personal_workspace_fk")
         .execute(&admin)
         .await

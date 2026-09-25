@@ -6,6 +6,7 @@ import { WorkspaceGroupsSection } from "@/features/settings/workspace-groups";
 import { WorkspaceIdentitySection } from "@/features/settings/workspace-identity";
 import { WorkspaceMembersSection } from "@/features/settings/workspace-members";
 import { WorkspaceTokensSection } from "@/features/settings/workspace-tokens";
+import { NotificationPrefsSection } from "@/features/notifications/notification-prefs";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
@@ -94,6 +95,9 @@ export function WorkspaceSettingsPage() {
         ) : null}
         {roleAtLeast(workspace.role, "member") ? (
           <WorkspaceGroupsSection workspaceId={workspace.id} canManage={canManage} />
+        ) : null}
+        {roleAtLeast(workspace.role, "member") ? (
+          <NotificationPrefsSection workspaceId={workspace.id} />
         ) : null}
         {canManage ? <WorkspaceTokensSection workspaceId={workspace.id} /> : null}
       </div>
