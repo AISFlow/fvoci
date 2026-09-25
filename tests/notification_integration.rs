@@ -408,3 +408,47 @@ async fn comment_mention_notifies_member_not_actor() {
     app_db.close().await;
     harness.cleanup().await;
 }
+
+/// Upgrading an existing install must not notify users about past events: the
+/// notifications consumer starts after the events recorded before migration 018.
+#[tokio::test]
+async fn upgrade_starts_notifications_after_existing_events() {
+    let harness = TestDb::bootstrap_through(17).await;
+    let admin = admin_pool(&harness).await;
+    let mut tx = admin.begin().await.expect("tx");
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("system ctx");
+    let workspace_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO fvoci.workspaces (id, slug, name) VALUES (gen_random_uuid(), 'upg', 'Upgrade') RETURNING id",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("workspace");
+    let last: (String, i64) = sqlx::query_as(
+        "INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, payload) \
+         VALUES (gen_random_uuid(), $1, 'task.created', 'task', gen_random_uuid(), '{}'::jsonb) \
+         RETURNING xact::text, seq",
+    )
+    .bind(workspace_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("historical event");
+    tx.commit().await.expect("commit");
+    admin.close().await;
+
+    fvoci_server::db::migrate::run_migrations(&harness.admin_url)
+        .await
+        .expect("migrate to latest");
+    let admin = admin_pool(&harness).await;
+    let cursor: (String, i64) = sqlx::query_as(
+        "SELECT last_xact::text, last_seq FROM fvoci.outbox_consumers WHERE consumer = 'notifications'",
+    )
+    .fetch_one(&admin)
+    .await
+    .expect("notifications cursor");
+    assert_eq!(cursor, last, "cursor starts after the pre-upgrade events");
+    admin.close().await;
+    harness.cleanup().await;
+}

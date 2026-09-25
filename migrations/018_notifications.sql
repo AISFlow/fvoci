@@ -78,3 +78,19 @@ CREATE POLICY owner_isolation ON fvoci.notification_prefs
         )
         OR (SELECT public.app_system_ctx_on())
     );
+
+-- Existing installs: start the notifications consumer after the events already
+-- recorded, so an upgrade does not notify users about past activity. A fresh
+-- database has no events and starts at the beginning as usual.
+DO $$
+BEGIN
+    PERFORM pg_catalog.set_config('app.system_ctx', 'on', true);
+    INSERT INTO fvoci.outbox_consumers (consumer, last_xact, last_seq)
+    SELECT 'notifications', e.xact, e.seq
+    FROM fvoci.events AS e
+    ORDER BY e.xact DESC, e.seq DESC
+    LIMIT 1
+    ON CONFLICT (consumer) DO NOTHING;
+    PERFORM pg_catalog.set_config('app.system_ctx', '', true);
+END;
+$$;
