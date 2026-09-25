@@ -90,6 +90,18 @@ impl SearchTypeFilter {
     }
 }
 
+#[derive(Debug)]
+enum ScanError {
+    Meili(MeiliError),
+    Db(sqlx::Error),
+}
+
+impl From<MeiliError> for ScanError {
+    fn from(error: MeiliError) -> Self {
+        Self::Meili(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchQueryError {
     NotFound,
@@ -247,11 +259,12 @@ pub async fn query_workspace_search(
 
     let scanned = match scan_lexical(pool, input.meili, &input, &acl, &prepared).await {
         Ok(page) => page,
-        // Unavailable/Timeout and other Meili failures are the 503 problem.
-        Err(error) => {
+        // Meili failures are the 503 problem; a database failure stays an error.
+        Err(ScanError::Meili(error)) => {
             tracing::warn!(error = %error, "meili search unavailable");
             return Ok(Err(SearchQueryError::MeiliUnavailable));
         }
+        Err(ScanError::Db(error)) => return Err(error),
     };
     let items = finish_items(input.workspace_id, &prepared, scanned.items);
     let next_cursor = scanned.next_off.map(|off| encode_cursor(off, &filters));
@@ -484,7 +497,7 @@ async fn scan_lexical(
     input: &WorkspaceSearchRequest<'_>,
     acl: &SearchAcl,
     prepared: &PreparedQuery,
-) -> Result<ScannedPage, MeiliError> {
+) -> Result<ScannedPage, ScanError> {
     let workspace_ids = HashSet::from([input.workspace_id.to_string()]);
     let scopes = [meili_scope(input.workspace_id, acl)];
     let mut items = Vec::new();
@@ -541,7 +554,7 @@ async fn scan_lexical(
         let hits: Vec<MeiliHit> = unique.iter().map(|(_, hit, _)| hit.clone()).collect();
         let rows = hydrate_hits(pool, input, acl, &hits)
             .await
-            .map_err(|_| MeiliError::Protocol)?;
+            .map_err(ScanError::Db)?;
         let mut by_key = HashMap::new();
         for row in rows {
             by_key.insert(hit_key(kind_of(row.r#type), &row.id.to_string()), row);
@@ -1045,31 +1058,46 @@ pub fn highlight_snippet(text: &str, q: &str) -> Option<String> {
 }
 
 fn highlight_snippet_window(text: &str, q: &str, max_chars: usize) -> Option<String> {
-    let needle = {
-        let nfkc: String = q.nfkc().collect();
-        nfkc.split_whitespace().next()?.to_string()
-    };
+    // Offsets follow the source exactly: JS strings index UTF-16 code units, so
+    // indexOf/slice and the ±40 / 200 window are measured in UTF-16 units, not
+    // bytes (byte offsets dropped most Korean snippets).
+    let needle: String = q
+        .nfkc()
+        .collect::<String>()
+        .split_whitespace()
+        .next()?
+        .to_string();
     if text.is_empty() {
         return None;
     }
     let hay: String = text.nfkc().collect();
-    let idx = hay.to_lowercase().find(&needle.to_lowercase())?;
+    let hay16: Vec<u16> = hay.encode_utf16().collect();
+    let lower16: Vec<u16> = hay.to_lowercase().encode_utf16().collect();
+    let needle_lower16: Vec<u16> = needle.to_lowercase().encode_utf16().collect();
+    let needle_len = needle.encode_utf16().count();
+    let idx = index_of_u16(&lower16, &needle_lower16)?;
     let start = idx.saturating_sub(40.min(max_chars));
-    let end = hay.len().min(start + max_chars);
-    let match_end = (idx + needle.len()).min(end);
-    if !hay.is_char_boundary(start)
-        || !hay.is_char_boundary(idx)
-        || !hay.is_char_boundary(match_end)
-        || !hay.is_char_boundary(end)
-    {
-        return None;
-    }
-    let before = escape_html(&hay[start..idx]);
-    let matched = escape_html(&hay[idx..match_end]);
-    let after = escape_html(&hay[match_end..end]);
+    let end = hay16.len().min(start + max_chars);
+    let match_end = (idx + needle_len).min(end);
+    let slice = |from: usize, to: usize| -> String {
+        let from = from.min(hay16.len());
+        let to = to.clamp(from, hay16.len());
+        String::from_utf16_lossy(&hay16[from..to])
+    };
+    let before = escape_html(&slice(start, idx));
+    let matched = escape_html(&slice(idx, match_end));
+    let after = escape_html(&slice(match_end, end));
     Some(format!(
         "{before}<span class=\"keyword\">{matched}</span>{after}"
     ))
+}
+
+fn index_of_u16(hay: &[u16], needle: &[u16]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    hay.windows(needle.len())
+        .position(|window| window == needle)
 }
 
 pub fn parse_snippet(html: &str) -> Vec<SnippetPiece> {
@@ -1119,6 +1147,22 @@ mod tests {
         assert_eq!(fnv1a("").len(), 8);
         assert_eq!(fnv1a("검색"), fnv1a("검색"));
         assert_ne!(fnv1a("a"), fnv1a("b"));
+    }
+
+    #[test]
+    fn highlight_snippet_uses_utf16_offsets_for_korean_and_emoji() {
+        // Mirrors the source JS: indexOf/slice in UTF-16 code units.
+        let text = format!("{}검색 결과 🙂 끝", "가".repeat(60));
+        let html = highlight_snippet(&text, "검색").expect("korean snippet");
+        assert!(
+            html.contains("<span class=\"keyword\">검색</span>"),
+            "{html}"
+        );
+        // 40 UTF-16 units of context before the match, as in the source.
+        let before = html.split("<span").next().unwrap();
+        assert_eq!(before.encode_utf16().count(), 40, "{html}");
+        let emoji = highlight_snippet("앞 🙂 검색어 뒤", "검색어").expect("emoji snippet");
+        assert!(emoji.starts_with("앞 🙂 "), "{emoji}");
     }
 
     #[test]

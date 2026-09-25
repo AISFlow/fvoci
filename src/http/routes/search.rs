@@ -142,12 +142,11 @@ async fn workspace_search(
             Some(Uuid::parse_str(raw).map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?)
         }
     };
-    let tag = match query.tag.as_deref() {
-        None => None,
-        Some(raw) => {
-            Some(Uuid::parse_str(raw).map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?)
-        }
-    };
+    // Tags are not ported yet; refuse the filter instead of silently ignoring it.
+    if query.tag.is_some() {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    let tag: Option<Uuid> = None;
     let limit = match query.limit.as_deref() {
         None => 20u32,
         Some(raw) => {
@@ -161,6 +160,8 @@ async fn workspace_search(
         }
     };
 
+    // Source order: authenticate, then the IP limit, then the user limit.
+    let (user, session_id) = require_session(&state, &jar).await?;
     let ip = peer_ip(peer.ip());
     if let Err(retry_after) = state
         .rate_limiter
@@ -169,7 +170,6 @@ async fn workspace_search(
     {
         return Err(AppError::rate_limited(retry_after).into());
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     if let Err(retry_after) = state
         .rate_limiter
