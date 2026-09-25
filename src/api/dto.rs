@@ -227,6 +227,65 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ApiTokenCreateBody {
+    pub name: String,
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub unlimited: Option<bool>,
+    #[serde(default)]
+    pub service: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MeApiTokenCreateBody {
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ApiTokenOutput {
+    pub id: String,
+    pub workspace_id: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub user_id: Option<String>,
+    pub name: String,
+    pub scopes: Vec<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ApiTokenCreatedOutput {
+    pub id: String,
+    pub workspace_id: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub user_id: Option<String>,
+    pub name: String,
+    pub scopes: Vec<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ApiTokenListResponse {
+    pub items: Vec<ApiTokenOutput>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
@@ -750,6 +809,82 @@ pub struct AddProjectMemberBody {
     pub role: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateGroupBody {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct GroupOutput {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct GroupListResponse {
+    pub items: Vec<GroupOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct GroupMemberBody {
+    pub user_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct GroupMemberOutput {
+    pub user_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct GroupMemberListResponse {
+    pub items: Vec<GroupMemberOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectGroupGrantBody {
+    pub group_id: Uuid,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectGroupRevokeBody {
+    pub group_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectGroupGrantOutput {
+    pub group_id: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct ProjectGroupGrantListResponse {
+    pub items: Vec<ProjectGroupGrantOutput>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
@@ -921,6 +1056,17 @@ pub struct TaskListItemOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskDependencyOutput {
+    pub blocker_id: String,
+    pub blocked_id: String,
+    #[serde(rename = "type")]
+    pub dependency_type: String,
+    pub lag_days: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct TaskListResponse {
     pub items: Vec<TaskListItemOutput>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
@@ -969,12 +1115,103 @@ pub struct TaskOutput {
     pub can_edit: bool,
     pub assignee_ids: Vec<String>,
     pub label_ids: Vec<String>,
-    pub dependencies: Vec<serde_json::Value>,
+    pub dependencies: Vec<TaskDependencyOutput>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub child_progress: Option<TaskChildProgressOutput>,
     #[cfg_attr(feature = "api-schema", schema(required = true))]
     pub parent: Option<TaskParentOutput>,
     pub children: Vec<TaskChildOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LabelOutput {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LabelListResponse {
+    pub items: Vec<LabelOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateLabelBody {
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchLabelBody {
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MilestoneOutput {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub due_date: Option<NaiveDate>,
+    pub sort_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct MilestoneListResponse {
+    pub items: Vec<MilestoneOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateMilestoneBody {
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_double_option_date")]
+    pub due_date: Option<Option<NaiveDate>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchMilestoneBody {
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option_date")]
+    pub due_date: Option<Option<NaiveDate>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateTaskDependencyBody {
+    pub blocked_id: Uuid,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    #[serde(rename = "type")]
+    pub dependency_type: Option<String>,
+    pub lag_days: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskDependencyListResponse {
+    pub items: Vec<TaskDependencyOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -994,6 +1231,69 @@ pub struct LookupItemOutput {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct LookupListResponse {
     pub items: Vec<LookupItemOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CreateCommentBody {
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_user_ids: Option<Vec<Uuid>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned_group_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PatchCommentBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentReactionBody {
+    pub emoji: String,
+    pub on: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentReactionSummary {
+    pub count: usize,
+    pub reacted_by_me: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentOutput {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub document_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+    pub parent_id: Option<Uuid>,
+    pub created_by: Uuid,
+    pub body: String,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub reactions: std::collections::HashMap<String, CommentReactionSummary>,
+    pub other_reaction_count: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct CommentListResponse {
+    pub items: Vec<CommentOutput>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1111,4 +1411,47 @@ mod tests {
         assert_eq!(body["name"], "파일.png");
         assert!(body["createdAt"].as_str().unwrap().contains("2026-09-24"));
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchSnippetPiece {
+    pub text: String,
+    pub r#match: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchItemOutput {
+    pub r#type: String,
+    pub id: String,
+    pub title: String,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub display_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub extract_status: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub chunk_no: Option<i64>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub snippet: Option<Vec<SearchSnippetPiece>>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub project_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub document_id: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub task_id: Option<String>,
+    pub score: f64,
+    pub updated_at: String,
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct SearchListResponse {
+    pub items: Vec<SearchItemOutput>,
+    #[cfg_attr(feature = "api-schema", schema(required = true))]
+    pub next_cursor: Option<String>,
 }

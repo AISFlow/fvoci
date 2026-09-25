@@ -4,7 +4,7 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch as patch_method, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
@@ -12,21 +12,30 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateTaskBody, MoveTaskBody, OkResponse, PatchTaskBody, TaskChildOutput,
-    TaskChildProgressOutput, TaskListItemOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
-    TaskParentOutput, TaskStatusCountOutput,
+    CreateLabelBody, CreateMilestoneBody, CreateTaskBody, CreateTaskDependencyBody,
+    LabelListResponse, LabelOutput, MilestoneListResponse, MilestoneOutput, MoveTaskBody,
+    OkResponse, PatchLabelBody, PatchMilestoneBody, PatchTaskBody, TaskChildOutput,
+    TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListItemOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TaskStatusCountOutput,
 };
 use crate::auth::session::SessionUser;
+use crate::db::labels::{
+    create_label, list_project_labels, list_workspace_labels, purge_label, update_label,
+};
+use crate::db::milestones::{
+    create_milestone, list_project_milestones, purge_milestone, update_milestone,
+};
 use crate::db::projects::ProjectDbError;
 use crate::db::tasks::{
-    create_task, get_task, list_project_tasks, move_task, patch_task_meta, restore_task,
-    trash_task, CreateTaskInput,
+    add_task_dependency, create_task, get_task, list_project_dependencies, list_project_tasks,
+    move_task, patch_task_meta, remove_task_dependency, restore_task, trash_task, CreateTaskInput,
 };
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
-use crate::http::guard::{check_origin, reject_bearer};
+use crate::error::{AppError, ProblemCode};
+use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
+use crate::tasks::dependency::DependencyType;
 use crate::tasks::list_query::{parse_task_list_query, TaskListQueryError};
 use crate::tasks::patch::{
     estimate_is_valid, ExpectedDatesInput, FieldUpdate, MoveTaskInput, PatchTaskMetaInput,
@@ -66,6 +75,38 @@ pub fn router() -> Router<AppState> {
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/restore",
             post(restore_task_route),
         )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/labels",
+            get(list_workspace_labels_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels",
+            get(list_project_labels_route).post(create_label_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels/{label_id}",
+            patch_method(update_label_route).delete(delete_label_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones",
+            get(list_project_milestones_route).post(create_milestone_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones/{milestone_id}",
+            patch_method(update_milestone_route).delete(delete_milestone_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/dependencies",
+            get(list_project_dependencies_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies",
+            post(add_dependency_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies/{blocked_id}",
+            axum::routing::delete(remove_dependency_route),
+        )
 }
 
 async fn create_task_route(
@@ -77,7 +118,6 @@ async fn create_task_route(
     body: Result<Json<CreateTaskBody>, JsonRejection>,
 ) -> Result<Response, TaskApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if !title_is_valid(&body.title) {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
@@ -88,10 +128,14 @@ async fn create_task_route(
     if !priority_is_valid(&body.priority) {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
-    if body.milestone_id.is_some() {
-        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-    }
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = create_task(
@@ -108,7 +152,7 @@ async fn create_task_route(
             start_date: body.start_date,
             due_date: body.due_date,
             parent_id: body.parent_id,
-            milestone_id: None,
+            milestone_id: body.milestone_id,
             recurrence: body.recurrence,
         },
         Some(&ip),
@@ -127,8 +171,14 @@ async fn get_task_route(
     jar: CookieJar,
     Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<TaskOutput>, TaskApiError> {
-    reject_bearer(&headers)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = get_task(
         &state.auth.db.pool,
@@ -144,9 +194,13 @@ async fn get_task_route(
             meta: task_meta_output(task.meta),
             content_json: task.content_json,
             can_edit: task.can_edit,
-            assignee_ids: Vec::new(),
-            label_ids: Vec::new(),
-            dependencies: Vec::new(),
+            assignee_ids: uuid_strings(&task.assignee_ids),
+            label_ids: uuid_strings(&task.label_ids),
+            dependencies: task
+                .dependencies
+                .into_iter()
+                .map(dependency_output)
+                .collect(),
             child_progress: task.child_progress.map(|progress| TaskChildProgressOutput {
                 done: progress.done,
                 total: progress.total,
@@ -182,13 +236,16 @@ async fn patch_task_route(
     body: Result<Json<PatchTaskBody>, JsonRejection>,
 ) -> Result<Json<TaskMetaOutput>, TaskApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    if body.assignee_ids.is_some() || body.label_ids.is_some() || body.milestone_id.is_some() {
-        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-    }
     let input = parse_patch_body(&body)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = patch_task_meta(
@@ -217,12 +274,18 @@ async fn move_task_route(
     body: Result<Json<MoveTaskBody>, JsonRejection>,
 ) -> Result<Json<TaskMetaOutput>, TaskApiError> {
     let Json(body) = body.map_err(AppError::from)?;
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
     if body.before_id.is_some() && body.after_id.is_some() {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = move_task(
@@ -254,9 +317,15 @@ async fn trash_task_route(
     jar: CookieJar,
     Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<OkResponse>, TaskApiError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = trash_task(
@@ -282,9 +351,15 @@ async fn restore_task_route(
     jar: CookieJar,
     Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<OkResponse>, TaskApiError> {
-    reject_bearer(&headers)?;
     check_origin(&headers, &state.public_origin)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = restore_task(
@@ -294,6 +369,413 @@ async fn restore_task_route(
         actor_user_id,
         session_id,
         Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn list_workspace_labels_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<LabelListResponse>, TaskApiError> {
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result =
+        list_workspace_labels(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
+            .await
+            .map_err(internal)?;
+    match result {
+        Ok(labels) => Ok(Json(LabelListResponse {
+            items: labels.into_iter().map(label_output).collect(),
+        })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn list_project_labels_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<LabelListResponse>, TaskApiError> {
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = list_project_labels(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(labels) => Ok(Json(LabelListResponse {
+            items: labels.into_iter().map(label_output).collect(),
+        })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn create_label_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<CreateLabelBody>, JsonRejection>,
+) -> Result<Response, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = create_label(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        &body.name,
+        &body.color,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(label) => Ok((StatusCode::CREATED, Json(label_output(label))).into_response()),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn update_label_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, label_id)): Path<(Uuid, Uuid, Uuid)>,
+    body: Result<Json<PatchLabelBody>, JsonRejection>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = update_label(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        label_id,
+        actor_user_id,
+        session_id,
+        body.name.as_deref(),
+        body.color.as_deref(),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn delete_label_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, label_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = purge_label(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        label_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn list_project_milestones_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<MilestoneListResponse>, TaskApiError> {
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = list_project_milestones(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(rows) => Ok(Json(MilestoneListResponse {
+            items: rows.into_iter().map(milestone_output).collect(),
+        })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn create_milestone_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<CreateMilestoneBody>, JsonRejection>,
+) -> Result<Response, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = create_milestone(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        &body.name,
+        body.due_date.flatten(),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(row) => Ok((StatusCode::CREATED, Json(milestone_output(row))).into_response()),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn update_milestone_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, milestone_id)): Path<(Uuid, Uuid, Uuid)>,
+    body: Result<Json<PatchMilestoneBody>, JsonRejection>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = update_milestone(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        milestone_id,
+        actor_user_id,
+        session_id,
+        body.name.as_deref(),
+        body.due_date,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn delete_milestone_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, milestone_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = purge_milestone(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        milestone_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn list_project_dependencies_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<TaskDependencyListResponse>, TaskApiError> {
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = list_project_dependencies(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(items) => Ok(Json(TaskDependencyListResponse {
+            items: items.into_iter().map(dependency_output).collect(),
+        })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn add_dependency_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<CreateTaskDependencyBody>, JsonRejection>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    if body.lag_days.is_some_and(|lag| lag < 0) {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    let requested_type = match body.dependency_type.as_deref() {
+        None => None,
+        Some(value) => Some(
+            DependencyType::parse(value)
+                .ok_or_else(|| AppError::from_code(ProblemCode::InvalidInput))?,
+        ),
+    };
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = add_task_dependency(
+        &state.auth.db.pool,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        task_id,
+        body.blocked_id,
+        requested_type,
+        body.lag_days,
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+async fn remove_dependency_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, task_id, blocked_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, TaskApiError> {
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let result = remove_task_dependency(
+        &state.auth.db.pool,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        task_id,
+        blocked_id,
     )
     .await
     .map_err(internal)?;
@@ -316,6 +798,14 @@ fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiE
         && body.parent_id.is_none()
         && body.recurrence.is_none()
         && body.archived.is_none()
+        && body.assignee_ids.is_none()
+        && body.label_ids.is_none()
+        && body.milestone_id.is_none()
+    {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    if body.assignee_ids.as_ref().is_some_and(|ids| ids.len() > 50)
+        || body.label_ids.as_ref().is_some_and(|ids| ids.len() > 50)
     {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
     }
@@ -376,6 +866,9 @@ fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiE
             Some(Some(value)) => FieldUpdate::Set(value.clone()),
         },
         archived: body.archived,
+        assignee_ids: body.assignee_ids.clone(),
+        label_ids: body.label_ids.clone(),
+        milestone_id: FieldUpdate::from_optional(body.milestone_id),
     })
 }
 
@@ -430,6 +923,21 @@ fn map_task_db_error(err: ProjectDbError) -> TaskApiError {
             title: "workflow has no statuses".to_string(),
         },
         ProjectDbError::InvalidMoveAnchors => AppError::from_code(ProblemCode::InvalidInput).into(),
+        ProjectDbError::DependencyCycle => TaskApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "dependency_cycle",
+            title: "dependency cycle".to_string(),
+        },
+        ProjectDbError::DependencyContradiction => TaskApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "dependency_contradiction",
+            title: "dependency contradiction".to_string(),
+        },
+        ProjectDbError::TaskCannotBlockItself => TaskApiError::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: "task_cannot_block_itself",
+            title: "task cannot block itself".to_string(),
+        },
         other => map_project_error(other).into(),
     }
 }
@@ -441,7 +949,6 @@ async fn list_tasks(
     Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
     query: Result<Query<TaskListQueryParams>, QueryRejection>,
 ) -> Result<Json<TaskListResponse>, TaskApiError> {
-    reject_bearer(&headers)?;
     let Query(params) = query.map_err(AppError::from)?;
     let parsed = parse_task_list_query(
         params.query.as_deref(),
@@ -452,7 +959,14 @@ async fn list_tasks(
         params.to.as_deref(),
     )
     .map_err(map_task_list_query_error)?;
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::TasksRead),
+        Some(workspace_id),
+    )
+    .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
     let result = list_project_tasks(
         &state.auth.db.pool,
@@ -470,9 +984,9 @@ async fn list_tasks(
                 .items
                 .into_iter()
                 .map(|task| TaskListItemOutput {
-                    meta: task_meta_output(task),
-                    assignee_ids: Vec::new(),
-                    label_ids: Vec::new(),
+                    meta: task_meta_output(task.meta),
+                    assignee_ids: uuid_strings(&task.assignee_ids),
+                    label_ids: uuid_strings(&task.label_ids),
                 })
                 .collect(),
             next_cursor: page.next_cursor,
@@ -530,6 +1044,38 @@ fn task_meta_output(task: crate::db::tasks::TaskMetaRow) -> TaskMetaOutput {
     }
 }
 
+fn uuid_strings(ids: &[Uuid]) -> Vec<String> {
+    ids.iter().map(ToString::to_string).collect()
+}
+
+fn label_output(label: crate::db::labels::LabelRow) -> LabelOutput {
+    LabelOutput {
+        id: label.id.to_string(),
+        project_id: label.project_id.to_string(),
+        name: label.name,
+        color: label.color,
+    }
+}
+
+fn milestone_output(row: crate::db::milestones::MilestoneRow) -> MilestoneOutput {
+    MilestoneOutput {
+        id: row.id.to_string(),
+        project_id: row.project_id.to_string(),
+        name: row.name,
+        due_date: row.due_date,
+        sort_key: row.sort_key,
+    }
+}
+
+fn dependency_output(edge: crate::db::tasks::TaskDependencyEdge) -> TaskDependencyOutput {
+    TaskDependencyOutput {
+        blocker_id: edge.blocker_id.to_string(),
+        blocked_id: edge.blocked_id.to_string(),
+        dependency_type: edge.dependency_type,
+        lag_days: edge.lag_days,
+    }
+}
+
 enum TaskApiError {
     App(AppError),
     Coded {
@@ -573,21 +1119,14 @@ impl IntoResponse for TaskApiError {
 
 async fn require_session(
     state: &AppState,
+    headers: &HeaderMap,
     jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
+    access: crate::http::authz::Access,
+    workspace_id: Option<Uuid>,
+) -> Result<(SessionUser, Uuid, Uuid), AppError> {
+    let auth =
+        crate::http::authz::require_request_auth(state, headers, jar, access, workspace_id).await?;
+    Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
 fn parse_user_id(value: &str) -> Result<Uuid, AppError> {

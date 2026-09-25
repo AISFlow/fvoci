@@ -8,13 +8,7 @@ const TITLE_MAX: usize = 1_000;
 const CURSOR_MAX: usize = 1_024;
 const TASK_TYPES: &[&str] = &["task", "bug", "story", "epic", "subtask"];
 const PRIORITIES: &[&str] = &["none", "low", "medium", "high", "urgent"];
-const UNSUPPORTED_FILTER_KEYS: &[&str] = &[
-    "assigneeId",
-    "labelId",
-    "milestoneId",
-    "custom",
-    "dueBefore",
-];
+const UNSUPPORTED_FILTER_KEYS: &[&str] = &["custom", "dueBefore"];
 
 #[derive(Debug, Clone)]
 pub struct ParsedTaskListQuery {
@@ -40,6 +34,15 @@ pub struct ViewFilters {
     pub priority: Option<String>,
     pub open_only: bool,
     pub title: Option<String>,
+    pub assignee_id: Option<AssigneeFilter>,
+    pub label_id: Option<Uuid>,
+    pub milestone_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssigneeFilter {
+    Me,
+    User(Uuid),
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +174,16 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
     let object = value.as_object().ok_or(TaskListQueryError::InvalidInput)?;
     reject_unknown_keys(
         object,
-        &["type", "statusId", "priority", "openOnly", "title"],
+        &[
+            "type",
+            "statusId",
+            "priority",
+            "openOnly",
+            "title",
+            "assigneeId",
+            "labelId",
+            "milestoneId",
+        ],
     )?;
     for key in UNSUPPORTED_FILTER_KEYS {
         if object.contains_key(*key) {
@@ -199,6 +211,18 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
         None => None,
         Some(value) => Some(parse_title(value)?),
     };
+    let assignee_id = match object.get("assigneeId") {
+        None => None,
+        Some(value) => Some(parse_assignee_id(value)?),
+    };
+    let label_id = match object.get("labelId") {
+        None => None,
+        Some(value) => Some(parse_uuid(value, "labelId")?),
+    };
+    let milestone_id = match object.get("milestoneId") {
+        None => None,
+        Some(value) => Some(parse_uuid(value, "milestoneId")?),
+    };
 
     Ok(ViewFilters {
         task_type,
@@ -206,6 +230,9 @@ fn parse_view_filters(value: &Value) -> Result<ViewFilters, TaskListQueryError> 
         priority,
         open_only,
         title,
+        assignee_id,
+        label_id,
+        milestone_id,
     })
 }
 
@@ -262,6 +289,17 @@ fn parse_uuid(value: &Value, _field: &str) -> Result<Uuid, TaskListQueryError> {
     Uuid::parse_str(raw).map_err(|_| TaskListQueryError::InvalidInput)
 }
 
+fn parse_assignee_id(value: &Value) -> Result<AssigneeFilter, TaskListQueryError> {
+    let raw = value.as_str().ok_or(TaskListQueryError::InvalidInput)?;
+    if raw == "me" {
+        Ok(AssigneeFilter::Me)
+    } else {
+        Uuid::parse_str(raw)
+            .map(AssigneeFilter::User)
+            .map_err(|_| TaskListQueryError::InvalidInput)
+    }
+}
+
 fn parse_sort_field(value: &Value) -> Result<SortField, TaskListQueryError> {
     let raw = value.as_str().ok_or(TaskListQueryError::InvalidInput)?;
     if Uuid::parse_str(raw).is_ok() {
@@ -305,6 +343,11 @@ pub fn filter_fingerprint(
     project_id: Uuid,
     query: &ParsedTaskListQuery,
 ) -> String {
+    let assignee_id = match &query.view.filters.assignee_id {
+        Some(AssigneeFilter::Me) => Some("me".to_string()),
+        Some(AssigneeFilter::User(id)) => Some(id.to_string()),
+        None => None,
+    };
     let payload = serde_json::json!({
         "workspaceId": workspace_id.to_string(),
         "projectId": project_id.to_string(),
@@ -315,6 +358,9 @@ pub fn filter_fingerprint(
                 "priority": query.view.filters.priority,
                 "openOnly": query.view.filters.open_only,
                 "title": query.view.filters.title,
+                "assigneeId": assignee_id,
+                "labelId": query.view.filters.label_id.map(|id| id.to_string()),
+                "milestoneId": query.view.filters.milestone_id.map(|id| id.to_string()),
             },
             "sort": query.view.sort.iter().map(|sort| {
                 serde_json::json!({
@@ -510,7 +556,7 @@ mod tests {
     #[test]
     fn rejects_unknown_filter_keys() {
         let err = parse_task_list_query(
-            Some(r#"{"filters":{"assigneeId":"00000000-0000-0000-0000-000000000000"}}"#),
+            Some(r#"{"filters":{"dueBefore":"2026-01-01"}}"#),
             None,
             None,
             None,
@@ -519,6 +565,73 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, TaskListQueryError::InvalidInput);
+    }
+
+    #[test]
+    fn accepts_assignee_and_label_filters() {
+        let parsed = parse_task_list_query(
+            Some(
+                r#"{"filters":{"assigneeId":"me","labelId":"550e8400-e29b-41d4-a716-446655440000"}}"#,
+            ),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("valid query");
+        assert_eq!(parsed.view.filters.assignee_id, Some(AssigneeFilter::Me));
+        assert_eq!(
+            parsed.view.filters.label_id,
+            Some(Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_assignee_filter() {
+        let err = parse_task_list_query(
+            Some(r#"{"filters":{"assigneeId":"everyone"}}"#),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, TaskListQueryError::InvalidInput);
+    }
+
+    #[test]
+    fn fingerprint_includes_assignee_label_and_milestone() {
+        let workspace = Uuid::nil();
+        let project = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let base = parse_task_list_query(Some("{}"), None, None, None, None, None).unwrap();
+        let filtered = parse_task_list_query(
+            Some(r#"{"filters":{"assigneeId":"me"}}"#),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            filter_fingerprint(workspace, project, &base),
+            filter_fingerprint(workspace, project, &filtered)
+        );
+        let with_milestone = parse_task_list_query(
+            Some(r#"{"filters":{"milestoneId":"550e8400-e29b-41d4-a716-446655440000"}}"#),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            filter_fingerprint(workspace, project, &base),
+            filter_fingerprint(workspace, project, &with_milestone)
+        );
     }
 
     #[test]

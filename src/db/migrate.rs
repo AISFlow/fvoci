@@ -15,6 +15,13 @@ const MIGRATIONS: &[(&str, i32)] = &[
     (include_str!("../../migrations/008_projects.sql"), 8),
     (include_str!("../../migrations/009_invitations.sql"), 9),
     (include_str!("../../migrations/010_revisions.sql"), 10),
+    (include_str!("../../migrations/011_comments.sql"), 11),
+    (include_str!("../../migrations/012_api_tokens.sql"), 12),
+    (include_str!("../../migrations/013_outbox.sql"), 13),
+    (include_str!("../../migrations/014_search_index.sql"), 14),
+    (include_str!("../../migrations/015_task_labels.sql"), 15),
+    (include_str!("../../migrations/016_groups.sql"), 16),
+    (include_str!("../../migrations/017_task_milestones.sql"), 17),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -283,7 +290,9 @@ pub async fn assert_app_role(pool: &PgPool) -> Result<(), String> {
                   'sessions', 'events', 'audit_log', 'documents', 'document_states',
                   'document_collab_updates', 'document_collab_op_receipts', 'attachments',
                   'projects', 'project_members', 'workflows', 'statuses', 'tasks',
-                  'invitations', 'revisions'
+                  'invitations', 'revisions', 'comments', 'api_tokens', 'outbox_consumers',
+                  'outbox_failures', 'processed_events', 'attachment_text', 'labels',
+                  'task_assignees', 'task_labels', 'milestones', 'task_dependencies'
               )
               AND pg_get_userbyid(c.relowner) = current_user
         )
@@ -368,6 +377,34 @@ mod tests {
         (
             10,
             "64594b33a13df1ed29479d4b07d692850e0c806b0b76749cc0316e3eaea8dfa8",
+        ),
+        (
+            11,
+            "ab17b10baa2533ebccaf994ae5c4d1d0f1ce7bc82a56f9e77371c483f48bf3e5",
+        ),
+        (
+            12,
+            "b8964ac88a75c2b5e4264c25de083810971e350550214c61bdd08de6ed695912",
+        ),
+        (
+            13,
+            "2ac42b2dc796dddd23d48574135c9e0c50c60cb55c6c3d9960b7faffe9c66708",
+        ),
+        (
+            14,
+            "c772193b7b97c1484d6339c69c32a18d8b46644d3cc9700db1b7222157ec0637",
+        ),
+        (
+            15,
+            "8b6a424957ef8a5a67804ea8b3f3d9990bbff43c91ab4dad10f2b682e864ce35",
+        ),
+        (
+            16,
+            "68dcd7c2f0edd54ee4ba4638dda9edbceef4e58b6174e537fb92c9abfe006ff5",
+        ),
+        (
+            17,
+            "f09ba97f766cfa3265c7383b9fd91c6f6fe747581bf7156807f5beffdda84846",
         ),
     ];
 

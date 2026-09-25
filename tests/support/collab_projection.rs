@@ -490,6 +490,7 @@ pub async fn collab_app_state_with_pool(
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
         },
         collab: Some(hub.clone()),
+        meili: None,
     };
     (state, hub)
 }

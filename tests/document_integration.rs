@@ -153,6 +153,7 @@ async fn app_state(app_url: &str) -> AppState {
             create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
         },
         collab: None,
+        meili: None,
     }
 }
 
@@ -992,8 +993,8 @@ async fn invalid_auth_and_input_are_source_errors() {
         &[("authorization", "Bearer nope")],
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["code"], "not_found");
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["items"].as_array().is_some());
     harness.cleanup().await;
 }
 

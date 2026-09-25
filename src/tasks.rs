@@ -1,3 +1,4 @@
+pub mod dependency;
 pub mod list_query;
 pub mod patch;
 

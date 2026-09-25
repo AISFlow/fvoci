@@ -42,8 +42,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::db::context::set_tenant;
-use crate::db::documents::wiki_can_edit;
 use crate::db::workspace::WorkspaceRole;
+use crate::projects::{workspace_base_permission, ProjectPermission};
 
 /// Result of the single-statement delivery read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +187,7 @@ type DeliveryRow = (
     Option<Uuid>,
     Option<String>,
     Option<DateTime<Utc>>,
+    Option<i32>,
 );
 pub async fn check_delivery_admission(
     pool: &PgPool,
@@ -241,7 +242,24 @@ async fn check_delivery_admission_inner(
             m.role,
             d.project_id,
             d.status,
-            d.deleted_at
+            d.deleted_at,
+            (
+                SELECT max(
+                    CASE dm.role
+                        WHEN 'lead' THEN 3
+                        WHEN 'member' THEN 2
+                        WHEN 'viewer' THEN 1
+                        ELSE 0
+                    END
+                )
+                FROM fvoci.document_members dm
+                INNER JOIN fvoci.group_members gm
+                    ON gm.workspace_id = dm.workspace_id AND gm.group_id = dm.group_id
+                WHERE dm.workspace_id = $3
+                  AND dm.document_id = $4
+                  AND gm.user_id = u.id
+                  AND dm.group_id IS NOT NULL
+            ) AS grant_rank
         FROM fvoci.users u
         INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
         INNER JOIN fvoci.workspaces w ON w.id = $3
@@ -260,14 +278,27 @@ async fn check_delivery_admission_inner(
     .await?;
     tx.commit().await?;
 
-    let Some((session_live, workspace_live, role, project_id, status, deleted_at)) = row else {
+    let Some((session_live, workspace_live, role, project_id, status, deleted_at, grant_rank)) =
+        row
+    else {
         return Ok(DeliveryAdmission::Denied);
     };
     if !session_live || !workspace_live {
         return Ok(DeliveryAdmission::Denied);
     }
     let role = role.as_deref().and_then(WorkspaceRole::parse);
-    if !wiki_can_edit(role) {
+    let Some(role) = role else {
+        return Ok(DeliveryAdmission::Denied);
+    };
+    let granted = match grant_rank {
+        Some(3) => ProjectPermission::Manage,
+        Some(2) => ProjectPermission::Edit,
+        Some(1) => ProjectPermission::View,
+        _ => ProjectPermission::None,
+    };
+    // Same rule as `document_permission`, evaluated in this snapshot SELECT.
+    let permission = workspace_base_permission(role).max(granted);
+    if !permission.at_least(ProjectPermission::View) {
         return Ok(DeliveryAdmission::Denied);
     }
     let Some(status) = status else {
@@ -277,7 +308,7 @@ async fn check_delivery_admission_inner(
         return Ok(DeliveryAdmission::Denied);
     }
     Ok(DeliveryAdmission::Allowed {
-        read_only: status == "archived",
+        read_only: status == "archived" || !permission.at_least(ProjectPermission::Edit),
     })
 }
 

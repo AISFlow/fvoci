@@ -101,6 +101,21 @@ path = "tests/task_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "task_labels_integration"
+path = "tests/task_labels_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "task_milestones_integration"
+path = "tests/task_milestones_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "comment_integration"
+path = "tests/comment_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "attachment_integration"
 path = "tests/attachment_integration.rs"
 required-features = ["db-tests"]
@@ -143,4 +158,29 @@ required-features = ["db-tests"]
 [[test]]
 name = "search_meili"
 path = "tests/search_meili.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "search_query"
+path = "tests/search_query.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "api_token_integration"
+path = "tests/api_token_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "group_integration"
+path = "tests/group_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "search_index"
+path = "tests/search_index.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "outbox_integration"
+path = "tests/outbox_integration.rs"
 required-features = ["db-tests"]

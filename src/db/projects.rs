@@ -34,6 +34,14 @@ pub enum ProjectDbError {
     WipLimitExceeded,
     InvalidMoveAnchors,
     WorkflowHasNoStatuses,
+    AssigneeIsNotAMember,
+    LabelNotFound,
+    MilestoneNotFound,
+    DependencyNotFound,
+    DependencyCycle,
+    DependencyContradiction,
+    TaskCannotBlockItself,
+    InvalidInput,
 }
 
 #[derive(Debug, Clone)]
@@ -167,7 +175,39 @@ async fn workspace_is_live(
     Ok(row.map(|(deleted,)| deleted.is_none()).unwrap_or(false))
 }
 
-async fn project_member_role(
+pub(crate) async fn project_member_role(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<ProjectMemberRole>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        r#"
+        SELECT role FROM fvoci.project_members
+        WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3
+        UNION ALL
+        SELECT pm.role
+        FROM fvoci.project_members pm
+        INNER JOIN fvoci.group_members gm
+            ON gm.workspace_id = pm.workspace_id AND gm.group_id = pm.group_id
+        WHERE pm.workspace_id = $1
+          AND pm.project_id = $2
+          AND gm.user_id = $3
+          AND pm.group_id IS NOT NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(role,)| ProjectMemberRole::parse(&role))
+        .max_by_key(|role| role.permission()))
+}
+
+async fn direct_project_member_role(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,
@@ -185,6 +225,36 @@ async fn project_member_role(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.and_then(|(role,)| ProjectMemberRole::parse(&role)))
+}
+
+/// Visibility predicate matching `project_permission`: workspace-visible to
+/// non-guests, otherwise a direct user row or a group grant for the actor.
+pub(crate) fn visible_project_sql(
+    project_alias: &str,
+    guest_param: u32,
+    actor_param: u32,
+) -> String {
+    format!(
+        "(
+            ({project_alias}.visibility = 'workspace' AND ${guest_param} = false)
+            OR EXISTS (
+                SELECT 1 FROM fvoci.project_members pm
+                WHERE pm.workspace_id = {project_alias}.workspace_id
+                  AND pm.project_id = {project_alias}.id
+                  AND pm.user_id = ${actor_param}
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM fvoci.project_members pm
+                INNER JOIN fvoci.group_members gm
+                    ON gm.workspace_id = pm.workspace_id AND gm.group_id = pm.group_id
+                WHERE pm.workspace_id = {project_alias}.workspace_id
+                  AND pm.project_id = {project_alias}.id
+                  AND gm.user_id = ${actor_param}
+                  AND pm.group_id IS NOT NULL
+            )
+        )"
+    )
 }
 
 async fn count_project_leads(
@@ -205,24 +275,37 @@ async fn count_project_leads(
     Ok(row.0)
 }
 
+pub(crate) async fn count_project_leads_except(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    except_user_id: Option<Uuid>,
+    except_group_id: Option<Uuid>,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as(
+        r#"
+        SELECT count(*) FROM fvoci.project_members
+        WHERE workspace_id = $1 AND project_id = $2 AND role = 'lead'
+          AND ($3::uuid IS NULL OR user_id IS DISTINCT FROM $3)
+          AND ($4::uuid IS NULL OR group_id IS DISTINCT FROM $4)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(except_user_id)
+    .bind(except_group_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.0)
+}
+
 async fn count_project_leads_excluding(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,
     exclude_user_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
-    let row: (i64,) = sqlx::query_as(
-        r#"
-        SELECT count(*) FROM fvoci.project_members
-        WHERE workspace_id = $1 AND project_id = $2 AND role = 'lead' AND user_id <> $3
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(exclude_user_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    Ok(row.0)
+    count_project_leads_except(tx, workspace_id, project_id, Some(exclude_user_id), None).await
 }
 
 pub(crate) async fn lock_project(
@@ -495,10 +578,11 @@ pub async fn create_project(
 
     sqlx::query(
         r#"
-        INSERT INTO fvoci.project_members (workspace_id, project_id, user_id, role)
-        VALUES ($1, $2, $3, 'lead')
+        INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role)
+        VALUES ($1, $2, $3, $4, 'lead')
         "#,
     )
+    .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(project_id)
     .bind(actor_user_id)
@@ -518,11 +602,12 @@ pub async fn create_project(
             let _ = lead_role;
             sqlx::query(
                 r#"
-                INSERT INTO fvoci.project_members (workspace_id, project_id, user_id, role)
-                VALUES ($1, $2, $3, 'lead')
+                INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role)
+                VALUES ($1, $2, $3, $4, 'lead')
                 ON CONFLICT (workspace_id, project_id, user_id) DO UPDATE SET role = 'lead', updated_at = now()
                 "#,
             )
+            .bind(Uuid::now_v7())
             .bind(workspace_id)
             .bind(project_id)
             .bind(lead_user_id)
@@ -682,6 +767,18 @@ pub async fn list_projects(
     };
 
     let guest = workspace_role == WorkspaceRole::Guest;
+    let visible = visible_project_sql("p", 2, 3);
+    let list_sql = format!(
+        r#"
+        SELECT p.id, p.key, p.name, p.description, p.icon, p.visibility, p.root_document_id,
+               p.status, p.created_by, p.created_at, p.updated_at
+        FROM fvoci.projects p
+        WHERE p.workspace_id = $1
+          AND p.deleted_at IS NULL
+          AND {visible}
+        ORDER BY p.key COLLATE "C"
+        "#
+    );
     let rows = sqlx::query_as::<
         _,
         (
@@ -697,25 +794,7 @@ pub async fn list_projects(
             DateTime<Utc>,
             DateTime<Utc>,
         ),
-    >(
-        r#"
-        SELECT p.id, p.key, p.name, p.description, p.icon, p.visibility, p.root_document_id,
-               p.status, p.created_by, p.created_at, p.updated_at
-        FROM fvoci.projects p
-        WHERE p.workspace_id = $1
-          AND p.deleted_at IS NULL
-          AND (
-            (p.visibility = 'workspace' AND $2 = false)
-            OR EXISTS (
-                SELECT 1 FROM fvoci.project_members pm
-                WHERE pm.workspace_id = p.workspace_id
-                  AND pm.project_id = p.id
-                  AND pm.user_id = $3
-            )
-          )
-        ORDER BY p.key COLLATE "C"
-        "#,
-    )
+    >(&list_sql)
     .bind(workspace_id)
     .bind(guest)
     .bind(actor_user_id)
@@ -891,16 +970,17 @@ pub async fn update_project(
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::GuestLead));
         }
-        let member = project_member_role(&mut tx, workspace_id, project_id, lead_user_id).await?;
+        let member =
+            direct_project_member_role(&mut tx, workspace_id, project_id, lead_user_id).await?;
         if member.is_none() {
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::LeadNotMember));
         }
-        sqlx::query(
+        let promoted = sqlx::query(
             r#"
             UPDATE fvoci.project_members
-            SET role = CASE WHEN user_id = $3 THEN 'lead' ELSE role END, updated_at = now()
-            WHERE workspace_id = $1 AND project_id = $2
+            SET role = 'lead', updated_at = now()
+            WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3
             "#,
         )
         .bind(workspace_id)
@@ -908,6 +988,10 @@ pub async fn update_project(
         .bind(lead_user_id)
         .execute(&mut *tx)
         .await?;
+        if promoted.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(Err(ProjectDbError::LeadNotMember));
+        }
         sqlx::query(
             r#"
             UPDATE fvoci.project_members
@@ -1033,7 +1117,9 @@ pub async fn list_project_members(
         SELECT u.id, u.email, u.given_name, u.family_name, pm.role
         FROM fvoci.project_members pm
         INNER JOIN fvoci.users u ON u.id = pm.user_id
-        WHERE pm.workspace_id = $1 AND pm.project_id = $2 AND u.deleted_at IS NULL
+        WHERE pm.workspace_id = $1 AND pm.project_id = $2
+          AND pm.user_id IS NOT NULL
+          AND u.deleted_at IS NULL
         ORDER BY u.email COLLATE "C"
         "#,
     )
@@ -1101,10 +1187,11 @@ pub async fn add_project_member(
     }
     let inserted = sqlx::query(
         r#"
-        INSERT INTO fvoci.project_members (workspace_id, project_id, user_id, role)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
     )
+    .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(project_id)
     .bind(target_user_id)
@@ -1178,7 +1265,8 @@ pub async fn update_project_member_role(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let current = project_member_role(&mut tx, workspace_id, project_id, target_user_id).await?;
+    let current =
+        direct_project_member_role(&mut tx, workspace_id, project_id, target_user_id).await?;
     let Some(current) = current else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -1281,7 +1369,8 @@ pub async fn remove_project_member(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let current = project_member_role(&mut tx, workspace_id, project_id, target_user_id).await?;
+    let current =
+        direct_project_member_role(&mut tx, workspace_id, project_id, target_user_id).await?;
     let Some(current) = current else {
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
@@ -1294,7 +1383,7 @@ pub async fn remove_project_member(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::LastLead));
     }
-    sqlx::query(
+    let deleted = sqlx::query(
         r#"
         DELETE FROM fvoci.project_members
         WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3
@@ -1305,6 +1394,10 @@ pub async fn remove_project_member(
     .bind(target_user_id)
     .execute(&mut *tx)
     .await?;
+    if deleted.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
 
     record_project_event_and_audit(
         &mut tx,

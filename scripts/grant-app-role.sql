@@ -60,14 +60,54 @@ GRANT SELECT, INSERT ON fvoci.document_collab_op_receipts TO :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.document_collab_op_receipts FROM :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.attachments TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.attachment_text TO :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.projects TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.project_members TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.groups TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.group_members TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_members TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.workflows TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.statuses TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.tasks TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.labels TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_assignees TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_labels TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.milestones TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_dependencies TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.invitations TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.revisions TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.comments TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.api_tokens TO :"app_role";
 
 REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() TO :"app_role";
+
+REVOKE ALL ON fvoci.outbox_consumers FROM :"app_role";
+REVOKE ALL ON fvoci.outbox_failures FROM :"app_role";
+REVOKE ALL ON fvoci.processed_events FROM :"app_role";
+
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_ensure_consumer(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_ensure_consumer(text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_lease(text, uuid, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_lease(text, uuid, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_release(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_release(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_read(text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_read(text, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_advance(text, uuid, xid8, bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_advance(text, uuid, xid8, bigint) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, uuid, text, integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_record_failure(text, uuid, uuid, text, integer, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_clear_failure(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_clear_failure(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_failure_state(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_failure_state(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_requeue(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_requeue(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_claim_retries(text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_claim_retries(text, integer) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_mark_processed(text, uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) TO :"app_role";

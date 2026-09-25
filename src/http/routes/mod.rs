@@ -1,10 +1,14 @@
+pub mod api_tokens;
 pub mod attachments;
 pub mod auth;
+pub mod comments;
 pub mod documents;
+pub mod groups;
 pub mod invitations;
 pub mod lookup;
 pub mod projects;
 pub mod revisions;
+pub mod search;
 pub mod setup;
 pub mod tasks;
 pub mod workspaces;

@@ -7,7 +7,7 @@ use crate::db::context::{lock_tree, set_tenant};
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::workspace::WorkspaceRole;
-use crate::projects::{workspace_base_permission, ProjectPermission};
+use crate::projects::{workspace_base_permission, ProjectMemberRole, ProjectPermission};
 
 pub(crate) use crate::db::context::{lock_membership_users, recheck_session, session_is_live};
 pub const MAX_TREE_DEPTH: i32 = 20;
@@ -195,6 +195,7 @@ fn permission_can_edit(permission: ProjectPermission) -> bool {
 }
 
 /// Wiki document permission for HTTP and tree listing. Project documents return `None`.
+/// Effective level is max(workspace base, group grants on `document_members`).
 pub(crate) async fn document_permission(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -206,9 +207,6 @@ pub(crate) async fn document_permission(
     let Some(role) = role else {
         return Ok(ProjectPermission::None);
     };
-    if role == WorkspaceRole::Guest {
-        return Ok(ProjectPermission::None);
-    }
     let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
         r#"
         SELECT project_id, deleted_at
@@ -229,7 +227,87 @@ pub(crate) async fn document_permission(
     if require_live && deleted_at.is_some() {
         return Ok(ProjectPermission::None);
     }
-    Ok(workspace_base_permission(role))
+    let base = workspace_base_permission(role);
+    let granted = wiki_group_permission(tx, workspace_id, document_id, user_id).await?;
+    Ok(base.max(granted))
+}
+
+async fn wiki_group_permission(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    user_id: Uuid,
+) -> Result<ProjectPermission, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        r#"
+        SELECT dm.role
+        FROM fvoci.document_members dm
+        INNER JOIN fvoci.group_members gm
+            ON gm.workspace_id = dm.workspace_id AND gm.group_id = dm.group_id
+        WHERE dm.workspace_id = $1
+          AND dm.document_id = $2
+          AND gm.user_id = $3
+          AND dm.group_id IS NOT NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(role,)| ProjectMemberRole::parse(&role).map(ProjectMemberRole::permission))
+        .max()
+        .unwrap_or(ProjectPermission::None))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DocumentPermission {
+    None,
+    View,
+    Edit,
+}
+
+impl DocumentPermission {
+    pub fn at_least(self, min: Self) -> bool {
+        self >= min
+    }
+}
+
+pub(crate) async fn assert_document_writable(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
+    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT project_id, deleted_at
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((project_id, deleted_at)) = row else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if deleted_at.is_some() {
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    if let Some(project_id) = project_id {
+        let locked = lock_project(tx, workspace_id, project_id).await?;
+        let Some(locked) = locked else {
+            return Ok(Err(DocumentDbError::NotFound));
+        };
+        if locked.status == "archived" {
+            return Ok(Err(DocumentDbError::NotFound));
+        }
+    }
+    Ok(Ok(()))
 }
 
 pub(crate) async fn membership_role(
@@ -1280,7 +1358,7 @@ pub async fn move_wiki_document(
         "newPath": new_path,
         "oldParentId": old_parent_id.map(|id| id.to_string()),
         "oldPath": doc_path,
-        "oldProjectId": null,
+        "oldProjectId": doc_project_id.map(|id| id.to_string()),
         "newProjectId": dest_project_id.map(|id| id.to_string()),
     });
     record_document_event_and_audit(

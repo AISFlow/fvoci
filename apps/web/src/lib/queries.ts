@@ -40,6 +40,36 @@ export function membersQuery(workspaceId: string) {
   });
 }
 
+export type SearchTab = "all" | "document" | "task" | "attachment" | "comment";
+
+export function searchQuery(
+  workspaceId: string,
+  q: string,
+  tab: SearchTab,
+  projectId?: string,
+  cursor?: string,
+) {
+  return queryOptions({
+    queryKey: ["search", workspaceId, q, tab, projectId ?? "", cursor ?? ""] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/search", {
+          params: {
+            path: { workspace_id: workspaceId },
+            query: {
+              q,
+              type: tab,
+              ...(projectId ? { projectId } : {}),
+              ...(cursor ? { cursor } : {}),
+            },
+          },
+        }),
+      ),
+    enabled: Boolean(workspaceId) && q.trim().length > 0,
+    retry: false,
+  });
+}
+
 export function invitationPublicQuery(token: string) {
   return queryOptions({
     queryKey: ["invitation", token],
@@ -47,6 +77,19 @@ export function invitationPublicQuery(token: string) {
       ensureOk(
         await api.GET("/api/v1/invitations/{token}", {
           params: { path: { token } },
+        }),
+      ),
+    retry: false,
+  });
+}
+
+export function workspaceApiTokensQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["workspaces", workspaceId, "api-tokens"],
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/api-tokens", {
+          params: { path: { workspace_id: workspaceId } },
         }),
       ),
     retry: false,

@@ -8,6 +8,10 @@ const TASK_PROBLEM_KEYS: Record<string, Parameters<typeof t>[0]> = {
   invalid_recurrence_preset: "invalid recurrence preset",
   task_archived: "task is archived — read-only",
   status_not_in_project_workflow: "status not in project workflow",
+  assignee_is_not_a_member: "assignee is not a member",
+  dependency_cycle: "dependency cycle",
+  dependency_contradiction: "dependency contradiction",
+  task_cannot_block_itself: "task cannot block itself",
 };
 
 export function taskMutationErrorMessage(

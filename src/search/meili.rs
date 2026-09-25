@@ -45,14 +45,6 @@ static SOURCE_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("source id regex")
 });
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(Duration::from_millis(MEILI_OP_TIMEOUT_MS))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("meili http client")
-});
-
 static ENSURE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +107,9 @@ pub struct MeiliConfig {
     pub url: String,
     api_key: String,
     pub index_uid: String,
+    // Owned per config rather than process-wide: pooled connections belong to the
+    // runtime that opened them.
+    http: reqwest::Client,
 }
 
 impl std::fmt::Debug for MeiliConfig {
@@ -133,6 +128,11 @@ impl MeiliConfig {
             url: url.trim_end_matches('/').to_string(),
             api_key,
             index_uid,
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_millis(MEILI_OP_TIMEOUT_MS))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("meili http client"),
         }
     }
 
@@ -401,7 +401,8 @@ async fn meili_request(
     body: Option<&Value>,
 ) -> Result<MeiliResponse, MeiliError> {
     let url = format!("{}{path}", config.origin());
-    let mut req = HTTP
+    let mut req = config
+        .http
         .request(method, &url)
         .header("accept", "application/json");
     if !config.api_key.is_empty() {
@@ -593,6 +594,16 @@ async fn delete_meili_by_filter_op(config: &MeiliConfig, filter: &str) -> Result
         reqwest::Method::POST,
         &config.index_path("/documents/delete"),
         Some(&json!({ "filter": filter })),
+    )
+    .await
+}
+
+async fn delete_all_meili_documents_op(config: &MeiliConfig) -> Result<(), MeiliError> {
+    enqueue_and_wait(
+        config,
+        reqwest::Method::DELETE,
+        &config.index_path("/documents"),
+        None,
     )
     .await
 }
@@ -1027,6 +1038,10 @@ pub async fn delete_meili_sources(config: &MeiliConfig, ids: &[String]) -> Resul
 
 pub async fn delete_meili_by_filter(config: &MeiliConfig, filter: &str) -> Result<(), MeiliError> {
     with_op_deadline(delete_meili_by_filter_op(config, filter)).await
+}
+
+pub async fn delete_all_meili_documents(config: &MeiliConfig) -> Result<(), MeiliError> {
+    with_op_deadline(delete_all_meili_documents_op(config)).await
 }
 
 pub async fn upsert_meili_sources(

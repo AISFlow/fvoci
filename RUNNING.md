@@ -371,6 +371,69 @@ a recreated server container on the same volumes, and post-recreate reads.
 CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
 `.github/workflows/install.yml` (no secrets, no image publish).
 
+## Backup and restore
+
+This is the logical backup for the Compose install above (the source advanced
+install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
+of every volume, and it is not PITR.
+
+**Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
+functions) and `fvoci`, taken as the PostgreSQL owner role through the
+`postgres` service, plus a `tar` of the `storage` volume. **Omitted:** Meilisearch (`searchdata`), the scoped API key
+volume, Compose env files, pepper keys, and database passwords. The search
+index is derived. Restore runs `fvoci-migrate --ensure-meili-key` (new scoped
+key, index settings), then `fvoci-migrate --recover-outbox` (rebases outbox
+cursors to the new cluster's xids before any server starts) and
+`fvoci-migrate --rebuild-search` (reindexes from PostgreSQL, including
+attachment text chunks). Keep `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID` the same as
+the original or existing passwords will not verify. `POSTGRES_USER`,
+`POSTGRES_DB`, and `FVOCI_APP_ROLE` names must match; cluster passwords and
+`MEILI_MASTER_KEY` may be new. `scripts/restore.sh` compares the keyring fingerprint recorded in the backup manifest and refuses to restore with a different keyring.
+
+**Ordering:** `scripts/backup.sh` stops the server (the only writer) and checks
+that no other client sessions remain, then dumps PostgreSQL, then archives
+storage. Stored attachment keys in the dump must exist as
+`objects/<key>/payload` in the tar, so restored files cover every database
+reference. Archives are created with directory mode `0700` and file mode
+`0600`. The dump contains whatever the database already stored (including
+password hashes); the archive does not add the env file or Meili master key.
+
+Backup a running project (restarts the server afterwards unless
+`--leave-stopped`):
+
+```sh
+scripts/backup.sh \
+  --project fvoci-rust-install \
+  --env-file infra/rust/.env \
+  --output /srv/fvoci-backups/fvoci-2026-09-25
+```
+
+Restore only into a **new** Compose project whose install volumes do not exist.
+Do not restore onto the source project. On failure the target is left for
+diagnosis; delete only that project with `docker compose -p <name> down -v`.
+
+```sh
+scripts/restore.sh \
+  --project fvoci-restore-check \
+  --env-file /srv/fvoci-restore/.env \
+  --input /srv/fvoci-backups/fvoci-2026-09-25
+```
+
+Restore starts postgres and Meilisearch on empty volumes, creates the
+application role, restores the dump, restores storage, then runs the one-shot
+`init` job (`fvoci-migrate`, `--grant-app-role`, `--ensure-meili-key`; all
+idempotent on this path) and starts the server. Confirm login with the original
+password, document body, attachment bytes, extraction text, and tasks.
+
+`scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
+source project (setup/login, wiki collab body, HWPX upload and extraction,
+project/task, a document comment), backs it up, deletes that stack
+and its volumes, restores into a second project, and checks those artifacts
+plus uid `1000` and that the restored server receives only `DATABASE_APP_URL`.
+Trap cleanup removes only those two projects. CI runs it as a separate job on
+`ubuntu-24.04` and `ubuntu-24.04-arm` in `.github/workflows/install.yml` (no
+secrets, no image publish).
+
 When `FVOCI_EXTRACTOR_BIN` is absent, extraction is explicitly disabled and stored
 HWP/HWPX attachments remain pending. An invalid configured path fails startup.
 `FVOCI_EXTRACT_POLL_SECS` defaults to 30 and must be positive. One job is in flight

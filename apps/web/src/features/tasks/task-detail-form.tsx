@@ -1,4 +1,4 @@
-import { t } from "@fvoci/i18n";
+import { t, formatPersonName } from "@fvoci/i18n";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,12 @@ import {
   type TaskListItem,
 } from "./task-edit-payload";
 import { TASK_TYPES, TASK_TYPE_LABELS, isTaskType, type TaskType } from "./task-types";
+import type { MemberOutput } from "@/lib/contracts";
+import type { LabelItem, MilestoneItem, TaskDependency } from "./queries";
 import "@/features/projects/projects.css";
 
 const NONE = "";
+const DEP_TYPES = ["FS", "SS", "FF"] as const;
 
 export function TaskDetailForm({
   slug,
@@ -26,6 +29,10 @@ export function TaskDetailForm({
   task,
   statuses,
   parentItems,
+  members,
+  labels,
+  milestones,
+  dependencyCandidates,
   readOnly,
   canEdit,
   pending,
@@ -36,6 +43,11 @@ export function TaskDetailForm({
   onPriorityChange,
   onHierarchySave,
   onDueDateBlur,
+  onAssigneesChange,
+  onLabelsChange,
+  onMilestoneChange,
+  onAddDependency,
+  onRemoveDependency,
   onArchiveToggle,
   onTrash,
   archivePending,
@@ -46,6 +58,10 @@ export function TaskDetailForm({
   task: TaskDetail;
   statuses: readonly WorkflowStatus[];
   parentItems: readonly Pick<TaskListItem, "id" | "type" | "number" | "title">[];
+  members: readonly MemberOutput[];
+  labels: readonly LabelItem[];
+  milestones: readonly MilestoneItem[];
+  dependencyCandidates: readonly Pick<TaskListItem, "id" | "number" | "title">[];
   readOnly: boolean;
   canEdit: boolean;
   pending?: boolean;
@@ -56,6 +72,15 @@ export function TaskDetailForm({
   onPriorityChange: (priority: string) => void | Promise<void>;
   onHierarchySave: (type: string, parentId: string | null) => void | Promise<void>;
   onDueDateBlur: (value: string) => void | Promise<void>;
+  onAssigneesChange: (assigneeIds: string[]) => void | Promise<void>;
+  onLabelsChange: (labelIds: string[]) => void | Promise<void>;
+  onMilestoneChange: (milestoneId: string | null) => void | Promise<void>;
+  onAddDependency: (input: {
+    blockedId: string;
+    type: "FS" | "SS" | "FF";
+    lagDays: number;
+  }) => void | Promise<void>;
+  onRemoveDependency: (edge: { blockerId: string; blockedId: string }) => void | Promise<void>;
   onArchiveToggle: (archived: boolean) => void | Promise<void>;
   onTrash: () => void | Promise<void>;
   archivePending?: boolean;
@@ -65,7 +90,15 @@ export function TaskDetailForm({
   const archived = task.archivedAt !== null;
   const [draftType, setDraftType] = useState<TaskType>(isTaskType(task.type) ? task.type : "task");
   const [draftParentId, setDraftParentId] = useState<string | null>(task.parentId);
+  const [draftAssigneeIds, setDraftAssigneeIds] = useState<string[]>(() => [...task.assigneeIds]);
+  const [draftLabelIds, setDraftLabelIds] = useState<string[]>(() => [...task.labelIds]);
   const [hierarchyError, setHierarchyError] = useState<string | null>(null);
+  const [depFormOpen, setDepFormOpen] = useState(false);
+  const [depBlockedId, setDepBlockedId] = useState(NONE);
+  const [depType, setDepType] = useState<(typeof DEP_TYPES)[number]>("FS");
+  const [depLagDays, setDepLagDays] = useState(0);
+  const [depLocalError, setDepLocalError] = useState<string | null>(null);
+  const dependencies = (task.dependencies ?? []) as TaskDependency[];
 
   useEffect(() => {
     setDraftType(isTaskType(task.type) ? task.type : "task");
@@ -266,23 +299,235 @@ export function TaskDetailForm({
             }}
           />
         </div>
+        <fieldset className="task-form__field" disabled={readOnly} data-testid="task-edit-assignees">
+          <legend>{t("task.assignee")}</legend>
+          <div className="task-form__checks">
+            {members.map((member) => {
+              const checked = draftAssigneeIds.includes(member.userId);
+              return (
+                <label key={member.userId} className="task-form__check">
+                  <input
+                    type="checkbox"
+                    data-testid={`task-edit-assignee-${member.userId}`}
+                    checked={checked}
+                    disabled={readOnly}
+                    onChange={() => {
+                      const next = checked
+                        ? draftAssigneeIds.filter((id) => id !== member.userId)
+                        : [...draftAssigneeIds, member.userId];
+                      setDraftAssigneeIds(next);
+                      void onAssigneesChange(next);
+                    }}
+                  />
+                  <span>{formatPersonName(member)}</span>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+        <fieldset className="task-form__field" disabled={readOnly} data-testid="task-edit-labels">
+          <legend>{t("task.filter.labelsShort")}</legend>
+          <div className="task-form__checks">
+            {labels.length === 0 ? (
+              <p className="task-home__note">{t("task.activity.value.none")}</p>
+            ) : (
+              labels.map((label) => {
+                const checked = draftLabelIds.includes(label.id);
+                return (
+                  <label key={label.id} className="task-form__check">
+                    <input
+                      type="checkbox"
+                      data-testid={`task-edit-label-${label.id}`}
+                      checked={checked}
+                      disabled={readOnly}
+                      onChange={() => {
+                        const next = checked
+                          ? draftLabelIds.filter((id) => id !== label.id)
+                          : [...draftLabelIds, label.id];
+                        setDraftLabelIds(next);
+                        void onLabelsChange(next);
+                      }}
+                    />
+                    <span>{label.name}</span>
+                  </label>
+                );
+              })
+            )}
+          </div>
+        </fieldset>
         <div className="task-form__field">
-          <Label>{t("task.assignee")}</Label>
-          <p className="task-home__note" data-testid="task-edit-assignee-disabled">
-            {t("task.field.notYetAvailable")}
-          </p>
+          <Label htmlFor="task-edit-milestone">{t("project.milestones")}</Label>
+          <select
+            id="task-edit-milestone"
+            data-testid="task-edit-milestone"
+            aria-label={t("project.milestones")}
+            disabled={readOnly || pending}
+            value={task.milestoneId ?? NONE}
+            onChange={(event) => {
+              const next = event.target.value;
+              void onMilestoneChange(next === NONE ? null : next);
+            }}
+          >
+            <option value={NONE}>{t("task.milestone.none")}</option>
+            {milestones.map((milestone) => (
+              <option key={milestone.id} value={milestone.id}>
+                {milestone.name}
+              </option>
+            ))}
+          </select>
         </div>
-        <div className="task-form__field">
-          <Label>{t("task.filter.labelsShort")}</Label>
-          <p className="task-home__note" data-testid="task-edit-labels-disabled">
-            {t("task.field.notYetAvailable")}
-          </p>
-        </div>
-        <div className="task-form__field">
-          <Label>{t("project.milestones")}</Label>
-          <p className="task-home__note" data-testid="task-edit-milestone-disabled">
-            {t("task.field.notYetAvailable")}
-          </p>
+        <div className="task-form__field" data-testid="task-edit-dependencies">
+          {dependencies.length > 0 || depFormOpen || depLocalError ? (
+            <h2 className="settings-section__title">{t("task.dep")}</h2>
+          ) : null}
+          {dependencies.length > 0 ? (
+            <ul className="flex flex-col gap-1">
+              {dependencies.map((edge) => {
+                const otherId = edge.blockerId === task.id ? edge.blockedId : edge.blockerId;
+                const other = dependencyCandidates.find((candidate) => candidate.id === otherId);
+                const name = other
+                  ? `${formatDisplayId(projectKey, other.number)} ${other.title}`
+                  : otherId.slice(0, 8);
+                const inbound = edge.blockerId !== task.id;
+                return (
+                  <li
+                    key={`${edge.blockerId}-${edge.blockedId}`}
+                    className="flex items-center justify-between gap-2"
+                    data-testid={`task-edit-dependency-${edge.blockerId}-${edge.blockedId}`}
+                  >
+                    <span>
+                      {inbound ? "← " : ""}
+                      {t("task.dep.lag", { name, type: edge.type, n: edge.lagDays })}
+                    </span>
+                    {canEdit && !readOnly ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        data-testid={`task-edit-dependency-remove-${edge.blockedId}`}
+                        disabled={pending}
+                        onClick={() =>
+                          void onRemoveDependency({
+                            blockerId: edge.blockerId,
+                            blockedId: edge.blockedId,
+                          })
+                        }
+                      >
+                        {t("task.dependency.remove")}
+                      </Button>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+          {depLocalError ? (
+            <p className="task-form__alert" role="alert">
+              {depLocalError}
+            </p>
+          ) : null}
+          {canEdit && !readOnly ? (
+            !depFormOpen ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                data-testid="task-edit-dependency-open"
+                disabled={pending}
+                onClick={() => setDepFormOpen(true)}
+              >
+                {t("task.dep.add")}
+              </Button>
+            ) : (
+              <form
+                className="flex flex-col gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (depBlockedId === NONE) {
+                    setDepLocalError(t("dep.target.required"));
+                    return;
+                  }
+                  setDepLocalError(null);
+                  void Promise.resolve(
+                    onAddDependency({
+                      blockedId: depBlockedId,
+                      type: depType,
+                      lagDays: Number.isFinite(depLagDays) ? Math.max(0, depLagDays) : 0,
+                    }),
+                  ).then(
+                    () => {
+                      setDepFormOpen(false);
+                      setDepBlockedId(NONE);
+                      setDepType("FS");
+                      setDepLagDays(0);
+                    },
+                    () => {
+                      /* parent actionError already maps the failure */
+                    },
+                  );
+                }}
+              >
+                <select
+                  data-testid="task-edit-dependency-target"
+                  aria-label={t("task.dep.target")}
+                  disabled={pending}
+                  value={depBlockedId}
+                  onChange={(event) => setDepBlockedId(event.target.value)}
+                >
+                  <option value={NONE}>{t("task.dep.targetPlaceholder")}</option>
+                  {dependencyCandidates
+                    .filter((candidate) => candidate.id !== task.id)
+                    .map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {formatDisplayId(projectKey, candidate.number)} {candidate.title}
+                      </option>
+                    ))}
+                </select>
+                <select
+                  data-testid="task-edit-dependency-type"
+                  aria-label={t("task.dep.relation")}
+                  disabled={pending}
+                  value={depType}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    if (next === "FS" || next === "SS" || next === "FF") setDepType(next);
+                  }}
+                >
+                  {DEP_TYPES.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
+                <Input
+                  data-testid="task-edit-dependency-lag"
+                  aria-label={t("task.dep.lagDays")}
+                  type="number"
+                  min={0}
+                  step={1}
+                  disabled={pending}
+                  value={depLagDays}
+                  onChange={(event) => setDepLagDays(Number.parseInt(event.target.value, 10) || 0)}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button type="submit" size="sm" data-testid="task-edit-dependency-add" disabled={pending}>
+                    {t("task.dependency.add")}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setDepFormOpen(false);
+                      setDepLocalError(null);
+                    }}
+                  >
+                    {t("task.create.cancel")}
+                  </Button>
+                </div>
+              </form>
+            )
+          ) : null}
         </div>
         {fieldError ? (
           <p className="task-form__alert" role="alert" data-testid="task-edit-field-error">

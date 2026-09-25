@@ -1,28 +1,37 @@
 // Path stubs exist only for OpenAPI generation.
 
 #[cfg(feature = "api-schema")]
-use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 #[cfg(feature = "api-schema")]
 use utoipa::{Modify, OpenApi};
 
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
-    AddProjectMemberBody, AncestorsResponse, AttachmentOutput, AttachmentPartUrlResponse,
-    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CompleteAttachmentUploadBody,
-    CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateDocumentBody,
-    CreateProjectBody, CreateTaskBody, CreateWorkspaceBody, DocumentMetaResponse,
-    ExpectedDatesBody, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
-    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LoginBody,
-    LoginResponse, LookupItemOutput, LookupListResponse, MemberResponse, MemberRoleBody,
-    MembersResponse, MoveDocumentBody, MoveTaskBody, OkResponse, PatchDocumentBody, PatchMeBody,
-    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectListResponse,
-    ProjectMembersResponse, ProjectOutput, PutAttachmentPartResponse,
-    ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
-    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
+    AddProjectMemberBody, AncestorsResponse, ApiTokenCreateBody, ApiTokenCreatedOutput,
+    ApiTokenListResponse, ApiTokenOutput, AttachmentOutput, AttachmentPartUrlResponse,
+    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
+    CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
+    CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
+    CreateDocumentBody, CreateGroupBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody,
+    CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody, DocumentMetaResponse,
+    ExpectedDatesBody, GroupListResponse, GroupMemberBody, GroupMemberListResponse,
+    GroupMemberOutput, GroupOutput, InvitationAcceptBody, InvitationConsentItem,
+    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
+    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
+    MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
+    OkResponse, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
+    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
+    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
+    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
+    PutAttachmentPartResponse, ResumeAttachmentUploadResponse, RevisionCreateResponse,
+    RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
+    RevisionRestoreResponse, SearchItemOutput, SearchListResponse, SearchSnippetPiece,
     SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, SortDocumentBody,
-    TaskChildOutput, TaskChildProgressOutput, TaskListResponse, TaskMetaOutput, TaskOutput,
-    TaskParentOutput, TrashItemResponse, TrashListResponse, TreeResponse, WorkflowOutput,
-    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMetaResponse,
+    TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput,
+    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
+    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMetaResponse,
 };
 
 #[cfg(feature = "api-schema")]
@@ -35,6 +44,15 @@ impl Modify for CookieSecurityAddon {
         components.add_security_scheme(
             "fvoci_session",
             SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new("fvoci_session"))),
+        );
+        components.add_security_scheme(
+            "bearer_api_token",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("API token")
+                    .build(),
+            ),
         );
     }
 }
@@ -65,6 +83,12 @@ impl Modify for CookieSecurityAddon {
         create_invitation,
         get_invitation,
         accept_invitation,
+        list_workspace_api_tokens,
+        create_workspace_api_token,
+        revoke_workspace_api_token,
+        list_me_api_tokens,
+        create_me_api_token,
+        revoke_me_api_token,
         list_projects,
         create_project,
         get_project,
@@ -73,8 +97,21 @@ impl Modify for CookieSecurityAddon {
         add_project_member,
         patch_project_member,
         delete_project_member,
+        list_groups,
+        create_group,
+        purge_group,
+        list_group_members,
+        add_group_member,
+        remove_group_member,
+        list_project_group_grants,
+        add_project_group_grant,
+        remove_project_group_grant,
+        list_document_group_grants,
+        add_document_group_grant,
+        remove_document_group_grant,
         get_project_workflow,
         lookup_display_id,
+        workspace_search,
         list_tasks,
         create_task,
         get_task,
@@ -82,6 +119,18 @@ impl Modify for CookieSecurityAddon {
         move_task,
         trash_task,
         restore_task,
+        list_workspace_labels,
+        list_project_labels,
+        create_label,
+        update_label,
+        delete_label,
+        list_project_milestones,
+        create_milestone,
+        update_milestone,
+        delete_milestone,
+        list_project_dependencies,
+        add_task_dependency,
+        remove_task_dependency,
         create_document,
         list_tree,
         get_document,
@@ -95,6 +144,15 @@ impl Modify for CookieSecurityAddon {
         complete_attachment_upload,
         get_attachment_meta,
         download_attachment,
+        list_document_comments,
+        create_document_comment,
+        list_task_comments,
+        create_task_comment,
+        patch_comment,
+        delete_comment,
+        resolve_comment,
+        unresolve_comment,
+        react_comment,
     ),
     components(
         schemas(
@@ -115,6 +173,11 @@ impl Modify for CookieSecurityAddon {
             InvitationCreateBody,
             InvitationCreateResponse,
             InvitationPublicResponse,
+            ApiTokenCreateBody,
+            MeApiTokenCreateBody,
+            ApiTokenOutput,
+            ApiTokenCreatedOutput,
+            ApiTokenListResponse,
             InvitationLegalDocument,
             InvitationAcceptBody,
             InvitationConsentItem,
@@ -127,6 +190,16 @@ impl Modify for CookieSecurityAddon {
             ProjectListResponse,
             ProjectMembersResponse,
             AddProjectMemberBody,
+            CreateGroupBody,
+            GroupOutput,
+            GroupListResponse,
+            GroupMemberBody,
+            GroupMemberOutput,
+            GroupMemberListResponse,
+            ProjectGroupGrantBody,
+            ProjectGroupRevokeBody,
+            ProjectGroupGrantOutput,
+            ProjectGroupGrantListResponse,
             WorkflowOutput,
             CreateTaskBody,
             PatchTaskBody,
@@ -138,8 +211,22 @@ impl Modify for CookieSecurityAddon {
             TaskChildOutput,
             TaskChildProgressOutput,
             TaskListResponse,
+            LabelOutput,
+            LabelListResponse,
+            CreateLabelBody,
+            PatchLabelBody,
+            MilestoneOutput,
+            MilestoneListResponse,
+            CreateMilestoneBody,
+            PatchMilestoneBody,
+            TaskDependencyOutput,
+            TaskDependencyListResponse,
+            CreateTaskDependencyBody,
             LookupItemOutput,
             LookupListResponse,
+            SearchSnippetPiece,
+            SearchItemOutput,
+            SearchListResponse,
             CreateDocumentBody,
             PatchDocumentBody,
             DocumentMetaResponse,
@@ -155,6 +242,12 @@ impl Modify for CookieSecurityAddon {
             CompleteAttachmentUploadBody,
             AttachmentOutput,
             PutAttachmentPartResponse,
+            CreateCommentBody,
+            PatchCommentBody,
+            CommentReactionBody,
+            CommentReactionSummary,
+            CommentOutput,
+            CommentListResponse,
             ProblemResponse,
         )
     ),
@@ -164,13 +257,184 @@ impl Modify for CookieSecurityAddon {
         (name = "auth", description = "Authentication and profile"),
         (name = "workspaces", description = "Workspace membership and metadata"),
         (name = "projects", description = "Project and workflow management"),
-        (name = "search", description = "Display id lookup"),
+        (name = "search", description = "Workspace search and display id lookup"),
         (name = "tasks", description = "Project task operations"),
         (name = "documents", description = "Wiki documents"),
         (name = "attachments", description = "Wiki document attachments"),
+        (name = "comments", description = "Document and task comments"),
     )
 )]
 pub struct ApiDoc;
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size"),
+    ),
+    responses(
+        (status = 200, description = "Document comments", body = CommentListResponse),
+        (status = 400, description = "Invalid cursor", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_document_comments() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = CreateCommentBody,
+    responses(
+        (status = 201, description = "Created comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_document_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size"),
+    ),
+    responses(
+        (status = 200, description = "Task comments", body = CommentListResponse),
+        (status = 400, description = "Invalid cursor", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_task_comments() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    request_body = CreateCommentBody,
+    responses(
+        (status = 201, description = "Created comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_task_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    request_body = PatchCommentBody,
+    responses(
+        (status = 200, description = "Updated comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn patch_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted comment", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn delete_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/resolve",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    responses(
+        (status = 200, description = "Resolved comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn resolve_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/unresolve",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    responses(
+        (status = 200, description = "Unresolved comment", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn unresolve_comment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/comments/{comment_id}/reactions",
+    tag = "comments",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("comment_id" = String, description = "Comment id"),
+    ),
+    request_body = CommentReactionBody,
+    responses(
+        (status = 200, description = "Updated reactions", body = CommentOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Reaction conflict", body = ProblemResponse),
+    )
+)]
+fn react_comment() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -425,6 +689,107 @@ fn accept_invitation() {}
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
     get,
+    path = "/api/v1/workspaces/{workspace_id}/api-tokens",
+    tag = "api-tokens",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace API tokens", body = ApiTokenListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_workspace_api_tokens() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/api-tokens",
+    tag = "api-tokens",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = ApiTokenCreateBody,
+    responses(
+        (status = 201, description = "Token created; secret shown once", body = ApiTokenCreatedOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn create_workspace_api_token() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/api-tokens/{id}",
+    tag = "api-tokens",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("id" = String, description = "Token id"),
+    ),
+    responses(
+        (status = 200, description = "Token revoked", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn revoke_workspace_api_token() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/api-tokens",
+    tag = "api-tokens",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "Current user API tokens", body = ApiTokenListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_me_api_tokens() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/me/api-tokens",
+    tag = "api-tokens",
+    security(("fvoci_session" = [])),
+    request_body = MeApiTokenCreateBody,
+    responses(
+        (status = 201, description = "Token created; secret shown once", body = ApiTokenCreatedOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn create_me_api_token() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/me/api-tokens/{id}",
+    tag = "api-tokens",
+    security(("fvoci_session" = [])),
+    params(("id" = String, description = "Token id")),
+    responses(
+        (status = 200, description = "Token revoked", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn revoke_me_api_token() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
     path = "/api/v1/workspaces/{workspace_id}/projects",
     tag = "projects",
     security(("fvoci_session" = [])),
@@ -568,6 +933,235 @@ fn delete_project_member() {}
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
     get,
+    path = "/api/v1/workspaces/{workspace_id}/groups",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace groups", body = GroupListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_groups() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/groups",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = CreateGroupBody,
+    responses(
+        (status = 201, description = "Created group", body = GroupOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_group() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/groups/{group_id}",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("group_id" = String, description = "Group id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted group", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Last private-project lead", body = ProblemResponse),
+    )
+)]
+fn purge_group() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/groups/{group_id}/members",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("group_id" = String, description = "Group id"),
+    ),
+    responses(
+        (status = 200, description = "Group members", body = GroupMemberListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_group_members() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/groups/{group_id}/members",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("group_id" = String, description = "Group id"),
+    ),
+    request_body = GroupMemberBody,
+    responses(
+        (status = 201, description = "Added group member", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Already a member", body = ProblemResponse),
+    )
+)]
+fn add_group_member() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/groups/{group_id}/members",
+    tag = "groups",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("group_id" = String, description = "Group id"),
+    ),
+    request_body = GroupMemberBody,
+    responses(
+        (status = 200, description = "Removed group member", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn remove_group_member() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups",
+    tag = "projects",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project group grants", body = ProjectGroupGrantListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_group_grants() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups",
+    tag = "projects",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = ProjectGroupGrantBody,
+    responses(
+        (status = 201, description = "Granted project group", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Already granted", body = ProblemResponse),
+    )
+)]
+fn add_project_group_grant() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/groups",
+    tag = "projects",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = ProjectGroupRevokeBody,
+    responses(
+        (status = 200, description = "Revoked project group", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Last private-project lead", body = ProblemResponse),
+    )
+)]
+fn remove_project_group_grant() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/groups",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Wiki document group grants", body = ProjectGroupGrantListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_document_group_grants() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/groups",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = ProjectGroupGrantBody,
+    responses(
+        (status = 201, description = "Granted wiki document group", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Already granted", body = ProblemResponse),
+    )
+)]
+fn add_document_group_grant() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/groups",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = ProjectGroupRevokeBody,
+    responses(
+        (status = 200, description = "Revoked wiki document group", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn remove_document_group_grant() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
     path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/workflow",
     tag = "projects",
     security(("fvoci_session" = [])),
@@ -624,6 +1218,33 @@ fn list_tasks() {}
     )
 )]
 fn lookup_display_id() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/search",
+    tag = "search",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("q" = String, Query, description = "Search query"),
+        ("type" = Option<String>, Query, description = "Result kind filter"),
+        ("projectId" = Option<String>, Query, description = "Optional project scope"),
+        ("tag" = Option<String>, Query, description = "Optional tag filter"),
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i32>, Query, description = "Page size 1-50"),
+        ("mode" = Option<String>, Query, description = "lexical or hybrid"),
+    ),
+    responses(
+        (status = 200, description = "Search hits", body = SearchListResponse),
+        (status = 400, description = "Invalid input or cursor", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not a workspace member", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Search unavailable", body = ProblemResponse),
+    )
+)]
+fn workspace_search() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -734,6 +1355,222 @@ fn trash_task() {}
     )
 )]
 fn restore_task() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/labels",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace labels", body = LabelListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_workspace_labels() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project labels", body = LabelListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_labels() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = CreateLabelBody,
+    responses(
+        (status = 201, description = "Created label", body = LabelOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_label() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels/{label_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("label_id" = String, description = "Label id"),
+    ),
+    request_body = PatchLabelBody,
+    responses(
+        (status = 200, description = "Label updated", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn update_label() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/labels/{label_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("label_id" = String, description = "Label id"),
+    ),
+    responses(
+        (status = 200, description = "Label deleted", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn delete_label() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project milestones", body = MilestoneListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_milestones() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = CreateMilestoneBody,
+    responses(
+        (status = 201, description = "Created milestone", body = MilestoneOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_milestone() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones/{milestone_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("milestone_id" = String, description = "Milestone id"),
+    ),
+    request_body = PatchMilestoneBody,
+    responses(
+        (status = 200, description = "Milestone updated", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn update_milestone() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/milestones/{milestone_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("milestone_id" = String, description = "Milestone id"),
+    ),
+    responses(
+        (status = 200, description = "Milestone deleted", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn delete_milestone() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/dependencies",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project dependencies", body = TaskDependencyListResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_dependencies() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+    ),
+    request_body = CreateTaskDependencyBody,
+    responses(
+        (status = 200, description = "Dependency added", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn add_task_dependency() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/dependencies/{blocked_id}",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("task_id" = String, description = "Task id"),
+        ("blocked_id" = String, description = "Blocked task id"),
+    ),
+    responses(
+        (status = 200, description = "Dependency removed", body = OkResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn remove_task_dependency() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -1203,6 +2040,8 @@ mod tests {
         for (name, fields) in [
             ("SessionUserOutput", &["familyName", "emailVerifiedAt"][..]),
             ("MemberResponse", &["familyName"][..]),
+            ("ApiTokenOutput", &["userId", "expiresAt"][..]),
+            ("ApiTokenCreatedOutput", &["userId", "expiresAt"][..]),
         ] {
             for field in fields {
                 assert_required_nullable(schemas, name, field);
@@ -1227,6 +2066,11 @@ mod tests {
         for field in ["id", "name", "mime", "scanStatus"] {
             assert_required_non_nullable(schemas, "AttachmentOutput", field);
         }
+        for field in ["id", "workspaceId", "name", "scopes", "createdAt"] {
+            assert_required_non_nullable(schemas, "ApiTokenOutput", field);
+            assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", field);
+        }
+        assert_required_non_nullable(schemas, "ApiTokenCreatedOutput", "token");
         let create = &schemas["CreateDocumentBody"];
         assert!(create["required"]
             .as_array()

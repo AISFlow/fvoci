@@ -91,6 +91,19 @@ export function projectsPath(slug: string): string {
   return `/w/${slug.toLowerCase()}/projects`;
 }
 
+export function searchPath(
+  slug: string,
+  params?: { q?: string; tab?: string; projectId?: string },
+): string {
+  const search = new URLSearchParams();
+  if (params?.q) search.set("q", params.q);
+  if (params?.tab && params.tab !== "all") search.set("tab", params.tab);
+  if (params?.projectId) search.set("projectId", params.projectId);
+  const qs = search.toString();
+  const base = `/w/${slug.toLowerCase()}/search`;
+  return qs ? `${base}?${qs}` : base;
+}
+
 export function projectTasksPath(slug: string, key: string): string {
   return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}/tasks`;
 }

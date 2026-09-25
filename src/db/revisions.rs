@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{session_is_live, set_tenant};
-use crate::db::documents::{membership_role, wiki_can_edit, workspace_is_live};
+use crate::db::documents::workspace_is_live;
 use crate::db::identity::{append_event, EventAppend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,28 +114,23 @@ async fn authorize_document(
     if !workspace_is_live(&mut *tx, workspace_id).await? {
         return Ok(Err(RevisionDbError::NotFound));
     }
-    let role = membership_role(&mut *tx, workspace_id, actor_user_id).await?;
-    let _ = write;
-    if !wiki_can_edit(role) {
-        return Ok(Err(RevisionDbError::Forbidden));
-    }
-    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"
-        SELECT project_id, deleted_at
-        FROM fvoci.documents
-        WHERE workspace_id = $1 AND id = $2
-        "#,
+    let min = if write {
+        crate::projects::ProjectPermission::Edit
+    } else {
+        crate::projects::ProjectPermission::View
+    };
+    let permission = crate::db::documents::document_permission(
+        tx,
+        workspace_id,
+        actor_user_id,
+        document_id,
+        true,
     )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
     .await?;
-    match row {
-        Some((project_id, deleted_at)) if project_id.is_none() && deleted_at.is_none() => {
-            Ok(Ok(()))
-        }
-        _ => Ok(Err(RevisionDbError::NotFound)),
+    if !permission.at_least(min) {
+        return Ok(Err(RevisionDbError::NotFound));
     }
+    Ok(Ok(()))
 }
 
 pub async fn authorize_revision_document(

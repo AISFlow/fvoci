@@ -33,8 +33,18 @@ jobs:
             specs: e2e/workspace-invite-flow.spec.ts
           - flow: task-edit-flow
             specs: e2e/task-edit-flow.spec.ts
+          - flow: task-assign-labels-flow
+            specs: e2e/task-assign-labels-flow.spec.ts
+          - flow: workspace-groups-flow
+            specs: e2e/workspace-groups-flow.spec.ts
+          - flow: task-milestones-deps-flow
+            specs: e2e/task-milestones-deps-flow.spec.ts
           - flow: wiki-lifecycle-flow
             specs: e2e/workspace-wiki-lifecycle.spec.ts
+          - flow: comments-flow
+            specs: e2e/comments-flow.spec.ts
+          - flow: api-token-flow
+            specs: e2e/api-token-flow.spec.ts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

@@ -7,6 +7,9 @@ on:
       - infra/rust/**
       - scripts/install-smoke.sh
       - scripts/install-smoke-collab.mjs
+      - scripts/backup.sh
+      - scripts/restore.sh
+      - scripts/backup-restore-smoke.sh
       - Dockerfile
       - .dockerignore
       - Cargo.toml
@@ -27,6 +30,9 @@ on:
       - infra/rust/**
       - scripts/install-smoke.sh
       - scripts/install-smoke-collab.mjs
+      - scripts/backup.sh
+      - scripts/restore.sh
+      - scripts/backup-restore-smoke.sh
       - Dockerfile
       - .dockerignore
       - Cargo.toml
@@ -69,3 +75,24 @@ jobs:
           node-version: '24.21.0'
       - name: Run container install smoke
         run: bash scripts/install-smoke.sh
+
+  # Native GitHub-hosted ubuntu-24.04 and ubuntu-24.04-arm (not a cross-build).
+  backup-restore-smoke:
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            check: backup-restore-smoke
+          - runner: ubuntu-24.04-arm
+            check: backup-restore-smoke-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.21.0'
+      - name: Run container backup/restore smoke
+        run: bash scripts/backup-restore-smoke.sh

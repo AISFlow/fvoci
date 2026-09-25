@@ -9,3 +9,7 @@ export type MemberOutput = components["schemas"]["MemberResponse"];
 export type InvitationCreateInput = components["schemas"]["InvitationCreateBody"];
 export type InvitationPublicOutput = components["schemas"]["InvitationPublicResponse"];
 export type InvitationAcceptInput = components["schemas"]["InvitationAcceptBody"];
+export type ApiTokenOutput = components["schemas"]["ApiTokenOutput"];
+export type ApiTokenCreatedOutput = components["schemas"]["ApiTokenCreatedOutput"];
+export type ApiTokenCreateInput = components["schemas"]["ApiTokenCreateBody"];
+export type ApiTokenScope = NonNullable<ApiTokenCreateInput["scopes"]>[number];
