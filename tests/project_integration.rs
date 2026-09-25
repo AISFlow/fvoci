@@ -2272,3 +2272,135 @@ async fn private_project_cross_path_authorization_links() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn clone_project_copies_configuration_not_tasks_or_members() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _user_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+
+    let source = create_project(app.clone(), &cookie, workspace_id, "SRC", "workspace").await;
+    let source_id = source["id"].as_str().unwrap();
+
+    let (status, label) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{source_id}/labels"),
+        Some(json!({"name": "bug", "color": "red"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{label:?}");
+
+    let (status, milestone) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{source_id}/milestones"),
+        Some(json!({"name": "M1"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{milestone:?}");
+
+    let (status, clone) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{source_id}/clone"),
+        Some(json!({"key": "CPY", "name": "Copy"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{clone:?}");
+    let clone_id = clone["id"].as_str().unwrap();
+
+    let events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE workspace_id = $1 AND verb = 'project.created' AND payload->>'sourceProjectId' = $2",
+    )
+    .bind(workspace_id)
+    .bind(source_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(events.0, 1);
+
+    let clone_tasks: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.tasks WHERE workspace_id = $1 AND project_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(Uuid::parse_str(clone_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(clone_tasks.0, 0);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn project_documents_tree_create_and_move_emit_events() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _user_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+
+    let project = create_project(app.clone(), &cookie, workspace_id, "DOC", "workspace").await;
+    let project_id = project["id"].as_str().unwrap();
+    let root_id = project["rootDocumentId"].as_str().unwrap();
+
+    let (status, tree) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tree:?}");
+    assert_eq!(tree["items"].as_array().unwrap().len(), 1);
+
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents"),
+        Some(json!({"parentId": root_id, "title": "Spec"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let child_id = created["id"].as_str().unwrap();
+
+    let (status, child) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents"),
+        Some(json!({"parentId": child_id, "title": "Nested"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{child:?}");
+    let nested_id = child["id"].as_str().unwrap();
+
+    let (status, moved) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{nested_id}/move"
+        ),
+        Some(json!({"newParentId": root_id})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{moved:?}");
+
+    let moved_events: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE workspace_id = $1 AND verb = 'document.moved'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(moved_events.0 >= 1);
+
+    admin.close().await;
+    harness.cleanup().await;
+}

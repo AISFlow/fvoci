@@ -9,14 +9,14 @@ use utoipa::{Modify, OpenApi};
 use crate::api::dto::{
     AddProjectMemberBody, AncestorsResponse, ApiTokenCreateBody, ApiTokenCreatedOutput,
     ApiTokenListResponse, ApiTokenOutput, AttachmentOutput, AttachmentPartUrlResponse,
-    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CommentListResponse,
-    CommentOutput, CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody,
-    CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
-    CreateDocumentBody, CreateGroupBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody,
-    CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody, DocumentMetaResponse,
-    ExpectedDatesBody, GroupListResponse, GroupMemberBody, GroupMemberListResponse,
-    GroupMemberOutput, GroupOutput, InvitationAcceptBody, InvitationConsentItem,
-    InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    AttachmentUploadedPartResponse, BodyResponse, BrandingOutput, CloneProjectBody,
+    CommentListResponse, CommentOutput, CommentReactionBody, CommentReactionSummary,
+    CompleteAttachmentUploadBody, CreateAttachmentUploadBody, CreateAttachmentUploadResponse,
+    CreateCommentBody, CreateDocumentBody, CreateGroupBody, CreateLabelBody, CreateMilestoneBody,
+    CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
+    DocumentMetaResponse, ExpectedDatesBody, GroupListResponse, GroupMemberBody,
+    GroupMemberListResponse, GroupMemberOutput, GroupOutput, InvitationAcceptBody,
+    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
     InvitationPublicResponse, LabelListResponse, LabelOutput, LoginBody, LoginResponse,
     LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberResponse, MemberRoleBody,
     MembersResponse, MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody,
@@ -92,8 +92,14 @@ impl Modify for CookieSecurityAddon {
         revoke_me_api_token,
         list_projects,
         create_project,
+        clone_project,
         get_project,
         patch_project,
+        list_project_documents,
+        create_project_document,
+        get_project_document,
+        patch_project_document,
+        move_project_document,
         list_project_members,
         add_project_member,
         patch_project_member,
@@ -194,6 +200,7 @@ impl Modify for CookieSecurityAddon {
             PatchWorkspaceBody,
             MemberRoleBody,
             CreateProjectBody,
+            CloneProjectBody,
             PatchProjectBody,
             ProjectOutput,
             ProjectListResponse,
@@ -956,6 +963,26 @@ fn list_projects() {}
     )
 )]
 fn create_project() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/clone",
+    tag = "projects",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Source project id"),
+    ),
+    request_body = CloneProjectBody,
+    responses(
+        (status = 201, description = "Cloned project", body = ProjectOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 409, description = "Key taken", body = ProblemResponse),
+    )
+)]
+fn clone_project() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -1749,6 +1776,99 @@ fn remove_task_dependency() {}
     )
 )]
 fn create_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    responses(
+        (status = 200, description = "Project document tree", body = TreeResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_documents() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+    ),
+    request_body = CreateDocumentBody,
+    responses(
+        (status = 201, description = "Created project document", body = DocumentMetaResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn create_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Project document metadata", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = PatchDocumentBody,
+    responses(
+        (status = 200, description = "Updated project document", body = DocumentMetaResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn patch_project_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/move",
+    tag = "documents",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    request_body = MoveDocumentBody,
+    responses(
+        (status = 200, description = "Moved project document", body = DocumentMetaResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn move_project_document() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

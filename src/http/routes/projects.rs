@@ -4,22 +4,23 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    AddProjectMemberBody, CreateProjectBody, MemberResponse, OkResponse, PatchProjectBody,
-    ProjectListItemOutput, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
-    WorkflowOutput, WorkflowStatusOutput,
+    AddProjectMemberBody, CloneProjectBody, CreateProjectBody, MemberResponse, OkResponse,
+    PatchProjectBody, ProjectListItemOutput, ProjectListResponse, ProjectMembersResponse,
+    ProjectOutput, WorkflowOutput, WorkflowStatusOutput,
 };
 use crate::auth::session::SessionUser;
 use crate::db::projects::{
-    add_project_member, create_project, get_project, get_project_workflow, list_project_members,
-    list_projects, remove_project_member, update_project, update_project_member_role,
-    CreateProjectInput, ProjectDbError, UpdateProjectInput,
+    add_project_member, clone_project, create_project, get_project, get_project_workflow,
+    list_project_members, list_projects, remove_project_member, update_project,
+    update_project_member_role, CloneProjectInput, CreateProjectInput, ProjectDbError,
+    UpdateProjectInput,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
@@ -39,6 +40,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}",
             get(get_project_route).patch(patch_project_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/clone",
+            post(clone_project_route),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}/members",
@@ -95,6 +100,71 @@ async fn create_project_route(
             visibility: &body.visibility,
             description: body.description.as_deref(),
             icon: body.icon.as_deref(),
+            lead_user_id: body.lead_user_id,
+        },
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(project) => {
+            Ok((StatusCode::CREATED, Json(project_output(project, false))).into_response())
+        }
+        Err(err) => Err(map_project_error(err)),
+    }
+}
+
+async fn clone_project_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+    body: Result<Json<CloneProjectBody>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let key = normalize_project_key(&body.key).map_err(map_key_error)?;
+    if !name_is_valid(&body.name) {
+        return Err(AppError::from_code(ProblemCode::InvalidInput));
+    }
+    if let Some(visibility) = body.visibility.as_deref() {
+        if visibility != "private" && visibility != "workspace" {
+            return Err(AppError::from_code(ProblemCode::InvalidInput));
+        }
+    }
+    if let Some(Some(description)) = body.description.as_ref() {
+        if !description_is_valid(Some(description)) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput));
+        }
+    }
+    if let Some(Some(icon)) = body.icon.as_ref() {
+        if !icon_is_valid(Some(icon)) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput));
+        }
+    }
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = clone_project(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        CloneProjectInput {
+            key: &key,
+            name: &body.name,
+            visibility: body.visibility.as_deref(),
+            description: body.description.as_ref().map(|value| value.as_deref()),
+            icon: body.icon.as_ref().map(|value| value.as_deref()),
             lead_user_id: body.lead_user_id,
         },
         Some(&ip),
