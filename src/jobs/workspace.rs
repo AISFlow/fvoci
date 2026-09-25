@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::attachments::LocalStorage;
+use crate::attachments::ObjectStorage;
 use crate::db::context::{set_system, set_tenant};
 use crate::db::workspace::{list_deleted_workspace_ids, purge_workspace};
 
@@ -20,15 +20,19 @@ pub struct WorkspacePurgeStats {
 }
 
 /// Crash-safe ordering: attachment rows are implicit tombstones.
-/// Storage objects are removed first through `LocalStorage`. The DB purge
-/// commits only after every key for that workspace deleted successfully.
+/// Storage is cleaned first through `ObjectStorage::purge_key`: every open
+/// multipart upload for each key (the row's own and orphans that never had
+/// their id persisted) is aborted, then the object is deleted. A key that is
+/// already gone counts as deleted; any other storage error (403, wrong
+/// bucket, network) keeps every DB row for the next sweep. The DB purge
+/// commits only after every key for that workspace was cleaned.
 /// A crash mid-storage leaves the rows for the next sweep. A crash after
 /// storage and before the DB purge: the next sweep deletes missing objects
 /// (idempotent) and then removes the workspace. DB-first without a journal
 /// table would orphan objects; a tombstone table would need a migration.
 pub async fn run_workspace_purge(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     now: DateTime<Utc>,
     cancel: &CancellationToken,
 ) -> Result<WorkspacePurgeStats, sqlx::Error> {
@@ -71,14 +75,14 @@ enum PurgeOne {
 
 async fn purge_one(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     workspace_id: Uuid,
 ) -> Result<PurgeOne, sqlx::Error> {
     let keys = list_storage_keys(pool, workspace_id).await?;
     let mut failed = 0u32;
     let mut deleted = 0u32;
     for key in &keys {
-        match storage.delete_object(key).await {
+        match storage.purge_key(key).await {
             Ok(()) => deleted += 1,
             Err(err) => {
                 failed += 1;

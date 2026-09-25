@@ -151,6 +151,15 @@ if [[ -z "$SERVER_CID" ]]; then
   exit 1
 fi
 
+# The storage archive below is the local driver's volume. With S3 the objects
+# live in the bucket; archiving the (unused) volume would claim a backup that
+# cannot restore them. See RUNNING.md "S3 storage backup".
+if docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SERVER_CID" | grep -qx 'STORAGE_DRIVER=s3'; then
+  echo "server uses STORAGE_DRIVER=s3: this script archives the local storage volume and cannot back up bucket objects." >&2
+  echo "Back up PostgreSQL with pg_dump and protect the bucket with versioning/replication (RUNNING.md, S3 storage backup)." >&2
+  exit 1
+fi
+
 STORAGE_VOL="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data/storage"}}{{.Name}}{{end}}{{end}}' "$SERVER_CID")"
 if [[ -z "$STORAGE_VOL" ]]; then
   echo "server container has no /data/storage volume" >&2

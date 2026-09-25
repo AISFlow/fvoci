@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::attachments::LocalStorage;
+use crate::attachments::ObjectStorage;
 use crate::db::attachment_extract::{
     claim_extract, default_extract_limits, finish_extract, load_extract_input,
     oversize_resource_limit, release_extract, FinishExtract, EXTRACT_LEASE_SECS,
@@ -123,7 +123,7 @@ impl ExtractJobHandle {
 pub fn spawn_extract_job(
     settings: ExtractJobSettings,
     pool: PgPool,
-    storage: LocalStorage,
+    storage: ObjectStorage,
 ) -> ExtractJobHandle {
     let cancel = CancellationToken::new();
     let wake = Arc::new(Notify::new());
@@ -141,7 +141,7 @@ pub fn spawn_extract_job(
 async fn run_extract_loop(
     settings: ExtractJobSettings,
     pool: PgPool,
-    storage: LocalStorage,
+    storage: ObjectStorage,
     cancel: CancellationToken,
     wake: Arc<Notify>,
 ) {
@@ -174,7 +174,7 @@ async fn run_extract_loop(
 async fn process_one_claim(
     settings: &ExtractJobSettings,
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     cancel: &CancellationToken,
 ) -> Result<bool, String> {
     let claim = claim_extract(pool)
@@ -214,7 +214,7 @@ async fn process_one_claim(
         oversize_resource_limit(input.size_bytes)
     } else {
         let bytes =
-            read_storage_bytes(storage, &input.storage_key, settings.limits.max_input_bytes)
+            read_extract_input(storage, &input.storage_key, settings.limits.max_input_bytes)
                 .await
                 .map_err(|e| format!("storage read failed: {e}"))?;
         if cancel.is_cancelled() {
@@ -247,8 +247,12 @@ async fn process_one_claim(
     Ok(true)
 }
 
-async fn read_storage_bytes(
-    storage: &LocalStorage,
+/// Reads an attachment original through the configured `ObjectStorage`
+/// (local file or S3 ranged GET) into memory, refusing anything above
+/// `max_bytes` before reading. The bytes go to the extractor over stdin, so
+/// no temporary file is written on either driver.
+pub async fn read_extract_input(
+    storage: &ObjectStorage,
     storage_key: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>, String> {

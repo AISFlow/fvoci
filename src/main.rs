@@ -8,7 +8,9 @@ use tokio::signal;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
-use fvoci_server::attachments::{spawn_extract_job, ExtractJobHandle, ExtractJobSettings};
+use fvoci_server::attachments::{
+    spawn_extract_job, ExtractJobHandle, ExtractJobSettings, ObjectStorage,
+};
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
@@ -226,17 +228,15 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         }
         None => None,
     };
+    let storage = ObjectStorage::from_settings(&config.storage)?;
+    storage.probe().await?;
     let extract_job = match ExtractJobSettings::from_env()? {
         Some(settings) => {
             tracing::info!(
                 extractor = %settings.extractor_bin.display(),
                 "attachment native extraction enabled"
             );
-            Some(spawn_extract_job(
-                settings,
-                pool.clone(),
-                fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
-            ))
+            Some(spawn_extract_job(settings, pool.clone(), storage.clone()))
         }
         None => {
             tracing::info!("attachment native extraction disabled (FVOCI_EXTRACTOR_BIN unset)");
@@ -265,10 +265,16 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("outbox dispatcher idle (no consumers registered)");
     }
+    let maintenance_settings = MaintenanceSettings::from_env(config.upload_incomplete_ttl);
+    tracing::info!(
+        ttl_secs = maintenance_settings.upload_incomplete_ttl.as_secs(),
+        interval_secs = maintenance_settings.upload_gc_interval.as_secs(),
+        "abandoned upload cleanup scheduled in maintenance"
+    );
     let maintenance = Some(spawn_maintenance(
-        MaintenanceSettings::from_env(),
+        maintenance_settings,
         pool.clone(),
-        fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
+        storage.clone(),
         mailer.clone(),
     ));
     let state = AppState {
@@ -280,7 +286,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         public_origin,
         cookie_secure: config.cookie_secure,
         rate_limiter: RateLimiter::new(),
-        storage: fvoci_server::attachments::LocalStorage::new(config.storage_root.clone()),
+        storage: storage.clone(),
         upload: config.upload.clone(),
         collab: collab.clone(),
         meili: config.meili.clone(),

@@ -7,10 +7,14 @@
 //!
 //! Source does not purge `events`, `audit_log`, or collab receipts. Those
 //! tables stay append-only (app role cannot DELETE them).
+//!
+//! Abandoned-upload cleanup is a second job in the same loop with its own
+//! cadence and claim key.
 
 mod claim;
 mod retention;
 mod tokens;
+mod uploads;
 mod workspace;
 
 use std::sync::Arc;
@@ -21,12 +25,12 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::attachments::LocalStorage;
+use crate::attachments::ObjectStorage;
 use crate::mail::Mailer;
 
 pub use claim::{
     JobClaim, JOB_KEY_DAILY, JOB_KEY_DIGEST, JOB_KEY_ICS, JOB_KEY_MAGIC, JOB_KEY_NOTIFICATIONS,
-    JOB_KEY_PROCESSED, JOB_KEY_WORKSPACE, JOB_LOCK_NAMESPACE,
+    JOB_KEY_PROCESSED, JOB_KEY_UPLOADS, JOB_KEY_WORKSPACE, JOB_LOCK_NAMESPACE,
 };
 pub use retention::{
     run_notification_gc, run_processed_gc, GC_DELETE_BATCH, GC_DELETE_ROUNDS,
@@ -34,17 +38,26 @@ pub use retention::{
     PROCESSED_GC_WINDOW_DAYS,
 };
 pub use tokens::{run_ics_token_gc, run_magic_token_gc, TOKEN_GC_BATCH};
+pub use uploads::{run_stale_upload_gc, StaleUploadGcStats, UPLOAD_GC_BATCH};
 pub use workspace::{
     run_workspace_purge, WorkspacePurgeStats, WORKSPACE_PURGE_AFTER_DAYS, WORKSPACE_PURGE_BATCH,
 };
 
 const DEFAULT_TICK: Duration = Duration::from_secs(60);
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const DEFAULT_UPLOAD_GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const DEFAULT_UPLOAD_INCOMPLETE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone)]
 pub struct MaintenanceSettings {
     pub tick: Duration,
+    /// Cadence of the daily sweep.
     pub interval: Duration,
+    /// Cadence of the abandoned-upload cleanup.
+    pub upload_gc_interval: Duration,
+    /// Incomplete uploads older than this are removed
+    /// (`UPLOAD_INCOMPLETE_TTL_HOURS`, validated in `Config`).
+    pub upload_incomplete_ttl: Duration,
 }
 
 impl Default for MaintenanceSettings {
@@ -52,13 +65,23 @@ impl Default for MaintenanceSettings {
         Self {
             tick: DEFAULT_TICK,
             interval: DEFAULT_INTERVAL,
+            upload_gc_interval: DEFAULT_UPLOAD_GC_INTERVAL,
+            upload_incomplete_ttl: DEFAULT_UPLOAD_INCOMPLETE_TTL,
         }
     }
 }
 
 impl MaintenanceSettings {
-    pub fn from_env() -> Self {
+    pub fn from_env(upload_incomplete_ttl: Duration) -> Self {
         Self {
+            upload_gc_interval: Duration::from_secs(parse_positive_u64(
+                "FVOCI_UPLOAD_GC_INTERVAL_SECS",
+                std::env::var("FVOCI_UPLOAD_GC_INTERVAL_SECS")
+                    .ok()
+                    .as_deref(),
+                DEFAULT_UPLOAD_GC_INTERVAL.as_secs(),
+            )),
+            upload_incomplete_ttl,
             tick: Duration::from_secs(parse_positive_u64(
                 "FVOCI_MAINTENANCE_TICK_SECS",
                 std::env::var("FVOCI_MAINTENANCE_TICK_SECS").ok().as_deref(),
@@ -109,7 +132,7 @@ impl MaintenanceHandle {
 pub fn spawn_maintenance(
     settings: MaintenanceSettings,
     pool: PgPool,
-    storage: LocalStorage,
+    storage: ObjectStorage,
     mailer: Arc<Mailer>,
 ) -> MaintenanceHandle {
     let cancel = CancellationToken::new();
@@ -121,28 +144,78 @@ pub fn spawn_maintenance(
 async fn run_maintenance_loop(
     settings: MaintenanceSettings,
     pool: PgPool,
-    storage: LocalStorage,
+    storage: ObjectStorage,
     mailer: Arc<Mailer>,
     cancel: CancellationToken,
 ) {
-    let mut last_run: Option<Instant> = None;
+    let mut last_daily: Option<Instant> = None;
+    let mut last_upload_gc: Option<Instant> = None;
     let mut ticker = tokio::time::interval(settings.tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = ticker.tick() => {
-                if last_run.is_some_and(|started| started.elapsed() < settings.interval) {
-                    continue;
+                if is_due(last_upload_gc, settings.upload_gc_interval) {
+                    match run_stale_upload_sweep(
+                        &pool,
+                        &storage,
+                        settings.upload_incomplete_ttl,
+                        &cancel,
+                    )
+                    .await
+                    {
+                        Ok(Some(_)) => last_upload_gc = Some(Instant::now()),
+                        Ok(None) => {}
+                        Err(err) => warn!(error = %err, "maintenance.upload_gc_failed"),
+                    }
                 }
-                match run_daily_sweep(&pool, &storage, &mailer, &cancel).await {
-                    Ok(Some(_)) => last_run = Some(Instant::now()),
-                    Ok(None) => {}
-                    Err(err) => warn!(error = %err, "maintenance.daily_sweep_failed"),
+                if cancel.is_cancelled() {
+                    return;
+                }
+                if is_due(last_daily, settings.interval) {
+                    match run_daily_sweep(&pool, &storage, &mailer, &cancel).await {
+                        Ok(Some(_)) => last_daily = Some(Instant::now()),
+                        Ok(None) => {}
+                        Err(err) => warn!(error = %err, "maintenance.daily_sweep_failed"),
+                    }
                 }
             }
         }
     }
+}
+
+fn is_due(last: Option<Instant>, interval: Duration) -> bool {
+    last.is_none_or(|started| started.elapsed() >= interval)
+}
+
+/// Claim the upload cleanup lock and remove one bounded batch of incomplete
+/// uploads older than `ttl`. `None` means another process holds the lock.
+pub async fn run_stale_upload_sweep(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<Option<StaleUploadGcStats>, sqlx::Error> {
+    let Some(claim) = JobClaim::try_claim(pool, JOB_KEY_UPLOADS).await? else {
+        return Ok(None);
+    };
+    let ttl = chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
+    let cutoff = Utc::now()
+        .checked_sub_signed(ttl)
+        .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC);
+    let result = run_stale_upload_gc(pool, storage, cutoff, cancel).await;
+    claim.release().await;
+    let stats = result?;
+    if stats.claimed > 0 {
+        info!(
+            claimed = stats.claimed,
+            purged = stats.purged,
+            failed = stats.failed,
+            "maintenance.upload_gc"
+        );
+    }
+    Ok(Some(stats))
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +233,7 @@ pub struct DailySweepStats {
 /// another process holds the lock.
 pub async fn run_daily_sweep(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     mailer: &Mailer,
     cancel: &CancellationToken,
 ) -> Result<Option<DailySweepStats>, sqlx::Error> {
@@ -174,7 +247,7 @@ pub async fn run_daily_sweep(
 
 async fn run_daily_jobs(
     pool: &PgPool,
-    storage: &LocalStorage,
+    storage: &ObjectStorage,
     mailer: &Mailer,
     cancel: &CancellationToken,
 ) -> Result<DailySweepStats, sqlx::Error> {

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use document_extract_client::{peek_last_spawn, take_last_spawn};
-use fvoci_server::attachments::{spawn_extract_job, ExtractJobSettings, LocalStorage};
+use fvoci_server::attachments::{spawn_extract_job, ExtractJobSettings, ObjectStorage};
 use fvoci_server::db::attachment_extract::fetch_extract_state;
 use fvoci_server::db::pool;
 use uuid::Uuid;
@@ -71,7 +71,7 @@ async fn run() -> Result<(), String> {
             let _job = spawn_extract_job(
                 hang_settings(extractor_bin),
                 pool.clone(),
-                LocalStorage::new(PathBuf::from(storage_root)),
+                ObjectStorage::local(PathBuf::from(&storage_root)),
             );
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while std::time::Instant::now() < deadline {
@@ -91,7 +91,7 @@ async fn run() -> Result<(), String> {
             let job = spawn_extract_job(
                 hang_settings(extractor_bin),
                 pool.clone(),
-                LocalStorage::new(PathBuf::from(storage_root)),
+                ObjectStorage::local(PathBuf::from(&storage_root)),
             );
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             let helper_pid = loop {
@@ -163,7 +163,7 @@ async fn run() -> Result<(), String> {
             let job = spawn_extract_job(
                 settings,
                 pool.clone(),
-                LocalStorage::new(PathBuf::from(storage_root)),
+                ObjectStorage::local(PathBuf::from(&storage_root)),
             );
             let deadline = std::time::Instant::now() + Duration::from_secs(120);
             while std::time::Instant::now() < deadline {

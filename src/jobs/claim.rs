@@ -11,6 +11,7 @@ pub const JOB_KEY_MAGIC: i32 = 4;
 pub const JOB_KEY_NOTIFICATIONS: i32 = 5;
 pub const JOB_KEY_PROCESSED: i32 = 6;
 pub const JOB_KEY_DIGEST: i32 = 7;
+pub const JOB_KEY_UPLOADS: i32 = 8;
 
 /// Session-level claim on a connection detached from the pool. The lock lives
 /// exactly as long as that session: release (or drop, or a cancelled claim

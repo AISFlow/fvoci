@@ -3,7 +3,8 @@
 #
 # Target volumes must not already exist. Restores PostgreSQL, restores the
 # storage volume, then starts init (fvoci-migrate, --grant-app-role,
-# --ensure-meili-key) and the server. Meilisearch data is not in the backup;
+# --ensure-meili-key), checks every stored attachment exists in storage
+# (fvoci-migrate --verify-storage) and starts the server. Meilisearch data is not in the backup;
 # init creates a scoped key and empty index with the required settings.
 #
 # Keep POSTGRES_USER, POSTGRES_DB, and FVOCI_APP_ROLE names the same as the
@@ -259,8 +260,14 @@ echo "rebasing outbox cursors (snapshot $SNAPSHOT_AT)"
 echo "rebuilding the search index from PostgreSQL"
 "${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --rebuild-search
 
+# Every stored attachment in the restored database must exist in the storage
+# the server will use, with its recorded size. Runs with the server's own
+# environment (app role, storage variables), before the server starts.
+echo "verifying stored attachments against the configured storage"
+"${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
+
 echo "starting the server"
 "${COMPOSE[@]}" up -d --wait server
 
-python3 -c 'import json,sys; json.dump({"restoredProject": sys.argv[1], "searchRebuilt": "rebuild-search"}, sys.stdout)' "$PROJECT"
+python3 -c 'import json,sys; json.dump({"restoredProject": sys.argv[1], "searchRebuilt": "rebuild-search", "storageVerified": True}, sys.stdout)' "$PROJECT"
 printf '\n'

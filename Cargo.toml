@@ -40,7 +40,7 @@ hex = "0.4"
 hmac = "0.12"
 rand = "0.9"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -59,6 +59,11 @@ uuid = { version = "1", features = ["v7", "serde"] }
 bytes = "1"
 infer = "0.19"
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
+rusty-s3 = "0.8"
+# Same features rusty-s3 already enables: only used to call its signing
+# primitive (ListMultipartUploads) and to parse/serialize S3 XML.
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+quick-xml = { version = "0.38", features = ["serialize"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
@@ -130,6 +135,11 @@ required-features = ["db-tests"]
 [[test]]
 name = "attachment_extract_integration"
 path = "tests/attachment_extract_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "attachment_s3_integration"
+path = "tests/attachment_s3_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
