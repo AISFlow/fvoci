@@ -14,6 +14,7 @@ import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
 import { InvitePage } from "@/pages/InvitePage";
+import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -43,6 +44,14 @@ export function App() {
             element={
               <SetupGuard>
                 <LoginPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/reset-password"
+            element={
+              <SetupGuard>
+                <ResetPasswordPage />
               </SetupGuard>
             }
           />

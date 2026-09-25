@@ -89,6 +89,7 @@ struct DrainOutcome {
     extract: Result<(), String>,
     outbox: Result<(), String>,
     stale_uploads: Result<(), String>,
+    digest: Result<(), String>,
 }
 
 #[tokio::main]
@@ -253,8 +254,15 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         ttl_secs = config.upload_incomplete_ttl.as_secs(),
         "abandoned upload cleanup enabled"
     );
+    let mailer = std::sync::Arc::new(fvoci_server::mail::Mailer::from_smtp(config.smtp.clone()));
+    if mailer.enabled() {
+        tracing::info!("smtp mailer enabled");
+    } else {
+        tracing::info!("smtp mailer disabled (SMTP_HOST/SMTP_PORT/SMTP_FROM unset)");
+    }
     let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
     consumers.push(fvoci_server::notifications::notifications_consumer());
+    consumers.push(fvoci_server::mail::mail_consumer(mailer.clone()));
     if let Some(meili) = config.meili.clone() {
         consumers.push(fvoci_server::search::index::search_index_consumer(meili));
     }
@@ -268,6 +276,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("outbox dispatcher idle (no consumers registered)");
     }
+    let digest_sweep = Some(fvoci_server::mail::spawn_digest_sweep(
+        pool.clone(),
+        mailer.clone(),
+    ));
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::new(pool.clone()),
@@ -281,6 +293,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         upload: config.upload.clone(),
         collab: collab.clone(),
         meili: config.meili.clone(),
+        mailer,
     };
 
     let deadline = config.shutdown_deadline;
@@ -289,11 +302,13 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
     let stale_upload_task = Arc::new(tokio::sync::Mutex::new(Some(stale_upload_cleanup)));
     let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
+    let digest_task = Arc::new(tokio::sync::Mutex::new(digest_sweep));
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
     let stale_upload_task_for_signal = stale_upload_task.clone();
     let outbox_task_for_signal = outbox_task.clone();
+    let digest_task_for_signal = digest_task.clone();
 
     let serve = announce_after_first_pending_poll(
         axum::serve(
@@ -317,6 +332,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             if let Some(job) = outbox_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
                 tracing::info!("outbox dispatcher shutdown started concurrently with HTTP drain");
+            }
+            if let Some(job) = digest_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
+                tracing::info!("digest sweep shutdown started concurrently with HTTP drain");
             }
             if let Some(hub) = collab_for_signal {
                 hub.begin_shutdown();
@@ -357,6 +376,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let extract = join_extract_finished(&extract_task).await;
                     let stale_uploads = join_stale_upload_finished(&stale_upload_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
+                    let digest = join_digest_finished(&digest_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve: map_serve_result(serve_result),
@@ -364,6 +384,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                         extract,
                         outbox,
                         stale_uploads,
+                        digest,
                     }
                 },
                 Some(started),
@@ -388,6 +409,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let extract = join_extract_finished(&extract_task).await;
                     let stale_uploads = join_stale_upload_finished(&stale_upload_task).await;
                     let outbox = join_outbox_finished(&outbox_task).await;
+                    let digest = join_digest_finished(&digest_task).await;
                     drain_pool.close().await;
                     DrainOutcome {
                         serve,
@@ -395,6 +417,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                         extract,
                         outbox,
                         stale_uploads,
+                        digest,
                     }
                 },
                 started,
@@ -440,6 +463,16 @@ async fn join_outbox_finished(
     outbox_task: &tokio::sync::Mutex<Option<OutboxDispatcherHandle>>,
 ) -> Result<(), String> {
     if let Some(job) = outbox_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await?;
+    }
+    Ok(())
+}
+
+async fn join_digest_finished(
+    digest_task: &tokio::sync::Mutex<Option<fvoci_server::mail::DigestSweepHandle>>,
+) -> Result<(), String> {
+    if let Some(job) = digest_task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;
     }
@@ -512,6 +545,7 @@ where
                 .or_else(|| extract_failure_error(outcome.extract))
                 .or_else(|| extract_failure_error(outcome.stale_uploads))
                 .or_else(|| extract_failure_error(outcome.outbox))
+                .or_else(|| extract_failure_error(outcome.digest))
             {
                 return Err(error);
             }
@@ -629,6 +663,7 @@ mod shutdown_outcome_tests {
                         extract: Ok(()),
                         outbox: Ok(()),
                         stale_uploads: Ok(()),
+                        digest: Ok(()),
                     }
                 },
                 Some(Instant::now()),

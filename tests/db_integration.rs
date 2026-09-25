@@ -154,6 +154,7 @@ async fn app_state(app_url: &str) -> AppState {
         },
         collab: None,
         meili: None,
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
 
@@ -1279,6 +1280,11 @@ async fn app_role_cannot_read_secret_columns() {
             .fetch_optional(&app)
             .await;
     assert!(denied_token.is_err());
+    let denied_magic =
+        sqlx::query_scalar::<_, String>("SELECT token_hash FROM fvoci.magic_tokens LIMIT 1")
+            .fetch_optional(&app)
+            .await;
+    assert!(denied_magic.is_err());
     let max_version =
         sqlx::query_scalar::<_, i32>("SELECT max(version) FROM fvoci.schema_migrations")
             .fetch_one(&app)

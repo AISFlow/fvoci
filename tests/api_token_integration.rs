@@ -158,6 +158,7 @@ async fn app_state(app_url: &str) -> AppState {
         },
         collab: None,
         meili: None,
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
 

@@ -14,6 +14,7 @@ pub mod identity;
 pub mod invitations;
 pub mod labels;
 pub mod lookup;
+pub mod magic;
 pub mod migrate;
 pub mod milestones;
 pub mod notifications;

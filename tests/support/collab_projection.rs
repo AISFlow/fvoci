@@ -491,6 +491,7 @@ pub async fn collab_app_state_with_pool(
         },
         collab: Some(hub.clone()),
         meili: None,
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     };
     (state, hub)
 }

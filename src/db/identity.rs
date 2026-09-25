@@ -660,6 +660,52 @@ pub async fn update_profile(
     Ok(true)
 }
 
+pub async fn set_password_hash(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    password_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT fvoci.app_user_set_password_hash($1, $2)")
+        .bind(user_id)
+        .bind(password_hash)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn revoke_all_sessions_for_user(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE fvoci.sessions
+        SET revoked_at = now(), updated_at = now()
+        WHERE user_id = $1 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+pub async fn find_reset_user_by_email(
+    pool: &PgPool,
+    email: &str,
+) -> Result<Option<(Uuid, i32, Option<DateTime<Utc>>)>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT id, auth_generation, suspended_at
+        FROM fvoci.users
+        WHERE email = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn rehash_password_if_unchanged(
     pool: &PgPool,
     user_id: Uuid,

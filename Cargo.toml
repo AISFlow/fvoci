@@ -64,11 +64,13 @@ rusty-s3 = "0.8"
 # primitive (ListMultipartUploads) and to parse/serialize S3 XML.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 quick-xml = { version = "0.38", features = ["serialize"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
 tokio-tungstenite = "=0.29.0"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
+mailparse = "0.16"
 
 [features]
 db-tests = []
@@ -208,4 +210,9 @@ required-features = ["db-tests"]
 [[test]]
 name = "workspace_lifecycle"
 path = "tests/workspace_lifecycle.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "mail_integration"
+path = "tests/mail_integration.rs"
 required-features = ["db-tests"]
