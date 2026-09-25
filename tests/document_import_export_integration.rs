@@ -886,6 +886,11 @@ async fn real_zip_bomb_is_rejected_within_the_inflate_budget() {
     let fx = fixture(&harness).await;
     // 1 GiB of zeros as one deflate entry of about 1 MiB (see `zero_bomb_zip`).
     let bomb = zero_bomb_zip(128);
+    // The rejection is the inflate budget, not a malformed archive.
+    assert_eq!(
+        fvoci_server::documents::import_zip::unzip_bounded(&bomb).unwrap_err(),
+        fvoci_server::documents::import_zip::ZipImportError::TooLarge
+    );
     assert!(bomb.len() < 8 * 1024 * 1024, "bomb is {} bytes", bomb.len());
     let before = vm_hwm_kib();
     let (status, body) = fx
@@ -913,7 +918,7 @@ async fn document_over_128_kib_imports_and_exports() {
     let harness = TestDb::bootstrap().await;
     let fx = fixture(&harness).await;
     let paragraph = "한글 문단과 English text 가 섞인 긴 본문입니다. ".repeat(40);
-    let markdown = (0..60)
+    let markdown = (0..100)
         .map(|i| format!("## 절 {i}\n\n{paragraph}\n"))
         .collect::<String>();
     assert!(markdown.len() > 200 * 1024 && markdown.len() < 1024 * 1024);
@@ -967,7 +972,7 @@ async fn document_over_128_kib_imports_and_exports() {
         assert!(disposition.is_ascii());
         if format == "md" {
             let text = String::from_utf8(bytes).unwrap();
-            assert!(text.contains("절 59"));
+            assert!(text.contains("절 99"));
         } else {
             assert!(bytes.len() > 1000);
         }
@@ -988,6 +993,7 @@ async fn project_document_export_route() {
     )
     .await;
     let project_id = project["id"].as_str().unwrap();
+    let root_id = project["rootDocumentId"].as_str().unwrap();
     let (status, doc) = json_request(
         fx.app.clone(),
         "POST",
@@ -995,7 +1001,7 @@ async fn project_document_export_route() {
             "/api/v1/workspaces/{}/projects/{project_id}/documents",
             fx.workspace_id
         ),
-        Some(json!({"title": "Spec"})),
+        Some(json!({"title": "Spec", "parentId": root_id})),
         Some(&fx.cookie),
     )
     .await;

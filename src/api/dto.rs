@@ -655,7 +655,7 @@ pub struct BodyResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(utoipa::ToSchema))]
 pub struct StartImportBody {
     pub workspace_id: Uuid,

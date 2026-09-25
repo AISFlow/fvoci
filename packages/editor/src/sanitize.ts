@@ -1,4 +1,7 @@
-import { API_PREFIX, UUID_SOURCE } from "@fvoci/contracts";
+/* WHY: this repository has no @fvoci/contracts package; values copied from
+ * source packages/contracts (routes.ts API_PREFIX, primitives.ts UUID_SOURCE). */
+const API_PREFIX = "/api/v1";
+const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 import sanitizeHtml from "sanitize-html";
 
 export const NON_TEXT_TAGS = ["script", "style", "textarea", "option"] as const;

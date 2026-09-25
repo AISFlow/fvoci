@@ -1,17 +1,26 @@
 import { t } from "@fvoci/i18n";
 import { useMutation } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ProblemError } from "@/lib/api";
-import { isImportActive, pollImportJob, type ImportJobStatus } from "@/lib/import-poll";
+import {
+  fetchImportStatus,
+  IMPORT_POLL_MS,
+  IMPORT_POLL_TRIES,
+  isImportActive,
+  pollImportJob,
+  type ImportJobStatus,
+} from "@/lib/import-poll";
 import "../settings/settings-shell.css";
 
 type ImportSource = "markdown-zip" | "office-file" | "notion-zip";
 
+/* WHY: only formats this server converts. PDF/DOCX/PPTX/XLSX/ODF have no
+ * parser yet (the server answers import_failed), so they are not offered. */
 const IMPORT_ACCEPT: Record<ImportSource, string> = {
   "markdown-zip": ".zip,application/zip",
-  "office-file": ".pdf,.docx,.pptx,.xlsx,.odt,.odp,.ods,.hwp,.hwpx",
+  "office-file": ".md,.markdown,.txt,.hwp,.hwpx",
   "notion-zip": ".zip,application/zip",
 };
 
@@ -32,6 +41,15 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+/** Polling stopped by the user or the try budget; the job keeps running. */
+class PollStopped extends Error {
+  readonly kind: "cancelled" | "budget";
+  constructor(kind: "cancelled" | "budget") {
+    super(`import poll ${kind}`);
+    this.kind = kind;
+  }
+}
+
 export function WorkspaceImportSection({
   workspaceId,
   canManage,
@@ -40,9 +58,50 @@ export function WorkspaceImportSection({
   canManage: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const pollRef = useRef<AbortController | null>(null);
   const [source, setSource] = useState<ImportSource>("markdown-zip");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resumeJobId, setResumeJobId] = useState<string | null>(null);
+
+  useEffect(() => () => pollRef.current?.abort(), []);
+
+  async function waitForJob(jobId: string): Promise<void> {
+    pollRef.current?.abort();
+    const controller = new AbortController();
+    pollRef.current = controller;
+    setResumeJobId(null);
+    try {
+      const outcome = await pollImportJob({
+        fetchStatus: (signal) => fetchImportStatus(workspaceId, jobId, signal),
+        signal: controller.signal,
+        intervalMs: IMPORT_POLL_MS,
+        maxTries: IMPORT_POLL_TRIES,
+      });
+      if (outcome.kind === "failed") throw new ProblemError(400, "import_failed");
+      if (outcome.kind === "cancelled" || outcome.kind === "budget") {
+        setResumeJobId(jobId);
+        throw new PollStopped(outcome.kind);
+      }
+    } finally {
+      if (pollRef.current === controller) pollRef.current = null;
+    }
+  }
+
+  function showDone() {
+    setMessage(t("workspace.import.ok"));
+    setError(null);
+  }
+
+  function showError(err: Error) {
+    if (err instanceof PollStopped) {
+      setError(null);
+      setMessage(err.kind === "budget" ? t("workspace.import.timeout") : null);
+      return;
+    }
+    setMessage(null);
+    setError(err instanceof ProblemError ? err.title : t("workspace.import.failed"));
+  }
 
   const importMutation = useMutation({
     mutationFn: async (file: File) => {
@@ -65,23 +124,19 @@ export function WorkspaceImportSection({
         id: string;
         status: ImportJobStatus;
       };
-      if (isImportActive(job.status)) {
-        const final = await pollImportJob(workspaceId, job.id);
-        if (final === "failed") {
-          throw new ProblemError(400, "import_failed");
-        }
-      }
+      if (isImportActive(job.status)) await waitForJob(job.id);
       return job;
     },
-    onSuccess: () => {
-      setMessage(t("workspace.import.ok"));
-      setError(null);
-    },
-    onError: (err) => {
-      setMessage(null);
-      setError(err instanceof ProblemError ? err.title : t("workspace.import.failed"));
-    },
+    onSuccess: showDone,
+    onError: showError,
   });
+
+  const resumeMutation = useMutation({
+    mutationFn: waitForJob,
+    onSuccess: showDone,
+    onError: showError,
+  });
+  const pending = importMutation.isPending || resumeMutation.isPending;
 
   if (!canManage) return null;
 
@@ -112,13 +167,19 @@ export function WorkspaceImportSection({
             importMutation.mutate(file);
           }}
         />
-        <Button
-          type="button"
-          disabled={importMutation.isPending}
-          onClick={() => inputRef.current?.click()}
-        >
-          {importMutation.isPending ? t("workspace.import.running") : t("workspace.import.source")}
+        <Button type="button" disabled={pending} onClick={() => inputRef.current?.click()}>
+          {pending ? t("workspace.import.running") : t("workspace.import.source")}
         </Button>
+        {pending ? (
+          <Button type="button" variant="outline" onClick={() => pollRef.current?.abort()}>
+            {t("workspace.import.cancelPoll")}
+          </Button>
+        ) : null}
+        {!pending && resumeJobId ? (
+          <Button type="button" variant="outline" onClick={() => resumeMutation.mutate(resumeJobId)}>
+            {t("workspace.import.resumePoll")}
+          </Button>
+        ) : null}
         {message ? <p className="text-ui text-muted-foreground">{message}</p> : null}
         {error ? <p className="text-ui text-destructive">{error}</p> : null}
       </div>

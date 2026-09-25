@@ -31,7 +31,18 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
   await page.locator('input[type="file"]').setInputFiles(importZip);
   await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible({ timeout: 30_000 });
 
+  // Async office-file import: the durable runner converts it; the page polls to completion.
+  await page.getByLabel("가져올 형식").selectOption("office-file");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "비동기-메모.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from("# 비동기 메모\n\n러너가 가져온 본문", "utf8"),
+  });
+  await expect(page.getByRole("button", { name: "가져오는 중입니다" })).toBeHidden({ timeout: 60_000 });
+  await expect(page.getByText("가져오기를 시작했습니다")).toBeVisible();
+
   await page.goto("/w/acme/wiki");
+  await expect(page.getByRole("link", { name: "비동기-메모" })).toBeVisible({ timeout: 15_000 });
   await page.getByRole("link", { name: "e2e-note" }).click();
   await expect(page.getByLabel("문서 제목")).toHaveValue("e2e-note");
 

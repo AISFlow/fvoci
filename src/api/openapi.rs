@@ -156,6 +156,10 @@ impl Modify for CookieSecurityAddon {
         export_pdf,
         export_docx,
         export_pptx,
+        export_project_markdown,
+        export_project_pdf,
+        export_project_docx,
+        export_project_pptx,
         start_import,
         get_import_status,
     create_revision, list_revisions, get_revision, restore_revision, move_document, sort_document, trash_document, restore_document, list_trash,
@@ -2285,8 +2289,9 @@ fn get_body() {}
         (status = 200, description = "Markdown export", content_type = "text/markdown"),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 400, description = "Stored body is not a valid document", body = ProblemResponse),
+        (status = 413, description = "Export exceeds document max body bytes", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
-        (status = 503, description = "Export unavailable", body = ProblemResponse),
     )
 )]
 fn export_markdown() {}
@@ -2305,8 +2310,9 @@ fn export_markdown() {}
         (status = 200, description = "PDF export", content_type = "application/pdf"),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 400, description = "Stored body is not a valid document", body = ProblemResponse),
+        (status = 413, description = "Export exceeds document max body bytes", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
-        (status = 503, description = "Export unavailable", body = ProblemResponse),
     )
 )]
 fn export_pdf() {}
@@ -2325,8 +2331,9 @@ fn export_pdf() {}
         (status = 200, description = "DOCX export", content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 400, description = "Stored body is not a valid document", body = ProblemResponse),
+        (status = 413, description = "Export exceeds document max body bytes", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
-        (status = 503, description = "Export unavailable", body = ProblemResponse),
     )
 )]
 fn export_docx() {}
@@ -2345,11 +2352,100 @@ fn export_docx() {}
         (status = 200, description = "PPTX export", content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 400, description = "Stored body is not a valid document", body = ProblemResponse),
+        (status = 413, description = "Export exceeds document max body bytes", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
-        (status = 503, description = "Export unavailable", body = ProblemResponse),
     )
 )]
 fn export_pptx() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/md",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "Markdown export", content_type = "text/markdown"),
+        (status = 400, description = "Stored body is not a valid document", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 413, description = "Export exceeds document max body bytes", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn export_project_markdown() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/pdf",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "PDF export", content_type = "application/pdf"),
+        (status = 400, description = "Stored body is not a valid document", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 413, description = "Export exceeds document max body bytes", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn export_project_pdf() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/docx",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "DOCX export", content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        (status = 400, description = "Stored body is not a valid document", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 413, description = "Export exceeds document max body bytes", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn export_project_docx() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/pptx",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("document_id" = String, description = "Document id"),
+    ),
+    responses(
+        (status = 200, description = "PPTX export", content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        (status = 400, description = "Stored body is not a valid document", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 413, description = "Export exceeds document max body bytes", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn export_project_pptx() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -2359,11 +2455,12 @@ fn export_pptx() {}
     security(("fvoci_session" = [])),
     request_body = StartImportBody,
     responses(
-        (status = 201, description = "Import job created", body = ImportJobResponse),
-        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 201, description = "Import job created (markdown-zip: completed; office-file, notion-zip: running)", body = ImportJobResponse),
+        (status = 400, description = "invalid_input, or import_failed", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
-        (status = 403, description = "Forbidden", body = ProblemResponse),
-        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 404, description = "Not found, not a workspace admin, or bearer token", body = ProblemResponse),
+        (status = 413, description = "Body or decoded file exceeds the import limit", body = ProblemResponse),
+        (status = 415, description = "Body is not application/json", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
     )
 )]

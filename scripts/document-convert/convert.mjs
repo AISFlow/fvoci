@@ -54,8 +54,12 @@ function respond(ok, body) {
 }
 
 async function main() {
-	// The request always arrives on stdin (no argv/env size limits).
-	const raw = readFileSync(0, "utf8");
+	// The request always arrives on stdin (no argv/env size limits). Read it
+	// as a stream: readFileSync(0) fails with EAGAIN on a pipe that is not
+	// yet filled.
+	const chunks = [];
+	for await (const chunk of process.stdin) chunks.push(chunk);
+	const raw = Buffer.concat(chunks).toString("utf8");
 	const req = JSON.parse(raw);
 	const op = req.op;
 	try {
