@@ -19,6 +19,7 @@ use crate::db::documents::{
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::projects::project_member_role;
+use crate::db::quota::{StorageQuota, StorageQuotaError};
 use crate::projects::effective_permission;
 use crate::projects::ProjectPermission;
 
@@ -182,6 +183,9 @@ async fn with_upload_xact_lock(
     Ok(())
 }
 
+/// Source `countWorkspaceReservedBytes`: every row of the workspace counts,
+/// stored ones included, so the limit bounds total storage, not just uploads
+/// in flight.
 async fn count_reserved_bytes(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -190,7 +194,7 @@ async fn count_reserved_bytes(
         r#"
         SELECT COALESCE(SUM(reserved_size_bytes), 0)::bigint
         FROM fvoci.attachments
-        WHERE workspace_id = $1 AND status IN ('uploading', 'assembling')
+        WHERE workspace_id = $1
         "#,
     )
     .bind(workspace_id)
@@ -544,6 +548,7 @@ pub async fn create_upload(
     pool: &PgPool,
     storage: &ObjectStorage,
     limits: &UploadLimits,
+    quota: &StorageQuota,
     workspace_id: Uuid,
     reservation: UploadReservation,
     actor_user_id: Uuid,
@@ -589,7 +594,14 @@ pub async fn create_upload(
             }
         };
     lock_workspace_storage(&mut tx, workspace_id).await?;
-    let _reserved = count_reserved_bytes(&mut tx, workspace_id).await?;
+    let reserved = count_reserved_bytes(&mut tx, workspace_id).await?;
+    if let Err(err) = quota.check(reserved, input.size_bytes) {
+        tx.rollback().await?;
+        return Ok(Err(match err {
+            StorageQuotaError::Upload => AttachmentDbError::UploadLimit,
+            StorageQuotaError::Storage => AttachmentDbError::StorageLimit,
+        }));
+    }
 
     let (document_id, task_id) = match parent {
         AttachmentParent::Document(id) => (Some(id), None),

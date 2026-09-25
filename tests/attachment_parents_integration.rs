@@ -1069,3 +1069,140 @@ async fn task_attachments_stay_out_of_shares_and_reach_extract_and_search() {
     let _ = c.owner;
     c.done().await;
 }
+
+// ---------------------------------------------------------------------------
+// Storage quota (source requireStorageReservation)
+
+fn quota_app(
+    c: &Ctx,
+    state: fvoci_server::http::state::AppState,
+    storage: i64,
+    upload: i64,
+) -> axum::Router {
+    let mut state = state;
+    state.quota = fvoci_server::db::quota::StorageQuota {
+        storage_bytes: fvoci_server::db::quota::QuotaLimit::Bytes(storage),
+        upload_bytes: fvoci_server::db::quota::QuotaLimit::Bytes(upload),
+    };
+    let _ = c;
+    fvoci_server::http::router(state, None)
+}
+
+async fn create_only(
+    app: &axum::Router,
+    cookie: &str,
+    path: &str,
+    size: usize,
+) -> (StatusCode, Value) {
+    json_request(
+        app.clone(),
+        "POST",
+        path,
+        Some(json!({"name": "q.bin", "sizeBytes": size})),
+        Some(cookie),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn upload_and_storage_limits_count_every_row_of_the_workspace() {
+    let c = ctx().await;
+    let app = quota_app(&c, app_state(&c.harness.app_url).await, 30, 12);
+    let doc_id = create_wiki_document(&c.app, &c.cookie, c.ws).await;
+    let project = create_project(c.app.clone(), &c.cookie, c.ws, "QTA", "workspace").await;
+    let task_id = create_task(&c.app, &c.cookie, c.ws, project["id"].as_str().unwrap()).await;
+    let doc_path = format!("/api/v1/workspaces/{}/documents/{doc_id}/uploads", c.ws);
+    let task_path = task_upload_path(c.ws, &task_id);
+
+    let (status, body) = create_only(&app, &c.cookie, &doc_path, 13).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{body}");
+    assert_eq!(body["code"], "limit.upload");
+
+    // 12 stored on the document + 12 still uploading on the task = 24.
+    let (status, stored) = upload(&app, &c.cookie, c.ws, &doc_path, "a.bin", &[1u8; 12]).await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    let (status, _) = create_only(&app, &c.cookie, &task_path, 12).await;
+    assert_eq!(status, StatusCode::CREATED);
+    // 24 + 7 > 30: refused across parents; 6 fits exactly.
+    let (status, body) = create_only(&app, &c.cookie, &task_path, 7).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{body}");
+    assert_eq!(body["code"], "limit.storage");
+    let (status, _) = create_only(&app, &c.cookie, &task_path, 6).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = create_only(&app, &c.cookie, &task_path, 1).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+
+    // Deleting the stored attachment frees its reservation.
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{}/attachments/{}",
+            c.ws,
+            stored["id"].as_str().unwrap()
+        ),
+        None,
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = create_only(&app, &c.cookie, &task_path, 12).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Full again (12 + 12 + 6 = 30).
+    let (status, _) = create_only(&app, &c.cookie, &doc_path, 1).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    // Permission is checked before the quota: an outsider learns nothing.
+    let outsider = add_workspace_user(&c.admin, c.ws, "guest", "outsider").await;
+    let (status, _) = create_only(&app, &outsider.cookie, &doc_path, 1).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    c.done().await;
+}
+
+#[tokio::test]
+async fn concurrent_reservations_never_exceed_the_storage_limit() {
+    let c = ctx().await;
+    let app = quota_app(&c, app_state(&c.harness.app_url).await, 100, 100);
+    let doc_id = create_wiki_document(&c.app, &c.cookie, c.ws).await;
+    let project = create_project(c.app.clone(), &c.cookie, c.ws, "CON", "workspace").await;
+    let task_id = create_task(&c.app, &c.cookie, c.ws, project["id"].as_str().unwrap()).await;
+    let doc_path = format!("/api/v1/workspaces/{}/documents/{doc_id}/uploads", c.ws);
+    let task_path = task_upload_path(c.ws, &task_id);
+    // Separate users so the per-user create rate limit is not the gate.
+    let mut users = Vec::new();
+    for i in 0..10 {
+        users.push(add_workspace_user(&c.admin, c.ws, "member", &format!("u{i}")).await);
+    }
+    let mut handles = Vec::new();
+    for (i, user) in users.iter().enumerate() {
+        let app = app.clone();
+        let cookie = user.cookie.clone();
+        let path = if i % 2 == 0 {
+            doc_path.clone()
+        } else {
+            task_path.clone()
+        };
+        handles.push(tokio::spawn(async move {
+            create_only(&app, &cookie, &path, 30).await.0
+        }));
+    }
+    let mut created = 0;
+    let mut refused = 0;
+    for handle in handles {
+        match handle.await.unwrap() {
+            StatusCode::CREATED => created += 1,
+            StatusCode::PAYMENT_REQUIRED => refused += 1,
+            other => panic!("unexpected {other}"),
+        }
+    }
+    assert_eq!((created, refused), (3, 7));
+    let reserved: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(reserved_size_bytes), 0)::bigint FROM fvoci.attachments WHERE workspace_id = $1",
+    )
+    .bind(c.ws)
+    .fetch_one(&c.admin)
+    .await
+    .unwrap();
+    assert_eq!(reserved, 90);
+    c.done().await;
+}

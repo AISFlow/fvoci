@@ -329,6 +329,9 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         document_convert,
         import_wake,
         import_extractor_available,
+        // Source self-host policy: storage/upload limits come only from the
+        // signed license, which is not ported; unlimited until it is.
+        quota: Default::default(),
     };
 
     let deadline = config.shutdown_deadline;

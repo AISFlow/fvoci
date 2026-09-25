@@ -264,6 +264,7 @@ async fn create_upload_session(
         &state.auth.db.pool,
         &state.storage,
         &state.upload,
+        &state.quota,
         workspace_id,
         reservation,
         user_id,

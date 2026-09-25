@@ -9027,6 +9027,16 @@
               }
             }
           },
+          "402": {
+            "description": "Storage or upload limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Not found or forbidden",
             "content": {

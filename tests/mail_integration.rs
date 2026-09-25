@@ -348,6 +348,7 @@ async fn app_state(app_url: &str, mailer: Arc<Mailer>) -> AppState {
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,
+        quota: Default::default(),
     }
 }
 

@@ -194,6 +194,7 @@ async fn app_state_with_part_size(
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,
+        quota: Default::default(),
     }
 }
 

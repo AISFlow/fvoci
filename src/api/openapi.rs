@@ -3329,6 +3329,7 @@ fn restore_revision() {}
         (status = 201, description = "Upload session created", body = CreateAttachmentUploadResponse),
         (status = 400, description = "Invalid input", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 402, description = "Storage or upload limit", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
         (status = 413, description = "File too large", body = ProblemResponse),
         (status = 429, description = "Create rate limited", body = ProblemResponse),
