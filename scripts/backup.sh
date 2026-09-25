@@ -242,7 +242,7 @@ manifest = {
     },
     "search": {
         "included": False,
-        "reason": "Meilisearch is derived. Restore runs fvoci-migrate --ensure-meili-key (scoped key and index settings). Product search-rebuild is not in this slice; extract_text lives in PostgreSQL.",
+        "reason": "Meilisearch is derived. Restore runs fvoci-migrate --ensure-meili-key (scoped key and index settings) and --rebuild-search from PostgreSQL.",
     },
     "database": {
         "path": "database.dump",

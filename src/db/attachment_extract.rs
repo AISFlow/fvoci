@@ -5,6 +5,10 @@ use uuid::Uuid;
 
 use document_extract_client::limits::{Limits, MAX_INPUT_BYTES, MAX_WARNING_ENTRIES};
 
+use crate::db::identity::{append_event, EventAppend};
+use crate::db::search_index::replace_attachment_chunks;
+use crate::search::chunk::chunk_plain_text;
+
 pub const EXTRACT_LEASE_SECS: u64 = 300;
 pub const EXTRACT_MAX_ATTEMPTS: i16 = 2;
 pub const EXTRACT_RETRY_BACKOFF_MS: u64 = 1_000;
@@ -190,6 +194,37 @@ pub async fn finish_extract(
     .bind(&finish.rhwp_rev)
     .execute(&mut *tx)
     .await?;
+
+    let chunks = if finish.status == "ok" {
+        chunk_plain_text(&finish.text)
+    } else {
+        Vec::new()
+    };
+    replace_attachment_chunks(
+        &mut tx,
+        claim.workspace_id,
+        claim.attachment_id,
+        &finish.status,
+        &chunks,
+    )
+    .await?;
+    append_event(
+        &mut tx,
+        EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(claim.workspace_id),
+            actor_user_id: None,
+            verb: "attachment.extracted".into(),
+            target_type: Some("attachment".into()),
+            target_id: Some(claim.attachment_id),
+            payload: json!({
+                "attachmentId": claim.attachment_id.to_string(),
+                "status": finish.status,
+            }),
+        },
+    )
+    .await?;
+
     tx.commit().await?;
     Ok(updated.rows_affected() > 0)
 }

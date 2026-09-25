@@ -340,10 +340,11 @@ of every volume, and it is not PITR.
 functions) and `fvoci`, taken as the PostgreSQL owner role through the
 `postgres` service, plus a `tar` of the `storage` volume. **Omitted:** Meilisearch (`searchdata`), the scoped API key
 volume, Compose env files, pepper keys, and database passwords. The search
-index is derived. Restore runs `fvoci-migrate --ensure-meili-key`, which writes
-a new scoped key and ensures index settings. Product `search-rebuild` is not in
-this slice; attachment `extract_text` is in PostgreSQL and comes back with the
-dump. Keep `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID` the same as
+index is derived. Restore runs `fvoci-migrate --ensure-meili-key` (new scoped
+key, index settings), then `fvoci-migrate --recover-outbox` (rebases outbox
+cursors to the new cluster's xids before any server starts) and
+`fvoci-migrate --rebuild-search` (reindexes from PostgreSQL, including
+attachment text chunks). Keep `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID` the same as
 the original or existing passwords will not verify. `POSTGRES_USER`,
 `POSTGRES_DB`, and `FVOCI_APP_ROLE` names must match; cluster passwords and
 `MEILI_MASTER_KEY` may be new. `scripts/restore.sh` compares the keyring fingerprint recorded in the backup manifest and refuses to restore with a different keyring.

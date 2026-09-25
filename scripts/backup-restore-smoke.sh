@@ -338,6 +338,23 @@ TASK_JSON="$(curl -fsS -b "$COOKIE_JAR" "$RESTORE_BASE/api/v1/workspaces/${WORKS
 python3 -c 'import json,sys; body=json.loads(sys.argv[1]); assert body.get("title")=="Backup restore task", body; assert body.get("id")==sys.argv[2], body' "$TASK_JSON" "$TASK_ID"
 log_assert "restored task: ok"
 
+# The index is derived: restore rebuilds it from PostgreSQL. Meili indexes
+# asynchronously, so poll (read-only, bounded) until the task is searchable.
+SEARCH_FOUND=""
+for _ in $(seq 1 60); do
+  SEARCH_JSON="$(curl -fsS -b "$COOKIE_JAR" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/search?q=Backup%20restore%20task")"
+  if python3 -c 'import json,sys; body=json.loads(sys.argv[1]); sys.exit(0 if any(i.get("id")==sys.argv[2] for i in body.get("items",[])) else 1)' "$SEARCH_JSON" "$TASK_ID"; then
+    SEARCH_FOUND=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$SEARCH_FOUND" ]]; then
+  echo "restored task is not searchable after rebuild: ${SEARCH_JSON}" >&2
+  exit 1
+fi
+log_assert "restored search index finds the task: ok"
+
 RESTORE_CID="$("${RESTORE_COMPOSE[@]}" ps -q server)"
 RUNNING_UID="$(docker exec "$RESTORE_CID" id -u)"
 SERVER_PID1_UID="$(docker exec "$RESTORE_CID" stat -c '%u' /proc/1)"

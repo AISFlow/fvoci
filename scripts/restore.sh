@@ -254,8 +254,11 @@ echo "rebasing outbox cursors (snapshot $SNAPSHOT_AT)"
   --recover-outbox --since "$SINCE" --snapshot-at "$SNAPSHOT_AT" \
   --apply --reason "restore into $PROJECT" --ack-external-replay
 
+echo "rebuilding the search index from PostgreSQL"
+"${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --rebuild-search
+
 echo "starting the server"
 "${COMPOSE[@]}" up -d --wait server
 
-python3 -c 'import json,sys; json.dump({"restoredProject": sys.argv[1], "searchRebuilt": "ensure-meili-key"}, sys.stdout)' "$PROJECT"
+python3 -c 'import json,sys; json.dump({"restoredProject": sys.argv[1], "searchRebuilt": "rebuild-search"}, sys.stdout)' "$PROJECT"
 printf '\n'

@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use fvoci_server::db::migrate;
 use fvoci_server::db::outbox_recover::{parse_recover_outbox_args, recover_outbox};
-use fvoci_server::search::meili::ensure_meili_key_file;
+use fvoci_server::search::index::{rebuild_pool, rebuild_search_index};
+use fvoci_server::search::meili::{ensure_meili_key_file, meili_config_from_env};
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() {
@@ -27,6 +29,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         [flag, path] if flag == "--ensure-meili-key" => {
             ensure_meili_key_file(&PathBuf::from(path)).await?;
         }
+        [flag] if flag == "--rebuild-search" => {
+            rebuild(None).await?;
+        }
+        [flag, workspace] if flag == "--rebuild-search" => {
+            let workspace_id = Uuid::parse_str(workspace).map_err(|_| "invalid workspace ID")?;
+            rebuild(Some(workspace_id)).await?;
+        }
         [flag, rest @ ..] if flag == "--recover-outbox" => {
             let url = migration_url()?;
             let opts = parse_recover_outbox_args(rest)?;
@@ -35,10 +44,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
             );
         }
     }
+    Ok(())
+}
+
+async fn rebuild(workspace_id: Option<Uuid>) -> Result<(), Box<dyn std::error::Error>> {
+    let url = migration_url()?;
+    let meili =
+        meili_config_from_env()?.ok_or("FVOCI_MEILI_URL is required for --rebuild-search")?;
+    let pool = rebuild_pool(&url).await?;
+    migrate::assert_schema_current(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let outcome = rebuild_search_index(&pool, &meili, workspace_id).await?;
+    eprintln!(
+        "search rebuild complete workspaces={} pages={}",
+        outcome.workspaces, outcome.pages
+    );
+    pool.close().await;
     Ok(())
 }
 

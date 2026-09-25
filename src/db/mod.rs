@@ -16,6 +16,7 @@ pub mod pool;
 pub mod projects;
 pub mod quota;
 pub mod revisions;
+pub mod search_index;
 pub mod tasks;
 pub mod workspace;
 

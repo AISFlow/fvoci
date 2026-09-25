@@ -1328,7 +1328,7 @@ pub async fn move_wiki_document(
         "newPath": new_path,
         "oldParentId": old_parent_id.map(|id| id.to_string()),
         "oldPath": doc_path,
-        "oldProjectId": null,
+        "oldProjectId": doc_project_id.map(|id| id.to_string()),
         "newProjectId": dest_project_id.map(|id| id.to_string()),
     });
     record_document_event_and_audit(
