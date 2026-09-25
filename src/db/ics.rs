@@ -213,6 +213,12 @@ async fn list_visible_ics_tasks(
                 OR t.due_at IS NOT NULL
           )
           AND {visible}
+          -- Source listIcsFeed: the owner's assigned tasks (its saved-calendar-view
+          -- branch waits for views to be ported).
+          AND EXISTS (
+                SELECT 1 FROM fvoci.task_assignees ta
+                WHERE ta.workspace_id = t.workspace_id AND ta.task_id = t.id AND ta.user_id = $3
+          )
         ORDER BY COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date, t.start_date), t.id
         LIMIT {ICS_FEED_LIMIT}
         "#
