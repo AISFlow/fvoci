@@ -288,10 +288,8 @@ async fn replace_task_assignees(
         return Ok(Err(ProjectDbError::InvalidInput));
     }
     let unique = unique_ids(assignee_ids);
+    // Caller (patch_task_meta) already holds the assignees' membership locks.
     if !unique.is_empty() {
-        let mut lock_ids = unique.clone();
-        lock_ids.push(actor_user_id);
-        lock_membership_users(tx, &lock_ids).await?;
         for user_id in &unique {
             if !membership_exists(tx, workspace_id, *user_id).await? {
                 return Ok(Err(ProjectDbError::AssigneeIsNotAMember));
@@ -2034,6 +2032,17 @@ pub async fn patch_task_meta(
     let restores_archived = patch_only_unarchives(&input);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
+    // Membership locks come before the project row lock on every write path; take
+    // the assignees' together with the actor's (sorted) before anything else.
+    if let Some(assignee_ids) = input
+        .assignee_ids
+        .as_deref()
+        .filter(|ids| !ids.is_empty() && ids.len() <= MAX_TASK_REFS)
+    {
+        let mut lock_ids = unique_ids(assignee_ids);
+        lock_ids.push(actor_user_id);
+        lock_membership_users(&mut tx, &lock_ids).await?;
+    }
     let task = match require_task_write_access(
         &mut tx,
         workspace_id,

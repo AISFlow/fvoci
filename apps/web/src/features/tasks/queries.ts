@@ -38,6 +38,7 @@ export function taskQuery(workspaceId: string, taskId: string) {
           params: { path: { workspace_id: workspaceId, task_id: taskId } },
         }),
       ),
+    enabled: Boolean(workspaceId) && Boolean(taskId),
     retry: false,
   });
 }
