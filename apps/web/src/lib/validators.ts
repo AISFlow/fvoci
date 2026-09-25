@@ -92,3 +92,32 @@ export const apiTokenCreateInput = z.object({
   unlimited: z.boolean().optional(),
   service: z.boolean().optional(),
 });
+
+export const magicLinkInput = z.object({
+  email: z.string().trim().email("i18n:form.email"),
+});
+
+export const emailChangeInput = z.object({
+  newEmail: z.string().trim().email("i18n:form.email"),
+});
+
+// Password-less accounts set a first password without `currentPassword`.
+export const passwordChangeForm = z.object({
+  currentPassword: z.string().min(1, "i18n:form.too_small"),
+  newPassword: z.string().min(10, "i18n:form.too_small"),
+});
+
+export const passwordCreateForm = z.object({
+  currentPassword: z.string(),
+  newPassword: z.string().min(10, "i18n:form.too_small"),
+});
+
+// One field: the current password, or the email local part when there is none.
+export const withdrawConfirmForm = z.object({
+  confirmValue: z.string().min(1, "i18n:form.too_small"),
+});
+
+export const profileNameInput = z.object({
+  familyName: z.string().trim().max(100, "i18n:form.too_big"),
+  givenName: z.string().trim().min(1, "i18n:form.too_small").max(100, "i18n:form.too_big"),
+});

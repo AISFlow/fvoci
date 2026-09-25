@@ -19,30 +19,40 @@ use crate::api::dto::{
     CreateAttachmentUploadBody, CreateAttachmentUploadResponse, CreateCommentBody,
     CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody, CreateMilestoneBody,
     CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody, CreateWorkspaceBody,
-    DeleteWorkspaceBody, DocumentMetaResponse, ExpectedDatesBody, GroupListResponse,
-    GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
-    IcsTokenResponse, ImportJobResponse, InstanceAdminBody, InstanceSettingsOutput,
-    InstanceSettingsPatchSchema, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
-    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LabelListResponse,
-    LabelOutput, LegalDocumentOutput, LegalPublishBody, LegalVersionMetaOutput,
-    LegalVersionsResponse, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
-    MeApiTokenCreateBody, MemberConsentOutput, MemberResponse, MemberRoleBody, MembersResponse,
-    MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody, NotificationItemOutput,
-    NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
-    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PasswordResetBody,
-    PasswordResetConfirmBody, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
-    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
-    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
-    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
-    PublicBrandingOutput, PublicSettingsValues, PutAttachmentPartResponse,
+    DeleteWorkspaceBody, DocumentMetaResponse, DocumentShareLinkCreateBody, ExpectedDatesBody,
+    GroupListResponse, GroupMemberBody, GroupMemberListResponse, GroupMemberOutput, GroupOutput,
+    HolidaysListResponse, IcsTokenResponse, ImportJobResponse, InstanceAdminBody,
+    InstanceSettingsOutput, InstanceSettingsPatchSchema, InvitationAcceptBody,
+    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    InvitationPublicResponse, LabelListResponse, LabelOutput, LegalDocumentOutput,
+    LegalPublishBody, LegalVersionMetaOutput, LegalVersionsResponse, LoginBody, LoginResponse,
+    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput,
+    MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse, MilestoneOutput,
+    MoveDocumentBody, MoveTaskBody, NotificationItemOutput, NotificationListResponse,
+    NotificationPatchBody, NotificationPrefsBody, NotificationReadAllResponse,
+    NotificationUnreadCountResponse, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
+    PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody,
+    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
+    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
+    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PublicBrandingOutput,
+    PublicSettingsValues, PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
     ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
     RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
     SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
-    SetupResponse, SetupStatusResponse, SortDocumentBody, StartImportBody, TaskChildOutput,
+    SetupResponse, SetupStatusResponse, ShareCreateBody, ShareLinkCreatedOutput,
+    ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput, SortDocumentBody,
+    StarCreateBody, StarItemOutput, StarListResponse, StartImportBody, TaskChildOutput,
     TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse,
     TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse,
     TreeResponse, WorkflowOutput, WorkspaceConsentsResponse, WorkspaceListItemResponse,
     WorkspaceListResponse, WorkspaceMemberConsentsOutput, WorkspaceMetaResponse,
+};
+#[cfg(feature = "api-schema")]
+use crate::api::dto::{
+    DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, EmailChangeBody,
+    ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse,
+    MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, TokenBody, WithdrawBody,
+    WorkspaceStatusOutput,
 };
 #[cfg(feature = "api-schema")]
 use crate::settings::catalog::{
@@ -91,6 +101,18 @@ impl Modify for CookieSecurityAddon {
         me_patch,
         password_reset,
         confirm_password_reset,
+        withdraw,
+        cancel_withdraw,
+        email_change,
+        email_confirm,
+        password_change,
+        magic_link,
+        magic_link_consume,
+        auth_providers,
+        auth_identities,
+        me_export,
+        me_dashboard,
+        me_locate,
         list_my_workspaces,
         personal_workspace,
         create_workspace,
@@ -205,6 +227,25 @@ impl Modify for CookieSecurityAddon {
         delete_workspace_holiday,
         create_ics_token,
         get_ics_feed,
+        list_stars,
+        create_star,
+        delete_star,
+        list_recent,
+        list_share_links,
+        create_share_link,
+        revoke_share_link,
+        list_wiki_document_share_links,
+        create_wiki_document_share_link,
+        list_project_document_share_links,
+        create_project_document_share_link,
+        get_share_meta,
+        get_share_body,
+        get_share_tree,
+        get_share_pdf,
+        search_share,
+        get_share_document,
+        get_share_attachment,
+        download_share_attachment,
         admin_audit,
         admin_system,
         admin_users,
@@ -338,6 +379,8 @@ impl Modify for CookieSecurityAddon {
             ActivityItemOutput,
             ActivityListResponse,
             CommentListResponse,
+    DashboardProjectOutput, DashboardRecentItemOutput, DashboardWorkspaceOutput, DocumentShareLinkCreateBody, EmailChangeBody, ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse, MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, RecentItemOutput, RecentListResponse, ShareCreateBody, ShareLinkCreatedOutput, ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput, StarCreateBody, StarItemOutput, StarListResponse, TokenBody, WithdrawBody, WorkspaceStatusOutput,
+            ProblemResponse,
             AuditLogItemOutput,
             AuditLogListResponse,
             AdminSystemOutput,
@@ -376,7 +419,6 @@ impl Modify for CookieSecurityAddon {
             I18nSettings,
             SecuritySettings,
             OperatorSettings,
-            ProblemResponse,
         )
     ),
     modifiers(&CookieSecurityAddon),
@@ -392,8 +434,6 @@ impl Modify for CookieSecurityAddon {
         (name = "comments", description = "Document and task comments"),
         (name = "notifications", description = "In-app notifications"),
         (name = "schedule", description = "Holidays and ICS calendar feeds"),
-        (name = "admin", description = "Instance administration, settings and branding"),
-        (name = "legal", description = "Legal documents and consents"),
     )
 )]
 pub struct ApiDoc;
@@ -838,6 +878,183 @@ fn password_reset() {}
     )
 )]
 fn confirm_password_reset() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/withdraw",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    request_body = WithdrawBody,
+    responses(
+        (status = 200, description = "Erasure scheduled; session cookie cleared", body = ErasureScheduleOutput),
+        (status = 400, description = "confirm_invalid", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 409, description = "owner_transfer_required or last_instance_admin", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn withdraw() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/cancel-withdraw",
+    tag = "auth",
+    request_body = TokenBody,
+    responses(
+        (status = 200, description = "Withdrawal cancelled", body = OkResponse),
+        (status = 404, description = "Unknown, used or expired cancel token", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn cancel_withdraw() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/auth/email",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    request_body = EmailChangeBody,
+    responses(
+        (status = 202, description = "Accepted (same response whether or not mail was sent)", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn email_change() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/email/confirm",
+    tag = "auth",
+    request_body = TokenBody,
+    responses(
+        (status = 200, description = "Email changed", body = OkResponse),
+        (status = 400, description = "magic_invalid", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn email_confirm() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    patch,
+    path = "/api/v1/auth/password",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    request_body = PasswordChangeBody,
+    responses(
+        (status = 200, description = "Password changed; other sessions revoked", body = OkResponse),
+        (status = 400, description = "password_invalid", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn password_change() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/magic-link",
+    tag = "auth",
+    request_body = MagicLinkBody,
+    responses(
+        (status = 202, description = "Accepted (same response for unknown addresses)", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn magic_link() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/magic-link/consume",
+    tag = "auth",
+    request_body = TokenBody,
+    responses(
+        (status = 200, description = "Signed in", body = LoginResponse),
+        (status = 400, description = "magic_invalid", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn magic_link_consume() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/providers",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Sign-in methods", body = ProvidersOutput),
+    )
+)]
+fn auth_providers() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/identities",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "Linked external identities", body = IdentitiesOutput),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+    )
+)]
+fn auth_identities() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/export",
+    tag = "auth",
+    security(("fvoci_session" = [])),
+    responses(
+        (status = 200, description = "ZIP: profile.json, comments.json, attachments.json, attachments/*", content_type = "application/zip"),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn me_export() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/dashboard",
+    tag = "workspaces",
+    security(("fvoci_session" = [])),
+    params(("lastVisited" = Option<String>, Query, description = "Workspace id to list first")),
+    responses(
+        (status = 200, description = "Cross-workspace dashboard", body = MeDashboardResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+    )
+)]
+fn me_dashboard() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/locate",
+    tag = "workspaces",
+    security(("fvoci_session" = [])),
+    params(
+        ("type" = String, Query, description = "task or document"),
+        ("id" = String, Query, description = "Task or document id"),
+    ),
+    responses(
+        (status = 200, description = "Workspace holding the target", body = MeLocateResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or not visible", body = ProblemResponse),
+    )
+)]
+fn me_locate() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
@@ -2065,6 +2282,344 @@ fn create_ics_token() {}
     )
 )]
 fn get_ics_feed() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/stars",
+    tag = "stars",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Starred documents and tasks the actor can still read", body = StarListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_stars() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/stars",
+    tag = "stars",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = StarCreateBody,
+    responses(
+        (status = 201, description = "Star (idempotent)", body = StarItemOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Target not found or not readable", body = ProblemResponse),
+    )
+)]
+fn create_star() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/stars/{id}",
+    tag = "stars",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("id" = String, description = "Star id"),
+    ),
+    responses(
+        (status = 200, description = "Star removed", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+    )
+)]
+fn delete_star() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/recent",
+    tag = "stars",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("limit" = Option<i32>, Query, description = "1..=50, default 20"),
+    ),
+    responses(
+        (status = 200, description = "Recently updated readable documents and tasks", body = RecentListResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_recent() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/share-links",
+    tag = "share",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "All links for owners/admins, otherwise the actor's own", body = ShareLinkListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_share_links() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/share-links",
+    tag = "share",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = ShareCreateBody,
+    responses(
+        (status = 201, description = "Share link with its one-time URL", body = ShareLinkCreatedOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or no edit permission", body = ProblemResponse),
+    )
+)]
+fn create_share_link() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{workspace_id}/share-links/{id}",
+    tag = "share",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("id" = String, description = "Share link id"),
+    ),
+    responses(
+        (status = 200, description = "Revoked", body = OkResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn revoke_share_link() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{id}/share-links",
+    tag = "share",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("id" = String, description = "Wiki document id"),
+    ),
+    responses(
+        (status = 200, description = "Links of this document visible to the actor", body = ShareLinkListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_wiki_document_share_links() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{id}/share-links",
+    tag = "share",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("id" = String, description = "Wiki document id"),
+    ),
+    request_body = DocumentShareLinkCreateBody,
+    responses(
+        (status = 201, description = "Share link with its one-time URL", body = ShareLinkCreatedOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or no edit permission", body = ProblemResponse),
+    )
+)]
+fn create_wiki_document_share_link() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{id}/share-links",
+    tag = "share",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("id" = String, description = "Project document id"),
+    ),
+    responses(
+        (status = 200, description = "Links of this document visible to the actor", body = ShareLinkListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn list_project_document_share_links() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{id}/share-links",
+    tag = "share",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("id" = String, description = "Project document id"),
+    ),
+    request_body = DocumentShareLinkCreateBody,
+    responses(
+        (status = 201, description = "Share link with its one-time URL", body = ShareLinkCreatedOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or no edit permission", body = ProblemResponse),
+    )
+)]
+fn create_project_document_share_link() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/share/{token}",
+    tag = "share",
+    params(("token" = String, description = "Share token")),
+    responses(
+        (status = 200, description = "Public share metadata", body = SharePublicMetaOutput),
+        (status = 404, description = "Unknown, expired or revoked", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn get_share_meta() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/share/{token}/body",
+    tag = "share",
+    params(
+        ("token" = String, description = "Share token"),
+        ("format" = Option<String>, Query, description = "html (default) | fragment | md"),
+    ),
+    responses(
+        (status = 200, description = "Shared root document body", content_type = "text/html"),
+        (status = 304, description = "Not modified (fragment/md)"),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Unknown, expired or revoked", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn get_share_body() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/share/{token}/tree",
+    tag = "share",
+    params(("token" = String, description = "Share token")),
+    responses(
+        (status = 200, description = "Visible subtree", body = TreeResponse),
+        (status = 404, description = "Unknown, expired or revoked", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn get_share_tree() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/share/{token}/pdf",
+    tag = "share",
+    params(
+        ("token" = String, description = "Share token"),
+        ("documentId" = Option<String>, Query, description = "Document inside the share"),
+    ),
+    responses(
+        (status = 200, description = "PDF of the shared root or of `documentId` in the share", content_type = "application/pdf"),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Outside the share, unknown, expired or revoked", body = ProblemResponse),
+        (status = 413, description = "Document body too large", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn get_share_pdf() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/share/{token}/search",
+    tag = "share",
+    params(
+        ("token" = String, description = "Share token"),
+        ("q" = String, Query, description = "1..=200 characters"),
+    ),
+    responses(
+        (status = 200, description = "Hits inside the share", body = SearchListResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Unknown, expired or revoked", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+        (status = 503, description = "Search unavailable", body = ProblemResponse),
+    )
+)]
+fn search_share() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/share/{token}/documents/{document_id}",
+    tag = "share",
+    params(
+        ("token" = String, description = "Share token"),
+        ("document_id" = String, description = "Document inside the share"),
+        ("format" = Option<String>, Query, description = "html (default) | fragment | md"),
+    ),
+    responses(
+        (status = 200, description = "Document body", content_type = "text/html"),
+        (status = 304, description = "Not modified (fragment/md)"),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 404, description = "Outside the share, unknown, expired or revoked", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn get_share_document() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/share/{token}/attachments/{attachment_id}",
+    tag = "share",
+    params(
+        ("token" = String, description = "Share token"),
+        ("attachment_id" = String, description = "Attachment id"),
+    ),
+    responses(
+        (status = 200, description = "Attachment metadata", body = AttachmentOutput),
+        (status = 404, description = "Outside the share, unknown, expired or revoked", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn get_share_attachment() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/share/{token}/attachments/{attachment_id}/download",
+    tag = "share",
+    params(
+        ("token" = String, description = "Share token"),
+        ("attachment_id" = String, description = "Attachment id"),
+        ("variant" = Option<String>, Query, description = "Omit for original bytes; preview is not stored in this slice"),
+    ),
+    responses(
+        (status = 200, description = "Original bytes", content_type = "application/octet-stream"),
+        (status = 400, description = "Invalid download variant", body = ProblemResponse),
+        (status = 404, description = "Outside the share, unknown, expired or revoked", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn download_share_attachment() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

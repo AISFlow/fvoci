@@ -86,6 +86,17 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.ics_tokens TO :"app_role";
 GRANT SELECT, INSERT ON fvoci.task_activity TO :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.task_activity FROM :"app_role";
 
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.stars TO :"app_role";
+-- share_links.token_hash is write-only for the app role: lookups go through
+-- fvoci.app_share_link_by_token_hash, and rows are never updated in place.
+GRANT INSERT, DELETE ON fvoci.share_links TO :"app_role";
+REVOKE SELECT, UPDATE ON fvoci.share_links FROM :"app_role";
+GRANT SELECT (
+    id, workspace_id, user_id, document_id, project_id, expires_at, created_at, updated_at
+) ON fvoci.share_links TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_share_link_by_token_hash(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_share_link_by_token_hash(text) TO :"app_role";
+
 REVOKE ALL ON fvoci.magic_tokens FROM :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_user_set_password_hash(uuid, text) TO :"app_role";
@@ -138,6 +149,26 @@ GRANT EXECUTE ON FUNCTION fvoci.app_outbox_is_processed(text, uuid) TO :"app_rol
 REVOKE EXECUTE ON FUNCTION fvoci.app_outbox_gc_processed(text, integer, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_outbox_gc_processed(text, integer, integer) TO :"app_role";
 
+REVOKE EXECUTE ON FUNCTION fvoci.app_magic_issue_email_change(text, uuid, integer, text, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_magic_issue_email_change(text, uuid, integer, text, timestamptz) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_magic_consume_payload(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_magic_consume_payload(text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_withdraw(uuid, timestamptz, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_withdraw(uuid, timestamptz, text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_id_by_withdraw_cancel_token_hash(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_id_by_withdraw_cancel_token_hash(text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_restore_withdrawn(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_restore_withdrawn(uuid, text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_anonymize(uuid, text, text, timestamptz, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_anonymize(uuid, text, text, timestamptz, timestamptz) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_update_email(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_update_email(uuid, text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_user_mark_email_verified(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_user_mark_email_verified(uuid) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_attachments_scrub_uploader(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_attachments_scrub_uploader(uuid, text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_attachments_stored_by_uploader(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_attachments_stored_by_uploader(uuid) TO :"app_role";
 GRANT SELECT, INSERT ON fvoci.legal_documents TO :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.legal_documents FROM :"app_role";
 GRANT SELECT, INSERT ON fvoci.user_consents TO :"app_role";

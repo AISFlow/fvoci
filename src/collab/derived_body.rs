@@ -297,7 +297,7 @@ fn tiptap_text(node: &Value, depth: u32) -> String {
 
 /// Source `packages/editor/src/emoji-glyph.ts` using pinned `@tiptap/extension-emoji`
 /// shortcode data in `emoji_shortcodes.json`.
-fn emoji_glyph(node: &Value) -> String {
+pub(crate) fn emoji_glyph(node: &Value) -> String {
     let attrs = node.get("attrs").and_then(Value::as_object);
     if let Some(glyph) = attrs.and_then(|a| a.get("emoji")).and_then(Value::as_str) {
         if !glyph.is_empty() {

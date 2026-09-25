@@ -67,6 +67,10 @@ export function parseRef(raw: string): ParsedRef | null {
   return { kind: "project", key };
 }
 
+export function workspaceHomePath(slug: string): string {
+  return `/w/${slug.toLowerCase()}`;
+}
+
 export function wikiPath(slug: string): string {
     return `/w/${slug.toLowerCase()}/wiki`;
 }

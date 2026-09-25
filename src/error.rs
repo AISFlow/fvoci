@@ -48,6 +48,8 @@ pub enum ProblemCode {
     ImportFailed,
     UnsupportedMediaType,
     UploadCapacityExceeded,
+    ConfirmInvalid,
+    OwnerTransferRequired,
     LastInstanceAdmin,
     SelfSuspension,
     UnsupportedBrandingAssetType,
@@ -100,6 +102,8 @@ impl ProblemCode {
             Self::ImportFailed => "import_failed",
             Self::UnsupportedMediaType => "unsupported_media_type",
             Self::UploadCapacityExceeded => "upload_capacity_exceeded",
+            Self::ConfirmInvalid => "confirm_invalid",
+            Self::OwnerTransferRequired => "owner_transfer_required",
             Self::LastInstanceAdmin => "last_instance_admin",
             Self::SelfSuspension => "self_suspension",
             Self::UnsupportedBrandingAssetType => "unsupported_branding_asset_type",
@@ -156,6 +160,8 @@ impl ProblemCode {
             Self::ImportFailed => "import failed",
             Self::UnsupportedMediaType => "unsupported media type",
             Self::UploadCapacityExceeded => "upload capacity exceeded — retry",
+            Self::ConfirmInvalid => "confirm_invalid",
+            Self::OwnerTransferRequired => "owner_transfer_required",
             Self::LastInstanceAdmin => "last_instance_admin",
             Self::SelfSuspension => "self_suspension",
             Self::UnsupportedBrandingAssetType => "unsupported branding asset type",
@@ -174,6 +180,7 @@ impl ProblemCode {
             Self::InvalidInput
             | Self::PasswordInvalid
             | Self::MagicInvalid
+            | Self::ConfirmInvalid
             | Self::RawApplicationOctetStreamBodyRequired
             | Self::AssigneeIsNotAMember => StatusCode::BAD_REQUEST,
             Self::InstanceSetupAlreadyCompleted
@@ -200,6 +207,7 @@ impl ProblemCode {
             Self::Conflict
             | Self::ProjectArchived
             | Self::RestoreRejected
+            | Self::OwnerTransferRequired
             | Self::LastInstanceAdmin
             | Self::SelfSuspension => StatusCode::CONFLICT,
             Self::CollabTimeoutRetry => StatusCode::GATEWAY_TIMEOUT,

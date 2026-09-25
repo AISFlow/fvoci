@@ -7,12 +7,16 @@ use crate::db::context::set_system;
 use crate::mail::MAGIC_TTL_SECS;
 
 pub const MAGIC_KIND_PASSWORD_RESET: &str = "password_reset";
+pub const MAGIC_KIND_LOGIN: &str = "login";
+pub const MAGIC_KIND_EMAIL_CHANGE: &str = "email_change";
 
 #[derive(Debug, Clone)]
 pub struct MagicPayload {
     pub kind: String,
     pub user_id: Uuid,
     pub generation: i32,
+    /// Present only for `email_change`.
+    pub new_email: Option<String>,
 }
 
 pub async fn issue_password_reset_token(
@@ -43,17 +47,22 @@ pub async fn consume_magic_token(
     let hash = hash_token(token);
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
-    let row: Option<(String, Uuid, i32)> =
-        sqlx::query_as("SELECT kind, user_id, generation FROM fvoci.app_magic_consume($1)")
-            .bind(&hash)
-            .fetch_optional(&mut *tx)
-            .await?;
+    // Source GETDEL: any kind is consumed; the caller checks the kind.
+    let row: Option<(String, Uuid, i32, Option<String>)> = sqlx::query_as(
+        "SELECT kind, user_id, generation, new_email FROM fvoci.app_magic_consume_payload($1)",
+    )
+    .bind(&hash)
+    .fetch_optional(&mut *tx)
+    .await?;
     tx.commit().await?;
-    Ok(row.map(|(kind, user_id, generation)| MagicPayload {
-        kind,
-        user_id,
-        generation,
-    }))
+    Ok(
+        row.map(|(kind, user_id, generation, new_email)| MagicPayload {
+            kind,
+            user_id,
+            generation,
+            new_email,
+        }),
+    )
 }
 
 pub fn magic_expires_at(now: DateTime<Utc>) -> DateTime<Utc> {
