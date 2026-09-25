@@ -244,25 +244,32 @@ async fn put_upload_part(
         Err(_) => return Err(AppError::internal()),
     };
     // Held until the part is committed; refused before the body is read.
-    let Some(_slot) = state.upload.part_put_slots.try_acquire() else {
+    let Some(_slot) = state.upload.part_put_slots.try_acquire(user_id) else {
         return Err(AppError::upload_capacity_exceeded(
             PART_SLOT_RETRY_AFTER_SECS,
         ));
     };
     let declared_len = declared_body_length(&headers, &body)?;
     let stream = body.into_data_stream();
-    let mut staged = state
-        .storage
-        .stage_part_stream(
+    // Bounds how long a paced body can hold its slot, on every driver.
+    let body_deadline = state
+        .upload
+        .part_put_slots
+        .body_deadline(declared_len.unwrap_or(max_bytes));
+    let mut staged = tokio::time::timeout(
+        body_deadline,
+        state.storage.stage_part_stream(
             &storage_key,
             upload_ref.as_deref(),
             part_number,
             stream,
             declared_len,
             max_bytes,
-        )
-        .await
-        .map_err(map_storage_error)?;
+        ),
+    )
+    .await
+    .map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?
+    .map_err(map_storage_error)?;
     #[cfg(feature = "db-tests")]
     crate::db::attachments::test_barrier::wait_pre_publish_barrier(attachment_id).await;
     let part = commit_upload_part(

@@ -209,6 +209,41 @@ test("attachment-upload orchestration", { concurrency: 1 }, async (t) => {
     assert.equal(resumeCalls, 0);
   });
 
+  await t.test("capacity 503 waits out Retry-After without using transport retries", async () => {
+    let partCalls = 0;
+    const delays: number[] = [];
+    installFetch((url, init) => {
+      if (url.endsWith("/uploads") && init?.method === "POST") {
+        return jsonResponse(createOutput(1), 201);
+      }
+      if (url.endsWith("/complete") && init?.method === "POST") {
+        return jsonResponse(storedOutput);
+      }
+      if (url.includes("/parts/")) {
+        partCalls += 1;
+        if (partCalls <= 5) {
+          return new Response(JSON.stringify({ code: "upload_capacity_exceeded" }), {
+            status: 503,
+            headers: { "Content-Type": "application/problem+json", "Retry-After": "2" },
+          });
+        }
+        return jsonResponse({ etag: "etag-1" });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const bridge = await loadBridge({
+      delay: (ms) => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+    });
+    const file = new File([new Uint8Array(PART_SIZE)], "f.bin");
+    const result = await bridge.upload(file, () => undefined);
+    assert.equal(result.id, ATT);
+    assert.equal(partCalls, 6);
+    assert.deepEqual(delays.slice(0, 5), [2000, 2000, 2000, 2000, 2000]);
+  });
+
   await t.test("abort during part retry delay stops the upload", async () => {
     let partCalls = 0;
     installFetch((url, init) => {

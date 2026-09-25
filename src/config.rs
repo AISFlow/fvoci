@@ -12,6 +12,8 @@ pub const DEFAULT_UPLOAD_PART_SIZE_BYTES: i64 = 32 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES: i64 = 5120_i64 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN: u32 = 120;
 pub const DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS: u32 = 64;
+/// Twice the web client's part parallelism (3).
+pub const DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS_PER_USER: u32 = 6;
 pub const DEFAULT_UPLOAD_INCOMPLETE_TTL_HOURS: u64 = 24;
 
 #[derive(Clone)]
@@ -326,13 +328,22 @@ fn required_upload_limits_from_env() -> Result<UploadLimits, String> {
             .ok()
             .as_deref(),
     )?;
-    limits.part_put_slots = crate::attachments::PartPutSlots::new(parse_positive_u32(
-        "FVOCI_UPLOAD_MAX_CONCURRENT_PARTS",
-        env::var("FVOCI_UPLOAD_MAX_CONCURRENT_PARTS")
-            .ok()
-            .as_deref(),
-        DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
-    )?);
+    limits.part_put_slots = crate::attachments::PartPutSlots::with_per_user(
+        parse_positive_u32(
+            "FVOCI_UPLOAD_MAX_CONCURRENT_PARTS",
+            env::var("FVOCI_UPLOAD_MAX_CONCURRENT_PARTS")
+                .ok()
+                .as_deref(),
+            DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+        )?,
+        parse_positive_u32(
+            "FVOCI_UPLOAD_MAX_CONCURRENT_PARTS_PER_USER",
+            env::var("FVOCI_UPLOAD_MAX_CONCURRENT_PARTS_PER_USER")
+                .ok()
+                .as_deref(),
+            DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS_PER_USER,
+        )?,
+    );
     Ok(limits)
 }
 
