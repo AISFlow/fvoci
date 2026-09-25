@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { createE2eUser, createTasksViaApi, login } from "./helpers";
+import { createE2eUser, createTasksViaApi, login, logout } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -209,7 +209,7 @@ test("private project is absent for non-members and viewer writes fail visibly",
 
   const id = await workspaceId(page, "acme");
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, admin.email, admin.password);
   const maskedLookup = await page.request.get(`/api/v1/workspaces/${id}/lookup/HID-2`);
   expect(maskedLookup.status()).toBe(200);
@@ -227,12 +227,12 @@ test("private project is absent for non-members and viewer writes fail visibly",
   await page.goto("/w/acme/HID/tasks");
   await expect(page.getByRole("alert")).toContainText("프로젝트를 찾을 수 없습니다");
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, other.email, other.password);
   await page.goto("/w/acme/projects");
   await expect(page.getByText("Hidden")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, member.email, member.password);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${id}/projects`);
   const hid = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "HID");
@@ -242,7 +242,7 @@ test("private project is absent for non-members and viewer writes fail visibly",
   });
   expect(addRes.status()).toBe(201);
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, admin.email, admin.password);
   await page.goto("/w/acme/projects");
   await expect(page.getByRole("link", { name: /Hidden/ })).toBeVisible();
@@ -278,7 +278,7 @@ test("wiki shell and foreign workspace denial still hold after project flow", as
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
   await expect(page.getByText("현재 역할: 멤버")).toBeVisible();
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, guest.email, guest.password);
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
@@ -294,7 +294,7 @@ test("wiki shell and foreign workspace denial still hold after project flow", as
   createE2eUser(foreign.email, foreign.password, foreign.givenName, {
     familyName: foreign.familyName,
   });
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, foreign.email, foreign.password);
   await page.goto("/w/acme/settings");
   await expect(page).toHaveURL(/\?denied=workspace$/);
@@ -302,7 +302,7 @@ test("wiki shell and foreign workspace denial still hold after project flow", as
   await page.getByRole("button", { name: "닫기" }).click();
   await expect(page).not.toHaveURL(/\?denied=workspace/);
 
-  await page.getByRole("button", { name: "로그아웃" }).click();
+  await logout(page);
   await login(page, admin.email, admin.password);
   await page.goto("/w/acme/wiki");
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
