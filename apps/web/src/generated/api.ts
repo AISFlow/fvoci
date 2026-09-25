@@ -222,7 +222,7 @@ export interface paths {
         get: operations["get_workspace"];
         put?: never;
         post?: never;
-        delete?: never;
+        delete: operations["delete_workspace"];
         options?: never;
         head?: never;
         patch: operations["patch_workspace"];
@@ -1397,6 +1397,9 @@ export interface components {
         CreateWorkspaceBody: {
             name: string;
             slug: string;
+        };
+        DeleteWorkspaceBody: {
+            confirmSlug: string;
         };
         DocumentMetaResponse: {
             /** Format: date-time */
@@ -2702,6 +2705,78 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    delete_workspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteWorkspaceBody"];
+            };
+        };
+        responses: {
+            /** @description Workspace deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Invalid confirmation slug */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Personal workspace is immutable */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

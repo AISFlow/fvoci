@@ -107,6 +107,17 @@ pub async fn remove_pending_by_inviter(
     Ok(result.rows_affected() as i64)
 }
 
+pub async fn remove_by_workspace(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM fvoci.invitations WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn create_invitation(
     pool: &PgPool,
     workspace_id: Uuid,
