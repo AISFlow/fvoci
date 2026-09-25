@@ -6,18 +6,26 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { SearchCommand } from "@/features/workspace/search-command";
 import { NotificationBell } from "@/features/notifications/notification-bell";
-import { projectsPath, searchPath, settingsPath, wikiPath, notificationsPath } from "@/lib/href";
+import {
+  projectsPath,
+  searchPath,
+  settingsPath,
+  wikiPath,
+  notificationsPath,
+  workspaceHomePath,
+} from "@/lib/href";
 import { api, ProblemError, problemMessage } from "@/lib/api";
 import { workspacesQuery } from "@/lib/queries";
 import "@/features/workspace/workspace-aux.css";
 
-export type WorkspaceNav = "wiki" | "settings" | "projects" | "search" | "notifications";
+export type WorkspaceNav = "home" | "wiki" | "settings" | "projects" | "search" | "notifications";
 
 function landingPath(slug: string, activeNav: WorkspaceNav): string {
   if (activeNav === "settings") return settingsPath(slug);
   if (activeNav === "projects") return projectsPath(slug);
   if (activeNav === "search") return searchPath(slug);
   if (activeNav === "notifications") return notificationsPath(slug);
+  if (activeNav === "home") return workspaceHomePath(slug);
   return wikiPath(slug);
 }
 
@@ -78,6 +86,13 @@ export function WorkspaceShell({
           </Link>
           <nav className="workspace-shell__nav" aria-label={t("nav.workspace")}>
             <Link
+              to={workspaceHomePath(slug)}
+              className={activeNav === "home" ? "workspace-shell__nav-link is-active" : "workspace-shell__nav-link"}
+              aria-current={activeNav === "home" ? "page" : undefined}
+            >
+              {t("nav.home")}
+            </Link>
+            <Link
               to={wikiPath(slug)}
               className={activeNav === "wiki" ? "workspace-shell__nav-link is-active" : "workspace-shell__nav-link"}
               aria-current={activeNav === "wiki" ? "page" : undefined}
@@ -135,6 +150,9 @@ export function WorkspaceShell({
           )}
           <SearchCommand slug={slug} workspaceId={workspaceId} />
           <NotificationBell slug={slug} workspaceId={workspaceId} />
+          <Link to="/settings/account" className="text-ui underline underline-offset-2">
+            {t("settings.account")}
+          </Link>
           <Button
             type="button"
             size="sm"

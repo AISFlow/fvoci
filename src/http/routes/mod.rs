@@ -1,3 +1,4 @@
+pub mod account;
 pub mod api_tokens;
 pub mod attachments;
 pub mod auth;
@@ -15,5 +16,7 @@ pub mod projects;
 pub mod revisions;
 pub mod search;
 pub mod setup;
+pub mod share;
+pub mod stars;
 pub mod tasks;
 pub mod workspaces;

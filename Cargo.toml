@@ -239,3 +239,16 @@ required-features = ["db-tests"]
 name = "background_jobs"
 path = "tests/background_jobs.rs"
 required-features = ["db-tests"]
+
+[[test]]
+name = "account_lifecycle"
+path = "tests/account_lifecycle.rs"
+required-features = ["db-tests"]
+
+# Password hashing (argon2id, 64 MiB, t=3) is ~20x slower unoptimized; debug
+# test and e2e servers otherwise spend seconds per login or password change.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

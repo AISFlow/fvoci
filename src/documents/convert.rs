@@ -19,6 +19,9 @@ use tokio::sync::Semaphore;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_CONCURRENCY: usize = 2;
+/// Helpers anonymous callers (public share PDFs) may run at once. They never
+/// wait for a permit, so they cannot queue ahead of members or import jobs.
+const PUBLIC_CONCURRENCY: usize = 1;
 const MAX_STDOUT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES: u64 = 16 * 1024;
 /// Variables the helper may inherit. Everything else (DATABASE_URL, peppers,
@@ -39,6 +42,9 @@ pub struct ConvertClient {
     args: Vec<String>,
     timeout: Duration,
     permits: Arc<Semaphore>,
+    /// Separate pool for anonymous work; see [`ConvertClient::for_public`].
+    public_permits: Arc<Semaphore>,
+    fail_fast: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +57,8 @@ pub enum ConvertError {
     TooLarge,
     #[error("timed out")]
     TimedOut,
+    #[error("document convert helper busy")]
+    Busy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +97,18 @@ impl ConvertClient {
             args,
             timeout: DEFAULT_TIMEOUT,
             permits: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY)),
+            public_permits: Arc::new(Semaphore::new(PUBLIC_CONCURRENCY)),
+            fail_fast: false,
+        }
+    }
+
+    /// The same helper on its own small pool that refuses with
+    /// [`ConvertError::Busy`] instead of waiting, for unauthenticated callers.
+    pub fn for_public(&self) -> Self {
+        Self {
+            permits: self.public_permits.clone(),
+            fail_fast: true,
+            ..self.clone()
         }
     }
 
@@ -100,11 +120,18 @@ impl ConvertClient {
 
     async fn call(&self, body: Value) -> Result<ConvertResponse, ConvertError> {
         let payload = serde_json::to_vec(&body).map_err(|e| ConvertError::Failed(e.to_string()))?;
-        let _permit = self
-            .permits
-            .acquire()
-            .await
-            .map_err(|_| ConvertError::Failed("convert helper closed".into()))?;
+        let _permit = if self.fail_fast {
+            self.permits
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ConvertError::Busy)?
+        } else {
+            self.permits
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| ConvertError::Failed("convert helper closed".into()))?
+        };
 
         let mut command = Command::new(&self.command);
         command
@@ -276,6 +303,23 @@ impl ConvertClient {
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    #[tokio::test]
+    async fn public_calls_refuse_instead_of_queueing_and_keep_member_permits() {
+        let client = ConvertClient::from_parts("/bin/false", vec![]);
+        let public = client.for_public();
+        let _held = public.permits.clone().try_acquire_owned().unwrap();
+        let err = public.call(serde_json::json!({})).await.unwrap_err();
+        assert!(matches!(err, ConvertError::Busy), "{err:?}");
+        // A second public view shares the same pool.
+        let err = client
+            .for_public()
+            .call(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConvertError::Busy), "{err:?}");
+        assert_eq!(client.permits.available_permits(), DEFAULT_CONCURRENCY);
+    }
     use super::*;
 
     fn script(dir: &std::path::Path, name: &str, body: &str) -> String {

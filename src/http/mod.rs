@@ -55,6 +55,7 @@ pub fn router_with_integrations(
     let api = Router::new()
         .merge(routes::setup::router())
         .merge(routes::auth::router())
+        .merge(routes::account::router())
         .merge(routes::workspaces::router())
         .merge(routes::invitations::router())
         .merge(routes::projects::router())
@@ -72,6 +73,8 @@ pub fn router_with_integrations(
         .merge(routes::api_tokens::router())
         .merge(routes::ics::router())
         .merge(routes::integrations::router(integrations))
+        .merge(routes::stars::router())
+        .merge(routes::share::router())
         .merge(collab)
         .layer(middleware::from_fn(canonicalize_bearer_path))
         .with_state(state);

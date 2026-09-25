@@ -190,3 +190,13 @@ export function workspaceGithubQuery(workspaceId: string) {
     retry: false,
   });
 }
+export const providersQuery = queryOptions({
+  queryKey: ["auth", "providers"],
+  queryFn: async () => ensureOk(await api.GET("/api/v1/auth/providers")),
+});
+
+export const identitiesQuery = queryOptions({
+  queryKey: ["auth", "identities"],
+  queryFn: async () => ensureOk(await api.GET("/api/v1/auth/identities")),
+  retry: false,
+});

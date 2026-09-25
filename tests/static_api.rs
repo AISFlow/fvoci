@@ -212,3 +212,32 @@ async fn merged_router_returns_json_for_unknown_api_and_serves_static() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn static_shell_and_assets_send_no_referrer() {
+    let dir = std::env::temp_dir().join(format!("fvoci-static-ref-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
+    std::fs::write(dir.join("assets.txt"), "asset").unwrap();
+    let app: Router = static_router(dir.clone());
+    // The SPA shell for a share URL carries the token in the path.
+    for (uri, status) in [
+        ("/s/some-share-token", StatusCode::OK),
+        ("/", StatusCode::OK),
+        ("/assets.txt", StatusCode::OK),
+        ("/missing-asset.js", StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{uri}");
+        assert_eq!(
+            response.headers()["referrer-policy"],
+            "no-referrer",
+            "{uri}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

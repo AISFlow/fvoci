@@ -651,7 +651,7 @@ pub(crate) async fn export_document(
                     params: None,
                 });
             }
-            Err(ExportRenderError::Failed) => {
+            Err(ExportRenderError::Failed | ExportRenderError::Busy) => {
                 return Err(AppError::internal().into());
             }
         };

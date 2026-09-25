@@ -1,3 +1,4 @@
+pub mod account;
 pub mod api_tokens;
 pub mod attachment_extract;
 pub mod attachments;
@@ -5,6 +6,7 @@ pub mod collab;
 pub mod collab_delivery;
 pub mod comments;
 pub mod context;
+pub mod dashboard;
 pub mod documents;
 pub mod group_grants;
 pub mod groups;
@@ -29,8 +31,11 @@ pub mod projects;
 pub mod quota;
 pub mod revisions;
 pub mod search_index;
+pub mod share;
+pub mod stars;
 pub mod task_activity;
 pub mod tasks;
+pub mod user_export;
 pub mod workspace;
 
 use sqlx::PgPool;

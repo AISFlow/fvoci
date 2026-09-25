@@ -16,6 +16,12 @@ import { NotificationsPage } from "@/pages/NotificationsPage";
 import { InvitePage } from "@/pages/InvitePage";
 import { AttachmentViewPage } from "@/pages/AttachmentViewPage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
+import { PublicSharePage } from "@/pages/PublicSharePage";
+import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
+import { MagicLinkPage } from "@/pages/MagicLinkPage";
+import { ConfirmEmailPage } from "@/pages/ConfirmEmailPage";
+import { CancelWithdrawPage } from "@/pages/CancelWithdrawPage";
+import { AccountSettingsPage } from "@/pages/AccountSettingsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -32,6 +38,8 @@ export function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/setup" element={<SetupPage />} />
+          {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
+          <Route path="/s/:token" element={<PublicSharePage />} />
           <Route
             path="/invite/:token"
             element={
@@ -57,6 +65,38 @@ export function App() {
             }
           />
           <Route
+            path="/magic-link"
+            element={
+              <SetupGuard>
+                <MagicLinkPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/confirm-email"
+            element={
+              <SetupGuard>
+                <ConfirmEmailPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/cancel-withdraw"
+            element={
+              <SetupGuard>
+                <CancelWithdrawPage />
+              </SetupGuard>
+            }
+          />
+          <Route
+            path="/settings/account"
+            element={
+              <SetupGuard>
+                <AccountSettingsPage />
+              </SetupGuard>
+            }
+          />
+          <Route
             path="/"
             element={
               <SetupGuard>
@@ -72,6 +112,7 @@ export function App() {
               </SetupGuard>
             }
           >
+            <Route index element={<WorkspaceHomePage />} />
             <Route path="projects" element={<ProjectsPage />} />
             <Route path="wiki" element={<WikiPage />} />
             <Route path="search" element={<SearchPage />} />

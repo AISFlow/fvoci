@@ -50,6 +50,9 @@ pub enum ProblemCode {
     UploadCapacityExceeded,
     AiUnavailable,
     IntegrationUnavailable,
+    ConfirmInvalid,
+    OwnerTransferRequired,
+    LastInstanceAdmin,
     InternalError,
 }
 
@@ -100,6 +103,9 @@ impl ProblemCode {
             Self::UploadCapacityExceeded => "upload_capacity_exceeded",
             Self::AiUnavailable => "ai_unavailable",
             Self::IntegrationUnavailable => "integration_unavailable",
+            Self::ConfirmInvalid => "confirm_invalid",
+            Self::OwnerTransferRequired => "owner_transfer_required",
+            Self::LastInstanceAdmin => "last_instance_admin",
             Self::InternalError => "internal_error",
         }
     }
@@ -152,6 +158,9 @@ impl ProblemCode {
             Self::UploadCapacityExceeded => "upload capacity exceeded — retry",
             Self::AiUnavailable => "ai unavailable",
             Self::IntegrationUnavailable => "integration unavailable",
+            Self::ConfirmInvalid => "confirm_invalid",
+            Self::OwnerTransferRequired => "owner_transfer_required",
+            Self::LastInstanceAdmin => "last_instance_admin",
             Self::InternalError => "internal error",
         }
     }
@@ -164,6 +173,7 @@ impl ProblemCode {
             Self::InvalidInput
             | Self::PasswordInvalid
             | Self::MagicInvalid
+            | Self::ConfirmInvalid
             | Self::AssigneeIsNotAMember => StatusCode::BAD_REQUEST,
             Self::InstanceSetupAlreadyCompleted
             | Self::NotFound
@@ -186,7 +196,11 @@ impl ProblemCode {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
             Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
-            Self::Conflict | Self::ProjectArchived | Self::RestoreRejected => StatusCode::CONFLICT,
+            Self::Conflict
+            | Self::ProjectArchived
+            | Self::RestoreRejected
+            | Self::OwnerTransferRequired
+            | Self::LastInstanceAdmin => StatusCode::CONFLICT,
             Self::CollabTimeoutRetry => StatusCode::GATEWAY_TIMEOUT,
             Self::ImportFailed => StatusCode::BAD_REQUEST,
             Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,

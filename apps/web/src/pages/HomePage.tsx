@@ -106,6 +106,9 @@ export function HomePage() {
               {t("workspace.create")}
             </Button>
           ) : null}
+          <Link to="/settings/account" className="self-center text-ui underline underline-offset-2">
+            {t("settings.account")}
+          </Link>
           <Button type="button" size="sm" variant="outline" onClick={() => void logout()}>
             {t("nav.logout")}
           </Button>
