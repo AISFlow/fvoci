@@ -23,6 +23,8 @@ import { collabBadge } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
 import { collabUserOf, setTitleEditing, useCollabSession } from "./collab-session";
 import { RevisionPanel } from "./revision-panel";
+import { ShareDialog } from "@/features/share/share-dialog";
+import { StarToggle } from "@/features/share/star-toggle";
 import "./document-shell.css";
 
 type PatchDocumentBody = components["schemas"]["PatchDocumentBody"];
@@ -340,6 +342,13 @@ export function DocumentView({ workspaceId, slug, documentId }: DocumentViewProp
             ) : null}
             {readOnly ? (
               <span className="document-page__badge">{t("doc.readOnly")}</span>
+            ) : null}
+            <StarToggle workspaceId={workspaceId} type="document" targetId={documentId} />
+            {!readOnly ? (
+              <ShareDialog
+                workspaceId={workspaceId}
+                target={{ documentId, projectId: null }}
+              />
             ) : null}
           </div>
           {!readOnly ? (
