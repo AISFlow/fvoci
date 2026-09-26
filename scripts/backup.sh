@@ -9,9 +9,11 @@
 #
 # Meilisearch data is not included. The index is derived; restore recreates a
 # scoped key and index settings. Product search-rebuild is not in this slice.
-# Pepper keys, DB passwords, and the Meili master key stay in the operator
-# env file — they are not copied into the archive (beyond whatever the database
-# dump already contains).
+# Pepper keys, ENCRYPTION_KEYS, DB passwords, and the Meili master key stay in
+# the operator env file — they are not copied into the archive (beyond whatever
+# the database dump already contains). The manifest records only fingerprints
+# of the pepper keyring and of each ENCRYPTION_KEYS key id
+# (scripts/encryption_keys.py), which restore compares before touching volumes.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,6 +48,14 @@ read_env() {
     echo "missing ${key} in env file" >&2
     exit 1
   fi
+  printf '%s\n' "${line#*=}"
+}
+
+# Optional variable: empty output when the env file does not set it.
+read_env_optional() {
+  local key="$1"
+  local line
+  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 || true)"
   printf '%s\n' "${line#*=}"
 }
 
@@ -214,8 +224,10 @@ fi
 TAR_LIST="$(tar -tf "$STAGING/storage.tar" | sed 's|^\./||')"
 MISSING=0
 # Capture first so a failing psql fails the backup instead of an empty loop.
+# Published previews (variants.preview.key) are never regenerated, so they
+# must be in the archive too.
 STORED_KEYS="$("${COMPOSE[@]}" exec -T postgres sh -c \
-  'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT storage_key FROM fvoci.attachments WHERE status='\''stored'\''"')"
+  'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT storage_key FROM fvoci.attachments WHERE status='\''stored'\'' UNION ALL SELECT variants->'\''preview'\''->>'\''key'\'' FROM fvoci.attachments WHERE status='\''stored'\'' AND jsonb_typeof(variants->'\''preview'\''->'\''key'\'')='\''string'\''"')"
 while IFS= read -r key; do
   [[ -z "$key" ]] && continue
   if ! grep -Fqx "objects/${key}/payload" <<<"$TAR_LIST"; then
@@ -236,6 +248,10 @@ PG_VERSION="$("${COMPOSE[@]}" exec -T postgres sh -c 'psql -X -v ON_ERROR_STOP=1
 PG_VERSION="$(printf '%s' "$PG_VERSION" | tr -d '[:space:]')"
 
 PEPPER_FP="$(pepper_fingerprint "$(read_env PASSWORD_PEPPER_KEYS)" "$(read_env PASSWORD_PEPPER_ACTIVE_KEY_ID)")"
+ENCRYPTION_ENTRY="$(ENCRYPTION_KEYS="$(read_env_optional ENCRYPTION_KEYS)" \
+  ENCRYPTION_ACTIVE_KEY_ID="$(read_env_optional ENCRYPTION_ACTIVE_KEY_ID)" \
+  python3 "$ROOT/scripts/encryption_keys.py" manifest)"
+ENCRYPTION_ENTRY="$ENCRYPTION_ENTRY" \
 PEPPER_FP="$PEPPER_FP" CREATED_AT="$CREATED_AT" SOURCE_PROJECT="$PROJECT" \
   DUMP_SIZE="$DUMP_SIZE" DUMP_SHA="$DUMP_SHA" \
   TAR_SIZE="$TAR_SIZE" TAR_SHA="$TAR_SHA" \
@@ -252,6 +268,7 @@ manifest = {
         "fingerprint": os.environ["PEPPER_FP"],
         "note": "SHA-256 of the canonical keyring and active id; keys are not stored. Restore refuses a different keyring because existing password hashes could not be verified.",
     },
+    "encryptionKeys": json.loads(os.environ["ENCRYPTION_ENTRY"]),
     "search": {
         "included": False,
         "reason": "Meilisearch is derived. Restore runs fvoci-migrate --ensure-meili-key (scoped key and index settings) and --rebuild-search from PostgreSQL.",

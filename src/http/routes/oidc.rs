@@ -311,13 +311,18 @@ async fn callback(
             .or_insert_with(|| value.into_owned());
     }
     let signed_state = jar.get(STATE_COOKIE).map(|c| c.value().to_string());
-    let session_user_id = match jar.get(SESSION_COOKIE) {
+    let session = match jar.get(SESSION_COOKIE) {
         Some(cookie) => state
             .auth
             .session_user(cookie.value())
             .await
             .map_err(internal)?
-            .and_then(|u| Uuid::parse_str(&u.user_id).ok()),
+            .and_then(|u| {
+                Some((
+                    Uuid::parse_str(&u.user_id).ok()?,
+                    Uuid::parse_str(&u.session_id).ok()?,
+                ))
+            }),
         None => None,
     };
     let settings = crate::settings::current_values(&state.auth.db.pool, &state.branding_name)
@@ -331,7 +336,7 @@ async fn callback(
             provider,
             query: &query,
             signed_state: signed_state.as_deref(),
-            session_user_id,
+            session,
             ip: Some(&ip),
             defaults: &settings.defaults_user,
         },
@@ -361,6 +366,18 @@ async fn callback(
         }
         Ok(OidcResult::SeatLimit) => {
             let mut response = AppError::from_code(ProblemCode::LimitSeats).into_response();
+            append_cookie(&mut response, &clear);
+            return Ok(response);
+        }
+        // Same as unlink: the session that asked for the link is gone.
+        Ok(OidcResult::SessionGone) => {
+            tracing::warn!(
+                provider = provider.as_str(),
+                reason = "session_gone",
+                "oidc.callback_failed"
+            );
+            let mut response =
+                AppError::from_code(ProblemCode::AuthenticationRequired).into_response();
             append_cookie(&mut response, &clear);
             return Ok(response);
         }

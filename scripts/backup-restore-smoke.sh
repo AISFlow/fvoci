@@ -27,6 +27,10 @@ RESTORE_APP_PASSWORD="$(openssl rand -hex 16)"
 MEILI_MASTER_KEY="$(openssl rand -hex 16)"
 RESTORE_MEILI_MASTER_KEY="$(openssl rand -hex 16)"
 PEPPER="{\"install\":\"$(openssl rand -hex 32)\"}"
+# Source keyring k1; the restore uses a rotated superset (k1 kept, k2 active).
+ENC_K1="$(openssl rand -hex 32)"
+SOURCE_ENCRYPTION_KEYS="{\"k1\":\"${ENC_K1}\"}"
+RESTORE_ENCRYPTION_KEYS="{\"k1\":\"${ENC_K1}\",\"k2\":\"$(openssl rand -hex 32)\"}"
 OWNER_EMAIL="owner@backup.test"
 OWNER_PASSWORD_LOGIN="installpass1"
 
@@ -84,6 +88,8 @@ write_env() {
   local meili="$4"
   local origin="$5"
   local port="$6"
+  local encryption_keys="$7"
+  local encryption_active="$8"
   cat >"$dest" <<EOF
 FVOCI_IMAGE=${IMAGE_TAG}
 POSTGRES_DB=fvoci
@@ -93,6 +99,8 @@ FVOCI_APP_ROLE=fvoci_app
 FVOCI_APP_PASSWORD=${app_pw}
 PASSWORD_PEPPER_KEYS=${PEPPER}
 PASSWORD_PEPPER_ACTIVE_KEY_ID=install
+ENCRYPTION_KEYS=${encryption_keys}
+ENCRYPTION_ACTIVE_KEY_ID=${encryption_active}
 FVOCI_PUBLIC_ORIGIN=${origin}
 FVOCI_COOKIE_SECURE=false
 FVOCI_PUBLISH_PORT=${port}
@@ -126,9 +134,21 @@ poll_extract_field() {
     "SELECT ${column} FROM fvoci.attachments WHERE id='${attachment_id}'" | tr -d '[:space:]'
 }
 
+poll_count() {
+  local project="$1"
+  local env_file="$2"
+  local sql="$3"
+  docker compose -f "$COMPOSE_FILE" --project-name "$project" --env-file "$env_file" \
+    exec -T postgres psql -U fvoci_owner -d fvoci -tAc "$sql" | tr -d '[:space:]'
+}
+
 SOURCE_PORT="$(pick_port)"
 SOURCE_BASE="http://127.0.0.1:${SOURCE_PORT}"
-write_env "$SOURCE_ENV" "$OWNER_PASSWORD" "$APP_PASSWORD" "$MEILI_MASTER_KEY" "$SOURCE_BASE" "$SOURCE_PORT"
+write_env "$SOURCE_ENV" "$OWNER_PASSWORD" "$APP_PASSWORD" "$MEILI_MASTER_KEY" "$SOURCE_BASE" "$SOURCE_PORT" \
+  "$SOURCE_ENCRYPTION_KEYS" k1
+
+python3 "$ROOT/scripts/encryption_keys.py" self-test
+log_assert "encryption keyring fingerprint self-test: ok"
 
 log_assert "== build image ${IMAGE_TAG}"
 BUILD_START=$SECONDS
@@ -231,6 +251,18 @@ COMMENT_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json"
 COMMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$COMMENT_CREATE")"
 log_assert "document comment create: ok (${COMMENT_ID})"
 
+# A secret sealed with ENCRYPTION_KEYS (MFA setup stores the TOTP secret
+# sealed; it is not enabled, so password login stays single-factor).
+curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
+  -X POST "$SOURCE_BASE/api/v1/auth/mfa/setup" \
+  -d "{\"currentPassword\":\"${OWNER_PASSWORD_LOGIN}\"}" >/dev/null
+SEALED_MFA="$(poll_count "$SOURCE_PROJECT" "$SOURCE_ENV" "SELECT count(*) FROM fvoci.user_mfa WHERE totp_secret LIKE 'enc:v2:k1:%'")"
+if [[ "$SEALED_MFA" != "1" ]]; then
+  echo "expected one sealed MFA secret, got ${SEALED_MFA}" >&2
+  exit 1
+fi
+log_assert "sealed MFA secret on source: ok"
+
 log_assert "== backup source stack"
 BACKUP_START=$SECONDS
 bash "$ROOT/scripts/backup.sh" \
@@ -246,7 +278,7 @@ if [[ "$MODE_DIR" != "700" || "$MODE_DUMP" != "600" || "$MODE_TAR" != "600" || "
   echo "backup permissions expected dir 700 files 600, got dir=${MODE_DIR} dump=${MODE_DUMP} tar=${MODE_TAR} manifest=${MODE_MANIFEST}" >&2
   exit 1
 fi
-python3 - "$BACKUP_DIR/manifest.json" <<'PY'
+ENC_K1="$ENC_K1" python3 - "$BACKUP_DIR/manifest.json" <<'PY'
 import json, os, sys
 backup_dir = os.path.dirname(sys.argv[1])
 names = sorted(os.listdir(backup_dir))
@@ -257,6 +289,10 @@ blob = json.dumps(manifest)
 assert "PASSWORD_PEPPER" not in blob
 assert "MEILI_MASTER" not in blob
 assert "FVOCI_APP_PASSWORD" not in blob
+keys = manifest["encryptionKeys"]
+assert keys["configured"] is True, keys
+assert sorted(keys["keyFingerprints"]) == ["k1"], keys
+assert os.environ["ENC_K1"] not in blob, "raw ENCRYPTION_KEYS key in manifest"
 PY
 log_assert "backup archive private + no extra secrets, search omitted: ok ($((SECONDS - BACKUP_START))s)"
 
@@ -287,16 +323,40 @@ if docker volume ls --format '{{.Name}}' | grep -q "^${WRONG_PROJECT}_"; then
 fi
 log_assert "restore with a different pepper refused before touching anything: ok"
 
+log_assert "== restore with a different key under a backed-up ENCRYPTION_KEYS id must be refused"
+WRONG_ENV="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-wrong-env.${RUN_ID}.XXXXXX")"
+chmod 600 "$WRONG_ENV"
+sed -E "s#^ENCRYPTION_KEYS=.*#ENCRYPTION_KEYS={\"k1\":\"$(openssl rand -hex 32)\"}#" "$SOURCE_ENV" >"$WRONG_ENV"
+WRONG_PROJECT="${RESTORE_PROJECT}-wrongkeys"
+if bash "$ROOT/scripts/restore.sh" --project "$WRONG_PROJECT" --env-file "$WRONG_ENV" --input "$BACKUP_DIR" >/dev/null 2>&1; then
+  rm -f "$WRONG_ENV"
+  echo "restore with a different ENCRYPTION_KEYS key must fail" >&2
+  exit 1
+fi
+rm -f "$WRONG_ENV"
+if docker volume ls --format '{{.Name}}' | grep -q "^${WRONG_PROJECT}_"; then
+  echo "refused restore must not create volumes" >&2
+  exit 1
+fi
+log_assert "restore with a mis-keyed ENCRYPTION_KEYS refused before touching anything: ok"
+
 write_env "$RESTORE_ENV" "$RESTORE_OWNER_PASSWORD" "$RESTORE_APP_PASSWORD" \
-  "$RESTORE_MEILI_MASTER_KEY" "$RESTORE_BASE" "$RESTORE_PORT"
+  "$RESTORE_MEILI_MASTER_KEY" "$RESTORE_BASE" "$RESTORE_PORT" \
+  "$RESTORE_ENCRYPTION_KEYS" k2
 
 log_assert "== restore into a fresh project"
 RESTORE_START=$SECONDS
-bash "$ROOT/scripts/restore.sh" \
+RESTORE_OUT="$(bash "$ROOT/scripts/restore.sh" \
   --project "$RESTORE_PROJECT" \
   --env-file "$RESTORE_ENV" \
-  --input "$BACKUP_DIR"
-log_assert "restore compose up: ok ($((SECONDS - RESTORE_START))s) base=${RESTORE_BASE}"
+  --input "$BACKUP_DIR")"
+printf '%s\n' "$RESTORE_OUT"
+python3 -c 'import json,sys; body=json.loads(sys.argv[1].strip().splitlines()[-1]); assert body.get("secretsVerified") is True, body' "$RESTORE_OUT"
+if grep -Fq "$ENC_K1" <<<"$RESTORE_OUT"; then
+  echo "restore output printed an ENCRYPTION_KEYS key" >&2
+  exit 1
+fi
+log_assert "restore compose up with a rotated superset keyring, secrets opened: ok ($((SECONDS - RESTORE_START))s) base=${RESTORE_BASE}"
 
 wait_http "$RESTORE_BASE" "/api/v1/setup"
 : >"$COOKIE_JAR"

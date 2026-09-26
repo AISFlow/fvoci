@@ -7,6 +7,12 @@
 //! the backup scripts do not copy. This check HEADs every stored key through
 //! `ObjectStorage`, so it answers the same question for both drivers.
 //!
+//! A published image preview (`variants.preview`) is checked the same way
+//! against its recorded byte size. The product never regenerates a published
+//! preview (a new one is only published while `variants.preview` is absent),
+//! so a missing preview object would fail every preview download: it fails
+//! verification instead of being reported as regenerable.
+//!
 //! Branding assets (instance `branding.logo` / `branding.favicon`) live in the
 //! same storage under their recorded key. They have no recorded size, so each
 //! one is read back (at most `BRANDING_ASSET_MAX_BYTES`) and must hash to its
@@ -31,6 +37,13 @@ pub struct StorageVerifyReport {
     pub missing: Vec<Uuid>,
     /// Attachment ids whose object size differs from `size_bytes`.
     pub size_mismatch: Vec<Uuid>,
+    /// Published previews checked.
+    pub preview_checked: u64,
+    /// Attachment ids whose published preview object is missing.
+    pub preview_missing: Vec<Uuid>,
+    /// Attachment ids whose preview object size differs from its recorded
+    /// `bytes`.
+    pub preview_size_mismatch: Vec<Uuid>,
     /// Branding assets referenced by the instance settings.
     pub branding_checked: u64,
     /// Branding asset kinds (`logo`, `favicon`) whose object is missing.
@@ -44,6 +57,8 @@ impl StorageVerifyReport {
     pub fn is_complete(&self) -> bool {
         self.missing.is_empty()
             && self.size_mismatch.is_empty()
+            && self.preview_missing.is_empty()
+            && self.preview_size_mismatch.is_empty()
             && self.branding_missing.is_empty()
             && self.branding_mismatch.is_empty()
     }
@@ -71,6 +86,21 @@ pub async fn verify_stored_objects(
                 Ok(None) => report.missing.push(object.id),
                 Err(err) => {
                     return Err(format!("storage check for attachment {}: {err}", object.id));
+                }
+            }
+            let Some(preview) = &object.preview else {
+                continue;
+            };
+            report.preview_checked += 1;
+            match storage.head(&preview.key).await {
+                Ok(Some(size)) if size as i64 == preview.bytes => {}
+                Ok(Some(_)) => report.preview_size_mismatch.push(object.id),
+                Ok(None) => report.preview_missing.push(object.id),
+                Err(err) => {
+                    return Err(format!(
+                        "storage check for the preview of attachment {}: {err}",
+                        object.id
+                    ));
                 }
             }
         }

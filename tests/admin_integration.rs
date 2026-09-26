@@ -2383,3 +2383,100 @@ async fn verify_storage_covers_branding_assets() {
     pool.close().await;
     h.finish().await;
 }
+
+/// `--verify-storage` also covers published image previews
+/// (`variants.preview`): the product never regenerates one, so a missing or
+/// resized preview object fails verification like a missing original.
+#[tokio::test]
+async fn verify_storage_covers_attachment_previews() {
+    let h = harness().await;
+    let storage: fvoci_server::attachments::ObjectStorage =
+        fvoci_server::attachments::LocalStorage::new(h.storage_root.clone()).into();
+    let admin = h.db.admin().await;
+    let workspace_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let document_id = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO fvoci.documents (
+            id, workspace_id, title, path, parent_id, sort_key, project_id, number,
+            status, schema_version, text, chosung, created_by, content_json, kind
+        ) VALUES ($1, $2, 'Doc', $3, NULL, 'V', NULL, 1, 'published', 1, 'Doc', '', $4,
+            '{"type":"doc","content":[]}'::jsonb, 'wiki')"#,
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(document_id.simple().to_string())
+    .bind(h.admin_id)
+    .execute(&admin)
+    .await
+    .expect("document");
+    let original = vec![7u8; 16];
+    let preview = vec![9u8; 5];
+    // Object keys are UUIDs, like the product's.
+    let preview_key = Uuid::now_v7().to_string();
+    let mut ids = Vec::new();
+    for with_preview in [false, true] {
+        let id = Uuid::now_v7();
+        let key = Uuid::now_v7().to_string();
+        let variants = if with_preview {
+            json!({"preview": {"key": &preview_key, "width": 2, "height": 2, "bytes": preview.len()}})
+        } else {
+            json!({})
+        };
+        sqlx::query(
+            r#"INSERT INTO fvoci.attachments (
+                id, workspace_id, document_id, uploader_id, status, name, mime,
+                size_bytes, reserved_size_bytes, storage_key, image, scan_status,
+                extract_status, completed_at, variants
+            ) VALUES ($1, $2, $3, $4, 'stored', 'f.png', 'image/png', 16, 16, $5, true,
+                'skipped', 'skipped', now(), $6)"#,
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(document_id)
+        .bind(h.admin_id)
+        .bind(&key)
+        .bind(&variants)
+        .execute(&admin)
+        .await
+        .expect("attachment");
+        storage.put_bytes(&key, original.clone()).await.unwrap();
+        if with_preview {
+            storage
+                .put_bytes(&preview_key, preview.clone())
+                .await
+                .unwrap();
+        }
+        ids.push(id);
+    }
+    let with_preview = ids[1];
+    let pool = pool::connect_app(&h.db.app_url).await.unwrap();
+    let verify = || fvoci_server::attachments::verify_stored_objects(&pool, &storage);
+    let report = verify().await.unwrap();
+    assert_eq!(report.checked, 2);
+    assert_eq!(report.preview_checked, 1);
+    assert!(report.is_complete(), "{report:?}");
+    let printed = serde_json::to_value(&report).unwrap();
+    assert_eq!(printed["previewChecked"], 1);
+    assert_eq!(printed["previewMissing"], json!([]));
+
+    // Original restored, preview object lost: incomplete.
+    storage.delete_object(&preview_key).await.unwrap();
+    let report = verify().await.unwrap();
+    assert!(report.missing.is_empty());
+    assert_eq!(report.preview_missing, vec![with_preview]);
+    assert!(!report.is_complete());
+
+    // A preview object of another size is not the published one.
+    storage.put_bytes(&preview_key, vec![9u8; 6]).await.unwrap();
+    let report = verify().await.unwrap();
+    assert_eq!(report.preview_size_mismatch, vec![with_preview]);
+    assert!(report.preview_missing.is_empty());
+    assert!(!report.is_complete());
+    pool.close().await;
+    admin.close().await;
+    h.finish().await;
+}

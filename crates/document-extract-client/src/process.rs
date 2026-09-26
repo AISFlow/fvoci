@@ -266,6 +266,9 @@ fn worker_fail(reason: WorkerFailureReason, detail: impl Into<String>) -> Extrac
     })
 }
 
+/// Variables the helper may inherit; everything else is withheld.
+const CHILD_ENV_ALLOWLIST: &[&str] = &["PATH"];
+
 fn spawn_child(
     req: ExtractRequest,
     deadline: Instant,
@@ -302,7 +305,16 @@ fn spawn_child(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_remove("DOCUMENT_EXTRACT_TEST_HANG_MS");
+        // Like the convert and image-preview children: the helper inherits
+        // nothing from the server (database URLs, peppers, ENCRYPTION_KEYS,
+        // SMTP or storage credentials). It reads no variables itself; the
+        // test hang arrives as `--test-hang-ms`, never through the env.
+        .env_clear();
+    for key in CHILD_ENV_ALLOWLIST {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
 
     if let Err(err) = apply_pre_exec_rlimits(&mut cmd, &req.limits) {
         return Ok(worker_fail(WorkerFailureReason::LimitApply, err));
@@ -761,5 +773,54 @@ mod child_io_tests {
             "{:?}",
             report.outcome
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod child_env_tests {
+    use super::{extract_killable, ExtractRequest};
+    use crate::limits::Limits;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A stand-in helper that records its environment (to the path passed as
+    /// `--name`) shows the server's variables are not inherited.
+    #[test]
+    fn helper_inherits_only_the_allowlist() {
+        // Cargo sets these for the test process; the helper must not see them.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let dir = std::env::temp_dir().join(format!(
+            "fvoci-extract-env-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("dump-env.sh");
+        std::fs::write(&script, "#!/bin/sh\n/usr/bin/env > \"$2\"\nexit 3\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let out = dir.join("env.txt");
+        let _ = extract_killable(ExtractRequest {
+            bytes: Vec::new(),
+            name: out.to_string_lossy().into_owned(),
+            limits: Limits::for_tests(),
+            extractor_bin: script,
+            test_hang_ms: None,
+        });
+        let dumped = std::fs::read_to_string(&out).expect("helper ran");
+        let _ = std::fs::remove_dir_all(&dir);
+        let keys: Vec<&str> = dumped
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(k, _)| k))
+            .collect();
+        // `sh` itself may add PWD / SHLVL / `_`; nothing else may appear.
+        for key in &keys {
+            assert!(
+                matches!(*key, "PATH" | "PWD" | "OLDPWD" | "SHLVL" | "_"),
+                "helper inherited {key}"
+            );
+        }
+        assert_eq!(keys.contains(&"PATH"), std::env::var_os("PATH").is_some());
     }
 }
