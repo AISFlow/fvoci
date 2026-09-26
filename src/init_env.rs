@@ -147,7 +147,14 @@ pub fn write_env(flags: &InitEnvFlags) -> Result<PathBuf, String> {
         let mut file = opts.open(&staging)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&staging, dest)
+        if flags.yes {
+            std::fs::rename(&staging, dest)
+        } else {
+            // Without --yes, never replace a file that appeared after the
+            // check: link() refuses an existing destination atomically.
+            std::fs::hard_link(&staging, dest)?;
+            std::fs::remove_file(&staging)
+        }
     })();
     if let Err(err) = written {
         let _ = std::fs::remove_file(&staging);

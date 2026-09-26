@@ -302,7 +302,7 @@ fn parse_positive_u64(name: &str, raw: Option<&str>, default: u64) -> Result<u64
     Ok(value)
 }
 
-fn storage_root_path_from_values(
+pub(crate) fn storage_root_path_from_values(
     fvoci_storage_dir: Option<&str>,
     storage_local_path: Option<&str>,
 ) -> Result<PathBuf, String> {

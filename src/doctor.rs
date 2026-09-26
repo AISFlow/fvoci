@@ -2,8 +2,9 @@
 //! server's own environment and dependencies without starting it and prints
 //! `{"ok":bool,"checks":[{"name","ok","detail"?}]}`. Run it with the server's
 //! environment (it needs no owner credentials). Checks are read-only: nothing
-//! is migrated, created or sent. Details never carry secrets; database URLs in
-//! driver messages are masked.
+//! is migrated or sent, and nothing is left behind (the local storage check
+//! writes and removes one probe file). Details never carry secrets; database
+//! URLs in driver messages are masked.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -62,7 +63,8 @@ impl Checks {
 
 /// `scheme://user:password@` → `scheme://***@` in any message.
 pub fn mask_urls(text: &str) -> String {
-    let re = regex::Regex::new(r"([A-Za-z][A-Za-z0-9+.-]*://)[^@/\s]+@").expect("static pattern");
+    // Up to the last `@` of the token, so a userinfo with a raw `/` is masked too.
+    let re = regex::Regex::new(r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s@]*@").expect("static pattern");
     re.replace_all(text, "${1}***@").into_owned()
 }
 
@@ -278,6 +280,36 @@ async fn database_checks(checks: &mut Checks, url: &str, collab: Option<&CollabC
 }
 
 async fn storage_check() -> Result<Option<String>, String> {
+    let driver = std::env::var("STORAGE_DRIVER")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "local".to_string());
+    if driver == "local" {
+        // Inspect only: the server creates the root at start, the doctor must
+        // not (it may run as another user or on another host).
+        let root = crate::config::storage_root_path_from_values(
+            std::env::var("FVOCI_STORAGE_DIR").ok().as_deref(),
+            std::env::var("STORAGE_LOCAL_PATH").ok().as_deref(),
+        )?;
+        let meta = std::fs::metadata(&root)
+            .map_err(|e| format!("storage root {}: {e}", root.display()))?;
+        if !meta.is_dir() {
+            return Err(format!(
+                "storage root {} is not a directory",
+                root.display()
+            ));
+        }
+        // Writability: a probe file is created and removed again.
+        let probe = root.join(format!(".fvoci-doctor-{}", uuid::Uuid::now_v7().simple()));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .map_err(|e| format!("storage root {} is not writable: {e}", root.display()))?;
+        let _ = std::fs::remove_file(&probe);
+        return Ok(Some("local".to_string()));
+    }
     let settings = crate::config::storage_settings_from_env()?;
     let storage = ObjectStorage::from_settings(&settings)?;
     storage.probe().await?;
@@ -352,5 +384,19 @@ mod tests {
         )
         .unwrap();
         assert!(!has_public_dev_key(&real));
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::mask_urls;
+
+    #[test]
+    fn masks_userinfo_containing_a_slash() {
+        assert_eq!(
+            mask_urls("connect postgres://u:pa/ss@db:5432/x failed"),
+            "connect postgres://***@db:5432/x failed"
+        );
+        assert_eq!(mask_urls("no url here"), "no url here");
     }
 }
