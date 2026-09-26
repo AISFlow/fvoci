@@ -47,20 +47,43 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(users.getByText(member.email)).toBeVisible();
   await expect(page.getByRole("region", { name: "워크스페이스", exact: true }).getByText(admin.workspaceName)).toBeVisible();
 
-  // Instance setting: branding name persists across a reload and reaches the public view.
+  // The unlicensed instance keeps its default branding, and both UI and API
+  // refuse branding changes without hiding ordinary admin settings.
   const branding = page.getByRole("region", { name: "브랜딩", exact: true });
-  const brandName = "FVOCI 테스트 인스턴스";
-  await branding.getByLabel("branding.name").fill(brandName);
+  await expect(branding).toContainText("엔터프라이즈 기능 사용 권한이 필요합니다");
+  await expect(branding.getByLabel("branding.name")).toHaveValue("FVOCI");
+  await expect(branding.getByLabel("branding.name")).toBeDisabled();
+  await expect(branding.getByRole("button", { name: "저장" })).toBeDisabled();
+  const deniedBranding = await page.request.patch("/api/v1/admin/instance-settings", {
+    data: { branding: { name: "Denied", smtpFromDisplay: null, loginBrandText: null } },
+  });
+  expect(deniedBranding.status()).toBe(403);
+  expect((await deniedBranding.json()).code).toBe("enterprise_license_required");
+
+  const share = page.getByRole("region", { name: "공유 링크", exact: true });
+  await expect(share.getByLabel("share.defaultExpiresDays")).toBeEnabled();
+  await share.getByLabel("share.defaultExpiresDays").fill("14");
   const saved = page.waitForResponse(
     (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
   );
-  await branding.getByRole("button", { name: "저장" }).click();
+  await share.getByRole("button", { name: "저장" }).click();
   expect((await saved).status()).toBe(200);
   await page.reload();
-  await expect(page.getByRole("region", { name: "브랜딩", exact: true }).getByLabel("branding.name")).toHaveValue(brandName);
+  await expect(page.getByRole("region", { name: "공유 링크", exact: true }).getByLabel("share.defaultExpiresDays")).toHaveValue("14");
+  await expect(page.getByRole("region", { name: "브랜딩", exact: true }).getByLabel("branding.name")).toHaveValue("FVOCI");
   const instance = await page.request.get("/api/v1/instance");
   expect(instance.ok()).toBe(true);
-  expect((await instance.json()).values.branding.name).toBe(brandName);
+  expect((await instance.json()).values.branding.name).toBe("FVOCI");
+
+  await page.getByRole("link", { name: "활동", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/audit$/);
+  await expect(page.getByText("엔터프라이즈 기능 사용 권한이 필요합니다")).toBeVisible();
+  await page.goto(`/w/${admin.workspaceSlug}/settings`);
+  const sso = page.locator("details").filter({ has: page.getByText("싱글 사인온", { exact: true }) });
+  await sso.locator("summary").click();
+  await expect(sso.getByText("엔터프라이즈 기능 사용 권한이 필요합니다")).toBeVisible();
+  await expect(sso.locator("form")).toHaveCount(0);
+  await page.goto("/settings/admin");
 
   // Publish a required terms document.
   await page.getByRole("link", { name: "법적 문서", exact: true }).click();
