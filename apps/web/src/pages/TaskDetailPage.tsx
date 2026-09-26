@@ -21,10 +21,8 @@ import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { parseRef, projectsPath, projectTasksPath } from "@/lib/href";
-import { CommentPanel } from "@/features/comments/comment-panel";
-import { ShareDialog } from "@/features/share/share-dialog";
-import { StarToggle } from "@/features/share/star-toggle";
-import { DocumentTagsBar } from "@/features/documents/document-tags-bar";
+import { CollabRoom } from "@/features/documents/collab-session";
+import { DocumentView } from "@/features/documents/document-view";
 import "@/features/projects/projects.css";
 
 export function TaskDetailPage() {
@@ -191,42 +189,21 @@ export function TaskDetailPage() {
           {t("task.error.notFound")}
         </p>
       ) : null}
-      {projectDocument ? (
-        <article className="task-detail">
-          <header>
-            <p className="task-home__note">{projectDocument.displayId}</p>
-            <h1>{projectDocument.title}</h1>
-            <div className="flex flex-wrap gap-2">
-              <StarToggle workspaceId={workspace.id} type="document" targetId={projectDocument.id} />
-              {project?.canEdit ? (
-                <ShareDialog
-                  workspaceId={workspace.id}
-                  target={{
-                    documentId: projectDocument.id,
-                    projectId: projectDocument.projectId ?? project.id,
-                  }}
-                />
-              ) : null}
-            </div>
-          </header>
-          <DocumentTagsBar
+      {projectDocument && project ? (
+        <CollabRoom workspaceId={workspace.id} kind="document" id={projectDocument.id}>
+          <DocumentView
             workspaceId={workspace.id}
+            slug={slug}
             documentId={projectDocument.id}
-            projectId={projectDocument.projectId ?? project?.id ?? null}
-            readOnly={!(project?.canEdit ?? false) || project?.status === "archived"}
+            project={{
+              id: project.id,
+              key: project.key,
+              rootDocumentId: project.rootDocumentId ?? null,
+              canEdit: project.canEdit,
+              archived: project.status === "archived",
+            }}
           />
-          <p className="task-home__note">{t("task.document.unsupported")}</p>
-          {me.data ? (
-            <CommentPanel
-              workspaceId={workspace.id}
-              kind="document"
-              targetId={projectDocument.id}
-              projectId={projectDocument.projectId ?? project?.id ?? ""}
-              currentUserId={me.data.userId}
-              readOnly={!(project?.canEdit ?? false)}
-            />
-          ) : null}
-        </article>
+        </CollabRoom>
       ) : null}
       {lookup.isLoading ? <QueryLoading /> : null}
       {lookup.isError && !lookup404 ? (

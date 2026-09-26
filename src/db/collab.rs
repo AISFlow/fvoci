@@ -26,8 +26,10 @@
 //! 1. `pg_advisory_xact_lock(1907006, lockKeyFromUuid(userId))` for each actor user
 //! 2. `users` + `sessions` `FOR UPDATE` via `recheck_session`
 //! 3. `memberships` `FOR UPDATE` via `membership_role_for_update`
-//! 4. `documents` `FOR UPDATE` for the wiki document row
-//! 5. `document_states` `FOR UPDATE`
+//! 4. project documents only: `projects` `FOR SHARE` (before the document row, matching
+//!    the project → document order of project document mutations)
+//! 5. `documents` `FOR UPDATE` for the wiki or project document row
+//! 6. `document_states` `FOR UPDATE`
 //!
 //! Empty-state seed only: `pg_advisory_xact_lock(1907004, lockKeyFromUuid(documentId))`.
 //! Reserved for a future room-manager connection lifetime lock:
@@ -48,6 +50,7 @@ use crate::db::documents::{
     recheck_session, workspace_is_live,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::db::projects::share_lock_project_permission;
 use crate::projects::ProjectPermission;
 
 pub use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
@@ -285,12 +288,48 @@ async fn lock_collab_init(
     Ok(())
 }
 
-async fn lock_wiki_document_for_update(
+/// Result of the single collab document access check (wiki or project document).
+struct CollabDocumentAccess {
+    permission: ProjectPermission,
+    /// Document status `archived` or the owning project archived: the room is read-only.
+    archived: bool,
+}
+
+/// Locks and authorizes a live wiki or project document for collab.
+///
+/// Project documents use the project's effective permission (visibility, direct
+/// and group grants) under a `FOR SHARE` project row lock taken before the
+/// document row lock, matching the project → document order of project document
+/// mutations. Wiki documents use `document_permission`. Returns `None` when the
+/// document is missing, trashed, in a trashed project, or changed affiliation
+/// between the unlocked read and the row lock.
+async fn lock_collab_document_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
+    actor_user_id: Uuid,
     document_id: Uuid,
-) -> Result<Option<(Option<Uuid>, String, Option<DateTime<Utc>>)>, sqlx::Error> {
-    sqlx::query_as(
+) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
+    let affiliation: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((expected_project_id,)) = affiliation else {
+        return Ok(None);
+    };
+    let project_access = match expected_project_id {
+        Some(project_id) => {
+            match share_lock_project_permission(tx, workspace_id, actor_user_id, project_id).await?
+            {
+                Some(access) => Some(access),
+                None => return Ok(None),
+            }
+        }
+        None => None,
+    };
+    let row: Option<(Option<Uuid>, String, Option<DateTime<Utc>>)> = sqlx::query_as(
         r#"
         SELECT project_id, status, deleted_at
         FROM fvoci.documents
@@ -301,7 +340,24 @@ async fn lock_wiki_document_for_update(
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut **tx)
-    .await
+    .await?;
+    let Some((project_id, status, deleted_at)) = row else {
+        return Ok(None);
+    };
+    if deleted_at.is_some() || project_id != expected_project_id {
+        return Ok(None);
+    }
+    let (permission, project_archived) = match project_access {
+        Some(access) => access,
+        None => (
+            document_permission(tx, workspace_id, actor_user_id, document_id, true).await?,
+            false,
+        ),
+    };
+    Ok(Some(CollabDocumentAccess {
+        permission,
+        archived: project_archived || status == "archived",
+    }))
 }
 
 async fn ensure_collab_state_row(
@@ -462,7 +518,7 @@ fn state_row_to_load(row: StateRow, tail: Vec<CollabUpdateRow>) -> CollabLoadSta
     }
 }
 
-async fn authorize_wiki_collab_write(
+async fn authorize_collab_write(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -480,20 +536,16 @@ async fn authorize_wiki_collab_write(
     if role.is_none() {
         return Ok(Err(CollabDbError::Forbidden));
     }
-    // Existence (tenant, trash, wiki) decides NotFound before permission decides Forbidden.
-    let doc = lock_wiki_document_for_update(tx, workspace_id, document_id).await?;
-    let Some((project_id, status, deleted_at)) = doc else {
+    // Existence (tenant, trash, affiliation) decides NotFound before permission decides Forbidden.
+    let Some(access) =
+        lock_collab_document_access(tx, workspace_id, actor_user_id, document_id).await?
+    else {
         return Ok(Err(CollabDbError::NotFound));
     };
-    if deleted_at.is_some() || project_id.is_some() {
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    let permission =
-        document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
-    if !permission.at_least(ProjectPermission::Edit) {
+    if !access.permission.at_least(ProjectPermission::Edit) {
         return Ok(Err(CollabDbError::Forbidden));
     }
-    if status == "archived" {
+    if access.archived {
         return Ok(Err(CollabDbError::Forbidden));
     }
     let content: (Value,) = sqlx::query_as(
@@ -506,7 +558,7 @@ async fn authorize_wiki_collab_write(
     Ok(Ok(content))
 }
 
-async fn authorize_wiki_collab_read(
+async fn authorize_collab_read(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -524,16 +576,12 @@ async fn authorize_wiki_collab_read(
     if role.is_none() {
         return Ok(Err(CollabDbError::NotFound));
     }
-    let doc = lock_wiki_document_for_update(tx, workspace_id, document_id).await?;
-    let Some((project_id, _status, deleted_at)) = doc else {
+    let Some(access) =
+        lock_collab_document_access(tx, workspace_id, actor_user_id, document_id).await?
+    else {
         return Ok(Err(CollabDbError::NotFound));
     };
-    if deleted_at.is_some() || project_id.is_some() {
-        return Ok(Err(CollabDbError::NotFound));
-    }
-    let permission =
-        document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
-    if !permission.at_least(ProjectPermission::View) {
+    if !access.permission.at_least(ProjectPermission::View) {
         return Ok(Err(CollabDbError::NotFound));
     }
     Ok(Ok(()))
@@ -622,7 +670,7 @@ pub async fn claim_writer_and_load(
 ) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let content = match authorize_wiki_collab_write(
+    let content = match authorize_collab_write(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -702,7 +750,7 @@ pub async fn load_collab_document(
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let content = match authorize_wiki_collab_write(
+    let content = match authorize_collab_write(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -826,22 +874,17 @@ async fn append_collab_update_in_tx(
         tx.rollback().await?;
         return Ok((Err(CollabDbError::Forbidden), timings));
     }
-    let doc = lock_wiki_document_for_update(&mut tx, workspace_id, document_id).await?;
-    let Some((project_id, status, deleted_at)) = doc else {
+    let Some(access) =
+        lock_collab_document_access(&mut tx, workspace_id, actor_user_id, document_id).await?
+    else {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::NotFound), timings));
     };
-    if deleted_at.is_some() || project_id.is_some() {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
-    }
-    let permission =
-        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
-    if !permission.at_least(ProjectPermission::Edit) {
+    if !access.permission.at_least(ProjectPermission::Edit) {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::Forbidden), timings));
     }
-    if status == "archived" {
+    if access.archived {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::Forbidden), timings));
     }
@@ -1003,7 +1046,7 @@ pub async fn lookup_collab_operation(
 ) -> Result<Result<Option<CollabOperationLookup>, CollabDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    match authorize_wiki_collab_read(
+    match authorize_collab_read(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -1057,7 +1100,7 @@ pub async fn verify_collab_operation(
     } = input;
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    match authorize_wiki_collab_read(
+    match authorize_collab_read(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -1123,7 +1166,7 @@ pub async fn compact_collab_snapshot(
 
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let content = match authorize_wiki_collab_write(
+    let content = match authorize_collab_write(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -1275,7 +1318,7 @@ pub struct CollabAdmission {
     pub archived: bool,
 }
 
-/// Resolve whether a live session may join a wiki document collab room.
+/// Resolve whether a live session may join a wiki or project document collab room.
 pub async fn resolve_collab_admission(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1322,23 +1365,19 @@ async fn resolve_collab_admission_tx(
         tx.rollback().await?;
         return Ok((Err(CollabDbError::NotFound), timings));
     }
-    let permission =
-        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
-    if !permission.at_least(ProjectPermission::View) {
-        tx.rollback().await?;
-        return Ok((Err(CollabDbError::NotFound), timings));
-    }
-    let doc = lock_wiki_document_for_update(&mut tx, workspace_id, document_id).await?;
+    let access =
+        lock_collab_document_access(&mut tx, workspace_id, actor_user_id, document_id).await?;
     timings.row_lock_us = row_started.elapsed().as_micros() as u64;
-    let Some((project_id, status, deleted_at)) = doc else {
+    let Some(access) = access else {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::NotFound), timings));
     };
-    if deleted_at.is_some() || project_id.is_some() {
+    if !access.permission.at_least(ProjectPermission::View) {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::NotFound), timings));
     }
-    let archived = status == "archived";
+    let permission = access.permission;
+    let archived = access.archived;
     let commit_started = Instant::now();
     tx.commit().await?;
     timings.commit_us = commit_started.elapsed().as_micros() as u64;
@@ -1361,7 +1400,7 @@ pub async fn load_collab_readonly(
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    match authorize_wiki_collab_read(
+    match authorize_collab_read(
         &mut tx,
         workspace_id,
         actor_user_id,
@@ -1491,7 +1530,7 @@ pub async fn project_derived_body(
 
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    match authorize_wiki_collab_write(
+    match authorize_collab_write(
         &mut tx,
         workspace_id,
         actor_user_id,

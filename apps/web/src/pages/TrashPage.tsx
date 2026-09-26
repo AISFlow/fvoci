@@ -9,27 +9,52 @@ import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk } from "@/lib/api";
 import { wikiPath } from "@/lib/href";
 import { trashQuery } from "@/lib/queries/documents";
+import { projectsQuery } from "@/features/projects/queries";
 
 export function TrashPage() {
   const queryClient = useQueryClient();
   const { slug, workspace } = useWorkspaceContext();
   const trash = useQuery(trashQuery(workspace?.id ?? ""));
+  const projects = useQuery(projectsQuery(workspace?.id ?? ""));
+  const projectKeys = new Map(
+    (projects.data?.items ?? []).map((project) => [project.id, project.key] as const),
+  );
   const [restoreError, setRestoreError] = useState<string | null>(null);
 
   const restore = useMutation({
-    mutationFn: async (documentId: string) =>
-      ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore", {
-          params: {
-            path: { workspace_id: workspace!.id, document_id: documentId },
-          },
-        }),
-      ),
-    onSuccess: async () => {
+    mutationFn: async (item: { id: string; projectId?: string | null }) =>
+      item.projectId
+        ? ensureOk(
+            await api.POST(
+              "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/restore",
+              {
+                params: {
+                  path: {
+                    workspace_id: workspace!.id,
+                    project_id: item.projectId,
+                    document_id: item.id,
+                  },
+                },
+              },
+            ),
+          )
+        : ensureOk(
+            await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/restore", {
+              params: {
+                path: { workspace_id: workspace!.id, document_id: item.id },
+              },
+            }),
+          ),
+    onSuccess: async (_data, item) => {
       setRestoreError(null);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["trash", workspace?.id] }),
         queryClient.invalidateQueries({ queryKey: ["tree", workspace?.id] }),
+        item.projectId
+          ? queryClient.invalidateQueries({
+              queryKey: ["project-documents", workspace?.id, item.projectId],
+            })
+          : Promise.resolve(),
       ]);
     },
     onError: (error: unknown) => {
@@ -75,6 +100,11 @@ export function TrashPage() {
               <li key={item.id} className="trash-page__row">
                 <div className="trash-page__copy">
                   <span className="trash-page__name">{item.title}</span>
+                  {item.projectId ? (
+                    <span className="trash-page__project">
+                      {projectKeys.get(item.projectId) ?? t("nav.projects")}
+                    </span>
+                  ) : null}
                   <time className="trash-page__when" dateTime={item.deletedAt}>
                     {new Date(item.deletedAt).toLocaleString()}
                   </time>
@@ -87,7 +117,7 @@ export function TrashPage() {
                   aria-label={`${t("trash.restore")} ${item.title}`}
                   onClick={() => {
                     setRestoreError(null);
-                    restore.mutate(item.id);
+                    restore.mutate({ id: item.id, projectId: item.projectId });
                   }}
                 >
                   {t("trash.restore")}

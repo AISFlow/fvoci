@@ -21,11 +21,12 @@ async function downloadWikiBinary(
   documentId: string,
   title: string,
   ext: "md" | "pdf" | "docx" | "pptx",
+  projectId?: string | null,
 ): Promise<void> {
-  const response = await fetch(
-    `/api/v1/workspaces/${workspaceId}/documents/${documentId}/${ext}`,
-    { credentials: "include" },
-  );
+  const base = projectId
+    ? `/api/v1/workspaces/${workspaceId}/projects/${projectId}/documents/${documentId}`
+    : `/api/v1/workspaces/${workspaceId}/documents/${documentId}`;
+  const response = await fetch(`${base}/${ext}`, { credentials: "include" });
   if (!response.ok) {
     throw new Error(`export failed: ${response.status}`);
   }
@@ -37,30 +38,34 @@ export async function downloadDocumentMarkdown(
   workspaceId: string,
   documentId: string,
   title: string,
+  projectId?: string | null,
 ): Promise<void> {
-  await downloadWikiBinary(workspaceId, documentId, title, "md");
+  await downloadWikiBinary(workspaceId, documentId, title, "md", projectId);
 }
 
 export async function downloadDocumentPdf(
   workspaceId: string,
   documentId: string,
   title: string,
+  projectId?: string | null,
 ): Promise<void> {
-  await downloadWikiBinary(workspaceId, documentId, title, "pdf");
+  await downloadWikiBinary(workspaceId, documentId, title, "pdf", projectId);
 }
 
 export async function downloadDocumentDocx(
   workspaceId: string,
   documentId: string,
   title: string,
+  projectId?: string | null,
 ): Promise<void> {
-  await downloadWikiBinary(workspaceId, documentId, title, "docx");
+  await downloadWikiBinary(workspaceId, documentId, title, "docx", projectId);
 }
 
 export async function downloadDocumentPptx(
   workspaceId: string,
   documentId: string,
   title: string,
+  projectId?: string | null,
 ): Promise<void> {
-  await downloadWikiBinary(workspaceId, documentId, title, "pptx");
+  await downloadWikiBinary(workspaceId, documentId, title, "pptx", projectId);
 }

@@ -1,12 +1,13 @@
 use std::net::SocketAddr;
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -18,7 +19,8 @@ use crate::api::dto::{
 use crate::auth::session::SessionUser;
 use crate::db::projects::{
     add_project_member, clone_project, create_project, get_project, get_project_workflow,
-    list_project_members, list_projects, remove_project_member, update_project,
+    list_deleted_projects, list_project_members, list_projects, remove_project_member,
+    restore_project, set_project_archived, trash_project, update_project,
     update_project_member_role, CloneProjectInput, CreateProjectInput, ProjectDbError,
     UpdateProjectInput,
 };
@@ -39,7 +41,21 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}",
-            get(get_project_route).patch(patch_project_route),
+            get(get_project_route)
+                .patch(patch_project_route)
+                .delete(delete_project_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/archive",
+            post(archive_project_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/unarchive",
+            post(unarchive_project_route),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/restore",
+            post(restore_project_route),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}/clone",
@@ -179,12 +195,25 @@ async fn clone_project_route(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectListQuery {
+    deleted: Option<String>,
+}
+
 async fn list_projects_route(
     State(state): State<AppState>,
     headers: HeaderMap,
     jar: CookieJar,
     Path(workspace_id): Path<Uuid>,
+    query: Result<Query<ProjectListQuery>, QueryRejection>,
 ) -> Result<Json<ProjectListResponse>, AppError> {
+    let Query(query) = query.map_err(AppError::from)?;
+    let deleted = match query.deleted.as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err(AppError::from_code(ProblemCode::InvalidInput)),
+    };
     let (user, _user_id, session_id) = require_session(
         &state,
         &headers,
@@ -194,6 +223,39 @@ async fn list_projects_route(
     )
     .await?;
     let actor_user_id = parse_user_id(&user.user_id)?;
+    if deleted {
+        // Source `listDeletedProjects`: counts are zero and the rows are not editable.
+        let result =
+            list_deleted_projects(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
+                .await
+                .map_err(internal)?;
+        return match result {
+            Ok(rows) => Ok(Json(ProjectListResponse {
+                items: rows
+                    .into_iter()
+                    .map(|project| ProjectListItemOutput {
+                        id: project.id.to_string(),
+                        workspace_id: project.workspace_id.to_string(),
+                        key: project.key,
+                        name: project.name,
+                        description: project.description,
+                        icon: project.icon,
+                        visibility: project.visibility,
+                        root_document_id: project.root_document_id.map(|id| id.to_string()),
+                        status: project.status,
+                        created_by: project.created_by.to_string(),
+                        created_at: project.created_at,
+                        updated_at: project.updated_at,
+                        task_count: 0,
+                        open_task_count: 0,
+                        can_edit: false,
+                        can_manage: false,
+                    })
+                    .collect(),
+            })),
+            Err(err) => Err(map_project_error(err)),
+        };
+    }
     let result = list_projects(&state.auth.db.pool, workspace_id, actor_user_id, session_id)
         .await
         .map_err(internal)?;
@@ -217,6 +279,7 @@ async fn list_projects_route(
                     task_count: item.task_count,
                     open_task_count: item.open_task_count,
                     can_edit: item.can_edit,
+                    can_manage: item.can_manage,
                 })
                 .collect(),
         })),
@@ -309,6 +372,140 @@ async fn patch_project_route(
             icon,
             lead_user_id: body.lead_user_id,
         },
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(project) => Ok(Json(project_output(project, false))),
+        Err(err) => Err(map_project_error(err)),
+    }
+}
+
+async fn delete_project_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, AppError> {
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = trash_project(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_project_error(err)),
+    }
+}
+
+async fn archive_project_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, AppError> {
+    set_archived_route(&state, peer, &headers, &jar, workspace_id, project_id, true).await
+}
+
+async fn unarchive_project_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, AppError> {
+    set_archived_route(
+        &state,
+        peer,
+        &headers,
+        &jar,
+        workspace_id,
+        project_id,
+        false,
+    )
+    .await
+}
+
+async fn set_archived_route(
+    state: &AppState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    archived: bool,
+) -> Result<Json<OkResponse>, AppError> {
+    check_origin(headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        state,
+        headers,
+        jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = set_project_archived(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        archived,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_project_error(err)),
+    }
+}
+
+async fn restore_project_route(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<ProjectOutput>, AppError> {
+    check_origin(&headers, &state.public_origin)?;
+    let (user, _user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::ProjectsManage),
+        Some(workspace_id),
+    )
+    .await?;
+    let actor_user_id = parse_user_id(&user.user_id)?;
+    let ip = peer_ip(peer.ip());
+    let result = restore_project(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
         Some(&ip),
     )
     .await

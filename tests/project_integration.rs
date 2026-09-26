@@ -2179,19 +2179,21 @@ async fn private_project_cross_path_authorization_links() {
         .unwrap();
     assert_non_member_denied(&app, &outsider.cookie, &fixture).await;
 
-    for user_id in [lead.user_id, owner_id] {
-        let session_id = if user_id == lead.user_id {
-            lead_session
-        } else {
-            session_id_for_user(&admin, user_id).await
-        };
-        let admission =
-            resolve_collab_admission(&pool, workspace_id, user_id, session_id, root_uuid).await;
-        assert!(
-            matches!(admission, Ok(Err(CollabDbError::NotFound))),
-            "collab admission for {user_id}: {admission:?}"
-        );
-    }
+    // Project documents join collab under project permission: the private
+    // project's lead is admitted, the workspace owner without a grant is not.
+    let admission =
+        resolve_collab_admission(&pool, workspace_id, lead.user_id, lead_session, root_uuid).await;
+    assert!(
+        matches!(admission, Ok(Ok(ref a)) if !a.read_only),
+        "collab admission for lead: {admission:?}"
+    );
+    let owner_session = session_id_for_user(&admin, owner_id).await;
+    let admission =
+        resolve_collab_admission(&pool, workspace_id, owner_id, owner_session, root_uuid).await;
+    assert!(
+        matches!(admission, Ok(Err(CollabDbError::NotFound))),
+        "collab admission for owner: {admission:?}"
+    );
 
     let (status, detail) = json_request(
         app.clone(),

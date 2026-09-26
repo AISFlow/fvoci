@@ -5628,3 +5628,621 @@ async fn collab_cold_reload_fragmented_document_fits_rlimits() {
         load.outcome
     );
 }
+
+// ---------------------------------------------------------------------------
+// Project documents: the wiki collab room, persist barrier, and derived body
+// run on project documents under project permission (visibility, direct and
+// group grants, archive, trash).
+// ---------------------------------------------------------------------------
+
+struct ProjectDocFixture {
+    doc: WikiDocFixture,
+    project_id: Uuid,
+}
+
+async fn setup_project_doc(harness: &TestDb, key: &str, visibility: &str) -> ProjectDocFixture {
+    let session = setup_owner_session(harness).await;
+    let project = fvoci_server::db::projects::create_project(
+        &session.pool,
+        session.workspace_id,
+        session.user_id,
+        session.session_id,
+        fvoci_server::db::projects::CreateProjectInput {
+            key,
+            name: "프로젝트 협업",
+            visibility,
+            description: None,
+            icon: None,
+            lead_user_id: None,
+        },
+        None,
+    )
+    .await
+    .expect("create project")
+    .expect("created project");
+    let created = fvoci_server::db::project_documents::create_project_document(
+        &session.pool,
+        session.workspace_id,
+        project.id,
+        session.user_id,
+        session.session_id,
+        CreateDocumentInput {
+            parent_id: project.root_document_id,
+            title: "프로젝트 문서",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("create project doc")
+    .expect("created project doc");
+    ProjectDocFixture {
+        doc: WikiDocFixture {
+            session,
+            document_id: created.id,
+        },
+        project_id: project.id,
+    }
+}
+
+async fn add_project_member_for(
+    fixture: &ProjectDocFixture,
+    target_user_id: Uuid,
+    role: fvoci_server::projects::ProjectMemberRole,
+) {
+    fvoci_server::db::projects::add_project_member(
+        &fixture.doc.session.pool,
+        fixture.doc.session.workspace_id,
+        fixture.project_id,
+        fixture.doc.session.user_id,
+        fixture.doc.session.session_id,
+        target_user_id,
+        role,
+        None,
+    )
+    .await
+    .expect("add project member")
+    .expect("added project member");
+}
+
+async fn document_content_json(harness: &TestDb, document_id: Uuid) -> Value {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (content,): (Value,) =
+        sqlx::query_as("SELECT content_json FROM fvoci.documents WHERE id = $1")
+            .bind(document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    admin.close().await;
+    content
+}
+
+async fn expect_permission_denied(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    routing_key: &str,
+    client_id: u32,
+) {
+    ws.send(Message::Binary(
+        auth_token_frame(routing_key, client_id).into(),
+    ))
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(10), ws.next())
+        .await
+        .expect("timeout")
+        .expect("stream")
+        .expect("frame");
+    let frame = fvoci_server::collab::wire::decode(&msg.into_data()).expect("decode");
+    assert!(
+        matches!(
+            frame,
+            WireFrame::Document {
+                message: DocumentMessage::Auth(AuthMessage::PermissionDenied { .. }),
+                ..
+            }
+        ),
+        "expected PermissionDenied, got {frame:?}"
+    );
+}
+
+#[tokio::test]
+async fn collab_project_document_persist_projects_body_and_restores_after_restart() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_project_doc(&harness, "PDOC", "workspace").await;
+    let doc = &fixture.doc;
+    let routing_key = room_key(doc.session.workspace_id, doc.document_id);
+    let first_id = Uuid::now_v7();
+    let second_id = Uuid::now_v7();
+
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let mut writer = connect_member(server.addr, &doc.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 501).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &tiptap_xml_pending_u1()).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "project document edit must apply"
+    );
+    writer
+        .send(Message::Binary(
+            stateless_frame(&routing_key, &format!("persist:{first_id}")).into(),
+        ))
+        .await
+        .unwrap();
+    expect_persisted(
+        &mut writer,
+        first_id,
+        Duration::from_secs(5),
+        "project document persist barrier",
+    )
+    .await;
+    assert_eq!(
+        document_content_json(&harness, doc.document_id).await,
+        pending_tiptap_u1_json(),
+        "persist barrier must project the derived body onto the project document"
+    );
+    drop(writer);
+    server.shutdown().await;
+
+    // A fresh server (cold room) restores the durable state and keeps editing.
+    let restarted = start_product_test_server(&harness.app_url, true).await;
+    let mut writer = connect_member(restarted.addr, &doc.session.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 502).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &tiptap_xml_pending_u2()).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+        "edit after restart must apply on top of the restored state"
+    );
+    writer
+        .send(Message::Binary(
+            stateless_frame(&routing_key, &format!("persist:{second_id}")).into(),
+        ))
+        .await
+        .unwrap();
+    expect_persisted(
+        &mut writer,
+        second_id,
+        Duration::from_secs(5),
+        "project document persist after restart",
+    )
+    .await;
+    let load = load_collab_document(
+        &doc.session.pool,
+        doc.session.workspace_id,
+        doc.session.user_id,
+        doc.session.session_id,
+        doc.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        project_snapshot_json(&load.snapshot),
+        pending_tiptap_both_json(),
+        "restored snapshot must contain the pre-restart edit and the new one"
+    );
+    assert_eq!(
+        document_content_json(&harness, doc.document_id).await,
+        pending_tiptap_both_json(),
+        "derived body must follow the restored document"
+    );
+    restarted.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_private_project_document_denies_nonmember_and_admits_member() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_project_doc(&harness, "PRIV", "private").await;
+    let doc = &fixture.doc;
+    let peer = setup_second_member(&harness, doc).await;
+    let routing_key = room_key(doc.session.workspace_id, doc.document_id);
+    let server = start_product_test_server(&harness.app_url, true).await;
+
+    // Workspace member without a project grant: denied like a missing document.
+    let mut outsider = connect_member(server.addr, &peer.session_token).await;
+    expect_permission_denied(&mut outsider, &routing_key, 601).await;
+    assert_eq!(
+        check_delivery_admission(
+            &peer.pool,
+            peer.workspace_id,
+            peer.user_id,
+            peer.session_id,
+            doc.document_id,
+        )
+        .await
+        .unwrap(),
+        DeliveryAdmission::Denied
+    );
+
+    // Viewer grant: joins read-only.
+    add_project_member_for(
+        &fixture,
+        peer.user_id,
+        fvoci_server::projects::ProjectMemberRole::Viewer,
+    )
+    .await;
+    let admission = resolve_collab_admission(
+        &peer.pool,
+        peer.workspace_id,
+        peer.user_id,
+        peer.session_id,
+        doc.document_id,
+    )
+    .await
+    .unwrap()
+    .expect("viewer admitted");
+    assert!(admission.read_only && !admission.archived);
+    assert_eq!(
+        check_delivery_admission(
+            &peer.pool,
+            peer.workspace_id,
+            peer.user_id,
+            peer.session_id,
+            doc.document_id,
+        )
+        .await
+        .unwrap(),
+        DeliveryAdmission::Allowed { read_only: true }
+    );
+    let mut viewer = connect_member(server.addr, &peer.session_token).await;
+    auth_and_join(&mut viewer, &routing_key, 602).await;
+
+    // Member grant through the project: writable admission.
+    fvoci_server::db::projects::update_project_member_role(
+        &doc.session.pool,
+        doc.session.workspace_id,
+        fixture.project_id,
+        doc.session.user_id,
+        doc.session.session_id,
+        peer.user_id,
+        fvoci_server::projects::ProjectMemberRole::Member,
+        None,
+    )
+    .await
+    .expect("update role")
+    .expect("role updated");
+    let admission = resolve_collab_admission(
+        &peer.pool,
+        peer.workspace_id,
+        peer.user_id,
+        peer.session_id,
+        doc.document_id,
+    )
+    .await
+    .unwrap()
+    .expect("member admitted");
+    assert!(!admission.read_only);
+    assert_eq!(
+        check_delivery_admission(
+            &peer.pool,
+            peer.workspace_id,
+            peer.user_id,
+            peer.session_id,
+            doc.document_id,
+        )
+        .await
+        .unwrap(),
+        DeliveryAdmission::Allowed { read_only: false }
+    );
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+/// Project member removal holds the project row (`FOR NO KEY UPDATE`) while the
+/// collab append takes `FOR SHARE`: the append must wait for the removal to
+/// commit, then observe it and refuse the write (no append after revoke).
+#[tokio::test]
+async fn collab_project_member_removal_blocks_then_rejects_concurrent_append() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_project_doc(&harness, "LOCK", "private").await;
+    let doc = &fixture.doc;
+    let peer = setup_second_member(&harness, doc).await;
+    add_project_member_for(
+        &fixture,
+        peer.user_id,
+        fvoci_server::projects::ProjectMemberRole::Member,
+    )
+    .await;
+    let claim = fvoci_server::db::collab::claim_writer_and_load(
+        &peer.pool,
+        peer.workspace_id,
+        peer.user_id,
+        peer.session_id,
+        doc.document_id,
+    )
+    .await
+    .unwrap()
+    .expect("member claims writer");
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let mut revoke = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.projects WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.project_id)
+        .execute(&mut *revoke)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.project_members WHERE project_id = $1 AND user_id = $2")
+        .bind(fixture.project_id)
+        .bind(peer.user_id)
+        .execute(&mut *revoke)
+        .await
+        .unwrap();
+
+    let pool = peer.pool.clone();
+    let (workspace_id, user_id, session_id, document_id) = (
+        peer.workspace_id,
+        peer.user_id,
+        peer.session_id,
+        doc.document_id,
+    );
+    let writer_generation = claim.writer_generation;
+    let tail_seq = claim.load.tail_seq;
+    let append = tokio::spawn(async move {
+        let payload = sample_hi_update();
+        fvoci_server::db::collab::append_collab_update(
+            &pool,
+            fvoci_server::db::collab::AppendCollabInput {
+                workspace_id,
+                actor_user_id: user_id,
+                session_id,
+                document_id,
+                writer_generation,
+                expected_tail_seq: tail_seq,
+                op_id: Uuid::now_v7(),
+                payload: &payload,
+                client_ip: None,
+            },
+        )
+        .await
+    });
+
+    // Observe the append parked on the project row lock (not a timing guess).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM pg_stat_activity
+            WHERE wait_event_type = 'Lock'
+              AND query LIKE '%FROM fvoci.projects%FOR SHARE%'
+            "#,
+        )
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+        assert!(
+            !append.is_finished(),
+            "append must not complete while the project removal holds the row"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "append never waited on the project row lock"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    revoke.commit().await.unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(10), append)
+        .await
+        .expect("append finishes after removal commit")
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            result,
+            Err(fvoci_server::db::collab::CollabDbError::Forbidden)
+        ),
+        "append after project member removal must be refused, got {result:?}"
+    );
+    let (tail_rows,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM fvoci.document_collab_updates WHERE document_id = $1")
+            .bind(doc.document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(tail_rows, 0, "no durable update after revoke");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_project_member_removal_barrier_rejects_writer_not_room() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_project_doc(&harness, "BARR", "private").await;
+    let doc = &fixture.doc;
+    let peer = setup_second_member(&harness, doc).await;
+    add_project_member_for(
+        &fixture,
+        peer.user_id,
+        fvoci_server::projects::ProjectMemberRole::Member,
+    )
+    .await;
+    let server = start_product_test_server(&harness.app_url, true).await;
+    let routing_key = room_key(doc.session.workspace_id, doc.document_id);
+
+    let mut owner = connect_member(server.addr, &doc.session.session_token).await;
+    auth_and_join(&mut owner, &routing_key, 701).await;
+    let mut writer = connect_member(server.addr, &peer.session_token).await;
+    auth_and_join(&mut writer, &routing_key, 702).await;
+
+    let (reached_rx, proceed_tx) = arm_append_revoke_barrier(doc.document_id).await;
+    writer
+        .send(Message::Binary(
+            sync_update_frame(&routing_key, &sample_hi_update()).into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), reached_rx)
+        .await
+        .expect("append barrier must be reached after validation")
+        .expect("barrier signal");
+    fvoci_server::db::projects::remove_project_member(
+        &doc.session.pool,
+        doc.session.workspace_id,
+        fixture.project_id,
+        doc.session.user_id,
+        doc.session.session_id,
+        peer.user_id,
+        None,
+    )
+    .await
+    .expect("remove member")
+    .expect("member removed");
+    proceed_tx.send(()).expect("release append barrier");
+    disarm_append_revoke_barrier(doc.document_id).await;
+
+    assert!(
+        wait_for_ws_close(&mut writer, Duration::from_secs(3)).await,
+        "writer removed from the project must be closed"
+    );
+    owner
+        .send(Message::Binary(
+            sync_step1_frame(&routing_key, &[0, 0]).into(),
+        ))
+        .await
+        .unwrap();
+    let mut owner_live = false;
+    for _ in 0..12 {
+        match recv_document_frame(&mut owner, 1).await {
+            Some(WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Update,
+                        ..
+                    }),
+                ..
+            }) => panic!("removed writer's update must not reach the owner"),
+            Some(WireFrame::Document {
+                message:
+                    DocumentMessage::Sync(SyncMessage {
+                        step: SyncStep::Step2,
+                        ..
+                    }),
+                ..
+            }) => {
+                owner_live = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(owner_live, "owner stays live after writer-only rejection");
+    let load = load_collab_document(
+        &doc.session.pool,
+        doc.session.workspace_id,
+        doc.session.user_id,
+        doc.session.session_id,
+        doc.document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(load.tail.is_empty(), "rejected update must not be durable");
+
+    let mut rejoin = connect_member(server.addr, &peer.session_token).await;
+    expect_permission_denied(&mut rejoin, &routing_key, 703).await;
+    server.shutdown().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_archived_project_document_is_read_only() {
+    let harness = TestDb::bootstrap().await;
+    let fixture = setup_project_doc(&harness, "ARCH", "workspace").await;
+    let doc = &fixture.doc;
+    let claim = fvoci_server::db::collab::claim_writer_and_load(
+        &doc.session.pool,
+        doc.session.workspace_id,
+        doc.session.user_id,
+        doc.session.session_id,
+        doc.document_id,
+    )
+    .await
+    .unwrap()
+    .expect("owner claims writer");
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.projects SET status = 'archived' WHERE id = $1")
+        .bind(fixture.project_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let admission = resolve_collab_admission(
+        &doc.session.pool,
+        doc.session.workspace_id,
+        doc.session.user_id,
+        doc.session.session_id,
+        doc.document_id,
+    )
+    .await
+    .unwrap()
+    .expect("archived project stays readable");
+    assert!(admission.read_only && admission.archived);
+    assert_eq!(
+        check_delivery_admission(
+            &doc.session.pool,
+            doc.session.workspace_id,
+            doc.session.user_id,
+            doc.session.session_id,
+            doc.document_id,
+        )
+        .await
+        .unwrap(),
+        DeliveryAdmission::Allowed { read_only: true }
+    );
+    let payload = sample_hi_update();
+    let result = fvoci_server::db::collab::append_collab_update(
+        &doc.session.pool,
+        fvoci_server::db::collab::AppendCollabInput {
+            workspace_id: doc.session.workspace_id,
+            actor_user_id: doc.session.user_id,
+            session_id: doc.session.session_id,
+            document_id: doc.document_id,
+            writer_generation: claim.writer_generation,
+            expected_tail_seq: claim.load.tail_seq,
+            op_id: Uuid::now_v7(),
+            payload: &payload,
+            client_ip: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            result,
+            Err(fvoci_server::db::collab::CollabDbError::Forbidden)
+        ),
+        "archived project refuses collab writes, got {result:?}"
+    );
+    harness.cleanup().await;
+}
