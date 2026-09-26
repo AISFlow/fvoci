@@ -116,25 +116,36 @@ async fn templates_rls_denies_cross_tenant_reads() {
     let tpl_id = created["id"].as_str().unwrap();
 
     let app_pool = app_pool(&db).await;
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.templates WHERE workspace_id = $1")
-        .bind(ws)
-        .fetch_one(&app_pool)
+    let tpl_uuid = Uuid::parse_str(tpl_id).unwrap();
+    let mut tx = app_pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
+        .bind(ws.to_string())
+        .execute(&mut *tx)
         .await
         .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.templates WHERE workspace_id = $1")
+            .bind(ws)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
     assert_eq!(count, 1);
+    tx.commit().await.unwrap();
 
     let other = Uuid::now_v7();
-    sqlx::query("SELECT set_config('app.tenant_id', $1::text, true)")
+    let mut tx = app_pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
         .bind(other.to_string())
-        .execute(&app_pool)
+        .execute(&mut *tx)
         .await
         .unwrap();
-    let denied: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.templates WHERE id = $1::uuid")
-        .bind(Uuid::parse_str(tpl_id).unwrap())
-        .fetch_one(&app_pool)
+    let denied: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.templates WHERE id = $1")
+        .bind(tpl_uuid)
+        .fetch_one(&mut *tx)
         .await
         .unwrap();
     assert_eq!(denied, 0);
+    tx.rollback().await.unwrap();
     app_pool.close().await;
 
     db.cleanup().await;
