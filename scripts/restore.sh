@@ -52,27 +52,6 @@ read_env() {
   printf '%s\n' "${line#*=}"
 }
 
-# Optional variable: empty output when the env file does not set it.
-read_env_optional() {
-  local key="$1"
-  local line
-  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 || true)"
-  printf '%s\n' "${line#*=}"
-}
-
-pepper_fingerprint() {
-  # SHA-256 over the canonical keyring JSON (sorted ids) and the active id. The
-  # keys themselves never leave the env file.
-  PEPPER_KEYS="$1" PEPPER_ACTIVE="$2" python3 -c '
-import hashlib, json, os
-ring = json.loads(os.environ["PEPPER_KEYS"])
-if not isinstance(ring, dict) or not ring:
-    raise SystemExit("PASSWORD_PEPPER_KEYS must be a non-empty JSON object")
-canon = json.dumps({"keys": dict(sorted(ring.items())), "active": os.environ["PEPPER_ACTIVE"]}, separators=(",", ":"))
-print(hashlib.sha256(canon.encode()).hexdigest())
-'
-}
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project)
@@ -102,8 +81,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PROJECT" && -n "$ENV_FILE" && -n "$INPUT" ]] || usage
-# Manifest/key checks run on the operator host, before any target volume exists.
-for dependency in docker python3; do
+# Manifest/key checks run in the selected product image before any target volume exists.
+for dependency in docker jq; do
   command -v "$dependency" >/dev/null 2>&1 || {
     echo "restore host requires $dependency" >&2
     exit 1
@@ -140,80 +119,33 @@ for path in "$DUMP" "$STORAGE_TAR" "$MANIFEST"; do
   fi
 done
 
-python3 - "$MANIFEST" "$DUMP" "$STORAGE_TAR" "$PROJECT" <<'PY'
-import hashlib, json, os, sys
-
-manifest_path, dump_path, tar_path, project = sys.argv[1:5]
-with open(manifest_path, encoding="utf-8") as fh:
-    manifest = json.load(fh)
-if manifest.get("formatVersion") != 1:
-    raise SystemExit("unsupported backup format")
-if manifest.get("schema") != "fvoci":
-    raise SystemExit("backup schema is not fvoci")
-source = manifest.get("sourceProject")
-if not isinstance(source, str) or source == "":
-    raise SystemExit("backup sourceProject is missing")
-if source == project:
-    raise SystemExit("restore target must use a different Compose project name")
-search = manifest.get("search") or {}
-if search.get("included") is True:
-    raise SystemExit("this restore path does not accept archives that embed Meilisearch")
-
-
-def check(entry, path):
-    if not isinstance(entry, dict):
-        raise SystemExit(f"invalid manifest entry for {path}")
-    if entry.get("path") != os.path.basename(path):
-        raise SystemExit(f"manifest path mismatch for {path}")
-    size = os.path.getsize(path)
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            digest.update(chunk)
-    sha = digest.hexdigest()
-    if entry.get("sizeBytes") != size or entry.get("sha256") != sha:
-        raise SystemExit(f"backup integrity check failed for {os.path.basename(path)}")
-
-
-check(manifest.get("database"), dump_path)
-check(manifest.get("storage"), tar_path)
-PY
-
-EXPECTED_PEPPER_FP="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("passwordPepper") or {}).get("fingerprint",""))' "$MANIFEST")"
-if [[ -z "$EXPECTED_PEPPER_FP" ]]; then
-  echo "backup manifest has no password pepper fingerprint; refusing to restore" >&2
+# Resolve the same product image as Compose will use for the target server.
+# The offline check needs no DB, migration owner, network, or writeable backup.
+COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" --env-file "$ENV_FILE")
+COMPOSE_CONFIG="$("${COMPOSE[@]}" config --format json)"
+SELECTED_IMAGE="$(jq -er '.services.server.image' <<<"$COMPOSE_CONFIG")"
+PRODUCT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$SELECTED_IMAGE")"
+compose_key() {
+  jq -r --arg name "$1" '.services.server.environment[$name] // ""' <<<"$COMPOSE_CONFIG"
+}
+PEPPER_KEYS="$(compose_key PASSWORD_PEPPER_KEYS)"
+PEPPER_ACTIVE="$(compose_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
+ENCRYPTION_KEYS_VALUE="$(compose_key ENCRYPTION_KEYS)"
+ENCRYPTION_ACTIVE="$(compose_key ENCRYPTION_ACTIVE_KEY_ID)"
+PREFLIGHT="$(PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE" \
+  ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE" \
+  docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+    --entrypoint /opt/fvoci/bin/fvoci-migrate \
+    -e PASSWORD_PEPPER_KEYS -e PASSWORD_PEPPER_ACTIVE_KEY_ID \
+    -e ENCRYPTION_KEYS -e ENCRYPTION_ACTIVE_KEY_ID \
+    -v "${INPUT}:/backup:ro" "$PRODUCT_IMAGE_ID" \
+    --restore-preflight /backup/manifest.json /backup/database.dump \
+    /backup/storage.tar "$PROJECT")"
+if [[ ! "$PREFLIGHT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\ [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+  echo "invalid restore preflight output" >&2
   exit 1
 fi
-ACTUAL_PEPPER_FP="$(pepper_fingerprint "$(read_env PASSWORD_PEPPER_KEYS)" "$(read_env PASSWORD_PEPPER_ACTIVE_KEY_ID)")"
-if [[ "$ACTUAL_PEPPER_FP" != "$EXPECTED_PEPPER_FP" ]]; then
-  echo "PASSWORD_PEPPER_KEYS/ACTIVE_KEY_ID differ from the backed-up install; existing passwords could not be verified. Use the original keyring." >&2
-  exit 1
-fi
-
-# Every ENCRYPTION_KEYS key id of the backup must be present with the same key
-# (compared by per-id HMAC fingerprints; keys are never printed).
-ENCRYPTION_ENTRY_FILE="$(mktemp "${TMPDIR:-/tmp}/fvoci-restore-keys.XXXXXX")"
-python3 -c '
-import json, sys
-manifest = json.load(open(sys.argv[1]))
-if "encryptionKeys" not in manifest:
-    sys.exit(3)
-json.dump(manifest["encryptionKeys"], open(sys.argv[2], "w"))
-' "$MANIFEST" "$ENCRYPTION_ENTRY_FILE" && ENTRY_STATUS=0 || ENTRY_STATUS=$?
-if (( ENTRY_STATUS == 3 )); then
-  echo "backup manifest predates the ENCRYPTION_KEYS fingerprint; the keyring is checked only by fvoci-migrate --verify-secrets after the database restore" >&2
-elif (( ENTRY_STATUS != 0 )); then
-  rm -f "$ENCRYPTION_ENTRY_FILE"
-  echo "could not read encryptionKeys from the backup manifest" >&2
-  exit 1
-elif ! ENCRYPTION_KEYS="$(read_env_optional ENCRYPTION_KEYS)" \
-  ENCRYPTION_ACTIVE_KEY_ID="$(read_env_optional ENCRYPTION_ACTIVE_KEY_ID)" \
-  python3 "$ROOT/scripts/encryption_keys.py" check "$ENCRYPTION_ENTRY_FILE"; then
-  rm -f "$ENCRYPTION_ENTRY_FILE"
-  echo "ENCRYPTION_KEYS cannot open the secrets sealed by the backed-up install (MFA, workspace SSO, webhooks). Use the original keyring or a superset of it." >&2
-  exit 1
-fi
-rm -f "$ENCRYPTION_ENTRY_FILE"
+read -r SNAPSHOT_AT SINCE <<<"$PREFLIGHT"
 
 for vol in "${VOLUME_KEYS[@]}"; do
   if docker volume inspect "${PROJECT}_${vol}" >/dev/null 2>&1; then
@@ -222,7 +154,6 @@ for vol in "${VOLUME_KEYS[@]}"; do
   fi
 done
 
-COMPOSE=(docker compose -f "$COMPOSE_FILE" --project-name "$PROJECT" --env-file "$ENV_FILE")
 APP_ROLE="$(read_env FVOCI_APP_ROLE)"
 APP_PASSWORD="$(read_env FVOCI_APP_PASSWORD)"
 if [[ ! "$APP_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
@@ -296,7 +227,6 @@ echo "running migrate, grant-app-role, and ensure-meili-key"
 # outbox cursors before any server starts (writers are still stopped here).
 # createdAt is taken after the quiesced dump but has whole-second precision, so
 # events from earlier in that same second sort after it; use the next second.
-read -r SNAPSHOT_AT SINCE < <(python3 -c 'import datetime,json,sys; t=datetime.datetime.strptime(json.load(open(sys.argv[1]))["createdAt"],"%Y-%m-%dT%H:%M:%SZ")+datetime.timedelta(seconds=1); f="%Y-%m-%dT%H:%M:%SZ"; print(t.strftime(f),(t-datetime.timedelta(days=29)).strftime(f))' "$MANIFEST")
 echo "rebasing outbox cursors (snapshot $SNAPSHOT_AT)"
 "${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
   --recover-outbox --since "$SINCE" --snapshot-at "$SNAPSHOT_AT" \
@@ -319,5 +249,4 @@ echo "opening every sealed secret with the configured ENCRYPTION_KEYS"
 echo "starting the server"
 "${COMPOSE[@]}" up -d --wait server
 
-python3 -c 'import json,sys; json.dump({"restoredProject": sys.argv[1], "searchRebuilt": "rebuild-search", "storageVerified": True, "secretsVerified": True}, sys.stdout)' "$PROJECT"
-printf '\n'
+jq -nc --arg project "$PROJECT" '{restoredProject: $project, searchRebuilt: "rebuild-search", storageVerified: true, secretsVerified: true}'

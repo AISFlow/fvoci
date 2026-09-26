@@ -30,3 +30,4 @@ pub mod settings;
 pub mod share_render;
 pub mod tasks;
 pub mod validate;
+pub mod backup_manifest;

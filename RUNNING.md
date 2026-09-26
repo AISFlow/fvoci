@@ -603,11 +603,13 @@ install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
 of every volume, and it is not PITR.
 
 Run `scripts/backup.sh` and `scripts/restore.sh` on the operator's Linux host
-with Bash, Docker Compose, Python 3 (standard library only), GNU coreutils and
-tar. The scripts check their principal host tools before changing the stack.
-Manifest and key-fingerprint checks run in host Python; PostgreSQL dump/restore,
-storage archiving and the Rust `--verify-storage`/`--verify-secrets` probes run in
-the specified Compose containers. Python is not required inside the server image.
+with Bash, Docker Compose, jq, GNU coreutils and tar. The scripts check their
+principal host tools before changing the stack. The selected installed product
+image runs `fvoci-migrate --backup-manifest` and the offline
+`--restore-preflight` with only the key environment, a read-only backup mount
+for restore, and no network. PostgreSQL dump/restore, storage archiving and
+the Rust `--verify-storage`/`--verify-secrets` probes run in the specified
+Compose containers. Python is not required for the operational scripts.
 
 **Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
 functions) and `fvoci`, taken as the PostgreSQL owner role through the
@@ -625,7 +627,7 @@ the original or existing passwords will not verify. `POSTGRES_USER`,
 `ENCRYPTION_KEYS` seals TOTP secrets, workspace SSO client secrets and webhook
 signing secrets in the dump. The manifest's `encryptionKeys` entry records, per
 key id, `HMAC-SHA256(key, label || id)` (and a whole-keyring SHA-256 like the
-pepper's), never the keys (`scripts/encryption_keys.py`). Before any volume is
+pepper's), never the keys. Before any volume is
 created, restore requires every backed-up key id with the same key; extra keys
 and another active id (a rotation done since the backup) are accepted, a
 missing or changed key id is refused. A backup made without `ENCRYPTION_KEYS`
