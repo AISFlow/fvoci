@@ -1,0 +1,9 @@
+{"type":"doc","content":[
+ {"type":"callout","attrs":{"kind":"warning"},"content":[{"type":"paragraph","content":[{"type":"text","text":"주의"}]}]},
+ {"type":"callout","content":[{"type":"paragraph","content":[{"type":"text","text":"default note"}]}]},
+ {"type":"details","attrs":{"open":true},"content":[
+  {"type":"detailsSummary","content":[{"type":"text","text":"요약"}]},
+  {"type":"detailsContent","content":[{"type":"paragraph","content":[{"type":"text","text":"body"}]},{"type":"blockquote","content":[{"type":"paragraph","content":[{"type":"text","text":"q"}]}]}]}
+ ]},
+ {"type":"horizontalRule"}
+]}

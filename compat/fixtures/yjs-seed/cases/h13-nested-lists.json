@@ -1,0 +1,10 @@
+{"type":"doc","content":[{"type":"bulletList","content":[
+ {"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"one"}]},
+  {"type":"orderedList","attrs":{"start":3},"content":[
+   {"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"three"}]},
+    {"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"deep","marks":[{"type":"code"}]}]},
+     {"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"deeper"}]}]}]}]}]}]},
+   {"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"four"}]},{"type":"paragraph","content":[{"type":"text","text":"second para"}]}]}
+  ]}]},
+ {"type":"listItem","content":[{"type":"paragraph"}]}
+]}]}

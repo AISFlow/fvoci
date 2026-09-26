@@ -62,6 +62,9 @@ pub const MAX_PROJECT_STRING_BYTES: u64 = MAX_PROJECT_JSON_BYTES;
 /// Product derives the limit from `FVOCI_COLLAB_MAX_ROOMS` plus headroom.
 pub const DEFAULT_MAX_CHILD_CONCURRENCY: usize = 8;
 
+/// Default live cap for one-shot seed children ([`crate::process::ChildSlotKind::Seed`]).
+pub const DEFAULT_MAX_SEED_CHILD_CONCURRENCY: usize = 2;
+
 /// Minimum per-room memory reservation for aggregate admission.
 pub const MIN_ROOM_MEMORY_RESERVATION_BYTES: u64 = 16 * 1024 * 1024;
 

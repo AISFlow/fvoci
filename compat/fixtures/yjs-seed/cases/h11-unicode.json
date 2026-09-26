@@ -1,0 +1,12 @@
+{"type":"doc","content":[
+ {"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"한국어 제목 — 𝒜𝔹ℂ"}]},
+ {"type":"paragraph","content":[
+  {"type":"text","text":"emoji 👩‍👩‍👧‍👦 flag 🇰🇷 "},
+  {"type":"text","text":"astral 𠜎𠜱","marks":[{"type":"bold"}]},
+  {"type":"text","text":" NFD \u1112\u1161\u11ab"},
+  {"type":"text","text":" zwsp​ nbsp  bom﻿"},
+  {"type":"hardBreak"},
+  {"type":"text","text":"😀","marks":[{"type":"italic"}]},
+  {"type":"text","text":"끝"}
+ ]}
+]}

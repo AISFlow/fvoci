@@ -9,6 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::dto::ImportJobResponse;
+use crate::collab::seed::SeedEngine;
 use crate::db::import_jobs::{
     create_async_import_job, create_sync_import_job, get_import_job, ImportDbError, ImportSource,
     NewAsyncImport, IMPORT_HTTP_MAX_BYTES,
@@ -136,8 +137,12 @@ async fn start_import(
     let pool = &state.auth.db.pool;
 
     if source == ImportSource::MarkdownZip {
-        let Some(convert) = state.document_convert.as_ref() else {
-            tracing::error!("import.failed reason=convert_helper_unset");
+        let seed = match state.collab.as_ref() {
+            Some(hub) => Some(SeedEngine::from_hub(hub)),
+            None => SeedEngine::from_env(),
+        };
+        let Some(seed) = seed else {
+            tracing::error!("import.failed reason=collab_engine_unset");
             return Err(import_failed());
         };
         let Some(markdown_helper) = state.markdown.as_ref() else {
@@ -150,7 +155,7 @@ async fn start_import(
             .map_err(map_import_error)?;
         let created = match run_markdown_zip_import(
             pool,
-            convert,
+            &seed,
             markdown_helper,
             body.workspace_id,
             job.id,

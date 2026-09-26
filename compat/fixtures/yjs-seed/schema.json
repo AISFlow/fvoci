@@ -1,0 +1,717 @@
+{
+ "nodes": [
+  {
+   "name": "paragraph",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "textAlign",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "blockquote",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "bulletList",
+   "attrs": [
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "doc",
+   "attrs": []
+  },
+  {
+   "name": "hardBreak",
+   "attrs": []
+  },
+  {
+   "name": "heading",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "data-toc-id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "textAlign",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "level",
+     "hasDefault": true,
+     "default": 1,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "horizontalRule",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "listItem",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "orderedList",
+   "attrs": [
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "start",
+     "hasDefault": true,
+     "default": 1,
+     "validate": null
+    },
+    {
+     "name": "type",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "text",
+   "attrs": []
+  },
+  {
+   "name": "codeBlock",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "language",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "highlightLines",
+     "hasDefault": true,
+     "default": [],
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "table",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "tableCell",
+   "attrs": [
+    {
+     "name": "background",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "colspan",
+     "hasDefault": true,
+     "default": 1,
+     "validate": null
+    },
+    {
+     "name": "rowspan",
+     "hasDefault": true,
+     "default": 1,
+     "validate": null
+    },
+    {
+     "name": "colwidth",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "align",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "tableHeader",
+   "attrs": [
+    {
+     "name": "background",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "colspan",
+     "hasDefault": true,
+     "default": 1,
+     "validate": null
+    },
+    {
+     "name": "rowspan",
+     "hasDefault": true,
+     "default": 1,
+     "validate": null
+    },
+    {
+     "name": "colwidth",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "align",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "tableRow",
+   "attrs": [
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "details",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "open",
+     "hasDefault": true,
+     "default": false,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "detailsContent",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "detailsSummary",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "taskList",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "taskItem",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "checked",
+     "hasDefault": true,
+     "default": false,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "callout",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "kind",
+     "hasDefault": true,
+     "default": "note",
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "mermaid",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "source",
+     "hasDefault": true,
+     "default": "",
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "math",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "latex",
+     "hasDefault": true,
+     "default": "",
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "mathInline",
+   "attrs": [
+    {
+     "name": "latex",
+     "hasDefault": true,
+     "default": "",
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "attachment",
+   "attrs": [
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "name",
+     "hasDefault": true,
+     "default": "",
+     "validate": null
+    },
+    {
+     "name": "image",
+     "hasDefault": true,
+     "default": false,
+     "validate": null
+    },
+    {
+     "name": "width",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "align",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "caption",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "previewWidth",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "previewHeight",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "emoji",
+   "attrs": [
+    {
+     "name": "name",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "mention",
+   "attrs": [
+    {
+     "name": "entity",
+     "hasDefault": true,
+     "default": "user",
+     "validate": null
+    },
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": "",
+     "validate": null
+    },
+    {
+     "name": "label",
+     "hasDefault": true,
+     "default": "",
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "embed",
+   "attrs": [
+    {
+     "name": "id",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "ychange",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "entity",
+     "hasDefault": true,
+     "default": "document",
+     "validate": null
+    },
+    {
+     "name": "ref",
+     "hasDefault": true,
+     "default": "",
+     "validate": null
+    }
+   ]
+  }
+ ],
+ "marks": [
+  {
+   "name": "link",
+   "rank": 0,
+   "overlapping": false,
+   "attrs": [
+    {
+     "name": "href",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "target",
+     "hasDefault": true,
+     "default": "_blank",
+     "validate": null
+    },
+    {
+     "name": "rel",
+     "hasDefault": true,
+     "default": "noopener noreferrer nofollow",
+     "validate": null
+    },
+    {
+     "name": "class",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "title",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "textStyle",
+   "rank": 1,
+   "overlapping": false,
+   "attrs": [
+    {
+     "name": "color",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "bold",
+   "rank": 2,
+   "overlapping": false,
+   "attrs": []
+  },
+  {
+   "name": "code",
+   "rank": 3,
+   "overlapping": false,
+   "attrs": []
+  },
+  {
+   "name": "italic",
+   "rank": 4,
+   "overlapping": false,
+   "attrs": []
+  },
+  {
+   "name": "strike",
+   "rank": 5,
+   "overlapping": false,
+   "attrs": []
+  },
+  {
+   "name": "underline",
+   "rank": 6,
+   "overlapping": false,
+   "attrs": []
+  },
+  {
+   "name": "ychange",
+   "rank": 7,
+   "overlapping": false,
+   "attrs": [
+    {
+     "name": "user",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "type",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    },
+    {
+     "name": "color",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  },
+  {
+   "name": "highlight",
+   "rank": 8,
+   "overlapping": false,
+   "attrs": [
+    {
+     "name": "color",
+     "hasDefault": true,
+     "default": null,
+     "validate": null
+    }
+   ]
+  }
+ ]
+}

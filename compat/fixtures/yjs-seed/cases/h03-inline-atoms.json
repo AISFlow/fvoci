@@ -1,0 +1,17 @@
+{"type":"doc","content":[
+ {"type":"paragraph","content":[
+  {"type":"text","text":"hi "},
+  {"type":"mention","attrs":{"entity":"user","id":"0190a0a0-0000-7000-8000-000000000001","label":"김철수"}},
+  {"type":"text","text":" see "},
+  {"type":"mention","attrs":{"entity":"document","id":"0190a0a0-0000-7000-8000-000000000002","label":"문서"}},
+  {"type":"mention"},
+  {"type":"emoji","attrs":{"name":"smile"}},
+  {"type":"emoji"},
+  {"type":"mathInline","attrs":{"latex":"x^2"}},
+  {"type":"text","text":" end"}
+ ]},
+ {"type":"embed","attrs":{"entity":"task","ref":"0190a0a0-0000-7000-8000-000000000003"}},
+ {"type":"embed","attrs":{"entity":"url","ref":"https://video.example/v"}},
+ {"type":"attachment","attrs":{"id":"0190a0a0-0000-7000-8000-000000000004","name":"사진.png","image":true,"width":320,"align":"center","caption":"캡션","previewWidth":1.5,"previewHeight":2000000000000}},
+ {"type":"attachment","attrs":{"id":"0190a0a0-0000-7000-8000-000000000005","name":"a.pdf"}}
+]}

@@ -1,0 +1,9 @@
+{"type":"doc","content":[
+ {"type":"orderedList","attrs":{"start":1.0},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"a"}]}]}]},
+ {"type":"orderedList","attrs":{"start":-2147483647},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"b"}]}]}]},
+ {"type":"orderedList","attrs":{"start":2147483648},"content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"c"}]}]}]},
+ {"type":"heading","attrs":{"level":7},"content":[{"type":"text","text":"d"}]},
+ {"type":"heading","attrs":{"level":"2"},"content":[{"type":"text","text":"e"}]},
+ {"type":"attachment","attrs":{"width":0.1,"previewWidth":1e300,"previewHeight":-0.0,"image":false,"name":"n"}},
+ {"type":"codeBlock","attrs":{"highlightLines":[1,2.5,9007199254740993]}}
+]}

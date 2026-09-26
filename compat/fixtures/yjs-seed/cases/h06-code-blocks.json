@@ -1,0 +1,6 @@
+{"type":"doc","content":[
+ {"type":"codeBlock","attrs":{"language":"rust","highlightLines":[1,3]},"content":[{"type":"text","text":"fn main() {\n    println!(\"한글 😀\");\n}\n"}]},
+ {"type":"codeBlock","attrs":{"language":""},"content":[{"type":"text","text":"  indented\n\ttab"}]},
+ {"type":"codeBlock","attrs":{"language":null}},
+ {"type":"codeBlock"}
+]}

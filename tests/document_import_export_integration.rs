@@ -318,6 +318,104 @@ async fn crashed_run_is_recovered_by_the_next_claim() {
     harness.cleanup().await;
 }
 
+/// A missing seed engine (spawn failure / no seed slot) is capacity
+/// pressure: the run compensates, releases its lease and is retried; only
+/// the last attempt fails the job.
+#[tokio::test]
+async fn seed_unavailable_is_retried_then_fails_only_at_the_attempt_limit() {
+    use fvoci_server::collab::seed::SeedEngine;
+    use fvoci_server::import_job::{run_next_import, ImportJobSettings};
+
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let unavailable = ImportJobSettings {
+        seed: Some(SeedEngine::new(
+            std::env::temp_dir().join(format!("fvoci-missing-engine-{}", Uuid::now_v7())),
+            collab_engine::Limits::for_tests(),
+        )),
+        ..fx.settings.clone()
+    };
+    let available = fx.settings.clone();
+    let docs_before = fx.document_count().await;
+    let import = |name: &'static str| {
+        fx.import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "office-file",
+                "fileName": name,
+                "zipBase64": B64.encode("# retry\n\nbody")
+            }),
+        )
+    };
+    // Skip the retry backoff (IMPORT_RETRY_BACKOFF_SECS) for released rows.
+    let backdate = |job_id: Uuid| {
+        let admin = fx.admin.clone();
+        async move {
+            sqlx::query(
+                "UPDATE fvoci.import_jobs SET updated_at = now() - interval '1 hour' \
+                 WHERE id = $1 AND lease_token IS NULL",
+            )
+            .bind(job_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
+    };
+    let run = |settings: &ImportJobSettings| {
+        let settings = settings.clone();
+        let (pool, storage) = (fx.pool.clone(), fx.storage.clone());
+        async move {
+            run_next_import(&pool, &settings, &storage, &CancellationToken::new())
+                .await
+                .unwrap()
+        }
+    };
+
+    // Engine unavailable on the first attempt, back on the second: completed.
+    let (status, body) = import("retry.md").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert!(run(&unavailable).await);
+    let (state, has_payload, attempts, refs) = job_row(&fx.admin, job_id).await;
+    assert_eq!(
+        (state.as_str(), has_payload, attempts),
+        ("running", true, 1)
+    );
+    assert_eq!(refs["documentIds"], json!([]));
+    assert_eq!(
+        fx.document_count().await,
+        docs_before,
+        "first run compensated"
+    );
+    assert!(!run(&available).await, "released row waits out the backoff");
+    backdate(job_id).await;
+    assert!(run(&available).await);
+    let job = fx.job_status(&fx.cookie, &job_id.to_string()).await;
+    assert_eq!(job["status"], "completed", "{job}");
+    let (_, _, attempts, refs) = job_row(&fx.admin, job_id).await;
+    assert_eq!(attempts, 2);
+    assert_eq!(refs["documentIds"].as_array().unwrap().len(), 1);
+    assert_eq!(fx.document_count().await, docs_before + 1);
+
+    // Still unavailable on the last attempt: failed and compensated.
+    let (status, body) = import("exhausted.md").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert!(run(&unavailable).await);
+    assert_eq!(job_row(&fx.admin, job_id).await.0, "running");
+    backdate(job_id).await;
+    assert!(run(&unavailable).await);
+    let (state, has_payload, attempts, _) = job_row(&fx.admin, job_id).await;
+    assert_eq!(
+        (state.as_str(), has_payload, attempts),
+        ("failed", false, 2)
+    );
+    assert_eq!(fx.document_count().await, docs_before + 1);
+    assert!(!run(&available).await, "a failed job is not claimed again");
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn expired_lease_is_swept_failed_and_compensated() {
     let harness = TestDb::bootstrap().await;

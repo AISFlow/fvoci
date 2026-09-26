@@ -70,7 +70,6 @@ struct ConvertResponse {
     content_json: Option<Value>,
     html: Option<String>,
     markdown: Option<String>,
-    update_b64: Option<String>,
     content_type: Option<String>,
     ext: Option<String>,
     data_b64: Option<String>,
@@ -280,24 +279,6 @@ impl ConvertClient {
         )?;
         resp.html
             .ok_or(ConvertError::Failed("convert helper omitted html".into()))
-    }
-
-    pub async fn tiptap_to_yjs_update(
-        &self,
-        content_json: &Value,
-    ) -> Result<Vec<u8>, ConvertError> {
-        let resp = Self::map_code(
-            self.call(json!({
-                "op": "tiptap_to_yjs_update",
-                "contentJson": content_json,
-            }))
-            .await?,
-        )?;
-        let b64 = resp
-            .update_b64
-            .ok_or_else(|| ConvertError::Failed("convert helper omitted updateB64".into()))?;
-        B64.decode(b64)
-            .map_err(|e| ConvertError::Failed(e.to_string()))
     }
 
     pub async fn export_binary(

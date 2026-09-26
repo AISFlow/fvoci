@@ -1,0 +1,7 @@
+{"type":"doc","content":[
+ {"type":"heading","attrs":{"level":null,"id":"0190a0a0-0000-7000-8000-00000000000a","textAlign":"center","ychange":{"type":"added","user":"u"},"data-toc-id":"toc-1","bogus":"x"},"content":[{"type":"text","text":"h"}]},
+ {"type":"paragraph","attrs":"not-an-object","content":[{"type":"text","text":"p"}]},
+ {"type":"paragraph","attrs":[1,2],"content":[{"type":"text","text":"q"}]},
+ {"type":"orderedList","attrs":{"start":null,"type":"a","ychange":null},"content":[{"type":"listItem","attrs":{"id":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"i"}]}]}]},
+ {"type":"blockquote","attrs":{"id":{"nested":[1,{"k":null}]}},"content":[{"type":"paragraph","content":[{"type":"text","text":"obj id"}]}]}
+]}

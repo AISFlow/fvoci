@@ -141,7 +141,7 @@ pub async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixtur
                 "CARGO_BIN_EXE_fvoci-server"
             )),
         ),
-        ..ImportJobSettings::from_env(convert.clone())
+        ..ImportJobSettings::from_env()
     };
     let pool = pool::connect_app(&harness.app_url).await.expect("app pool");
     let storage_root = std::env::temp_dir().join(format!("fvoci-import-export-{}", Uuid::now_v7()));
