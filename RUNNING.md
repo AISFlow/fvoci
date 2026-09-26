@@ -602,6 +602,13 @@ This is the logical backup for the Compose install above (the source advanced
 install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
 of every volume, and it is not PITR.
 
+Run `scripts/backup.sh` and `scripts/restore.sh` on the operator's Linux host
+with Bash, Docker Compose, Python 3 (standard library only), GNU coreutils and
+tar. The scripts check their principal host tools before changing the stack.
+Manifest and key-fingerprint checks run in host Python; PostgreSQL dump/restore,
+storage archiving and the Rust `--verify-storage`/`--verify-secrets` probes run in
+the specified Compose containers. Python is not required inside the server image.
+
 **Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
 functions) and `fvoci`, taken as the PostgreSQL owner role through the
 `postgres` service, plus a `tar` of the `storage` volume. **Omitted:** Meilisearch (`searchdata`), the scoped API key
