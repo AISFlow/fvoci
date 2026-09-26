@@ -174,6 +174,20 @@ PEPPER_ACTIVE="$(runtime_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
 ENCRYPTION_KEYS_VALUE="$(runtime_key ENCRYPTION_KEYS)"
 ENCRYPTION_ACTIVE="$(runtime_key ENCRYPTION_ACTIVE_KEY_ID)"
 
+# Keep restart (including error cleanup) on the exact image and keys we backed
+# up, even if the original tag or env file changes during the operation.
+export FVOCI_IMAGE="$PRODUCT_IMAGE_ID"
+export PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE"
+export ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE"
+if ! "${COMPOSE[@]}" config --format json | jq -e '
+  .services.server.image == env.FVOCI_IMAGE and
+  (.services.server.environment as $settings |
+    all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
+      . as $key | $settings[$key] == env[$key]))' >/dev/null; then
+  echo "Compose must preserve the selected product image and key snapshot" >&2
+  exit 1
+fi
+
 echo "stopping server so dump and storage share a quiesced point"
 "${COMPOSE[@]}" stop -t 45 server
 SERVER_STOPPED=1

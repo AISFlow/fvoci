@@ -132,6 +132,19 @@ PEPPER_KEYS="$(compose_key PASSWORD_PEPPER_KEYS)"
 PEPPER_ACTIVE="$(compose_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
 ENCRYPTION_KEYS_VALUE="$(compose_key ENCRYPTION_KEYS)"
 ENCRYPTION_ACTIVE="$(compose_key ENCRYPTION_ACTIVE_KEY_ID)"
+# These exported values take precedence over later env-file interpolation.
+# Preflight and every subsequent Compose operation share this exact snapshot.
+export FVOCI_IMAGE="$PRODUCT_IMAGE_ID"
+export PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE"
+export ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE"
+if ! "${COMPOSE[@]}" config --format json | jq -e '
+  .services.server.image == env.FVOCI_IMAGE and .services.init.image == env.FVOCI_IMAGE and
+  (.services.server.environment as $settings |
+    all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
+      . as $key | $settings[$key] == env[$key]))' >/dev/null; then
+  echo "Compose must preserve the selected product image and key snapshot" >&2
+  exit 1
+fi
 PREFLIGHT="$(PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE" \
   ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE" \
   docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
@@ -167,6 +180,13 @@ echo "creating empty restore stack (no processes started)"
 SERVER_CID="$("${COMPOSE[@]}" ps -a -q server | head -1)"
 if [[ -z "$SERVER_CID" ]]; then
   echo "restore server container was not created" >&2
+  exit 1
+fi
+INIT_CID="$("${COMPOSE[@]}" ps -a -q init | head -1)"
+if [[ -z "$INIT_CID" ]] ||
+   [[ "$(docker inspect -f '{{.Image}}' "$SERVER_CID")" != "$PRODUCT_IMAGE_ID" ]] ||
+   [[ "$(docker inspect -f '{{.Image}}' "$INIT_CID")" != "$PRODUCT_IMAGE_ID" ]]; then
+  echo "created restore containers differ from the verified product image" >&2
   exit 1
 fi
 STORAGE_VOL="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data/storage"}}{{.Name}}{{end}}{{end}}' "$SERVER_CID")"
