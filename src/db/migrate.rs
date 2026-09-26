@@ -58,6 +58,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         33,
     ),
     (
+        include_str!("../../migrations/034_task_time_entries.sql"),
+        34,
+    ),
+    (
         include_str!("../../migrations/035_identity_link_issuer.sql"),
         35,
     ),
@@ -541,6 +545,10 @@ mod tests {
         (
             33,
             "4c8310a5380b5e1fa165fb7d3ebc0cdd4237af60ce102551061d37aa4e53fa7b",
+        ),
+        (
+            34,
+            "a15a3adb05357c2ac6e8cb70265b7b8319d18c3a934f1ef4658bb0cbe4cee7a4",
         ),
         (
             35,

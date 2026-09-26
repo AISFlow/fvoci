@@ -9,6 +9,10 @@ import { TaskActivityPanel } from "@/features/comments/task-activity-panel";
 import { StarToggle } from "@/features/share/star-toggle";
 import { TaskCollectionProperties } from "@/features/collections/task-collection-properties";
 import { TaskAttachmentsPanel } from "./task-attachments";
+import { TaskBacklinks } from "./task-backlinks";
+import { TaskTimeEntries } from "./task-time-entries";
+import { Button } from "@/components/ui/button";
+import { ConfirmActionButton } from "@/components/confirm-action";
 import "@/features/projects/projects.css";
 
 export function TaskDetailView({
@@ -44,6 +48,10 @@ export function TaskDetailView({
   onRemoveDependency,
   onArchiveToggle,
   onTrash,
+  clonePending,
+  deletePending,
+  onClone,
+  onDelete,
 }: {
   slug: string;
   workspaceId: string;
@@ -81,6 +89,10 @@ export function TaskDetailView({
   onRemoveDependency: (edge: { blockerId: string; blockedId: string }) => void | Promise<void>;
   onArchiveToggle: (archived: boolean) => void | Promise<void>;
   onTrash: () => void | Promise<void>;
+  clonePending?: boolean;
+  deletePending?: boolean;
+  onClone: () => void | Promise<void>;
+  onDelete: () => Promise<void>;
 }) {
   return (
     <div className="task-home">
@@ -125,6 +137,33 @@ export function TaskDetailView({
         onArchiveToggle={onArchiveToggle}
         onTrash={onTrash}
       />
+      {canEdit ? (
+        <div className="flex flex-wrap gap-2" data-testid="task-detail-actions">
+          {!readOnly ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              data-testid="task-clone"
+              disabled={clonePending || pending}
+              onClick={() => void onClone()}
+            >
+              {t("task.clone")}
+            </Button>
+          ) : null}
+          {task.archivedAt == null ? (
+            <ConfirmActionButton
+              title={t("task.delete.confirm.title")}
+              description={t("task.delete.confirm.body")}
+              actionLabel={t("task.delete")}
+              disabled={deletePending || pending}
+              onConfirm={onDelete}
+            >
+              {t("task.delete")}
+            </ConfirmActionButton>
+          ) : null}
+        </div>
+      ) : null}
       <TaskCollectionProperties
         workspaceId={workspaceId}
         taskId={task.id}
@@ -138,6 +177,12 @@ export function TaskDetailView({
         taskId={task.id}
         readOnly={readOnly || task.archivedAt != null}
       />
+      <TaskTimeEntries
+        workspaceId={workspaceId}
+        taskId={task.id}
+        members={members}
+        readOnly={readOnly}
+      />
       {currentUserId ? (
         <TaskActivityPanel
           key={task.id}
@@ -147,6 +192,7 @@ export function TaskDetailView({
           readOnly={readOnly}
         />
       ) : null}
+      <TaskBacklinks slug={slug} workspaceId={workspaceId} taskId={task.id} />
     </div>
   );
 }

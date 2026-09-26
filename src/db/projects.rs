@@ -45,6 +45,9 @@ pub enum ProjectDbError {
     DependencyContradiction,
     TaskCannotBlockItself,
     InvalidInput,
+    OpenTimeEntryExists,
+    StatusHasTasks,
+    WorkflowStatusLimit,
 }
 
 #[derive(Debug, Clone)]
@@ -242,9 +245,27 @@ pub(crate) fn visible_project_sql(
     guest_param: u32,
     actor_param: u32,
 ) -> String {
+    visible_project_predicate(project_alias, &format!("${guest_param}"), actor_param)
+}
+
+/// `visible_project_sql` with the actor's guest flag inlined (a server-computed
+/// boolean, never request text) for queries whose binds are all text.
+pub(crate) fn visible_project_sql_for_guest(
+    project_alias: &str,
+    guest: bool,
+    actor_param: u32,
+) -> String {
+    visible_project_predicate(
+        project_alias,
+        if guest { "true" } else { "false" },
+        actor_param,
+    )
+}
+
+fn visible_project_predicate(project_alias: &str, guest_sql: &str, actor_param: u32) -> String {
     format!(
         "(
-            ({project_alias}.visibility = 'workspace' AND ${guest_param} = false)
+            ({project_alias}.visibility = 'workspace' AND {guest_sql} = false)
             OR EXISTS (
                 SELECT 1 FROM fvoci.project_members pm
                 WHERE pm.workspace_id = {project_alias}.workspace_id
