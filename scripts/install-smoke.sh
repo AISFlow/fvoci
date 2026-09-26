@@ -145,6 +145,15 @@ wait_http() {
 wait_http "/api/v1/setup"
 log_assert "setup endpoint ready: ok"
 
+# Run the installed diagnostic as migrate, so its converter probe must select
+# the deployed server sibling and its shipped fonts rather than current_exe.
+if ! DOCTOR_REPORT="$("${COMPOSE[@]}" exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)"; then
+  printf '%s\n' "$DOCTOR_REPORT" >&2
+  exit 1
+fi
+python3 -c 'import json,sys; report=json.load(sys.stdin); assert report["ok"] is True; assert any(c["name"]=="document_convert" and c["ok"] is True for c in report["checks"]), report' <<<"$DOCTOR_REPORT"
+log_assert "installed doctor executes Rust document conversion with shipped assets: ok"
+
 COOKIE_JAR="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-cookie.${RUN_ID}.XXXXXX")"
 SETUP_BODY='{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}'
 curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
