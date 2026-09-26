@@ -1,0 +1,236 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "A ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://x.example"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "link with ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://x.example"
+              },
+              "type": "link"
+            },
+            {
+              "type": "italic"
+            }
+          ],
+          "text": "emphasis",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://x.example"
+              },
+              "type": "link"
+            }
+          ],
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://x.example"
+              },
+              "type": "link"
+            },
+            {
+              "type": "code"
+            }
+          ],
+          "text": "code",
+          "type": "text"
+        },
+        {
+          "text": " plus ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "highlight"
+            }
+          ],
+          "text": "hi ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://h.example"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "inside",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "highlight"
+            }
+          ],
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "bold with ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "document",
+            "id": "ref-in-bold",
+            "label": "Label"
+          },
+          "type": "mention"
+        },
+        {
+          "marks": [
+            {
+              "type": "bold"
+            }
+          ],
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "user",
+            "id": "u1",
+            "label": "Kim"
+          },
+          "type": "mention"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "type": "italic"
+            }
+          ],
+          "text": "italic ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "math"
+          },
+          "marks": [
+            {
+              "type": "italic"
+            }
+          ],
+          "type": "mathInline"
+        },
+        {
+          "marks": [
+            {
+              "type": "italic"
+            }
+          ],
+          "text": " inside",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://m.example"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "link ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "m"
+          },
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://m.example"
+              },
+              "type": "link"
+            }
+          ],
+          "type": "mathInline"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://m.example"
+              },
+              "type": "link"
+            }
+          ],
+          "text": " math",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Unicode punct: “quotes” — dash… ellipsis ©®™",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Tabs\tinside\ttext.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

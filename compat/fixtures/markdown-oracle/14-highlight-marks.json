@@ -1,0 +1,191 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "This is ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "highlight"
+            }
+          ],
+          "text": "highlighted",
+          "type": "text"
+        },
+        {
+          "text": " text and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "highlight"
+            }
+          ],
+          "text": "unterminated highlight.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "type": "bold"
+            },
+            {
+              "type": "highlight"
+            }
+          ],
+          "text": "bold highlight",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "italic"
+            }
+          ],
+          "text": "italic in highlight",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "highlight"
+            }
+          ],
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "under ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "bold",
+          "type": "text"
+        },
+        {
+          "text": " line",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "type": "italic"
+            },
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "bold italic",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "bold"
+            },
+            {
+              "type": "italic"
+            }
+          ],
+          "text": "mixed",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "italic"
+            },
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "mixed2",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "type": "strike"
+            },
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "strike bold",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "type": "code"
+            }
+          ],
+          "text": "code with **not bold**",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "type": "code"
+            }
+          ],
+          "text": "double `tick` code",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

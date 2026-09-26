@@ -1,0 +1,35 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "Above",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "type": "horizontalRule"
+    },
+    {
+      "type": "horizontalRule"
+    },
+    {
+      "type": "horizontalRule"
+    },
+    {
+      "type": "horizontalRule"
+    },
+    {
+      "content": [
+        {
+          "text": "Below",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

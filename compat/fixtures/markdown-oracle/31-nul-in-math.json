@@ -1,0 +1,43 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "pay ",
+          "type": "text"
+        },
+        {
+          "text": "$5 a\u0000b for ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "x"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " now",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "$ \u0000 $ and ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "a�b"
+          },
+          "type": "mathInline"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

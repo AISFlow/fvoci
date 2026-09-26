@@ -1,0 +1,175 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "Text with ",
+          "type": "text"
+        },
+        {
+          "text": "inline span",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "text": "bold tag",
+          "type": "text"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "underlined",
+          "type": "text"
+        },
+        {
+          "text": " text and ",
+          "type": "text"
+        },
+        {
+          "type": "hardBreak"
+        },
+        {
+          "text": " break and ",
+          "type": "text"
+        },
+        {
+          "type": "hardBreak"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "type": "hardBreak"
+        },
+        {
+          "text": " too.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "Click me",
+              "type": "text"
+            }
+          ],
+          "type": "detailsSummary"
+        },
+        {
+          "content": [
+            {
+              "content": [
+                {
+                  "text": "Hidden ",
+                  "type": "text"
+                },
+                {
+                  "marks": [
+                    {
+                      "type": "bold"
+                    }
+                  ],
+                  "text": "content",
+                  "type": "text"
+                },
+                {
+                  "text": ".",
+                  "type": "text"
+                }
+              ],
+              "type": "paragraph"
+            },
+            {
+              "content": [
+                {
+                  "content": [
+                    {
+                      "content": [
+                        {
+                          "text": "item",
+                          "type": "text"
+                        }
+                      ],
+                      "type": "paragraph"
+                    }
+                  ],
+                  "type": "listItem"
+                }
+              ],
+              "type": "bulletList"
+            }
+          ],
+          "type": "detailsContent"
+        }
+      ],
+      "type": "details"
+    },
+    {
+      "content": [
+        {
+          "content": [],
+          "type": "detailsSummary"
+        },
+        {
+          "content": [
+            {
+              "content": [
+                {
+                  "text": "empty summary",
+                  "type": "text"
+                }
+              ],
+              "type": "paragraph"
+            }
+          ],
+          "type": "detailsContent"
+        }
+      ],
+      "type": "details"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "Unclosed",
+              "type": "text"
+            }
+          ],
+          "type": "detailsSummary"
+        },
+        {
+          "content": [
+            {
+              "content": [
+                {
+                  "text": "never closed",
+                  "type": "text"
+                }
+              ],
+              "type": "paragraph"
+            }
+          ],
+          "type": "detailsContent"
+        }
+      ],
+      "type": "details"
+    }
+  ],
+  "type": "doc"
+}

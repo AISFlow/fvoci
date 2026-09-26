@@ -1,0 +1,138 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://img.example/a.png"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "alt text",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://img.example/noalt.png"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https://img.example/noalt.png",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "local alt",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "id": "3f2a-uuid",
+        "image": true,
+        "name": "photo.png"
+      },
+      "type": "attachment"
+    },
+    {
+      "attrs": {
+        "id": "abcd-1234",
+        "image": false,
+        "name": "report.pdf"
+      },
+      "type": "attachment"
+    },
+    {
+      "attrs": {
+        "id": "bold-id",
+        "image": false,
+        "name": "bold name.pdf"
+      },
+      "type": "attachment"
+    },
+    {
+      "content": [
+        {
+          "text": "Inline ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://x.example/i.png"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "img",
+          "type": "text"
+        },
+        {
+          "text": " in text and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "attachment:inline-id"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "file",
+          "type": "text"
+        },
+        {
+          "text": " inline.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "attachment:"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "empty",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

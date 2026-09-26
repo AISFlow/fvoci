@@ -1,0 +1,235 @@
+{
+  "content": [
+    {
+      "attrs": {
+        "level": 1
+      },
+      "content": [
+        {
+          "text": "Heading 1",
+          "type": "text"
+        }
+      ],
+      "type": "heading"
+    },
+    {
+      "attrs": {
+        "level": 2
+      },
+      "content": [
+        {
+          "text": "Heading ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "italic"
+            }
+          ],
+          "text": "2",
+          "type": "text"
+        },
+        {
+          "text": " with ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "bold",
+          "type": "text"
+        }
+      ],
+      "type": "heading"
+    },
+    {
+      "attrs": {
+        "level": 6
+      },
+      "content": [
+        {
+          "text": "Six",
+          "type": "text"
+        }
+      ],
+      "type": "heading"
+    },
+    {
+      "content": [
+        {
+          "text": "####### seven hashes",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "level": 1
+      },
+      "content": [
+        {
+          "text": "Setext H1",
+          "type": "text"
+        }
+      ],
+      "type": "heading"
+    },
+    {
+      "attrs": {
+        "level": 2
+      },
+      "content": [
+        {
+          "text": "Setext H2",
+          "type": "text"
+        }
+      ],
+      "type": "heading"
+    },
+    {
+      "content": [
+        {
+          "text": "A paragraph with ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "italic"
+            }
+          ],
+          "text": "italic",
+          "type": "text"
+        },
+        {
+          "text": ", ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "italic"
+            }
+          ],
+          "text": "also italic",
+          "type": "text"
+        },
+        {
+          "text": ", ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "bold",
+          "type": "text"
+        },
+        {
+          "text": ", ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "bold",
+          "type": "text"
+        },
+        {
+          "text": ", ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "strike"
+            }
+          ],
+          "text": "strike",
+          "type": "text"
+        },
+        {
+          "text": ", ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "strike"
+            }
+          ],
+          "text": "single",
+          "type": "text"
+        },
+        {
+          "text": ", ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "code"
+            }
+          ],
+          "text": "code",
+          "type": "text"
+        },
+        {
+          "text": ", and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "type": "italic"
+            },
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "both",
+          "type": "text"
+        },
+        {
+          "text": ".\nSoft line\nbreak here.\nHard break with spaces",
+          "type": "text"
+        },
+        {
+          "type": "hardBreak"
+        },
+        {
+          "text": "next line and backslash",
+          "type": "text"
+        },
+        {
+          "type": "hardBreak"
+        },
+        {
+          "text": "next.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Trailing space line\ncontinues.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

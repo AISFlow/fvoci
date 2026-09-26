@@ -1,0 +1,146 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "Hello ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "user",
+            "id": "u-123",
+            "label": "Kim Minsu"
+          },
+          "type": "mention"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "group",
+            "id": "g-9",
+            "label": "Designers"
+          },
+          "type": "mention"
+        },
+        {
+          "text": "!",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Ref inline ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "document",
+            "id": "d-1",
+            "label": ""
+          },
+          "type": "mention"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "task",
+            "id": "T-42",
+            "label": "Fix bug"
+          },
+          "type": "mention"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "project",
+            "id": "p-7",
+            "label": "Proj"
+          },
+          "type": "mention"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "entity": "document",
+        "ref": "embedded-doc"
+      },
+      "type": "embed"
+    },
+    {
+      "attrs": {
+        "entity": "task",
+        "ref": "T-100"
+      },
+      "type": "embed"
+    },
+    {
+      "attrs": {
+        "entity": "project",
+        "ref": "P-1"
+      },
+      "type": "embed"
+    },
+    {
+      "content": [
+        {
+          "attrs": {
+            "entity": "document",
+            "id": "with-label",
+            "label": "Label"
+          },
+          "type": "mention"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "entity": "task",
+        "ref": "T-trim"
+      },
+      "type": "embed"
+    },
+    {
+      "content": [
+        {
+          "text": "@[bad:x|y] @[user:missing-label] [[other:z]]",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "attrs": {
+            "entity": "user",
+            "id": "한글-id",
+            "label": "홍길동 🎉"
+          },
+          "type": "mention"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

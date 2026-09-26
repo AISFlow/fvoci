@@ -1,0 +1,125 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "Visit ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://example.com"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https://example.com",
+          "type": "text"
+        },
+        {
+          "text": ". Or (",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://paren.example/x"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https://paren.example/x",
+          "type": "text"
+        },
+        {
+          "text": ") or ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://trail.example/a_b"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https://trail.example/a_b",
+          "type": "text"
+        },
+        {
+          "text": "_.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "ftp://ftp.example is not gfm literal? ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "http://www.x.y?q=1"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "www.x.y?q=1",
+          "type": "text"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "javascript:alert(1)"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "javascript:alert(1)",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "mailto:user@sub.example.co.kr"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "user@sub.example.co.kr",
+          "type": "text"
+        },
+        {
+          "text": " mention",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

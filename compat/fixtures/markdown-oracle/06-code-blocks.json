@@ -1,0 +1,108 @@
+{
+  "content": [
+    {
+      "attrs": {
+        "language": "rust"
+      },
+      "content": [
+        {
+          "text": "fn main() {\n    println!(\"hi\");\n}",
+          "type": "text"
+        }
+      ],
+      "type": "codeBlock"
+    },
+    {
+      "attrs": {
+        "language": "TypeScript"
+      },
+      "content": [
+        {
+          "text": "const x: number = 1;",
+          "type": "text"
+        }
+      ],
+      "type": "codeBlock"
+    },
+    {
+      "attrs": {
+        "language": "js"
+      },
+      "content": [
+        {
+          "text": "let a = 1;",
+          "type": "text"
+        }
+      ],
+      "type": "codeBlock"
+    },
+    {
+      "attrs": {
+        "language": ""
+      },
+      "content": [
+        {
+          "text": "no language",
+          "type": "text"
+        }
+      ],
+      "type": "codeBlock"
+    },
+    {
+      "attrs": {
+        "language": "python"
+      },
+      "content": [
+        {
+          "text": "tilde fence",
+          "type": "text"
+        }
+      ],
+      "type": "codeBlock"
+    },
+    {
+      "attrs": {
+        "language": "markdown"
+      },
+      "content": [
+        {
+          "text": "```nested```",
+          "type": "text"
+        }
+      ],
+      "type": "codeBlock"
+    },
+    {
+      "attrs": {
+        "language": ""
+      },
+      "content": [
+        {
+          "text": "indented code block\nline two",
+          "type": "text"
+        }
+      ],
+      "type": "codeBlock"
+    },
+    {
+      "attrs": {
+        "language": ""
+      },
+      "content": [],
+      "type": "codeBlock"
+    },
+    {
+      "attrs": {
+        "language": "sh"
+      },
+      "content": [
+        {
+          "text": "unclosed fence at end",
+          "type": "text"
+        }
+      ],
+      "type": "codeBlock"
+    }
+  ],
+  "type": "doc"
+}

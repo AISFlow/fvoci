@@ -1,0 +1,371 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://example.com"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "http://example.com/a?b=c&d=e#f"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "http",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "mailto:a@b.co"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "mail",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "javascript:alert(1)"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "js",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "JAVASCRIPT:alert(1)"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "JS upper",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "data:text/html,<b>x</b>"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "data",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "vbscript:msgbox"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "vb",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "/docs/1"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "relative",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "#frag"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "hash",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "//evil.com"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "proto-relative",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": ""
+              },
+              "type": "link"
+            }
+          ],
+          "text": "empty",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "a b"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "spaces",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://t.example"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "titled",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://b.example"
+              },
+              "type": "link"
+            },
+            {
+              "type": "bold"
+            }
+          ],
+          "text": "bold link",
+          "type": "text"
+        },
+        {
+          "text": " ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://c.example"
+              },
+              "type": "link"
+            },
+            {
+              "type": "code"
+            }
+          ],
+          "text": "code link",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Autolink ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://auto.example"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https://auto.example",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "mailto:x@y.z"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "mailto:x@y.z",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "http://www.example.com"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "www.example.com",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://bare.example/path"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https://bare.example/path",
+          "type": "text"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Email literal: ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "mailto:someone@example.com"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "someone@example.com",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Unresolved [nothing][nope].",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

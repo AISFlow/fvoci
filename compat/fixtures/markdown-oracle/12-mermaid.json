@@ -1,0 +1,23 @@
+{
+  "content": [
+    {
+      "attrs": {
+        "source": "graph TD\n  A-->B\n  B-->C"
+      },
+      "type": "mermaid"
+    },
+    {
+      "attrs": {
+        "source": "sequenceDiagram\n  A->>B: hi"
+      },
+      "type": "mermaid"
+    },
+    {
+      "attrs": {
+        "source": ""
+      },
+      "type": "mermaid"
+    }
+  ],
+  "type": "doc"
+}
