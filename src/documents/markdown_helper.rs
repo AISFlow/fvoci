@@ -1,5 +1,6 @@
-//! Markdown conversions in a child process: a hidden mode of this binary,
-//! `--internal-markdown`, like the office and image preview children.
+//! Markdown conversions and the DOCX export in a child process: a hidden mode
+//! of this binary, `--internal-markdown`, like the office and image preview
+//! children.
 //!
 //! The Markdown parser (micromark semantics, `documents::markdown`) is
 //! super-linear on some inputs (deeply nested emphasis, block quotes and
@@ -8,7 +9,9 @@
 //! `main` before any runtime, logger, config or credential exists; it sets
 //! RLIMIT_AS/RLIMIT_CPU before reading its input from stdin, runs one
 //! operation on a thread with a stack sized for the parser's recursion, and
-//! writes the result to stdout. The parent bounds input, output, wall time and
+//! writes the result to stdout. The DOCX writer (`documents::docx`) runs here
+//! for the same reasons: CPU/memory proportional to a stored body, panics and
+//! its 20 MB output cap stay out of the server. The parent bounds input, output, wall time and
 //! concurrency, kills the child on timeout or drop, clears its environment and
 //! sets dies-with-parent on Linux. This is an isolation boundary for CPU,
 //! memory and crashes, not a filesystem or network sandbox.
@@ -23,6 +26,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
 use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
+use crate::documents::docx::{write_docx, DocxError, DOCX_MAX_OUTPUT_BYTES};
+use crate::documents::export_model::export_doc;
 use crate::documents::markdown::{md_to_safe_html, md_to_tiptap};
 use crate::share_render::{is_tiptap_doc, tiptap_doc_to_md};
 
@@ -49,6 +54,8 @@ pub enum MarkdownOp {
     MdToSafeHtml,
     /// Source `tiptapDocToMd` (with its `selfCheckedMd` reparse).
     TiptapToMd,
+    /// Source `export_docx`: `{"title", "contentJson"}` -> DOCX bytes.
+    TiptapToDocx,
 }
 
 impl MarkdownOp {
@@ -57,13 +64,19 @@ impl MarkdownOp {
             Self::MdToTiptap => "md-to-tiptap",
             Self::MdToSafeHtml => "md-to-safe-html",
             Self::TiptapToMd => "tiptap-to-md",
+            Self::TiptapToDocx => "tiptap-to-docx",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
-        [Self::MdToTiptap, Self::MdToSafeHtml, Self::TiptapToMd]
-            .into_iter()
-            .find(|op| op.as_str() == value)
+        [
+            Self::MdToTiptap,
+            Self::MdToSafeHtml,
+            Self::TiptapToMd,
+            Self::TiptapToDocx,
+        ]
+        .into_iter()
+        .find(|op| op.as_str() == value)
     }
 }
 
@@ -80,6 +93,26 @@ pub enum MarkdownError {
     /// Spawn/IO/protocol failure: not caused by the input.
     #[error("markdown helper failed: {0}")]
     Failed(String),
+}
+
+/// Why one child run did not produce output.
+enum RunError {
+    InvalidInput(String),
+    TooLarge,
+    Failed(String),
+    /// Watchdog, RLIMIT_CPU or an abort under RLIMIT_AS / stack overflow.
+    Killed(String),
+}
+
+impl From<RunError> for MarkdownError {
+    /// Markdown ops: a child killed on an input refuses that input.
+    fn from(err: RunError) -> Self {
+        match err {
+            RunError::InvalidInput(m) | RunError::Killed(m) => Self::InvalidInput(m),
+            RunError::TooLarge => Self::TooLarge,
+            RunError::Failed(m) => Self::Failed(m),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,17 +191,50 @@ impl MarkdownHelper {
         String::from_utf8(out).map_err(|e| MarkdownError::Failed(e.to_string()))
     }
 
+    /// Source `export_docx` (`markdownToDocx(documentMarkdown(title, doc))`):
+    /// DOCX bytes of at most [`DOCX_MAX_OUTPUT_BYTES`]. A body that is not a
+    /// Tiptap doc is `InvalidInput` (source `invalid_input`) without a child.
+    /// A child killed by the watchdog or a resource limit is `Failed` (the
+    /// Node export answered 500 on its timeout; the body is stored data, not
+    /// a request input).
+    pub async fn tiptap_to_docx(
+        &self,
+        title: &str,
+        content_json: &Value,
+    ) -> Result<Vec<u8>, MarkdownError> {
+        if !is_tiptap_doc(content_json) {
+            return Err(MarkdownError::InvalidInput("not a tiptap doc".into()));
+        }
+        let input = serde_json::to_vec(&serde_json::json!({
+            "title": title,
+            "contentJson": content_json,
+        }))
+        .map_err(|e| MarkdownError::Failed(e.to_string()))?;
+        match self.run_child(MarkdownOp::TiptapToDocx, input).await {
+            Ok(out) => Ok(out),
+            Err(RunError::Killed(m)) => Err(MarkdownError::Failed(m)),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     /// Runs one operation in a fresh child. The child is killed on timeout
     /// and when this future is dropped (`kill_on_drop`).
     pub async fn run(&self, op: MarkdownOp, input: Vec<u8>) -> Result<Vec<u8>, MarkdownError> {
-        let limits = self.limits;
+        Ok(self.run_child(op, input).await?)
+    }
+
+    async fn run_child(&self, op: MarkdownOp, input: Vec<u8>) -> Result<Vec<u8>, RunError> {
+        let mut limits = self.limits;
+        if op == MarkdownOp::TiptapToDocx {
+            limits.max_output_bytes = limits.max_output_bytes.min(DOCX_MAX_OUTPUT_BYTES);
+        }
         if input.len() > limits.max_input_bytes {
-            return Err(MarkdownError::TooLarge);
+            return Err(RunError::TooLarge);
         }
         let _permit = PERMITS
             .acquire()
             .await
-            .map_err(|_| MarkdownError::Failed("markdown helper closed".into()))?;
+            .map_err(|_| RunError::Failed("markdown helper closed".into()))?;
         let mut command = tokio::process::Command::new(&self.program);
         #[cfg(target_os = "linux")]
         {
@@ -199,11 +265,11 @@ impl MarkdownHelper {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn();
-        let mut child = spawned.map_err(|e| MarkdownError::Failed(format!("spawn: {e}")))?;
+        let mut child = spawned.map_err(|e| RunError::Failed(format!("spawn: {e}")))?;
         let (Some(mut stdin), Some(mut stdout), Some(mut stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            return Err(MarkdownError::Failed("child pipes unavailable".into()));
+            return Err(RunError::Failed("child pipes unavailable".into()));
         };
         let output_cap = limits.max_output_bytes as u64;
         let io = async move {
@@ -220,14 +286,14 @@ impl MarkdownHelper {
             let read_err = err_pipe.read_to_end(&mut err);
             let ((), out_res, err_res) = tokio::join!(feed, read_out, read_err);
             if out.len() as u64 > output_cap {
-                return Err(MarkdownError::TooLarge);
+                return Err(RunError::TooLarge);
             }
-            out_res.map_err(|e| MarkdownError::Failed(format!("stdout: {e}")))?;
-            err_res.map_err(|e| MarkdownError::Failed(format!("stderr: {e}")))?;
+            out_res.map_err(|e| RunError::Failed(format!("stdout: {e}")))?;
+            err_res.map_err(|e| RunError::Failed(format!("stderr: {e}")))?;
             let status = child
                 .wait()
                 .await
-                .map_err(|e| MarkdownError::Failed(format!("wait: {e}")))?;
+                .map_err(|e| RunError::Failed(format!("wait: {e}")))?;
             Ok((status, out, err))
         };
         // Every early return drops the child: kill_on_drop reaps it.
@@ -235,22 +301,17 @@ impl MarkdownHelper {
             tokio::time::timeout(limits.timeout, io)
                 .await
                 .map_err(|_| {
-                    MarkdownError::InvalidInput(format!(
-                        "markdown watchdog {}s",
-                        limits.timeout.as_secs()
-                    ))
+                    RunError::Killed(format!("markdown watchdog {}s", limits.timeout.as_secs()))
                 })??;
         let message = String::from_utf8_lossy(&err).trim().to_string();
         match status.code() {
             Some(0) => Ok(out),
-            Some(EXIT_INVALID_INPUT) => Err(MarkdownError::InvalidInput(message)),
-            Some(EXIT_OUTPUT_TOO_LARGE) => Err(MarkdownError::TooLarge),
-            Some(code) => Err(MarkdownError::Failed(format!(
-                "child exited {code}: {message}"
-            ))),
+            Some(EXIT_INVALID_INPUT) => Err(RunError::InvalidInput(message)),
+            Some(EXIT_OUTPUT_TOO_LARGE) => Err(RunError::TooLarge),
+            Some(code) => Err(RunError::Failed(format!("child exited {code}: {message}"))),
             // Killed by a signal: RLIMIT_CPU, or an abort (allocation failure
             // under RLIMIT_AS, stack overflow) on this input.
-            None => Err(MarkdownError::InvalidInput(format!(
+            None => Err(RunError::Killed(format!(
                 "child killed ({status}): {message}"
             ))),
         }
@@ -263,6 +324,28 @@ impl MarkdownHelper {
 enum ChildResult {
     Output(Vec<u8>),
     InvalidInput(String),
+    OutputTooLarge,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocxRequest {
+    title: String,
+    content_json: Value,
+}
+
+fn tiptap_to_docx(input: &[u8]) -> ChildResult {
+    let Ok(req) = serde_json::from_slice::<DocxRequest>(input) else {
+        return ChildResult::InvalidInput("input is not a docx request".into());
+    };
+    if !is_tiptap_doc(&req.content_json) {
+        return ChildResult::InvalidInput("not a tiptap doc".into());
+    }
+    match write_docx(&export_doc(&req.title, &req.content_json)) {
+        Ok(bytes) => ChildResult::Output(bytes),
+        Err(DocxError::TooLarge) => ChildResult::OutputTooLarge,
+        Err(DocxError::Pack(detail)) => ChildResult::InvalidInput(detail),
+    }
 }
 
 fn convert(op: MarkdownOp, input: Vec<u8>) -> ChildResult {
@@ -287,6 +370,7 @@ fn convert(op: MarkdownOp, input: Vec<u8>) -> ChildResult {
                     Vec::new()
                 }
             }),
+        MarkdownOp::TiptapToDocx => return tiptap_to_docx(&input),
     };
     match result {
         Ok(out) => ChildResult::Output(out),
@@ -356,6 +440,7 @@ pub fn maybe_run_helper() -> Option<i32> {
             let _ = writeln!(std::io::stderr(), "{detail}");
             return Some(EXIT_INVALID_INPUT);
         }
+        ChildResult::OutputTooLarge => return Some(EXIT_OUTPUT_TOO_LARGE),
     };
     if out.len() as u64 > max_output {
         return Some(EXIT_OUTPUT_TOO_LARGE);

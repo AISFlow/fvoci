@@ -1,0 +1,201 @@
+{
+ "content": [
+  {
+   "content": [
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "이름",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableHeader"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "marks": [
+            {
+             "type": "bold"
+            }
+           ],
+           "text": "값",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableHeader"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "비고",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableHeader"
+      }
+     ],
+     "type": "tableRow"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "가",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "줄1",
+           "type": "text"
+          },
+          {
+           "type": "hardBreak"
+          },
+          {
+           "text": "줄2",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "marks": [
+            {
+             "type": "code"
+            }
+           ],
+           "text": "code",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      }
+     ],
+     "type": "tableRow"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "short row",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      }
+     ],
+     "type": "tableRow"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "a",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "b",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "c",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "extra",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      }
+     ],
+     "type": "tableRow"
+    }
+   ],
+   "type": "table"
+  }
+ ],
+ "type": "doc"
+}

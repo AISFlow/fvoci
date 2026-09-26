@@ -1,6 +1,8 @@
 pub mod blocks;
 pub mod convert;
+pub mod docx;
 pub mod export;
+pub mod export_model;
 pub mod import_body;
 pub mod import_zip;
 pub mod markdown;
