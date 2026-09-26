@@ -1,9 +1,9 @@
 //! Meilisearch CE client for FVOCI search.
 //!
-//! Ports `packages/search/src/meili.ts` (lexical path) at source SHA
-//! `393795261322b916e588043cf94feca999175843`. Semantic/vector search
-//! (`searchMeiliVector`, embedding upsert besides a null `_vectors` slot)
-//! is intentionally not ported.
+//! Ports `packages/search/src/meili.ts` at source SHA
+//! `393795261322b916e588043cf94feca999175843`, including the attachment chunk
+//! vectors (`_vectors.attachments`, userProvided embedder) and
+//! `searchMeiliVector`.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -32,6 +32,8 @@ const TASK_POLL_MAX_MS: u64 = 100;
 pub const ATTACHMENT_EMBEDDER: &str = "attachments";
 /// Source `@fvoci/contracts` `EMBEDDING_DIMENSIONS`. Required by index settings.
 pub const EMBEDDING_DIMENSIONS: u32 = 1536;
+/// Source `SEMANTIC_CHUNK_K`: nearest chunks per vector query (old pgvector K).
+pub const SEMANTIC_CHUNK_K: u32 = 50;
 const SCOPED_KEY_NAME: &str = "fvoci";
 const KEY_FILE_UID: u32 = 1000;
 
@@ -206,6 +208,9 @@ pub struct SearchSource {
     pub chosung: String,
     pub stem: String,
     pub updated_at: i64,
+    /// Attachment chunk vector. `None` is still sent as
+    /// `_vectors.attachments: null`: CE rejects the whole batch when the key is missing.
+    pub embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -332,7 +337,7 @@ fn meili_document(doc: &SearchSource) -> Result<Value, MeiliError> {
         "stem": doc.stem,
         "updatedAt": doc.updated_at,
         "resourceKey": resource_key,
-        "_vectors": { ATTACHMENT_EMBEDDER: Value::Null },
+        "_vectors": { ATTACHMENT_EMBEDDER: doc.embedding.as_ref().map(|v| json!(v)) },
     }))
 }
 
@@ -879,6 +884,91 @@ async fn search_meili_op(
     Ok(MeiliSearchPage { hits, next_offset })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeiliVectorSearchInput {
+    pub vector: Vec<f32>,
+    pub scopes: Vec<MeiliSearchScope>,
+    pub limit: u32,
+}
+
+/// Source `meiliVectorScore`: CE 1.53.2 userProvided with `semanticRatio: 1`
+/// reports `_rankingScore` = (1 + cosine) / 2; map it back to cosine.
+pub fn meili_vector_score(ranking_score: f64) -> f64 {
+    2.0 * ranking_score - 1.0
+}
+
+/// Source `searchMeiliVector` (no `allowedKinds`: FVOCI search is session-only,
+/// so the parent-kind clause is never needed). Attachment chunks only.
+async fn search_meili_vector_op(
+    config: &MeiliConfig,
+    input: &MeiliVectorSearchInput,
+) -> Result<Vec<MeiliHit>, MeiliError> {
+    if input.vector.len() != EMBEDDING_DIMENSIONS as usize
+        || input.vector.iter().any(|n| !n.is_finite())
+        || input.vector.iter().all(|n| *n == 0.0)
+    {
+        return Err(MeiliError::Protocol);
+    }
+    let mut scopes = Vec::new();
+    for scope in &input.scopes {
+        if let Some(clause) = scope_clause(scope)? {
+            scopes.push(clause);
+        }
+    }
+    if scopes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let filter = format!(
+        "({}) AND {}",
+        scopes.join(" OR "),
+        meili_eq("kind", SearchSourceKind::Attachment.as_str())?
+    );
+    ensure_meili_index(config).await?;
+    let body = json!({
+        "q": "",
+        "vector": input.vector,
+        "hybrid": { "embedder": ATTACHMENT_EMBEDDER, "semanticRatio": 1 },
+        "filter": filter,
+        "limit": input.limit,
+        "attributesToRetrieve": RETRIEVE,
+        "showRankingScore": true,
+        "retrieveVectors": false,
+    });
+    let got = meili_request(
+        config,
+        reqwest::Method::POST,
+        &config.index_path("/search"),
+        Some(&body),
+    )
+    .await?;
+    if got.status != 200 {
+        return Err(MeiliError::Http(got.status));
+    }
+    // Source: a response without a sane processingTimeMs, or one that hit the
+    // search cutoff, is incomplete and must not be ranked.
+    let processing = got
+        .json
+        .get("processingTimeMs")
+        .and_then(Value::as_u64)
+        .ok_or(MeiliError::Protocol)?;
+    if processing >= MEILI_OP_TIMEOUT_MS {
+        return Err(MeiliError::Timeout);
+    }
+    Ok(got
+        .json
+        .get("hits")
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(hit_of).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|hit| hit.score > 0.0)
+        .map(|hit| MeiliHit {
+            score: meili_vector_score(hit.score),
+            ..hit
+        })
+        .collect())
+}
+
 fn write_key_file(path: &Path, key: &str) -> Result<(), MeiliError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -1206,6 +1296,13 @@ pub async fn search_meili(
     input: &MeiliSearchInput,
 ) -> Result<MeiliSearchPage, MeiliError> {
     with_op_deadline(search_meili_op(config, input)).await
+}
+
+pub async fn search_meili_vector(
+    config: &MeiliConfig,
+    input: &MeiliVectorSearchInput,
+) -> Result<Vec<MeiliHit>, MeiliError> {
+    with_op_deadline(search_meili_vector_op(config, input)).await
 }
 
 #[cfg(test)]

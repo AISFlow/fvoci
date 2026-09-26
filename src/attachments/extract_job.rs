@@ -19,6 +19,8 @@ use crate::db::attachment_extract::{
     oversize_resource_limit, release_extract, FinishExtract, EXTRACT_LEASE_SECS,
     EXTRACT_RETRY_BACKOFF_MS,
 };
+use crate::search::embed::Embedder;
+use crate::search::embed_pass::{run_embed_pass, EmbedBackoff, EmbedPassOutcome};
 
 const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > DEFAULT_TIMEOUT_MS);
 
@@ -125,6 +127,17 @@ pub fn spawn_extract_job(
     pool: PgPool,
     storage: ObjectStorage,
 ) -> ExtractJobHandle {
+    spawn_extract_job_with_embedder(settings, pool, storage, None)
+}
+
+/// Same loop; with an embedder, each cycle also runs one index-time
+/// embedding pass over extracted chunks (see [`crate::search::embed_pass`]).
+pub fn spawn_extract_job_with_embedder(
+    settings: ExtractJobSettings,
+    pool: PgPool,
+    storage: ObjectStorage,
+    embedder: Option<Embedder>,
+) -> ExtractJobHandle {
     let cancel = CancellationToken::new();
     let wake = Arc::new(Notify::new());
     let child_cancel = cancel.child_token();
@@ -132,6 +145,7 @@ pub fn spawn_extract_job(
         settings,
         pool,
         storage,
+        embedder,
         child_cancel,
         wake.clone(),
     ));
@@ -142,17 +156,32 @@ async fn run_extract_loop(
     settings: ExtractJobSettings,
     pool: PgPool,
     storage: ObjectStorage,
+    embedder: Option<Embedder>,
     cancel: CancellationToken,
     wake: Arc<Notify>,
 ) {
+    let mut embed_backoff = EmbedBackoff::default();
     while !cancel.is_cancelled() {
-        let worked = match process_one_claim(&settings, &pool, &storage, &cancel).await {
+        let mut worked = match process_one_claim(&settings, &pool, &storage, &cancel).await {
             Ok(worked) => worked,
             Err(err) => {
                 warn!(error = %err, "attachment extract claim cycle failed");
                 false
             }
         };
+        if let Some(embedder) = embedder.as_ref().filter(|_| !cancel.is_cancelled()) {
+            match run_embed_pass(&pool, embedder, &mut embed_backoff, &cancel).await {
+                Ok(EmbedPassOutcome::Embedded {
+                    attachment_id,
+                    chunks,
+                }) => {
+                    debug!(%attachment_id, chunks, "attachment chunks embedded");
+                    worked = true;
+                }
+                Ok(_) => {}
+                Err(err) => warn!(error = %err, "attachment embedding pass failed"),
+            }
+        }
 
         if cancel.is_cancelled() {
             break;

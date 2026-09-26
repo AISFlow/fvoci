@@ -38,6 +38,7 @@ fn document_source(
         chosung: text.chosung,
         stem: text.stem,
         updated_at: 1,
+        embedding: None,
     }
 }
 

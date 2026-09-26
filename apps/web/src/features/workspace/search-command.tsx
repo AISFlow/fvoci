@@ -47,7 +47,8 @@ export function SearchCommand({
     return () => window.clearTimeout(handle);
   }, [draft]);
 
-  const results = useQuery(searchQuery(workspaceId, q, "all"));
+  // Source command palette: workspace search asks for hybrid; the search page stays lexical.
+  const results = useQuery(searchQuery(workspaceId, q, "all", undefined, undefined, "hybrid"));
   const items = (results.data?.items ?? []) as SearchHit[];
 
   return (

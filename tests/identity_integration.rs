@@ -124,6 +124,7 @@ impl Harness {
             },
             collab: None,
             meili: None,
+            search_embedder: None,
             mailer: Arc::new(Mailer::from_smtp(None)),
             document_convert: None,
             import_wake: None,

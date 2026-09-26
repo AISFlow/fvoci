@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use fvoci_server::attachments::{
-    spawn_extract_job, ExtractJobHandle, ExtractJobSettings, ObjectStorage,
+    spawn_extract_job_with_embedder, ExtractJobHandle, ExtractJobSettings, ObjectStorage,
 };
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::hub::ShutdownStatus;
@@ -234,16 +234,37 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     };
     let storage = ObjectStorage::from_settings(&config.storage)?;
     storage.probe().await?;
+    let search_embedder = fvoci_server::search::embed::Embedder::from_env()?;
+    match search_embedder.as_ref() {
+        Some(embedder) => tracing::info!(
+            model = embedder.model(),
+            meili = config.meili.is_some(),
+            "semantic search embeddings enabled"
+        ),
+        None => tracing::info!(
+            "semantic search embeddings disabled (FVOCI_AI_ENABLED=1 and FVOCI_AI_EMBEDDINGS_BASE_URL unset)"
+        ),
+    }
     let extract_job = match ExtractJobSettings::from_env()? {
         Some(settings) => {
             tracing::info!(
                 extractor = %settings.extractor_bin.display(),
                 "attachment native extraction enabled"
             );
-            Some(spawn_extract_job(settings, pool.clone(), storage.clone()))
+            Some(spawn_extract_job_with_embedder(
+                settings,
+                pool.clone(),
+                storage.clone(),
+                search_embedder.clone(),
+            ))
         }
         None => {
             tracing::info!("attachment native extraction disabled (FVOCI_EXTRACTOR_BIN unset)");
+            if search_embedder.is_some() {
+                tracing::warn!(
+                    "attachment chunks are embedded by the extract job; without FVOCI_EXTRACTOR_BIN no new vectors are written"
+                );
+            }
             None
         }
     };
@@ -331,6 +352,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         upload: config.upload.clone(),
         collab: collab.clone(),
         meili: config.meili.clone(),
+        search_embedder,
         mailer,
         document_convert,
         import_wake,
