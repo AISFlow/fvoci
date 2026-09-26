@@ -384,11 +384,13 @@ hidden mode of the server binary: `fvoci-server --internal-markdown`. There is n
 or configure; the server re-executes itself (`current_exe`). The public share page renders its
 Markdown/HTML in-process without the parser (its Markdown keeps the first pass of the `$`
 self-check). Tiptap -> Yjs seeding (body `PUT`, duplicate, imports) runs in the `collab-engine`
-child (`FVOCI_COLLAB_ENGINE`, op `seed_from_tiptap`, same limits as the room child). The Node
-helper (`FVOCI_DOCUMENT_CONVERT_BIN`) is still used for PPTX/Markdown exports. DOCX and PDF
-exports (`GET …/documents/{id}/docx|pdf`, wiki and project) and the public share PDF run in the
-same child as the Markdown conversions (`--op tiptap-to-docx|tiptap-to-pdf`), see "DOCX export"
-and "PDF export" below.
+child (`FVOCI_COLLAB_ENGINE`, op `seed_from_tiptap`, same limits as the room child). Every
+document export (`GET …/documents/{id}/md|docx|pdf|pptx`, wiki and project) and the public share
+PDF run in the same child as the Markdown conversions
+(`--op tiptap-to-md-export|tiptap-to-docx|tiptap-to-pdf|tiptap-to-pptx`), see "DOCX export",
+"PDF export" and "PPTX and Markdown export" below. The server no longer runs the Node document
+convert helper and ignores `FVOCI_DOCUMENT_CONVERT_BIN`; `scripts/document-convert` remains only
+as the development oracle for the fixture regeneration scripts (`scripts/regen-*-oracle.sh`).
 
 The child is chosen before any runtime, config or credential is loaded, gets a cleared
 environment, RLIMIT_AS 2 GiB and RLIMIT_CPU 30 s, reads one input from stdin (4 MiB cap; the
@@ -413,7 +415,7 @@ deeply nested emphasis (60 KB of nested `*a ` 12.9 s), 50,000 nested `>` (15.5 s
 
 `GET …/documents/{id}/docx` (wiki and project routes) is written in Rust by the Markdown child
 above (`--op tiptap-to-docx`, same rlimits, 30 s watchdog and two-per-process concurrency) with
-docx-rs 0.4.22 (MIT, `image` feature off); it does not need `FVOCI_DOCUMENT_CONVERT_BIN`. The
+docx-rs 0.4.22 (MIT, `image` feature off). The
 Tiptap body is walked into one export model (`src/documents/export_model.rs`, meant for the PDF
 and PPTX writers too) and written as Word paragraphs, headings, numbering, tables and runs
 (`src/documents/docx.rs`). Fonts are named only (code in Consolas); attachment bytes are never
@@ -444,8 +446,7 @@ are written in Rust by the same child (`--op tiptap-to-pdf`, same rlimits, 30 s 
 same export model: krilla 0.8.2 writes the PDF and subsets the fonts, rustybuzz 0.20.1 shapes the
 text, unicode-linebreak 0.1.5 gives the line-break opportunities, and `src/documents/pdf.rs` does
 the flow (A4, 35/65/35 pt paddings, 12 pt text at line height 1.5, the TS heading sizes and block
-margins, pages broken between lines and table rows). Neither route needs
-`FVOCI_DOCUMENT_CONVERT_BIN` any more. The fonts are the files the Node export embeds
+margins, pages broken between lines and table rows). The fonts are the files the Node export embeds
 (`packages/editor/src/fonts`: Noto Sans KR, Noto Sans Mono CJK KR, Noto Emoji; SIL OFL 1.1),
 read at run time by the export child; each character uses the
 first of them that has a glyph, pictographs Noto Emoji first. Only the glyphs used are embedded.
@@ -474,6 +475,45 @@ pages / 0.55 MB; Korean text 0.12 s / 35 MB / 181 pages / 0.17 MB; 55 tables of 
 0.10 s / 30 MB; every Hangul syllable and 20,000 ideographs (the largest font subsets) 1.10 s /
 95 MB / 204 pages / 8.7 MB. The 30 s watchdog is about 27x the slowest. The Node helper took
 4–273 s and 0.7–3.4 GB RSS on the same bodies.
+
+## PPTX and Markdown export
+
+`GET …/documents/{id}/pptx` (wiki and project routes) is written in Rust by the same child
+(`--op tiptap-to-pptx`, same rlimits, 30 s watchdog, shared conversion slots) from the same export
+model, with the zip writer the DOCX export already links and hand-written PresentationML
+(`src/documents/pptx.rs`; no further crates). The layout is the Node export's: a 16:9 deck
+(10 × 5.625 in), text boxes stacked from the top of a slide 0.5 in from the left and 9 in wide, the
+title as the first heading (28 pt; later headings on a slide 16 pt), paragraphs 14 pt, one box per
+top-level list item, real tables (12 pt), code/math/Mermaid source in the mono font (12 pt), a
+top-level horizontal rule opens a new slide, and box heights from the same line estimate. Fonts are
+named only (Noto Sans KR, Noto Sans Mono CJK KR); nothing is embedded and attachment bytes are never
+read. The package is a minimal PresentationML deck (one master, one blank layout, a theme) that the
+product's own OOXML importer reads back.
+
+`GET …/documents/{id}/md` is `# title` (visible title, ASCII punctuation backslash-escaped) and a
+blank line, then the body's Markdown (`--op tiptap-to-md-export`; the same Tiptap -> Markdown
+conversion as `GET …/body?format=md`), `text/markdown; charset=utf-8`. It is byte-equal to the Node
+export on the whole oracle corpus.
+
+Contract as before for both: OOXML/Markdown content type, `Content-Disposition` with an RFC 5987
+`filename*`, `private, no-store`, `nosniff`; a stored body over 1 MiB or a file over 20,000,000
+bytes is `413`, a body that is not a Tiptap doc `400`, a killed child or writer failure `500`.
+
+Differences a user can notice in the PPTX against the Node export (full list with fixtures in
+`compat/fixtures/export-pptx/README.md`): text that does not fit the rest of a slide continues on
+the next slide instead of being shrunk, and tables too long for a slide continue on the next with
+the header row repeated (the Node export drew them past the slide edge); nested list items are
+indented levels and ordered items are numbered 1, 2, 3 (the Node export flattened nesting and
+numbered every item 1); task items have a ☑/☐ glyph; marks (bold, italic, underline, strike,
+highlight, code font) are kept and `http`/`https`/`mailto` links are clickable; quotes and callouts
+have a coloured bar (callouts a background); details show their summary; embeds a `[[doc:ref]]`
+placeholder; ragged table rows are padded to a full grid.
+
+Measured (release, 1 MiB stored bodies, one child each), PPTX / Markdown: mixed corpus 0.09 s /
+47 MB / 362 slides / 0.68 MB and 0.05 s / 37 MB; Korean text 0.05 s / 21 MB / 503 slides and
+0.01 s / 15 MB; 67 tables of 20×8 cells 0.12 s / 47 MB / 83 slides and 0.05 s / 34 MB; tiny marked
+runs with links 0.06 s / 42 MB and 0.06 s / 36 MB. The Node helper took 1.0–1.2 s and 0.28–0.42 GB
+RSS on the same bodies.
 
 ## Container install
 
@@ -796,9 +836,14 @@ http off loopback, or https without secure cookies, fail), `identity`,
 this build), `pg_connection_budget` (collab rooms + pool + reserve ≤
 `max_connections`), `storage` (local directory or S3 bucket probe),
 `meilisearch` (the scoped key reads its index), `smtp` (connect/EHLO/STARTTLS
-when offered; no mail sent), `document_convert` (one real conversion),
+when offered; no mail sent),
 `collab_engine` (spawn and ping; a set path that is not a file fails because
-the server would silently disable collaboration) and `extractor`. Optional
+the server would silently disable collaboration), `extractor`, and
+`document_convert` (run a small Markdown→Tiptap/HTML conversion and MD, DOCX,
+PDF, PPTX exports through the sibling `fvoci-server` binary). A missing,
+nonexecutable, or wrong server binary or unavailable PDF font files fails this
+check. It confirms basic converter readiness and output structure; independent
+reader and renderer tests cover export quality. Optional
 features that are unset report `disabled (...)`. Nothing is created, migrated or
 sent, and database URLs in details are masked.
 
