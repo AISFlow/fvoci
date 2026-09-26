@@ -112,24 +112,16 @@ fn row_from_tuple(
     })
 }
 
-fn kinds_sql(kinds: &[TemplateKind]) -> String {
-    if kinds.is_empty() {
-        return " AND false".to_string();
-    }
-    let list = kinds
-        .iter()
-        .map(|k| format!("'{}'", k.as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(" AND kind IN ({list})")
-}
-
 pub async fn list_templates(
     pool: &PgPool,
     workspace_id: Uuid,
     actor: &Actor,
     kinds: &[TemplateKind],
 ) -> TemplateResult<Vec<TemplateRow>> {
+    if kinds.is_empty() {
+        return Ok(Ok(vec![]));
+    }
+    let kind_filter: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
     let mut tx = pool.begin().await?;
     let role = match begin_member(&mut tx, workspace_id, actor, false).await? {
         Ok(role) => role,
@@ -142,12 +134,6 @@ pub async fn list_templates(
         tx.rollback().await?;
         return Ok(Err(TemplateDbError::NotFound));
     }
-    let filter = kinds_sql(kinds);
-    let sql = format!(
-        "SELECT id, workspace_id, kind, title, payload, created_by, created_at, updated_at \
-         FROM fvoci.templates WHERE workspace_id = $1{filter} \
-         ORDER BY created_at DESC, id DESC"
-    );
     let rows: Vec<(
         Uuid,
         Uuid,
@@ -157,16 +143,24 @@ pub async fn list_templates(
         Uuid,
         DateTime<Utc>,
         DateTime<Utc>,
-    )> = sqlx::query_as(&sql)
-        .bind(workspace_id)
-        .fetch_all(&mut *tx)
-        .await?;
+    )> = sqlx::query_as(
+        "SELECT id, workspace_id, kind, title, payload, created_by, created_at, updated_at \
+         FROM fvoci.templates WHERE workspace_id = $1 AND kind = ANY($2::text[]) \
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(workspace_id)
+    .bind(&kind_filter)
+    .fetch_all(&mut *tx)
+    .await?;
     tx.commit().await?;
-    Ok(Ok(
-        rows.into_iter()
-            .filter_map(|r| row_from_tuple(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7))
-            .collect(),
-    ))
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(
+            row_from_tuple(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7)
+                .expect("templates.kind_check enforces document|task"),
+        );
+    }
+    Ok(Ok(out))
 }
 
 pub async fn create_template(
@@ -242,11 +236,10 @@ async fn find_template(
     template_id: Uuid,
     kinds: &[TemplateKind],
 ) -> Result<Option<TemplateRow>, sqlx::Error> {
-    let filter = kinds_sql(kinds);
-    let sql = format!(
-        "SELECT id, workspace_id, kind, title, payload, created_by, created_at, updated_at \
-         FROM fvoci.templates WHERE workspace_id = $1 AND id = $2{filter}"
-    );
+    if kinds.is_empty() {
+        return Ok(None);
+    }
+    let kind_filter: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
     let row: Option<(
         Uuid,
         Uuid,
@@ -256,12 +249,18 @@ async fn find_template(
         Uuid,
         DateTime<Utc>,
         DateTime<Utc>,
-    )> = sqlx::query_as(&sql)
-        .bind(workspace_id)
-        .bind(template_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-    Ok(row.and_then(|r| row_from_tuple(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7)))
+    )> = sqlx::query_as(
+        "SELECT id, workspace_id, kind, title, payload, created_by, created_at, updated_at \
+         FROM fvoci.templates WHERE workspace_id = $1 AND id = $2 AND kind = ANY($3::text[])",
+    )
+    .bind(workspace_id)
+    .bind(template_id)
+    .bind(&kind_filter)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.and_then(|r| {
+        row_from_tuple(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7)
+    }))
 }
 
 fn resolved_title(template: &TemplateRow) -> String {
