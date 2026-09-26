@@ -137,10 +137,15 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(memberRow).toContainText("삭제 예약 · 14일 남음");
   expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(401);
 
+  // The erase alertdialog is a sibling of the row trigger, not a portal. After
+  // the user list refreshes, React reuses ConfirmActionButton so that dialog
+  // relabels to "삭제 취소" while it is still open and both buttons match.
+  await expect(eraseConfirm).toHaveCount(0);
   await memberRow.getByRole("button", { name: "삭제 취소", exact: true }).click();
   const cancelConfirm = page.getByRole("alertdialog");
   await expect(cancelConfirm).toContainText("이전 세션과 토큰은 되살아나지 않습니다.");
   await cancelConfirm.getByRole("button", { name: "삭제 취소", exact: true }).click();
+  await expect(cancelConfirm).toHaveCount(0);
   await expect(memberRow.getByRole("button", { name: "삭제 예약", exact: true })).toBeVisible();
   await expect(memberRow).not.toContainText("일 남음");
   const listed = (await (await page.request.get("/api/v1/admin/users")).json()) as {
