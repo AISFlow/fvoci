@@ -22,10 +22,11 @@ use sqlx::postgres::PgPool;
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
+use crate::collab::admission::warn_join_db_error;
 use crate::collab::awareness::{decode_awareness, AwarenessRegistry};
 use crate::collab::config::CollabConfig;
 use crate::collab::derived_body::prepare_derived_body;
-use crate::collab::engine_bridge::{BridgeError, EngineBridge};
+use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
 use crate::collab::validation::{
     classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
@@ -1417,7 +1418,15 @@ impl RoomActor {
             self.document_id,
         )
         .await
-        .map_err(|_| JoinError::DbError)?;
+        .map_err(|err| {
+            warn_join_db_error(
+                "room.handle_join.admission",
+                self.workspace_id,
+                self.document_id,
+                &err,
+            );
+            JoinError::DbError
+        })?;
         let admission = admission.map_err(|_| JoinError::AdmissionDenied)?;
         let read_only = join.conn.read_only || admission.read_only;
         if self.writer_generation.is_none() && !read_only {
@@ -1429,7 +1438,15 @@ impl RoomActor {
                 self.document_id,
             )
             .await
-            .map_err(|_| JoinError::DbError)?;
+            .map_err(|err| {
+                warn_join_db_error(
+                    "room.handle_join.claim_writer",
+                    self.workspace_id,
+                    self.document_id,
+                    &err,
+                );
+                JoinError::DbError
+            })?;
             let claim = claim.map_err(|e| match e {
                 CollabDbError::StaleWriter => JoinError::WriterStale,
                 _ => JoinError::AdmissionDenied,
@@ -1450,7 +1467,15 @@ impl RoomActor {
                 self.document_id,
             )
             .await
-            .map_err(|_| JoinError::DbError)?;
+            .map_err(|err| {
+                warn_join_db_error(
+                    "room.handle_join.load_readonly",
+                    self.workspace_id,
+                    self.document_id,
+                    &err,
+                );
+                JoinError::DbError
+            })?;
             let load = load.map_err(|_| JoinError::AdmissionDenied)?;
             self.set_committed_from_load(&load);
             if let Err(err) = self.reload_primary_from_committed().await {
@@ -2732,6 +2757,11 @@ impl RoomActor {
 
     async fn reload_primary_from_committed(&mut self) -> Result<(), JoinError> {
         if self.engine.recycle().await.is_err() {
+            tracing::warn!(
+                workspace_id = %self.workspace_id,
+                document_id = %self.document_id,
+                "collab primary recycle failed: engine bridge dead"
+            );
             self.primary_loaded = false;
             self.primary_dirty = true;
             return Err(JoinError::EngineUnavailable);
@@ -2764,10 +2794,23 @@ impl RoomActor {
                 encoding: 1,
             })
             .await
-            .map_err(|_| JoinError::EngineUnavailable)?;
+            .map_err(|_| {
+                tracing::warn!(
+                    workspace_id = %self.workspace_id,
+                    document_id = %self.document_id,
+                    "collab primary load failed: engine bridge dead"
+                );
+                JoinError::EngineUnavailable
+            })?;
         if report.outcome.is_applied_ok() {
             Ok(())
         } else {
+            warn_engine_not_applied(
+                "room.load_engine_primary",
+                Some(self.workspace_id),
+                Some(self.document_id),
+                &report.outcome,
+            );
             Err(JoinError::EngineUnavailable)
         }
     }

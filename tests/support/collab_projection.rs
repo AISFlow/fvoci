@@ -75,8 +75,22 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
         .expect("grant");
 }
 
+/// Route server `tracing` output (e.g. the underlying error behind a 1011
+/// "collab unavailable" join) into the libtest-captured output of the test that
+/// produced it. Default `warn`; override with `RUST_LOG`.
+pub fn init_test_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_test_writer()
+        .try_init();
+}
+
 impl TestDb {
     pub async fn bootstrap() -> Self {
+        init_test_tracing();
         let admin_base = std::env::var("TEST_DATABASE_URL")
             .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
             .expect("TEST_DATABASE_URL missing; collab projection tests require real PostgreSQL");
@@ -508,7 +522,25 @@ pub struct TestServer {
     hub: Arc<CollabHub>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
+    /// Released only after `hub.shutdown()` has reaped this server's helpers.
+    _helper_slot: tokio::sync::OwnedSemaphorePermit,
 }
+
+/// Concurrent collab test servers per test process.
+///
+/// The collab-engine primary child cap is process-wide and last-write-wins:
+/// every `CollabHub::new` sets it to `max_rooms + OFFLINE_REVISION_PRIMARY_HEADROOM`
+/// (6 for the smallest `max_rooms` = 2 used here). Production runs one hub per
+/// process, whose room slots stay under that cap. libtest runs many tests, each
+/// with its own hub, in one process; without this gate, ungated parallel tests
+/// exceed the shared cap and a helper spawn fails with `ResourceLimit` ("live
+/// primary collab children at cap N"), which surfaces as a 1011 "collab
+/// unavailable" close before auth. Each test server keeps at most one live room
+/// plus one offline revision-capture helper, so 3 servers x 2 children fit in 6.
+const MAX_CONCURRENT_TEST_SERVERS: usize = 3;
+
+static TEST_SERVER_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TEST_SERVERS)));
 
 impl TestServer {
     pub fn hub(&self) -> Arc<CollabHub> {
@@ -599,6 +631,11 @@ impl TestRun {
 }
 
 pub async fn spawn_server(app: Router, hub: Arc<CollabHub>) -> TestServer {
+    let helper_slot = TEST_SERVER_SLOTS
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("test server slot");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -618,6 +655,7 @@ pub async fn spawn_server(app: Router, hub: Arc<CollabHub>) -> TestServer {
         hub,
         shutdown: Some(shutdown_tx),
         join: Some(join),
+        _helper_slot: helper_slot,
     }
 }
 
@@ -725,7 +763,10 @@ pub async fn auth_and_join(
         .expect("timeout")
         .expect("stream")
         .expect("frame");
-    let frame = fvoci_server::collab::wire::decode(&msg.into_data()).expect("decode");
+    let Message::Binary(bytes) = msg else {
+        panic!("expected binary auth reply, got {msg:?}");
+    };
+    let frame = fvoci_server::collab::wire::decode(&bytes).expect("decode");
     assert!(matches!(
         frame,
         WireFrame::Document {

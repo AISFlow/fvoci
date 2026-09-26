@@ -128,7 +128,10 @@ fn worker_loop(
 ) {
     let mut session = match spawn_session(&engine_bin, limits) {
         Ok(session) => session,
-        Err(_) => return,
+        Err(report) => {
+            warn_engine_not_applied("bridge.initial_spawn", None, None, &report.outcome);
+            return;
+        }
     };
     ops_used.store(0, Ordering::Relaxed);
     while let Ok(job) = rx.recv() {
@@ -142,7 +145,15 @@ fn worker_loop(
                 session.kill_and_reap();
                 session = match spawn_session(&engine_bin, limits) {
                     Ok(s) => s,
-                    Err(_) => break,
+                    Err(report) => {
+                        warn_engine_not_applied(
+                            "bridge.recycle_spawn",
+                            None,
+                            None,
+                            &report.outcome,
+                        );
+                        break;
+                    }
                 };
                 ops_used.store(0, Ordering::Relaxed);
                 let _ = reply.send(());
@@ -183,4 +194,30 @@ fn spawn_session_inner(engine_bin: &Path, limits: Limits) -> Result<EngineSessio
         test_close_stdout_hang_ms: None,
         test_exit_after_write: None,
     })
+}
+
+/// Log why the engine did not apply a request. Only the failure variant and its
+/// detail are logged; `Ok` payloads can carry document content.
+pub(crate) fn warn_engine_not_applied(
+    site: &'static str,
+    workspace_id: Option<uuid::Uuid>,
+    document_id: Option<uuid::Uuid>,
+    outcome: &collab_engine::EngineStatus,
+) {
+    use collab_engine::EngineStatus;
+    let (status, detail) = match outcome {
+        EngineStatus::Ok { .. } => ("ok_not_applied", ""),
+        EngineStatus::Malformed { detail } => ("malformed", detail.as_str()),
+        EngineStatus::Unsupported { detail, .. } => ("unsupported", detail.as_str()),
+        EngineStatus::ResourceLimit { detail, .. } => ("resource_limit", detail.as_str()),
+        EngineStatus::WorkerFailure { detail, .. } => ("worker_failure", detail.as_str()),
+    };
+    tracing::warn!(
+        site,
+        workspace_id = ?workspace_id,
+        document_id = ?document_id,
+        status,
+        detail,
+        "collab engine request not applied"
+    );
 }
