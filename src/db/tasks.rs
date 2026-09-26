@@ -1399,7 +1399,7 @@ async fn list_tasks_in_scope(
     }
 
     let (mut base_conditions, mut base_binds) =
-        task_list_filter_conditions(query, actor_user_id, scope_condition);
+        task_list_filter_conditions(query, actor_user_id, scope_condition.clone());
     // Collection-backed parts of the view query (custom field filters,
     // dueBefore, field sorts) come from the shared compiler.
     let mut compiled_args = SqlArgs::starting_at(base_binds.len() + 3);
@@ -1448,7 +1448,10 @@ async fn list_tasks_in_scope(
     let mut binds = base_binds.clone();
     let sort = effective_sort_entries(&query.view.sort);
     if let Some(cursor) = &query.cursor {
-        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(
+        // The anchor row is subject to the same scope predicate as the page
+        // (project, or visible projects for the workspace scope), so a cursor
+        // naming a task the actor cannot see is rejected like a missing one.
+        let anchor_sql = format!(
             r#"
             SELECT t.created_at, t.updated_at, t.id, t.number, t.title, t.sort_key, t.priority, t.status_id,
                    t.due_date, t.due_at,
@@ -1461,16 +1464,17 @@ async fn list_tasks_in_scope(
                    ) AS status_sort_key
             FROM fvoci.tasks t
             WHERE t.workspace_id = $1
-              AND ($2::uuid IS NULL OR t.project_id = $2)
+              AND {scope_condition}
               AND t.id = $3
               AND t.deleted_at IS NULL
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(cursor.id)
-        .fetch_optional(&mut *tx)
-        .await?;
+            "#
+        );
+        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(&anchor_sql)
+            .bind(workspace_id)
+            .bind(scope_bind)
+            .bind(cursor.id)
+            .fetch_optional(&mut *tx)
+            .await?;
         let Some((
             created_at,
             updated_at,

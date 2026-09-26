@@ -9,10 +9,9 @@ use crate::api::dto::{
     WorkflowStatusOutput, WorkspaceStatusOutput,
 };
 use crate::api::tasks_dto::{
-    BacklinkFromResponse, BacklinkItemResponse, BacklinkListResponse, StatusCreateBody,
-    StatusPatchBody, TaskCloneOutput, TaskParentCandidateOutput, TaskParentListResponse,
-    TimeEntryCreateBody, TimeEntryListResponse, TimeEntryOutput, TimeEntryRollupResponse,
-    WorkspaceStatusListResponse,
+    BacklinkListResponse, StatusCreateBody, StatusPatchBody, TaskCloneOutput,
+    TaskParentCandidateOutput, TaskParentListResponse, TimeEntryCreateBody, TimeEntryListResponse,
+    TimeEntryOutput, TimeEntryRollupResponse, WorkspaceStatusListResponse,
 };
 
 #[derive(OpenApi)]
@@ -35,9 +34,6 @@ use crate::api::tasks_dto::{
         delete_status,
     ),
     components(schemas(
-        BacklinkFromResponse,
-        BacklinkItemResponse,
-        BacklinkListResponse,
         StatusCreateBody,
         StatusPatchBody,
         TaskCloneOutput,

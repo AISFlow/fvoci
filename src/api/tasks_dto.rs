@@ -84,34 +84,9 @@ pub struct TaskCloneOutput {
     pub display_id: String,
 }
 
-/// Source `backlinkFrom` (same shape as the document backlinks response).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub struct BacklinkFromResponse {
-    /// `document` or `task`.
-    #[serde(rename = "type")]
-    pub r#type: String,
-    pub id: String,
-    pub title: String,
-    #[cfg_attr(feature = "api-schema", schema(required = true, nullable = true))]
-    pub display_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub struct BacklinkItemResponse {
-    pub id: String,
-    pub from: BacklinkFromResponse,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub struct BacklinkListResponse {
-    pub items: Vec<BacklinkItemResponse>,
-}
+pub use crate::api::documents_dto::{
+    BacklinkFromResponse, BacklinkItemResponse, BacklinkListResponse,
+};
 
 /// Source `taskParentQuery`.
 #[derive(Debug, Clone, Deserialize)]
