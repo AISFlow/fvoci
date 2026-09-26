@@ -18,12 +18,12 @@ test("owner stars and shares a wiki document; the public link needs no session a
   const cspViolations = watchCspViolations(page);
 
   // Global security headers on the SPA shell served by the Rust server.
-  const shell = await page.request.get("/");
-  expect(shell.headers()["content-security-policy"]).toContain("default-src 'self'");
-  expect(shell.headers()["content-security-policy"]).toContain("frame-ancestors 'self'");
-  expect(shell.headers()["referrer-policy"]).toBe("no-referrer");
-  expect(shell.headers()["x-content-type-options"]).toBe("nosniff");
-  expect(shell.headers()["x-frame-options"]).toBe("SAMEORIGIN");
+  const appShell = await page.request.get("/");
+  expect(appShell.headers()["content-security-policy"]).toContain("default-src 'self'");
+  expect(appShell.headers()["content-security-policy"]).toContain("frame-ancestors 'self'");
+  expect(appShell.headers()["referrer-policy"]).toBe("no-referrer");
+  expect(appShell.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(appShell.headers()["x-frame-options"]).toBe("SAMEORIGIN");
 
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
