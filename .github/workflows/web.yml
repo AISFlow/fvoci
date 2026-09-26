@@ -40,6 +40,8 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
           python3 scripts/ci_selection.py plan \
             --workflow web \
             --event-json "$GITHUB_EVENT_PATH" \
