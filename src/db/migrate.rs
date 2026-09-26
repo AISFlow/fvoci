@@ -61,6 +61,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/034_task_time_entries.sql"),
         34,
     ),
+    (
+        include_str!("../../migrations/035_identity_link_issuer.sql"),
+        35,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -545,6 +549,10 @@ mod tests {
         (
             34,
             "a15a3adb05357c2ac6e8cb70265b7b8319d18c3a934f1ef4658bb0cbe4cee7a4",
+        ),
+        (
+            35,
+            "9ab2a7432d458d2663e3caa796cf9ac71a6cda1117a94d1ccdeb5c8bc8585b69",
         ),
     ];
 

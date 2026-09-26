@@ -77,6 +77,9 @@ pub enum OidcResult {
     },
     /// Source rethrows `QuotaExceededError` (402) from the callback.
     SeatLimit,
+    /// Link mode: the session that started the link was revoked, expired or
+    /// its account closed before the link was saved (401, like unlink).
+    SessionGone,
 }
 
 fn error(code: OidcErrorCode, mode: Option<Mode>) -> OidcResult {
@@ -327,7 +330,8 @@ pub struct CompleteParams<'a> {
     pub provider: ProviderKey,
     pub query: &'a HashMap<String, String>,
     pub signed_state: Option<&'a str>,
-    pub session_user_id: Option<Uuid>,
+    /// Live session cookie at callback start: (user id, session id).
+    pub session: Option<(Uuid, Uuid)>,
     pub ip: Option<&'a str>,
     pub defaults: &'a crate::settings::DefaultsUserSettings,
 }
@@ -419,16 +423,7 @@ pub async fn complete(
     };
     match stored.mode {
         Mode::Login => login_with_identity(pool, provider.key, &profile, stored.workspace_id).await,
-        Mode::Link => {
-            link_identity(
-                pool,
-                provider.key,
-                &profile,
-                &stored,
-                params.session_user_id,
-            )
-            .await
-        }
+        Mode::Link => link_identity(pool, provider.key, &profile, &stored, params.session).await,
         Mode::Invite => {
             accept_invite_with_identity(
                 pool,
@@ -491,6 +486,7 @@ async fn try_jit_join(
             domain: &domain,
             given_name: &given_name,
             subject: &subject,
+            issuer: &profile.issuer,
         },
     )
     .await?
@@ -510,8 +506,12 @@ async fn login_with_identity(
     workspace_id: Option<Uuid>,
 ) -> Result<OidcResult, sqlx::Error> {
     let subject = identity_subject(provider, &profile.sub, workspace_id);
-    let Some(link) = db::find_link(pool, provider.as_str(), &subject).await? else {
-        if let (ProviderKey::Generic, Some(ws)) = (provider, workspace_id) {
+    let lookup = db::find_link(pool, provider.as_str(), &subject, &profile.issuer).await?;
+    // A link made through another issuer is not this identity, and its
+    // subject stays taken, so JIT is not tried either.
+    let taken = lookup.subject_taken();
+    let Some(link) = lookup.found() else {
+        if let (ProviderKey::Generic, Some(ws), false) = (provider, workspace_id, taken) {
             if let Some(result) = try_jit_join(pool, profile, ws).await? {
                 return Ok(result);
             }
@@ -526,9 +526,9 @@ async fn link_identity(
     provider: ProviderKey,
     profile: &SocialProfile,
     stored: &StoredState,
-    session_user_id: Option<Uuid>,
+    session: Option<(Uuid, Uuid)>,
 ) -> Result<OidcResult, sqlx::Error> {
-    let (Some(expected), Some(actual)) = (stored.user_id, session_user_id) else {
+    let (Some(expected), Some((actual, session_id))) = (stored.user_id, session) else {
         return Ok(error(OidcErrorCode::StateMismatch, Some(Mode::Link)));
     };
     if expected != actual {
@@ -537,10 +537,12 @@ async fn link_identity(
     let subject = identity_subject(provider, &profile.sub, stored.workspace_id);
     let outcome = db::link_for_user(
         pool,
+        session_id,
         &NewLink {
             user_id: expected,
             provider: provider.as_str(),
             subject: &subject,
+            issuer: &profile.issuer,
             email: profile.email.as_deref(),
             workspace_id: None,
         },
@@ -549,7 +551,7 @@ async fn link_identity(
     Ok(match outcome {
         LinkOutcome::Linked => OidcResult::Linked,
         LinkOutcome::AlreadyLinked => error(OidcErrorCode::AlreadyLinked, Some(Mode::Link)),
-        LinkOutcome::SessionGone => error(OidcErrorCode::StateMismatch, Some(Mode::Link)),
+        LinkOutcome::SessionGone => OidcResult::SessionGone,
     })
 }
 
@@ -573,6 +575,7 @@ async fn accept_invite_with_identity(
             token_hash,
             provider: provider.as_str(),
             subject: &subject,
+            issuer: &profile.issuer,
             link_email: profile.email.as_deref(),
             given_name: profile.name.as_deref(),
             client_ip: ip,
