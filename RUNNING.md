@@ -45,7 +45,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` | Optional GitHub App (all three or none; the PEM may use literal `\n`). Enables `/github/install`, `/api/v1/github/callback`, the signed `/api/v1/github/webhook` endpoint and the `github` outbox consumer that closes/reopens linked issues. The install `state` is single use and bound to the admin session that started it (the callback needs that session cookie); the callback confirms the installation with `GET /app/installations/{id}` and never replaces an existing link to another installation (uninstall first). While the app is not configured the `github` cursor still advances, so enabling it later does not replay older status changes. |
 | `GITHUB_STATE_SECRET` | Server-only key (at least 32 bytes) for the install `state` MAC. If unset it is derived (HKDF-SHA256) from the active `ENCRYPTION_KEYS` key; with neither, a configured GitHub App fails at boot. The webhook secret is not used because GitHub App managers also hold it. |
 | `GITHUB_API_URL` | GitHub REST base (default `https://api.github.com`). Must be `https`; plain `http` only for a loopback host (tests point it at a local fake). |
-| `FVOCI_AI_ENABLED`, `FVOCI_AI_SECRET` | Document AI actions (summarize / generate-tasks / suggest-links) when `FVOCI_AI_ENABLED=1` and the secret is set (source gate). They are local text heuristics over the document markdown (no external model) and also need `FVOCI_DOCUMENT_CONVERT_BIN`. Otherwise members get `503 ai_unavailable`. |
+| `FVOCI_AI_ENABLED`, `FVOCI_AI_SECRET` | Document AI actions (summarize / generate-tasks / suggest-links) when `FVOCI_AI_ENABLED=1` and the secret is set (source gate). They are local text heuristics over the document markdown (no external model; the Markdown comes from the Rust `--internal-markdown` child, not the Node helper). Otherwise members get `503 ai_unavailable`. |
 | `FVOCI_AI_EMBEDDINGS_BASE_URL`, `FVOCI_AI_EMBEDDINGS_MODEL`, `FVOCI_AI_EMBEDDINGS_DIM` | Semantic search (source contract). With `FVOCI_AI_ENABLED=1` and a base URL, the server calls an OpenAI-compatible `POST {base}/embeddings` (model default `text-embedding-3-small`, `FVOCI_AI_SECRET` as the optional bearer, never logged). The extract job embeds extracted attachment text chunks (stored in `attachment_text.embedding`, copied to Meili `_vectors.attachments`), so vectors need `FVOCI_EXTRACTOR_BIN`; older chunks and failed calls are backfilled with backoff. Workspace search with `mode=hybrid` (the web command palette) RRF-merges Meili lexical hits with the nearest chunks; global search and any embedder failure answer lexically. `FVOCI_AI_EMBEDDINGS_DIM` must be `1536` (startup refuses anything else). A bad base URL refuses startup. |
 | `FVOCI_AI_EMBEDDINGS_ALLOW_PRIVATE` | `1` lets the embeddings URL resolve to a private or loopback address (a local model server) and only then use plain `http`; public hosts must use `https`. Link-local/metadata addresses are always refused, redirects are never followed and each call is pinned to the checked address. Default `0` (FVOCI hardening; the source has no such rule). |
 
@@ -375,6 +375,35 @@ Use the default helper build for deployment; `test-hang`, `extract-native-tests`
 and `extract-job-driver` are test-only. The helper must be installed alongside
 the server at the configured executable path. No Node or browser process is used
 for server-side extraction.
+
+## Markdown conversion child
+
+Markdown -> Tiptap (body `PUT` with `contentMd`, markdown-zip/office/Notion imports), Tiptap ->
+Markdown (member `GET …/body?format=md`, AI actions) and legal Markdown -> HTML run in Rust, in a
+hidden mode of the server binary: `fvoci-server --internal-markdown`. There is nothing to install
+or configure; the server re-executes itself (`current_exe`). The public share page renders its
+Markdown/HTML in-process without the parser (its Markdown keeps the first pass of the `$`
+self-check). The Node helper (`FVOCI_DOCUMENT_CONVERT_BIN`) is still used for Yjs seeding and
+PDF/DOCX/PPTX/Markdown exports.
+
+The child is chosen before any runtime, config or credential is loaded, gets a cleared
+environment, RLIMIT_AS 2 GiB and RLIMIT_CPU 30 s, reads one input from stdin (4 MiB cap; the
+callers already cap Markdown bodies at 1 MiB) and writes at most 32 MiB. The parent kills it
+after 30 s wall time or when the request goes away, dies-with-parent is set on Linux, and at most
+two conversions run per server process (the Node helper's concurrency). This is a CPU/memory/
+crash boundary, not a filesystem or network sandbox.
+
+Outcomes: a body nested past what can be stored (Tiptap JSON deeper than 126 levels, e.g. 61
+nested block quotes), or one that exhausts the CPU/memory/time budget, is `400 invalid_input`;
+input or output past the byte caps is `413`; a spawn/IO failure is `500`.
+
+The parser is markdown-rs 1.0.0 (a port of the JS micromark parser the editor uses), vendored
+in `vendor/markdown` with one fix for quadratic edit bookkeeping (`vendor/markdown/PATCHES.md`).
+Measured on 1 MiB bodies (release build, parse only): each of the 51 oracle corpus files repeated
+to 1 MiB takes 0.3–1.1 s and at most 0.62 GB RSS; 1 MiB of 3-line tables or of blank lines about
+1.1–1.2 s and about 1 GB RSS. The 30 s watchdog is about 25x the slowest ordinary body. Still super-linear, as in the JS parser:
+deeply nested emphasis (60 KB of nested `*a ` 12.9 s), 50,000 nested `>` (15.5 s) and a
+1,000-level indented list (11 s); such bodies stop at the 30 s watchdog as `invalid_input`.
 
 ## Container install
 

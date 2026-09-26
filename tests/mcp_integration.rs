@@ -429,16 +429,23 @@ async fn mcp_stdio_tools_against_real_server_with_scoped_pat() {
         .await;
     assert!(!err, "{body}");
     assert_eq!(body["contentJson"]["type"], "doc");
-
-    // Server routes not ported yet (docs/rewrite.md): PAT search, markdown
-    // body, body replace and block patch. The tool relays the server's refusal
-    // as a tool error with its status, never a success.
-    for (tool, args) in [
-        ("search", json!({"workspaceId": ws, "q": "First"})),
-        (
+    // Markdown body: converted by the server's own `--internal-markdown`
+    // child, so it works without the Node helper.
+    let (err, body) = mcp
+        .tool(
             "get_document_body",
             json!({"workspaceId": ws, "id": doc_id, "format": "md"}),
-        ),
+        )
+        .await;
+    assert!(!err, "{body}");
+    assert_eq!(body["contentMd"], "");
+
+    // Server routes not ported yet (docs/rewrite.md) or not configured here:
+    // PAT search, body replace (collab and the Node Yjs seed) and block patch.
+    // The tool relays the server's refusal as a tool error with its status,
+    // never a success.
+    for (tool, args) in [
+        ("search", json!({"workspaceId": ws, "q": "First"})),
         (
             "put_document_body",
             json!({"workspaceId": ws, "id": doc_id, "contentMd": "# x"}),

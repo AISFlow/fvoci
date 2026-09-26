@@ -1,0 +1,98 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "Costs $5 and ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "x"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " here.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "$5 and \\$",
+          "type": "text"
+        },
+        {
+          "text": "6",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "a ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "b"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": "c$ d",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "$x$1 digit after",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "$$5 and $$10",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "marks": [
+            {
+              "type": "code"
+            }
+          ],
+          "text": "$code$",
+          "type": "text"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "ok"
+          },
+          "type": "mathInline"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

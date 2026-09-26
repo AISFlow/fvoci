@@ -16,6 +16,8 @@ COPY scripts ./scripts
 COPY crates/collab-engine ./crates/collab-engine
 COPY crates/document-extract ./crates/document-extract
 COPY crates/document-extract-client ./crates/document-extract-client
+# markdown-rs with one local fix, wired by `[patch.crates-io]` (vendor/markdown/PATCHES.md).
+COPY vendor/markdown ./vendor/markdown
 
 FROM rust-sources AS rust-deps
 RUN cargo fetch --locked \

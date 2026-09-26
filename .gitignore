@@ -7,3 +7,6 @@
 
 # CodeGraph dev-tool index (local exploration aid, never a build input)
 .codegraph/
+
+# vendored crate build outputs (tests run with --target-dir)
+/vendor/*/target/

@@ -531,8 +531,8 @@ async fn ai_admit(
     let Some(config) = integrations.ai.as_ref() else {
         return Err(AppError::from_code(ProblemCode::AiUnavailable));
     };
-    if state.document_convert.is_none() {
-        tracing::warn!("ai request refused: FVOCI_DOCUMENT_CONVERT_BIN is unset");
+    if state.markdown.is_none() {
+        tracing::warn!("ai request refused: the markdown helper is unavailable");
         return Err(AppError::from_code(ProblemCode::AiUnavailable));
     }
     tracing::info!(key_hash = %config.key_hash(), "ai.request");
@@ -556,20 +556,20 @@ async fn ai_document(
     .await
     .map_err(internal)?
     .ok_or_else(|| AppError::from_code(ProblemCode::NotFound))?;
-    let convert = state
-        .document_convert
+    let helper = state
+        .markdown
         .as_ref()
         .ok_or_else(|| AppError::from_code(ProblemCode::AiUnavailable))?;
-    // An empty title makes the helper's markdown export the bare body, which
-    // is source `documentContentMd`.
-    let (bytes, _, _) = convert
-        .export_binary("export_md", "", &content_json)
-        .await
-        .map_err(|err| {
-            tracing::warn!(error = %err, "ai.markdown_failed");
-            AppError::internal()
-        })?;
-    let markdown = String::from_utf8(bytes).map_err(|_| AppError::internal())?;
+    // Source `documentContentMd` (the Node helper's `export_md` with an empty
+    // title, which refused a body that is not a Tiptap doc).
+    if !crate::share_render::is_tiptap_doc(&content_json) {
+        tracing::warn!("ai.markdown_failed reason=not_a_tiptap_doc");
+        return Err(AppError::internal());
+    }
+    let markdown = helper.tiptap_to_md(&content_json).await.map_err(|err| {
+        tracing::warn!(error = %err, "ai.markdown_failed");
+        AppError::internal()
+    })?;
     Ok((markdown, title))
 }
 

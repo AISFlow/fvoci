@@ -1,0 +1,31 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "hi @[user:u1|Alice bye",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "attrs": {
+            "entity": "user",
+            "id": "u2",
+            "label": "Bob"
+          },
+          "type": "mention"
+        },
+        {
+          "text": " ok",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

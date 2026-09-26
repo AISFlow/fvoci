@@ -169,6 +169,11 @@ async fn app_state(app_url: &str, storage_root: &std::path::Path) -> AppState {
         meili: None,
         search_embedder: None,
         document_convert: Some(convert_client()),
+        markdown: Some(
+            fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
+                "CARGO_BIN_EXE_fvoci-server"
+            )),
+        ),
         import_wake: None,
         import_extractor_available: false,
         quota: Default::default(),
@@ -1289,8 +1294,11 @@ async fn legal_publish_consent_gate_and_consent_records() {
     assert_eq!(terms.status, StatusCode::CREATED, "{}", terms.json);
     assert_eq!(terms.json["version"], 1);
     let html = terms.json["bodyHtml"].as_str().unwrap();
-    assert!(html.contains("<strong>목적</strong>"), "{html}");
-    assert!(!html.contains("<script"), "{html}");
+    // TS `tiptapDocToSafeHtml(mdToTiptapJson(md))` output, byte for byte.
+    assert_eq!(
+        html,
+        "<h1>제1조</h1><p><strong>목적</strong> alert(1) 본문</p>"
+    );
 
     // Public reads.
     let latest = get(&h.app, "/api/v1/legal/terms", None).await;

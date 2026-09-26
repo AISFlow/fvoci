@@ -177,6 +177,11 @@ async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppStat
         meili: None,
         search_embedder: None,
         document_convert: None,
+        markdown: Some(
+            fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
+                "CARGO_BIN_EXE_fvoci-server"
+            )),
+        ),
         import_wake: None,
         import_extractor_available: false,
         quota: Default::default(),

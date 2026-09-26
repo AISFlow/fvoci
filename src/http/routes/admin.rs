@@ -417,11 +417,11 @@ async fn post_legal(
     let Some(effective_at) = effective_at.filter(|_| valid) else {
         return Err(AppError::with_source(ProblemCode::InvalidInput, "/"));
     };
-    let Some(convert) = state.document_convert.as_ref() else {
-        tracing::error!("legal publish requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
+    let Some(markdown) = state.markdown.as_ref() else {
+        tracing::error!("legal publish requested but the markdown helper is unavailable");
         return Err(AppError::internal());
     };
-    let body_html = convert
+    let body_html = markdown
         .md_to_safe_html(&body.body_markdown)
         .await
         .map_err(|err| {

@@ -1,0 +1,82 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "문단 ",
+          "type": "text"
+        },
+        {
+          "text": "굵게 아닌 raw",
+          "type": "text"
+        },
+        {
+          "text": " 와 ",
+          "type": "text"
+        },
+        {
+          "text": "alert(1)",
+          "type": "text"
+        },
+        {
+          "text": " 와 ",
+          "type": "text"
+        },
+        {
+          "text": "밑줄시도",
+          "type": "text"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "줄바꿈",
+          "type": "text"
+        },
+        {
+          "type": "hardBreak"
+        },
+        {
+          "text": "다음",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "요약 <b>raw</b>",
+              "type": "text"
+            }
+          ],
+          "type": "detailsSummary"
+        },
+        {
+          "content": [
+            {
+              "content": [
+                {
+                  "text": "안에 본문",
+                  "type": "text"
+                }
+              ],
+              "type": "paragraph"
+            }
+          ],
+          "type": "detailsContent"
+        }
+      ],
+      "type": "details"
+    }
+  ],
+  "type": "doc"
+}

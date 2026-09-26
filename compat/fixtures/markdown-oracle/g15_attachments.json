@@ -1,0 +1,21 @@
+{
+  "content": [
+    {
+      "attrs": {
+        "id": "550e8400-e29b-41d4-a716-446655440099",
+        "image": true,
+        "name": "그림.png"
+      },
+      "type": "attachment"
+    },
+    {
+      "attrs": {
+        "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa99",
+        "image": false,
+        "name": "파일.pdf"
+      },
+      "type": "attachment"
+    }
+  ],
+  "type": "doc"
+}

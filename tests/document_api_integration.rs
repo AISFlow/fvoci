@@ -371,8 +371,8 @@ async fn put_body_markdown_goes_through_live_room_and_survives_restart() {
         .await;
         assert_eq!(status, StatusCode::OK, "{md}");
         let content_md = md["contentMd"].as_str().unwrap();
-        assert!(content_md.starts_with("# 제목"), "{content_md}");
-        assert!(content_md.contains("안녕 본문 😀 한글"), "{content_md}");
+        // Source `documentContentMd` (TS `tiptapDocToMd`) output, byte for byte.
+        assert_eq!(content_md, "# 제목\n\n안녕 본문 😀 한글\n");
         assert!(md.get("contentJson").is_none());
         let (status, _) = session_call(
             addr,
@@ -537,6 +537,12 @@ async fn put_body_validation_permission_and_token_scopes() {
             (
                 json!({"contentMd": "가".repeat(400_000)}),
                 StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            // Nested past the storable depth (Tiptap JSON > 126 levels):
+            // refused by the Rust parser child, nothing is written.
+            (
+                json!({"contentMd": "> ".repeat(61) + "x"}),
+                StatusCode::BAD_REQUEST,
             ),
         ] {
             let (status, problem) =
