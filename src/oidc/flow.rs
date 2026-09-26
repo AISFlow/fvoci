@@ -498,14 +498,7 @@ async fn login_with_identity(
     workspace_id: Option<Uuid>,
 ) -> Result<OidcResult, sqlx::Error> {
     let subject = identity_subject(provider, &profile.sub, workspace_id);
-    let lookup = db::find_link(
-        pool,
-        provider.as_str(),
-        &subject,
-        &profile.issuer,
-        profile.issuer_template.as_deref(),
-    )
-    .await?;
+    let lookup = db::find_link(pool, provider.as_str(), &subject, &profile.issuer).await?;
     // A link made through another issuer is not this identity, and its
     // subject stays taken, so JIT is not tried either.
     let taken = lookup.subject_taken();
@@ -575,7 +568,6 @@ async fn accept_invite_with_identity(
             provider: provider.as_str(),
             subject: &subject,
             issuer: &profile.issuer,
-            issuer_template: profile.issuer_template.as_deref(),
             link_email: profile.email.as_deref(),
             given_name: profile.name.as_deref(),
             client_ip: ip,

@@ -70,18 +70,14 @@ impl LinkLookup {
 }
 
 /// Sign-in lookup: no user is known yet, so it runs in system context. A
-/// link made before 035 has no issuer; it matches and records `issuer` in
-/// the same transaction (write-once), so later sign-ins must match it.
-/// `template` is the provider's Microsoft `{tenantid}` discovery issuer: a
-/// link that stored exactly that string (before 036) is not pinned to a
-/// tenant yet, so it matches and is re-pinned to the tenant `issuer` the same
-/// way. No other stored value is ever rewritten.
+/// legacy link without a verified issuer (including a Microsoft discovery
+/// template) cannot establish which identity owns this subject. Keep it
+/// occupied, but require an authenticated unlink and fresh link to use it.
 pub async fn find_link(
     pool: &PgPool,
     provider: &str,
     subject: &str,
     issuer: &str,
-    template: Option<&str>,
 ) -> Result<LinkLookup, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
@@ -100,25 +96,7 @@ pub async fn find_link(
         tx.commit().await?;
         return Ok(LinkLookup::Missing);
     };
-    let matches = match stored_issuer.as_deref() {
-        Some(stored) if stored == issuer => true,
-        Some(stored) if template == Some(stored) => {
-            sqlx::query_scalar("SELECT fvoci.app_identity_link_repin_template($1, $2, $3)")
-                .bind(id)
-                .bind(stored)
-                .bind(issuer)
-                .fetch_one(&mut *tx)
-                .await?
-        }
-        Some(_) => false,
-        None => {
-            sqlx::query_scalar("SELECT fvoci.app_identity_link_backfill_issuer($1, $2)")
-                .bind(id)
-                .bind(issuer)
-                .fetch_one(&mut *tx)
-                .await?
-        }
-    };
+    let matches = stored_issuer.as_deref() == Some(issuer);
     tx.commit().await?;
     if !matches {
         // No subject, issuer or email values are logged.
