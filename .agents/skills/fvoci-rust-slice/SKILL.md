@@ -11,6 +11,10 @@ description: FVOCI Rust 백엔드 기능을 HTTP 입력부터 영속화와 응�
 
 기준 SHA, 허용 파일, source-contract 결과, 실제 호출 경로, 필요한 검증 명령과 수락 조건.
 
+표준 프로토콜·파서·SDK를 만들거나 바꾸면 [standard-implementations](../fvoci-standard-implementations/SKILL.md),
+Node 대체·바이너리·child/build 경계를 바꾸면 [runtime-boundaries](../fvoci-runtime-boundaries/SKILL.md)를 먼저 적용한다.
+해당하지 않는 작업에서 후보 라이브러리 전체를 조사하지 않는다.
+
 ## 절차
 
 1. 성공/거부/경합·외부 실패 중 해당 기능의 핵심 재현 검사를 먼저 정한다. 기존 회귀가 있으면 실제 실패를 확인한다. 실패 원인이 환경 준비인지 제품인지 구분한다.
