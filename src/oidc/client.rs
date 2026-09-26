@@ -508,9 +508,6 @@ pub struct SocialProfile {
     /// issuer the `tid` fills in), or the configured base URL for an OAuth2
     /// provider without discovery. `sub` is only unique within it.
     pub issuer: String,
-    /// Microsoft's `{tenantid}` discovery issuer when `issuer` was filled from
-    /// it (links stored before 036 hold this string).
-    pub issuer_template: Option<String>,
     pub email: Option<String>,
     pub name: Option<String>,
     pub email_verified: bool,
@@ -672,7 +669,6 @@ pub async fn oidc_exchange(
         // The crate matched it to the discovery issuer, or relying_party_rules
         // to the tenant template filled with the verified `tid`.
         issuer: claims.issuer().as_str().to_string(),
-        issuer_template: template.then(|| discovery.issuer().as_str().to_string()),
         email: normalize_provider_email(text(claims.email().map(|e| e.as_str()))),
         name: text(claims.name().and_then(|n| n.get(None)).map(|n| n.as_str())).or_else(|| {
             text(
@@ -754,7 +750,6 @@ pub async fn naver_exchange(
     Ok(SocialProfile {
         sub,
         issuer: provider.issuer.clone(),
-        issuer_template: None,
         email: normalize_provider_email(body.email),
         name: body.name.or(body.nickname),
         email_verified: false,
