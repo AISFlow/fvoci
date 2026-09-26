@@ -462,6 +462,11 @@ fn to_meili(row: &SearchIndexRow) -> SearchSource {
         chosung: text.chosung,
         stem: text.stem,
         updated_at: row.updated_at.timestamp_millis(),
+        embedding: if row.kind == SearchSourceKind::Attachment {
+            row.embedding.clone()
+        } else {
+            None
+        },
     }
 }
 

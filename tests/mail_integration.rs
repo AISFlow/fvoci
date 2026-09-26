@@ -344,6 +344,7 @@ async fn app_state(app_url: &str, mailer: Arc<Mailer>) -> AppState {
         },
         collab: None,
         meili: None,
+        search_embedder: None,
         mailer,
         document_convert: None,
         import_wake: None,

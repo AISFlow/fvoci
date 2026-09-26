@@ -168,6 +168,7 @@ pub async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixtur
         },
         collab: None,
         meili: None,
+        search_embedder: None,
         mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
         document_convert: Some(convert),
         import_wake: Some(wake),
