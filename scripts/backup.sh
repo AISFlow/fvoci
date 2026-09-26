@@ -12,8 +12,8 @@
 # Pepper keys, ENCRYPTION_KEYS, DB passwords, and the Meili master key stay in
 # the operator env file — they are not copied into the archive (beyond whatever
 # the database dump already contains). The manifest records only fingerprints
-# of the pepper keyring and of each ENCRYPTION_KEYS key id
-# (scripts/encryption_keys.py), which restore compares before touching volumes.
+# of the pepper keyring and of each ENCRYPTION_KEYS key id, which restore
+# compares before touching volumes.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,38 +38,6 @@ usage: scripts/backup.sh --project NAME --env-file PATH --output DIR [options]
 
 EOF
   exit 2
-}
-
-read_env() {
-  local key="$1"
-  local line
-  line="$(grep -E "^${key}=" "$ENV_FILE" || true)"
-  if [[ -z "$line" ]]; then
-    echo "missing ${key} in env file" >&2
-    exit 1
-  fi
-  printf '%s\n' "${line#*=}"
-}
-
-# Optional variable: empty output when the env file does not set it.
-read_env_optional() {
-  local key="$1"
-  local line
-  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 || true)"
-  printf '%s\n' "${line#*=}"
-}
-
-pepper_fingerprint() {
-  # SHA-256 over the canonical keyring JSON (sorted ids) and the active id. The
-  # keys themselves never leave the env file.
-  PEPPER_KEYS="$1" PEPPER_ACTIVE="$2" python3 -c '
-import hashlib, json, os
-ring = json.loads(os.environ["PEPPER_KEYS"])
-if not isinstance(ring, dict) or not ring:
-    raise SystemExit("PASSWORD_PEPPER_KEYS must be a non-empty JSON object")
-canon = json.dumps({"keys": dict(sorted(ring.items())), "active": os.environ["PEPPER_ACTIVE"]}, separators=(",", ":"))
-print(hashlib.sha256(canon.encode()).hexdigest())
-'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -105,6 +73,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PROJECT" && -n "$ENV_FILE" && -n "$OUTPUT" ]] || usage
+# These are host-side tools; no Python runtime is needed for these operations.
+# Fail before stopping the server or creating backup state.
+for dependency in docker jq tar; do
+  command -v "$dependency" >/dev/null 2>&1 || {
+    echo "backup host requires $dependency" >&2
+    exit 1
+  }
+done
+docker compose version >/dev/null
 if [[ ! "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
   echo "--project must be a lowercase Compose project name" >&2
   exit 1
@@ -179,6 +156,37 @@ if [[ -z "$STORAGE_VOL" ]]; then
   exit 1
 fi
 docker volume inspect "$STORAGE_VOL" >/dev/null
+# Use the exact installed product image that is running this server. No pull or
+# alternate host executable may decide the backup key/manifest policy.
+SELECTED_IMAGE="$("${COMPOSE[@]}" config --format json | jq -er '.services.server.image')"
+PRODUCT_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$SELECTED_IMAGE")"
+if [[ "$(docker inspect -f '{{.Image}}' "$SERVER_CID")" != "$PRODUCT_IMAGE_ID" ]]; then
+  echo "running server image differs from the selected Compose product image" >&2
+  exit 1
+fi
+runtime_key() {
+  local name="$1"
+  docker inspect "$SERVER_CID" | jq -r --arg name "$name" \
+    '.[0].Config.Env | map(select(startswith($name + "="))) | last | if . == null then "" else .[($name | length) + 1:] end'
+}
+PEPPER_KEYS="$(runtime_key PASSWORD_PEPPER_KEYS)"
+PEPPER_ACTIVE="$(runtime_key PASSWORD_PEPPER_ACTIVE_KEY_ID)"
+ENCRYPTION_KEYS_VALUE="$(runtime_key ENCRYPTION_KEYS)"
+ENCRYPTION_ACTIVE="$(runtime_key ENCRYPTION_ACTIVE_KEY_ID)"
+
+# Keep restart (including error cleanup) on the exact image and keys we backed
+# up, even if the original tag or env file changes during the operation.
+export FVOCI_IMAGE="$PRODUCT_IMAGE_ID"
+export PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE"
+export ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE"
+if ! "${COMPOSE[@]}" config --format json | jq -e '
+  .services.server.image == env.FVOCI_IMAGE and
+  (.services.server.environment as $settings |
+    all(["PASSWORD_PEPPER_KEYS", "PASSWORD_PEPPER_ACTIVE_KEY_ID", "ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID"][];
+      . as $key | $settings[$key] == env[$key]))' >/dev/null; then
+  echo "Compose must preserve the selected product image and key snapshot" >&2
+  exit 1
+fi
 
 echo "stopping server so dump and storage share a quiesced point"
 "${COMPOSE[@]}" stop -t 45 server
@@ -240,55 +248,17 @@ if (( MISSING != 0 )); then
 fi
 
 CREATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-DUMP_SIZE="$(stat -c '%s' "$DUMP")"
-DUMP_SHA="$(sha256sum "$DUMP" | awk '{print $1}')"
-TAR_SIZE="$(stat -c '%s' "$STAGING/storage.tar")"
-TAR_SHA="$(sha256sum "$STAGING/storage.tar" | awk '{print $1}')"
 PG_VERSION="$("${COMPOSE[@]}" exec -T postgres sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SHOW server_version_num"')"
 PG_VERSION="$(printf '%s' "$PG_VERSION" | tr -d '[:space:]')"
-
-PEPPER_FP="$(pepper_fingerprint "$(read_env PASSWORD_PEPPER_KEYS)" "$(read_env PASSWORD_PEPPER_ACTIVE_KEY_ID)")"
-ENCRYPTION_ENTRY="$(ENCRYPTION_KEYS="$(read_env_optional ENCRYPTION_KEYS)" \
-  ENCRYPTION_ACTIVE_KEY_ID="$(read_env_optional ENCRYPTION_ACTIVE_KEY_ID)" \
-  python3 "$ROOT/scripts/encryption_keys.py" manifest)"
-ENCRYPTION_ENTRY="$ENCRYPTION_ENTRY" \
-PEPPER_FP="$PEPPER_FP" CREATED_AT="$CREATED_AT" SOURCE_PROJECT="$PROJECT" \
-  DUMP_SIZE="$DUMP_SIZE" DUMP_SHA="$DUMP_SHA" \
-  TAR_SIZE="$TAR_SIZE" TAR_SHA="$TAR_SHA" \
-  PG_VERSION="$PG_VERSION" \
-  python3 - "$STAGING/manifest.json" <<'PY'
-import json, os, sys
-manifest = {
-    "formatVersion": 1,
-    "createdAt": os.environ["CREATED_AT"],
-    "sourceProject": os.environ["SOURCE_PROJECT"],
-    "schema": "fvoci",
-    "postgres": {"serverVersionNum": int(os.environ["PG_VERSION"])},
-    "passwordPepper": {
-        "fingerprint": os.environ["PEPPER_FP"],
-        "note": "SHA-256 of the canonical keyring and active id; keys are not stored. Restore refuses a different keyring because existing password hashes could not be verified.",
-    },
-    "encryptionKeys": json.loads(os.environ["ENCRYPTION_ENTRY"]),
-    "search": {
-        "included": False,
-        "reason": "Meilisearch is derived. Restore runs fvoci-migrate --ensure-meili-key (scoped key and index settings) and --rebuild-search from PostgreSQL.",
-    },
-    "database": {
-        "path": "database.dump",
-        "sizeBytes": int(os.environ["DUMP_SIZE"]),
-        "sha256": os.environ["DUMP_SHA"],
-    },
-    "storage": {
-        "path": "storage.tar",
-        "sizeBytes": int(os.environ["TAR_SIZE"]),
-        "sha256": os.environ["TAR_SHA"],
-    },
-}
-with open(sys.argv[1], "w", encoding="utf-8") as fh:
-    json.dump(manifest, fh, indent=2)
-    fh.write("\n")
-PY
-chmod 600 "$STAGING/manifest.json"
+PASSWORD_PEPPER_KEYS="$PEPPER_KEYS" PASSWORD_PEPPER_ACTIVE_KEY_ID="$PEPPER_ACTIVE" \
+ENCRYPTION_KEYS="$ENCRYPTION_KEYS_VALUE" ENCRYPTION_ACTIVE_KEY_ID="$ENCRYPTION_ACTIVE" \
+docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+  --entrypoint /opt/fvoci/bin/fvoci-migrate \
+  -e PASSWORD_PEPPER_KEYS -e PASSWORD_PEPPER_ACTIVE_KEY_ID \
+  -e ENCRYPTION_KEYS -e ENCRYPTION_ACTIVE_KEY_ID \
+  -v "${STAGING}:/backup" "$PRODUCT_IMAGE_ID" \
+  --backup-manifest /backup/manifest.json "$PROJECT" "$CREATED_AT" "$PG_VERSION" \
+  /backup/database.dump /backup/storage.tar
 
 mv --no-target-directory --no-clobber "$STAGING" "$OUTPUT"
 chmod 700 "$OUTPUT"
@@ -298,5 +268,4 @@ if (( LEAVE_STOPPED == 0 )); then
   SERVER_STOPPED=0
 fi
 
-python3 -c 'import json,sys; json.dump({"backup": sys.argv[1], "objectsChecked": True}, sys.stdout)' "$OUTPUT"
-printf '\n'
+jq -nc --arg backup "$OUTPUT" '{backup: $backup, objectsChecked: true}'

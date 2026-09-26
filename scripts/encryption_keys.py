@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""ENCRYPTION_KEYS fingerprint for scripts/backup.sh and scripts/restore.sh.
+"""Independent v1 ENCRYPTION_KEYS manifest compatibility oracle.
+
+Operational backup and restore use the shared Rust fvoci-migrate modes. Keep
+this Python fixture for differential vectors and negative checks.
 
 The keyring seals TOTP secrets, workspace SSO client secrets and webhook
 signing secrets in the database (`enc:v2:<kid>:...`). A restore needs every

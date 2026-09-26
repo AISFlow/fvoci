@@ -47,9 +47,8 @@ where
 async fn app_state(
     harness: &TestDb,
 ) -> (AppState, std::sync::Arc<fvoci_server::collab::CollabHub>) {
-    // No Node helper: body writes, Markdown and duplicate seeds are Rust children.
+    // Body writes, Markdown and duplicate seeds are Rust children.
     let (state, hub) = collab_app_state(&harness.app_url, test_collab_config(8, 60_000)).await;
-    assert!(state.document_convert.is_none());
     (state, hub)
 }
 

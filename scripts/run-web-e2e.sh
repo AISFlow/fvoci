@@ -8,6 +8,39 @@ CARGO_TARGET_DIR="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[
 COLLAB_ENGINE_TARGET_DIR="$ROOT/crates/collab-engine/target"
 export CARGO_TARGET_DIR
 export FVOCI_COLLAB_ENGINE="$COLLAB_ENGINE_TARGET_DIR/debug/collab-engine"
+export ROOT
+
+if [[ -n "${FVOCI_WEB_E2E_DRY_RUN:-}" ]]; then
+  echo "FVOCI_WEB_E2E_DRY_RUN is not supported" >&2
+  exit 1
+fi
+
+# CI matrix runs exactly eight browser shards; do not allow runtime overrides.
+CI_SHARD_COUNT=8
+CI_SHARD=""
+SPEC_ARGS=()
+
+while (($# > 0)); do
+  case "$1" in
+    --ci-shard)
+      CI_SHARD="${2:?--ci-shard requires an index}"
+      shift 2
+      ;;
+    --)
+      shift
+      SPEC_ARGS+=("$@")
+      break
+      ;;
+    --ci-shard-count)
+      echo "--ci-shard-count is not supported; CI uses a fixed shard count of ${CI_SHARD_COUNT}" >&2
+      exit 1
+      ;;
+    *)
+      SPEC_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
 
 require_prepared() {
   local missing=0
@@ -37,48 +70,80 @@ build_current_artifacts() {
     --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine
 }
 
+run_ci_shard() {
+  local shard_index="$1"
+
+  if [[ -n "${FVOCI_WEB_E2E_SHARD_COUNT:-}" ]]; then
+    echo "FVOCI_WEB_E2E_SHARD_COUNT must not override the fixed CI shard count (${CI_SHARD_COUNT})" >&2
+    exit 1
+  fi
+  if (( shard_index < 0 || shard_index >= CI_SHARD_COUNT )); then
+    echo "shard index ${shard_index} out of range 0..$((CI_SHARD_COUNT - 1))" >&2
+    exit 1
+  fi
+
+  local plan_file
+  plan_file="$(mktemp "${TMPDIR:-/tmp}/fvoci-web-e2e-plan.XXXXXX")"
+
+  if ! python3 "$ROOT/scripts/web-e2e-groups.py" verify --shards "$CI_SHARD_COUNT" >/dev/null; then
+    rm -f "$plan_file"
+    exit 1
+  fi
+  if ! python3 "$ROOT/scripts/web-e2e-groups.py" shard-jsonl \
+      --index "$shard_index" --shards "$CI_SHARD_COUNT" >"$plan_file"; then
+    rm -f "$plan_file"
+    exit 1
+  fi
+  if [[ ! -s "$plan_file" ]]; then
+    echo "shard ${shard_index} plan is empty" >&2
+    rm -f "$plan_file"
+    exit 1
+  fi
+
+  echo "=== web e2e shard ${shard_index}/${CI_SHARD_COUNT}: build once ===" >&2
+  build_current_artifacts
+
+  local -a plan_lines=()
+  mapfile -t plan_lines <"$plan_file"
+  rm -f "$plan_file"
+  if ((${#plan_lines[@]} < 1)); then
+    echo "shard ${shard_index} plan is empty" >&2
+    exit 1
+  fi
+
+  local group_json specs_line group_label
+  for group_json in "${plan_lines[@]}"; do
+    [[ -z "$group_json" ]] && continue
+    mapfile -t specs_line < <(
+      python3 -c 'import json,sys; print("\n".join(json.loads(sys.argv[1])["specs"]))' "$group_json"
+    )
+    if ((${#specs_line[@]} < 1)); then
+      echo "shard plan group has no specs: ${group_json}" >&2
+      exit 1
+    fi
+    group_label="$(basename "${specs_line[0]%.spec.ts}")"
+    if ((${#specs_line[@]} > 1)); then
+      group_label="${group_label}+$(basename "${specs_line[1]%.spec.ts}")"
+    fi
+    if ! bash "$ROOT/scripts/web-e2e-run-group.sh" "${specs_line[@]}" </dev/null; then
+      echo "shard ${shard_index} failed on group: ${group_label}" >&2
+      exit 1
+    fi
+  done
+
+  echo "=== web e2e shard ${shard_index}: all groups passed ===" >&2
+}
+
 require_prepared
+
+if [[ -n "$CI_SHARD" ]]; then
+  if ((${#SPEC_ARGS[@]} > 0)); then
+    echo "--ci-shard cannot be combined with explicit spec arguments" >&2
+    exit 1
+  fi
+  run_ci_shard "$CI_SHARD"
+  exit 0
+fi
+
 build_current_artifacts
-
-RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-web-e2e.XXXXXX")"
-SERVER_LOG="$RUN_DIR/server.log"
-PEPPER='{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
-
-retain_failure_artifacts() {
-  local retain_dir log dest
-  retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")"
-  chmod 700 "$retain_dir"
-  if [[ -d "$RUN_DIR/playwright-output" ]] && [[ -n "$(ls -A "$RUN_DIR/playwright-output" 2>/dev/null || true)" ]]; then
-    cp -a "$RUN_DIR/playwright-output" "$retain_dir/playwright-output"
-  fi
-  mkdir -p "$retain_dir/owned-server"
-  while IFS= read -r -d '' log; do
-    dest="$retain_dir/owned-server/$(basename "$(dirname "$log")").log"
-    sed -E \
-      -e 's#postgres://[^[:space:]]+#postgres://redacted#g' \
-      -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL)=[^[:space:]]+#\1=redacted#g' \
-      "$log" >"$dest"
-  done < <(find "$RUN_DIR" -mindepth 2 -name server.log -type f -print0 2>/dev/null || true)
-  echo "retained failure artifacts in $retain_dir" >&2
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    printf 'failure-artifacts=%s\n' "$retain_dir" >>"$GITHUB_OUTPUT"
-  fi
-}
-
-cleanup() {
-  local status=$?
-  if (( status != 0 )); then
-    retain_failure_artifacts || true
-  fi
-  rm -rf "$RUN_DIR"
-}
-trap cleanup EXIT
-
-# Keep this run independent of a later Vite build replacing apps/web/dist.
-cp -a "$ROOT/apps/web/dist" "$RUN_DIR/static"
-
-bash "$ROOT/scripts/start-test-postgres.sh" \
-  bash "$ROOT/scripts/start-test-meili.sh" \
-  env RUN_DIR="$RUN_DIR" SERVER_LOG="$SERVER_LOG" PEPPER="$PEPPER" ROOT="$ROOT" \
-    CARGO_TARGET_DIR="$CARGO_TARGET_DIR" FVOCI_STATIC_DIR="$RUN_DIR/static" \
-  bash "$ROOT/scripts/web-e2e-inner.sh" "$@"
+bash "$ROOT/scripts/web-e2e-run-group.sh" "${SPEC_ARGS[@]}"

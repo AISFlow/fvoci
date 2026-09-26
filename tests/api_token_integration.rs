@@ -162,7 +162,6 @@ async fn app_state(app_url: &str) -> AppState {
         collab: None,
         meili: None,
         search_embedder: None,
-        document_convert: None,
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"

@@ -1,8 +1,9 @@
 #![cfg(feature = "db-tests")]
 #![allow(dead_code)]
 
-//! `GET …/documents/{id}/docx` (wiki and project) is served by the Rust
-//! writer: the app state here has no Node convert helper at all.
+//! `GET …/documents/{id}/{docx,pptx,md}` (wiki and project) are served by the
+//! Rust writers in the `--internal-markdown` child; there is no Node convert
+//! helper any more.
 
 #[path = "support/project_harness.rs"]
 mod project_harness;
@@ -14,6 +15,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const PPTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
 async fn get_raw(app: &axum::Router, path: &str, cookie: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
     let request = Request::builder()
@@ -69,8 +71,46 @@ fn assert_docx(status: StatusCode, headers: &HeaderMap, bytes: &[u8], filename_s
     assert_eq!(docx.document.children.len(), 4);
 }
 
+fn assert_file_headers(headers: &HeaderMap, content_type: &str, filename_star: &str) {
+    assert_eq!(headers["content-type"], content_type);
+    let disposition = headers["content-disposition"].to_str().unwrap();
+    assert!(disposition.contains(filename_star), "{disposition}");
+    assert_eq!(headers["cache-control"], "private, no-store");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+}
+
+/// PPTX: the product's OOXML importer reads the slide back (title, heading,
+/// list item, table cell).
+fn assert_pptx(status: StatusCode, headers: &HeaderMap, bytes: &[u8], title: &str, file: &str) {
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(bytes));
+    assert_file_headers(headers, PPTX, file);
+    let text = match fvoci_server::documents::office::extract_office(
+        bytes,
+        fvoci_server::documents::office::OfficeKind::Pptx,
+        fvoci_server::documents::office::OfficeMode::Markdown,
+        1 << 20,
+    ) {
+        fvoci_server::documents::office::OfficeOutcome::Ok { text, .. } => text,
+        other => panic!("{other:?}"),
+    };
+    assert!(text.starts_with(&format!("**{title}**")), "{text}");
+    for want in ["**안건**", "**예산**", "| 항목 |"] {
+        assert!(text.contains(want), "{want}: {text}");
+    }
+}
+
+/// Markdown: source `documentMarkdown` (`# title`, then `tiptapDocToMd`).
+fn assert_md(status: StatusCode, headers: &HeaderMap, bytes: &[u8], title: &str, file: &str) {
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(bytes));
+    assert_file_headers(headers, "text/markdown; charset=utf-8", file);
+    assert_eq!(
+        String::from_utf8(bytes.to_vec()).unwrap(),
+        format!("# {title}\n\n## 안건\n\n- **예산**\n\n| 항목 |\n| --- |\n")
+    );
+}
+
 #[tokio::test]
-async fn wiki_and_project_docx_without_the_node_helper() {
+async fn wiki_and_project_office_and_markdown_exports_in_rust() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
 
@@ -94,9 +134,22 @@ async fn wiki_and_project_docx_without_the_node_helper() {
         &bytes,
         "filename*=UTF-8''%ED%9A%8C%EC%9D%98%EB%A1%9D.docx",
     );
-    // PPTX still needs the Node helper, which this state does not have.
-    let (status, _, _) = get_raw(&app, &format!("{base}/pptx"), &cookie).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, headers, bytes) = get_raw(&app, &format!("{base}/pptx"), &cookie).await;
+    assert_pptx(
+        status,
+        &headers,
+        &bytes,
+        "회의록",
+        "filename*=UTF-8''%ED%9A%8C%EC%9D%98%EB%A1%9D.pptx",
+    );
+    let (status, headers, bytes) = get_raw(&app, &format!("{base}/md"), &cookie).await;
+    assert_md(
+        status,
+        &headers,
+        &bytes,
+        "회의록",
+        "filename*=UTF-8''%ED%9A%8C%EC%9D%98%EB%A1%9D.md",
+    );
 
     let project = create_project(app.clone(), &cookie, workspace_id, "DOC", "workspace").await;
     let project_id = project["id"].as_str().unwrap();
@@ -116,16 +169,28 @@ async fn wiki_and_project_docx_without_the_node_helper() {
     store_body(&harness, pdoc_id).await;
     let (status, headers, bytes) = get_raw(&app, &format!("{pbase}/docx"), &cookie).await;
     assert_docx(status, &headers, &bytes, "filename*=UTF-8''Spec.docx");
+    let (status, headers, bytes) = get_raw(&app, &format!("{pbase}/pptx"), &cookie).await;
+    assert_pptx(
+        status,
+        &headers,
+        &bytes,
+        "Spec",
+        "filename*=UTF-8''Spec.pptx",
+    );
+    let (status, headers, bytes) = get_raw(&app, &format!("{pbase}/md"), &cookie).await;
+    assert_md(status, &headers, &bytes, "Spec", "filename*=UTF-8''Spec.md");
 
     // The workspace route does not serve project documents; no session, no file.
-    let (status, _, _) = get_raw(
-        &app,
-        &format!("/api/v1/workspaces/{workspace_id}/documents/{pdoc_id}/docx"),
-        &cookie,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _, _) = get_raw(&app, &format!("{base}/docx"), "not-a-session").await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    for format in ["docx", "pptx", "md"] {
+        let (status, _, _) = get_raw(
+            &app,
+            &format!("/api/v1/workspaces/{workspace_id}/documents/{pdoc_id}/{format}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{format}");
+        let (status, _, _) = get_raw(&app, &format!("{base}/{format}"), "not-a-session").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{format}");
+    }
     harness.cleanup().await;
 }

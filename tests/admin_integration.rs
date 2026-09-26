@@ -2,8 +2,7 @@
 //! Instance administration against a real PostgreSQL with the non-superuser
 //! app role: admin-only routes, last-admin protection, the 428 consent gate,
 //! consent records, typed instance settings, branding assets and audit paging.
-//! Legal publishing renders markdown through the document convert helper
-//! (FVOCI_DOCUMENT_CONVERT_BIN, see scripts/prepare-document-convert.sh).
+//! Legal publishing renders markdown through the `--internal-markdown` child.
 
 use std::sync::Arc;
 
@@ -13,7 +12,6 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
 use fvoci_server::db::{migrate, pool, Db};
-use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
 use rand::RngCore;
@@ -131,12 +129,6 @@ fn join_db_url(server_url: &str, db_name: &str) -> String {
     parsed.to_string()
 }
 
-fn convert_client() -> ConvertClient {
-    ConvertClient::from_env().expect(
-        "FVOCI_DOCUMENT_CONVERT_BIN is required; run scripts/prepare-document-convert.sh first",
-    )
-}
-
 struct Harness {
     db: TestDb,
     app: axum::Router,
@@ -168,7 +160,6 @@ async fn app_state(app_url: &str, storage_root: &std::path::Path) -> AppState {
         collab: None,
         meili: None,
         search_embedder: None,
-        document_convert: Some(convert_client()),
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"
@@ -2304,9 +2295,50 @@ async fn concurrent_mutual_erasure_leaves_one_live_admin() {
         .execute(&admin)
         .await
         .unwrap();
-    let (a, b) = tokio::join!(
+    // Both requests must pass HTTP authentication before either erasure can
+    // revoke the other actor's session. Otherwise this tests the outer 401
+    // gate instead of the live-admin recheck under the transaction locks.
+    let mut holder = admin.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    fvoci_server::db::quota::acquire_admission_lock(&mut holder)
+        .await
+        .unwrap();
+    let (a, b, both_queued) = tokio::join!(
         erase(&h, "erase", second_id, Some(&h.admin_cookie)),
         erase(&h, "erase", h.admin_id, Some(&second)),
+        async {
+            let queued = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let waiting: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM pg_stat_activity \
+                         WHERE datname = current_database() AND state = 'active' \
+                         AND wait_event_type = 'Lock' AND wait_event = 'advisory' \
+                         AND query = 'SELECT pg_advisory_xact_lock($1)' \
+                         AND $1 = ANY(pg_blocking_pids(pid))",
+                    )
+                    .bind(holder_pid)
+                    .fetch_one(&admin)
+                    .await
+                    .unwrap();
+                    if waiting == 2 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok();
+            // Always release our barrier, including on a failed precondition.
+            holder.rollback().await.unwrap();
+            queued
+        },
+    );
+    assert!(
+        both_queued,
+        "both erasures must queue after HTTP authentication"
     );
     let statuses = [a.status, b.status];
     assert_eq!(

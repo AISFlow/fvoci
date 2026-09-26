@@ -216,7 +216,6 @@ pub async fn app_state(app_url: &str) -> AppState {
         collab: None,
         meili: None,
         search_embedder: None,
-        document_convert: None,
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"
@@ -342,15 +341,7 @@ fn extract_session_cookie(set_cookie: &str) -> String {
 }
 
 pub async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid, Uuid) {
-    setup_session_with_convert(harness, None).await
-}
-
-/// `setup_session` with a document convert helper wired into the app state.
-pub async fn setup_session_with_convert(
-    harness: &TestDb,
-    document_convert: Option<fvoci_server::documents::convert::ConvertClient>,
-) -> (axum::Router, String, Uuid, Uuid) {
-    setup_session_with(harness, |state| state.document_convert = document_convert).await
+    setup_session_with(harness, |_| {}).await
 }
 
 /// `setup_session` with another `--internal-markdown` child (`None`: unavailable).

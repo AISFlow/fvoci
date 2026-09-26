@@ -1133,6 +1133,10 @@ async fn document_over_128_kib_imports_and_exports() {
             "docx",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ),
+        (
+            "pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
     ] {
         let (status, bytes, headers) = raw_request(
             fx.app.clone(),
