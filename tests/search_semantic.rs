@@ -831,3 +831,95 @@ async fn provider_failures_fall_back_to_lexical_and_retry_later() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// Review B1: task-parent attachments (migration 030) are embedded and found
+/// by hybrid search like document ones, within the same access boundary.
+#[tokio::test]
+async fn task_attachments_are_embedded_and_found_by_hybrid_search() {
+    let harness = TestDb::bootstrap().await;
+    let (_, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let meili = test_meili();
+    ensure_meili_index(&meili).await.expect("ensure index");
+    let fake = FakeEmbedder::spawn().await;
+    let embedder = fake.embedder();
+    let app = search_app(&harness, &meili, Some(embedder.clone())).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
+
+    let mut task_attachments = Vec::new();
+    for (key, visibility) in [("OPEN", "workspace"), ("HIDE", "private")] {
+        let project =
+            create_project(app.clone(), &owner_cookie, workspace_id, key, visibility).await;
+        let project_id = project["id"].as_str().unwrap().to_string();
+        let (status, task) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+            Some(json!({"title": format!("{key} 태스크")})),
+            Some(&owner_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{task}");
+        let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+        let attachment_id = Uuid::now_v7();
+        sqlx::query(
+            r#"INSERT INTO fvoci.attachments (
+                id, workspace_id, task_id, uploader_id, status, name, reserved_size_bytes,
+                size_bytes, storage_key, completed_at
+            ) VALUES ($1, $2, $3, $4, 'stored', 'task.txt', 4, 4, $5, now())"#,
+        )
+        .bind(attachment_id)
+        .bind(workspace_id)
+        .bind(task_id)
+        .bind(owner_id)
+        .bind(Uuid::now_v7().to_string())
+        .execute(&admin)
+        .await
+        .expect("task attachment");
+        extract_text(&admin, &pool, workspace_id, attachment_id, &cat_story(key)).await;
+        task_attachments.push((attachment_id, task_id));
+    }
+    let mut delivered = Vec::new();
+    deliver_events(&admin, &pool, &meili, &mut delivered).await;
+
+    let mut embedded = embed_all(&pool, &embedder).await;
+    embedded.sort();
+    let mut expected: Vec<Uuid> = task_attachments.iter().map(|(a, _)| *a).collect();
+    expected.sort();
+    assert_eq!(embedded, expected, "task attachments are embedded");
+    deliver_events(&admin, &pool, &meili, &mut delivered).await;
+    let (open_attachment, open_task) = task_attachments[0];
+    let vectors = meili_vectors(
+        &meili,
+        &search_source_id(
+            SearchSourceKind::Attachment,
+            &open_attachment.to_string(),
+            Some(0),
+        ),
+    )
+    .await;
+    assert_eq!(
+        vectors["embeddings"][0].as_array().map(Vec::len),
+        Some(DIM),
+        "{vectors}"
+    );
+
+    let (status, body) = search(&app, &owner_cookie, workspace_id, "cat", "mode=hybrid").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids = ids_of(&body);
+    assert_eq!(ids.len(), 2, "{body}");
+    let open_item = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == open_attachment.to_string())
+        .expect("open task attachment found");
+    assert_eq!(open_item["taskId"], open_task.to_string(), "{open_item}");
+
+    // A member without the private project sees only the open task's file.
+    let (status, body) = search(&app, &member.cookie, workspace_id, "cat", "mode=hybrid").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids_of(&body), vec![open_attachment.to_string()]);
+    harness.cleanup().await;
+}

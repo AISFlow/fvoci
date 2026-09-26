@@ -235,6 +235,28 @@ fn host_name_blocked(host: &str) -> bool {
 
 /// Always refused, even with the private opt-in: link-local (cloud metadata
 /// at 169.254.169.254 / fe80::/10), unspecified, multicast and broadcast.
+/// IPv4 addresses carried inside IPv6 forms that can route to them: mapped
+/// (::ffff:0:0/96), compatible (::/96), NAT64 (64:ff9b::/96) and 6to4 (2002::/16).
+fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return Some(v4);
+    }
+    let bits = u128::from(v6);
+    let low32 = std::net::Ipv4Addr::from((bits & 0xffff_ffff) as u32);
+    if bits >> 32 == 0 && bits > 1 {
+        return Some(low32);
+    }
+    if bits >> 32 == 0x0064_ff9b_0000_0000_0000_0000 {
+        return Some(low32);
+    }
+    if (bits >> 112) == 0x2002 {
+        return Some(std::net::Ipv4Addr::from(
+            ((bits >> 80) & 0xffff_ffff) as u32,
+        ));
+    }
+    None
+}
+
 fn never_allowed(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -244,9 +266,7 @@ fn never_allowed(ip: IpAddr) -> bool {
             (u128::from(v6) >> 118) == 0x3fa
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| never_allowed(IpAddr::V4(v4)))
+                || embedded_ipv4(v6).is_some_and(|v4| never_allowed(IpAddr::V4(v4)))
         }
     }
 }
@@ -412,6 +432,21 @@ pub fn embedding_to_json_text(vector: &[f32]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn embedded_link_local_ipv4_is_never_allowed() {
+        for addr in [
+            "64:ff9b::a9fe:a9fe",
+            "::169.254.169.254",
+            "2002:a9fe:a9fe::1",
+            "::ffff:169.254.169.254",
+        ] {
+            let ip: std::net::IpAddr = addr.parse().unwrap();
+            assert!(super::never_allowed(ip), "{addr}");
+        }
+        let ok: std::net::IpAddr = "64:ff9b::0a00:0001".parse().unwrap();
+        assert!(!super::never_allowed(ok));
+    }
+
     use super::*;
 
     fn env<'a>(base: Option<&'a str>, private: Option<&'a str>) -> EmbedderEnv<'a> {

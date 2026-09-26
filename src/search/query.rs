@@ -634,14 +634,23 @@ async fn query_embedding(
     let embedder = input
         .embedder
         .filter(|_| input.hybrid && !prepared.chosung)?;
-    match embedder.embed(&[input.q.to_string()]).await {
-        Ok(mut vectors) => vectors.pop(),
-        Err(error) => {
+    // An interactive search waits at most QUERY_EMBED_TIMEOUT for the
+    // provider, then answers lexically (indexing keeps the 30 s deadline).
+    match tokio::time::timeout(QUERY_EMBED_TIMEOUT, embedder.embed(&[input.q.to_string()])).await {
+        Ok(Ok(mut vectors)) => vectors.pop(),
+        Ok(Err(error)) => {
             tracing::warn!(error = %error, "search.embed_failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("search.embed_timeout");
             None
         }
     }
 }
+
+/// Query-path provider deadline; the lexical result is returned after it.
+const QUERY_EMBED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn search_filters(
     input: &WorkspaceSearchRequest<'_>,

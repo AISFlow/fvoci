@@ -631,7 +631,8 @@ pub struct PendingEmbeddingChunk {
 
 /// Source `listPendingEmbedding`: text chunks without a vector, in chunk
 /// order. FVOCI also embeds `partial` chunks (they are indexed like `ok`) and
-/// skips attachments the index would drop (infected, trashed parent).
+/// skips attachments the index would drop (infected, trashed parent). Both
+/// parents count: documents and (live, unarchived) tasks, as the index does.
 pub async fn list_pending_embedding(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -646,12 +647,17 @@ pub async fn list_pending_embedding(
         FROM fvoci.attachment_text x
         JOIN fvoci.attachments a
           ON a.workspace_id = x.workspace_id AND a.id = x.attachment_id
-        JOIN fvoci.documents d
+        LEFT JOIN fvoci.documents d
           ON d.workspace_id = a.workspace_id AND d.id = a.document_id
+        LEFT JOIN fvoci.tasks t
+          ON t.workspace_id = a.workspace_id AND t.id = a.task_id
         WHERE x.workspace_id = $1 AND x.attachment_id = $2
           AND x.embedding IS NULL AND x.text <> '' AND x.status IN ('ok', 'partial')
           AND a.status = 'stored' AND a.scan_status <> 'infected'
-          AND d.deleted_at IS NULL
+          AND (
+                (a.document_id IS NOT NULL AND d.deleted_at IS NULL)
+             OR (a.task_id IS NOT NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL)
+          )
         ORDER BY x.chunk_no
         LIMIT $3
         "#,
@@ -683,12 +689,17 @@ pub async fn next_pending_embedding(
             FROM fvoci.attachment_text x
             JOIN fvoci.attachments a
               ON a.workspace_id = x.workspace_id AND a.id = x.attachment_id
-            JOIN fvoci.documents d
+            LEFT JOIN fvoci.documents d
               ON d.workspace_id = a.workspace_id AND d.id = a.document_id
+            LEFT JOIN fvoci.tasks t
+              ON t.workspace_id = a.workspace_id AND t.id = a.task_id
             WHERE x.workspace_id = $1
               AND x.embedding IS NULL AND x.text <> '' AND x.status IN ('ok', 'partial')
               AND a.status = 'stored' AND a.scan_status <> 'infected'
-              AND d.deleted_at IS NULL
+              AND (
+                    (a.document_id IS NOT NULL AND d.deleted_at IS NULL)
+                 OR (a.task_id IS NOT NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL)
+              )
               AND NOT (x.attachment_id = ANY($2))
             ORDER BY x.attachment_id
             LIMIT 1
