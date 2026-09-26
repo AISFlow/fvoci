@@ -22,3 +22,12 @@ description: FVOCI 원본 조사, Rust 기능 이식 시작, API 또는 협업 �
 ## 결과
 
 고정 SHA와 파일/함수, 보존할 계약, 기존 결함·미완료, 새 구현의 수락 시나리오, 실행한 재현과 미실행 범위를 반환한다. 기능 대응표 갱신은 코디네이터에게 전달한다. 문서만으로 실제 지원을 확정하지 않는다.
+
+
+## CodeGraph (선택, 대상 저장소 탐색 보조)
+
+호출 관계·영향 후보를 빨리 좁힐 때 `codegraph explore "<symbols>"`, `codegraph callers <symbol>`,
+`codegraph impact <symbol>`(Claude Code에서는 MCP `codegraph_explore`)를 쓸 수 있다. 실행 경로·worktree는
+`.agents/environment.md`의 CodeGraph 절을 따른다. 결과는 조사 후보다: 메서드 호출·SQL·RLS·cfg·IPC·trait
+dispatch 엣지가 빠질 수 있으므로(2026-09-26 관찰) 보안·삭제·의존성 제거 결론은 실제 코드와 검사로 확인한다.
+원본 참조 clone은 인덱싱하지 않는다. 응답이 크면 심볼을 더 좁혀 다시 묻는다.

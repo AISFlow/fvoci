@@ -2233,6 +2233,25 @@ pub struct AdminUserPatchOutput {
     pub suspended_at: Option<DateTime<Utc>>,
 }
 
+/// Source `adminEraseInput` (strict object).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminEraseBody {
+    pub user_id: Uuid,
+}
+
+/// Source `adminErasureScheduleOutput`: the cancel token only goes to the
+/// user by mail, never to the admin.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AdminErasureScheduleOutput {
+    pub ok: bool,
+    pub erase_at: DateTime<Utc>,
+    pub mail_sent: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]

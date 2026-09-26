@@ -18,8 +18,8 @@ use crate::collab::admission::{memory_budget_exceeded, warn_join_db_error};
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
 use crate::collab::room::{
-    CapturedRevision, ConnectionLease, JoinDelivery, JoinError, RevisionCaptureError,
-    RevisionRestoreError, RoomHandle, RoomJoin, RoomKey,
+    BodyWriteError, CapturedRevision, ConnectionLease, JoinDelivery, JoinError, LiveProjection,
+    RevisionCaptureError, RevisionRestoreError, RoomHandle, RoomJoin, RoomKey,
 };
 use crate::db::collab::estimate_persisted_collab_bytes;
 use crate::db::collab::resolve_collab_admission;
@@ -476,6 +476,38 @@ impl CollabHub {
         handle
             .restore_from_snapshot(actor_user_id, session_id, snap)
             .await
+    }
+
+    /// External body write through the room actor (source `replaceBody`).
+    pub async fn replace_body(
+        &self,
+        key: RoomKey,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        seed: Vec<u8>,
+        expected_tail_seq: Option<i64>,
+    ) -> Result<(), BodyWriteError> {
+        let handle = self
+            .ensure_live_room(key)
+            .await
+            .map_err(join_to_body_write_error)?;
+        handle
+            .replace_body(actor_user_id, session_id, seed, expected_tail_seq)
+            .await
+    }
+
+    /// Live Tiptap projection for a read-modify-write (source `withLiveDoc`).
+    pub async fn project_live(
+        &self,
+        key: RoomKey,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<LiveProjection, BodyWriteError> {
+        let handle = self
+            .ensure_live_room(key)
+            .await
+            .map_err(join_to_body_write_error)?;
+        handle.project_live(actor_user_id, session_id).await
     }
 
     #[cfg(feature = "db-tests")]
@@ -1488,5 +1520,16 @@ async fn idle_eviction_loop(
             )
             .await;
         }
+    }
+}
+
+fn join_to_body_write_error(err: JoinError) -> BodyWriteError {
+    match err {
+        JoinError::AdmissionDenied | JoinError::UnsupportedKind => BodyWriteError::Rejected,
+        JoinError::RoomFull
+        | JoinError::CapacityRetry
+        | JoinError::EngineUnavailable
+        | JoinError::WriterStale
+        | JoinError::DbError => BodyWriteError::Unavailable,
     }
 }

@@ -708,6 +708,21 @@ enum RoomCommand {
         snap: Vec<u8>,
         reply: oneshot::Sender<Result<(), RevisionRestoreError>>,
     },
+    /// External body write (PUT body / patch block): replace the fragment with
+    /// the Doc seeded from `seed` as one forward system update.
+    ReplaceBody {
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        seed: Vec<u8>,
+        expected_tail_seq: Option<i64>,
+        reply: oneshot::Sender<Result<(), BodyWriteError>>,
+    },
+    /// Live Tiptap JSON projection and the committed tail it reflects.
+    ProjectLive {
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        reply: oneshot::Sender<Result<LiveProjection, BodyWriteError>>,
+    },
     Shutdown,
     #[cfg(feature = "db-tests")]
     Probe(oneshot::Sender<ActorProbe>),
@@ -723,6 +738,12 @@ fn reject_room_command(cmd: RoomCommand) {
         }
         RoomCommand::Restore { reply, .. } => {
             let _ = reply.send(Err(RevisionRestoreError::Unavailable));
+        }
+        RoomCommand::ReplaceBody { reply, .. } => {
+            let _ = reply.send(Err(BodyWriteError::Unavailable));
+        }
+        RoomCommand::ProjectLive { reply, .. } => {
+            let _ = reply.send(Err(BodyWriteError::Unavailable));
         }
         RoomCommand::Leave(_) | RoomCommand::Frame { .. } | RoomCommand::Shutdown => {}
         #[cfg(feature = "db-tests")]
@@ -769,6 +790,38 @@ pub enum RevisionCaptureError {
 pub enum RevisionRestoreError {
     Rejected,
     Unavailable,
+}
+
+/// Outcome of an external body write applied through the room actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyWriteError {
+    /// Actor lost edit access, or the document is gone/archived.
+    Rejected,
+    Unavailable,
+    /// `expected_tail_seq` no longer matches the committed tail.
+    Conflict,
+    /// Update or collab state budget exceeded.
+    TooLarge,
+    /// The engine refused the seed Doc.
+    Invalid,
+    /// Durable, but the derived body could not be projected.
+    DeriveFailed,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveProjection {
+    pub content_json: serde_json::Value,
+    pub tail_seq: i64,
+}
+
+/// Engine failures of a forward write; restore and body writes map them differently.
+enum ForwardWriteError {
+    Rejected,
+    Unavailable,
+    Conflict,
+    EngineLimit,
+    EngineMalformed,
+    AppendTooLarge,
 }
 
 pub(crate) enum JoinDelivery {
@@ -884,6 +937,44 @@ impl RoomHandle {
         reply_rx
             .await
             .map_err(|_| RevisionRestoreError::Unavailable)?
+    }
+
+    pub async fn replace_body(
+        &self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        seed: Vec<u8>,
+        expected_tail_seq: Option<i64>,
+    ) -> Result<(), BodyWriteError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RoomCommand::ReplaceBody {
+                actor_user_id,
+                session_id,
+                seed,
+                expected_tail_seq,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| BodyWriteError::Unavailable)?;
+        reply_rx.await.map_err(|_| BodyWriteError::Unavailable)?
+    }
+
+    pub async fn project_live(
+        &self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<LiveProjection, BodyWriteError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RoomCommand::ProjectLive {
+                actor_user_id,
+                session_id,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| BodyWriteError::Unavailable)?;
+        reply_rx.await.map_err(|_| BodyWriteError::Unavailable)?
     }
 
     pub(crate) async fn deliver_join(&self, join: RoomJoin) -> JoinDelivery {
@@ -1163,6 +1254,31 @@ impl RoomActor {
                         }) => {
                             let _ = reply
                                 .send(self.handle_restore(actor_user_id, session_id, snap).await);
+                        }
+                        Some(RoomCommand::ReplaceBody {
+                            actor_user_id,
+                            session_id,
+                            seed,
+                            expected_tail_seq,
+                            reply,
+                        }) => {
+                            let _ = reply.send(
+                                self.handle_replace_body(
+                                    actor_user_id,
+                                    session_id,
+                                    seed,
+                                    expected_tail_seq,
+                                )
+                                .await,
+                            );
+                        }
+                        Some(RoomCommand::ProjectLive {
+                            actor_user_id,
+                            session_id,
+                            reply,
+                        }) => {
+                            let _ = reply
+                                .send(self.handle_project_live(actor_user_id, session_id).await);
                         }
                         Some(RoomCommand::Shutdown) => {
                             self.shutting_down = true;
@@ -3125,6 +3241,122 @@ impl RoomActor {
         session_id: Uuid,
         snap: Vec<u8>,
     ) -> Result<(), RevisionRestoreError> {
+        let applied = self
+            .apply_forward_write(
+                actor_user_id,
+                session_id,
+                Request::RestoreFromSnapshot {
+                    snap_b64: snap,
+                    encoding: 1,
+                },
+                None,
+            )
+            .await
+            .map_err(|err| match err {
+                ForwardWriteError::Rejected | ForwardWriteError::AppendTooLarge => {
+                    RevisionRestoreError::Rejected
+                }
+                ForwardWriteError::Unavailable
+                | ForwardWriteError::Conflict
+                | ForwardWriteError::EngineLimit
+                | ForwardWriteError::EngineMalformed => RevisionRestoreError::Unavailable,
+            })?;
+        if let Some(seq) = applied {
+            let _ = self
+                .maybe_project_derived_body(seq, actor_user_id, session_id, false)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Source `replaceLiveCollabContent`: the whole fragment becomes the seed
+    /// Doc's fragment as one forward update, durable before broadcast, then the
+    /// derived body is projected like any other committed update.
+    async fn handle_replace_body(
+        &mut self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        seed: Vec<u8>,
+        expected_tail_seq: Option<i64>,
+    ) -> Result<(), BodyWriteError> {
+        let applied = self
+            .apply_forward_write(
+                actor_user_id,
+                session_id,
+                Request::ReplaceFromUpdate {
+                    update_b64: seed,
+                    encoding: 1,
+                },
+                expected_tail_seq,
+            )
+            .await
+            .map_err(|err| match err {
+                ForwardWriteError::Rejected => BodyWriteError::Rejected,
+                ForwardWriteError::Unavailable => BodyWriteError::Unavailable,
+                ForwardWriteError::Conflict => BodyWriteError::Conflict,
+                ForwardWriteError::EngineLimit | ForwardWriteError::AppendTooLarge => {
+                    BodyWriteError::TooLarge
+                }
+                ForwardWriteError::EngineMalformed => BodyWriteError::Invalid,
+            })?;
+        let Some(seq) = applied else {
+            return Ok(());
+        };
+        // The update is durable and broadcast at this point: the write has
+        // happened. A failed derived-body projection is logged and re-derived
+        // by the next update or persist (source `onDeriveFailed`), not
+        // reported as a failed write.
+        match self
+            .maybe_project_derived_body(seq, actor_user_id, session_id, false)
+            .await
+        {
+            ProjectDerivedOutcome::Projected | ProjectDerivedOutcome::Unchanged => {}
+            other => {
+                tracing::warn!(
+                    document_id = %self.document_id,
+                    outcome = ?other,
+                    "collab.body_write_derive_failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_project_live(
+        &mut self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<LiveProjection, BodyWriteError> {
+        self.prepare_forward_writer(actor_user_id, session_id)
+            .await
+            .map_err(|err| match err {
+                ForwardWriteError::Rejected => BodyWriteError::Rejected,
+                _ => BodyWriteError::Unavailable,
+            })?;
+        let content_json = match self.engine.call(Request::Project { encoding: 1 }).await {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    content_json: Some(json),
+                    ..
+                } => json,
+                EngineStatus::ResourceLimit { .. } => return Err(BodyWriteError::TooLarge),
+                _ => return Err(BodyWriteError::Unavailable),
+            },
+            Err(_) => return Err(BodyWriteError::Unavailable),
+        };
+        Ok(LiveProjection {
+            content_json,
+            tail_seq: self.committed.tail_seq,
+        })
+    }
+
+    /// Claims the writer (loading committed state) when this room has none yet,
+    /// then rechecks the actor's edit access under the document locks.
+    async fn prepare_forward_writer(
+        &mut self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<(), ForwardWriteError> {
         if self.writer_generation.is_none() {
             let claim = claim_writer_and_load(
                 &self.pool,
@@ -3134,20 +3366,18 @@ impl RoomActor {
                 self.document_id,
             )
             .await
-            .map_err(|_| RevisionRestoreError::Unavailable)?;
+            .map_err(|_| ForwardWriteError::Unavailable)?;
             let claim = claim.map_err(|err| match err {
-                CollabDbError::Forbidden | CollabDbError::NotFound => {
-                    RevisionRestoreError::Rejected
-                }
-                _ => RevisionRestoreError::Unavailable,
+                CollabDbError::Forbidden | CollabDbError::NotFound => ForwardWriteError::Rejected,
+                _ => ForwardWriteError::Unavailable,
             })?;
             self.set_committed_from_load(&claim.load);
             self.reload_primary_from_committed()
                 .await
-                .map_err(|_| RevisionRestoreError::Unavailable)?;
+                .map_err(|_| ForwardWriteError::Unavailable)?;
             self.writer_generation = Some(claim.writer_generation);
         } else if self.ensure_primary_capacity().await.is_err() {
-            return Err(RevisionRestoreError::Unavailable);
+            return Err(ForwardWriteError::Unavailable);
         }
 
         #[cfg(feature = "db-tests")]
@@ -3157,32 +3387,44 @@ impl RoomActor {
             .locking_session_auth_by_ids(actor_user_id, session_id, false)
             .await
         {
-            LockingAuth::Allow => {}
-            LockingAuth::Deny => return Err(RevisionRestoreError::Rejected),
-            LockingAuth::DbError => return Err(RevisionRestoreError::Unavailable),
+            LockingAuth::Allow => Ok(()),
+            LockingAuth::Deny => Err(ForwardWriteError::Rejected),
+            LockingAuth::DbError => Err(ForwardWriteError::Unavailable),
+        }
+    }
+
+    /// Computes a forward update with `request`, validates it against the
+    /// committed bundle, appends it durably, integrates and broadcasts it.
+    /// Returns the committed seq, or `None` when the update is empty.
+    async fn apply_forward_write(
+        &mut self,
+        actor_user_id: Uuid,
+        session_id: Uuid,
+        request: Request,
+        expected_tail_seq: Option<i64>,
+    ) -> Result<Option<i64>, ForwardWriteError> {
+        self.prepare_forward_writer(actor_user_id, session_id)
+            .await?;
+        if expected_tail_seq.is_some_and(|expected| expected != self.committed.tail_seq) {
+            return Err(ForwardWriteError::Conflict);
         }
 
-        let payload = match self
-            .engine
-            .call(Request::RestoreFromSnapshot {
-                snap_b64: snap,
-                encoding: 1,
-            })
-            .await
-        {
+        let payload = match self.engine.call(request).await {
             Ok(report) => match report.outcome {
                 EngineStatus::Ok {
                     applied: true,
                     update_b64: Some(bytes),
                     ..
                 } => collab_engine::b64::decode(&bytes)
-                    .map_err(|_| RevisionRestoreError::Unavailable)?,
-                _ => return Err(RevisionRestoreError::Unavailable),
+                    .map_err(|_| ForwardWriteError::Unavailable)?,
+                EngineStatus::ResourceLimit { .. } => return Err(ForwardWriteError::EngineLimit),
+                EngineStatus::Malformed { .. } => return Err(ForwardWriteError::EngineMalformed),
+                _ => return Err(ForwardWriteError::Unavailable),
             },
-            Err(_) => return Err(RevisionRestoreError::Unavailable),
+            Err(_) => return Err(ForwardWriteError::Unavailable),
         };
         if is_empty_update(&payload) {
-            return Ok(());
+            return Ok(None);
         }
 
         let validation = validate_recovery_bundle(
@@ -3194,15 +3436,15 @@ impl RoomActor {
         )
         .await;
         if validation == BundleValidation::EngineUnavailable {
-            return Err(RevisionRestoreError::Unavailable);
+            return Err(ForwardWriteError::Unavailable);
         }
         if validation != BundleValidation::Ok {
-            return Err(RevisionRestoreError::Rejected);
+            return Err(ForwardWriteError::Rejected);
         }
 
         let writer_generation = self
             .writer_generation
-            .ok_or(RevisionRestoreError::Unavailable)?;
+            .ok_or(ForwardWriteError::Unavailable)?;
         let op_id = Uuid::now_v7();
         let expected_tail = self.committed.tail_seq;
         let digest = payload_digest(&payload);
@@ -3226,10 +3468,13 @@ impl RoomActor {
             Ok(Ok(result)) => result,
             Ok(Err(CollabDbError::StaleWriter)) => {
                 self.fatal_writer_stale().await;
-                return Err(RevisionRestoreError::Unavailable);
+                return Err(ForwardWriteError::Unavailable);
+            }
+            Ok(Err(CollabDbError::PayloadTooLarge | CollabDbError::StateBudgetExceeded)) => {
+                return Err(ForwardWriteError::AppendTooLarge);
             }
             Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
-                return Err(RevisionRestoreError::Rejected);
+                return Err(ForwardWriteError::Rejected);
             }
             Ok(Err(CollabDbError::StaleCutoff)) | Ok(Err(_)) | Err(_) => {
                 match self
@@ -3244,7 +3489,7 @@ impl RoomActor {
                     .await
                 {
                     Some(result) => result,
-                    None => return Err(RevisionRestoreError::Unavailable),
+                    None => return Err(ForwardWriteError::Unavailable),
                 }
             }
         };
@@ -3253,7 +3498,7 @@ impl RoomActor {
             AppendCollabResult::Committed { seq } | AppendCollabResult::DuplicateAck { seq } => {
                 if seq != expected_tail + 1 {
                     self.fatal_room_divergence(actor_user_id, session_id).await;
-                    return Err(RevisionRestoreError::Unavailable);
+                    return Err(ForwardWriteError::Unavailable);
                 }
                 seq
             }
@@ -3272,14 +3517,11 @@ impl RoomActor {
         {
             self.fatal_primary_unhealthy(actor_user_id, session_id)
                 .await;
-            return Err(RevisionRestoreError::Unavailable);
+            return Err(ForwardWriteError::Unavailable);
         }
         let y_protocol = encode_sync_payload(SyncStep::Update, &payload);
         self.broadcast_update(&y_protocol).await;
-        let _ = self
-            .maybe_project_derived_body(seq, actor_user_id, session_id, false)
-            .await;
-        Ok(())
+        Ok(Some(seq))
     }
 
     async fn broadcast_update(&mut self, y_protocol: &[u8]) {

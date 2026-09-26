@@ -61,7 +61,7 @@ jobs:
           - runner: ubuntu-24.04
             check: postgres-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test search_semantic
           - runner: ubuntu-24.04-arm
             check: postgres-arm64
             shard: a
@@ -69,7 +69,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             check: postgres-arm64-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test search_semantic
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     services:
@@ -189,6 +189,15 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/crates/collab-engine/target
         run: cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: |
+            packages/editor/package-lock.json
+            scripts/document-convert/package-lock.json
+      - name: Prepare the document convert helper (npm ci)
+        run: bash scripts/prepare-document-convert.sh >> "$GITHUB_ENV"
       - name: WebSocket, PostgreSQL and native helper integration tests
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
@@ -197,4 +206,4 @@ jobs:
           set -o pipefail
           cargo test --locked --offline --features db-tests --test collab_product collab_primary_huge_varint_memory_rejected_1008 -- --exact | tee "$RUNNER_TEMP/native-admission-test.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/native-admission-test.log"
-          cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration
+          cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration --test document_api_integration

@@ -151,6 +151,24 @@ test("workspace and global search find a document, task, comment, and attachment
   await waitForHit(`${globalQ}&type=comment`, "comment", documentTitle);
   await waitForHit(`${globalQ}&type=attachment`, "attachment", attachmentName);
 
+  // Source command palette asks for hybrid; this server has no embedder, so the
+  // answer is the lexical one.
+  const paletteRequest = page.waitForRequest((req) => {
+    const url = new URL(req.url());
+    return (
+      url.pathname === `/api/v1/workspaces/${wsId}/search` && url.searchParams.get("q") === token
+    );
+  });
+  await page.keyboard.press("Control+k");
+  const palette = page.getByRole("dialog", { name: "빠른 검색" });
+  await palette.getByLabel("검색어").fill(token);
+  const paletteUrl = new URL((await paletteRequest).url());
+  expect(paletteUrl.searchParams.get("mode")).toBe("hybrid");
+  expect(paletteUrl.searchParams.get("type")).toBe("all");
+  await expect(palette.getByText(documentTitle).first()).toBeVisible({ timeout: 10_000 });
+  await page.keyboard.press("Escape");
+  await expect(palette).toBeHidden();
+
   await page.goto(`/w/acme/search?q=${encodeURIComponent(token)}`);
   const results = page.getByRole("region", { name: "검색" });
   await expect(results.getByText(documentTitle).first()).toBeVisible({ timeout: 10_000 });

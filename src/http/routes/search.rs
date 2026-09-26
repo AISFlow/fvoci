@@ -13,12 +13,12 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::api::dto::{SearchItemOutput, SearchListResponse, SearchSnippetPiece};
-use crate::auth::session::SessionUser;
-use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
-use crate::http::guard::reject_bearer;
+use crate::error::{AppError, ProblemCode};
+use crate::http::authz::{require_request_auth, Access, RequestAuth};
 use crate::http::rate_limit::peer_ip;
 use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
+use crate::search::meili::ParentKinds;
 use crate::search::query::{
     query_global_search, query_workspace_search, GlobalSearchRequest, SearchQueryError,
     SearchResultItem, SearchTypeFilter, WorkspaceSearchRequest,
@@ -134,7 +134,6 @@ async fn global_search(
     jar: CookieJar,
     query: Result<Query<GlobalSearchQuery>, QueryRejection>,
 ) -> Result<Json<SearchListResponse>, SearchApiError> {
-    reject_bearer(&headers)?;
     let Query(query) = query.map_err(AppError::from)?;
     if query.q.trim().is_empty() || query.q.chars().count() > 200 {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
@@ -166,7 +165,8 @@ async fn global_search(
         }
     };
 
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let auth = require_request_auth(&state, &headers, &jar, Access::Any, None).await?;
+    let (actor_user_id, session_id) = (auth.user_id, auth.credential_id);
     let ip = peer_ip(peer.ip());
     if let Err(retry_after) = state
         .rate_limiter
@@ -175,7 +175,6 @@ async fn global_search(
     {
         return Err(AppError::rate_limited(retry_after).into());
     }
-    let actor_user_id = parse_user_id(&user.user_id)?;
     if let Err(retry_after) = state
         .rate_limiter
         .allow_window(
@@ -202,6 +201,8 @@ async fn global_search(
             cursor: query.cursor.as_deref(),
             limit,
             meili,
+            allowed_kinds: allowed_parent_kinds(&auth),
+            token_workspace_id: auth.token_workspace_id,
         },
     )
     .await
@@ -228,7 +229,6 @@ async fn workspace_search(
     Path(workspace_id): Path<Uuid>,
     query: Result<Query<WorkspaceSearchQuery>, QueryRejection>,
 ) -> Result<Json<SearchListResponse>, SearchApiError> {
-    reject_bearer(&headers)?;
     let Query(query) = query.map_err(AppError::from)?;
     if query.q.trim().is_empty() || query.q.chars().count() > 200 {
         return Err(AppError::from_code(ProblemCode::InvalidInput).into());
@@ -268,7 +268,9 @@ async fn workspace_search(
     };
 
     // Source order: authenticate, then the IP limit, then the user limit.
-    let (user, session_id) = require_session(&state, &jar).await?;
+    let auth =
+        require_request_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
+    let (actor_user_id, session_id) = (auth.user_id, auth.credential_id);
     let ip = peer_ip(peer.ip());
     if let Err(retry_after) = state
         .rate_limiter
@@ -277,7 +279,6 @@ async fn workspace_search(
     {
         return Err(AppError::rate_limited(retry_after).into());
     }
-    let actor_user_id = parse_user_id(&user.user_id)?;
     if let Err(retry_after) = state
         .rate_limiter
         .allow_window(
@@ -306,6 +307,9 @@ async fn workspace_search(
             cursor: query.cursor.as_deref(),
             limit,
             meili,
+            hybrid: query.mode.as_deref() == Some("hybrid"),
+            embedder: state.search_embedder.as_ref(),
+            allowed_kinds: allowed_parent_kinds(&auth),
         },
     )
     .await
@@ -352,27 +356,13 @@ fn to_output(item: SearchResultItem) -> SearchItemOutput {
     }
 }
 
-async fn require_session(
-    state: &AppState,
-    jar: &CookieJar,
-) -> Result<(SessionUser, Uuid), AppError> {
-    let token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let user = state
-        .auth
-        .session_user(&token)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    let session_id = Uuid::parse_str(&user.session_id)
-        .map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))?;
-    Ok((user, session_id))
-}
-
-fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
-    Uuid::parse_str(value).map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))
+/// Source `allowedContentKinds`: a PAT reads mixed content only through its scoped domains.
+fn allowed_parent_kinds(auth: &RequestAuth) -> Option<ParentKinds> {
+    let kinds = crate::http::routes::notifications::allowed_content_kinds(auth)?;
+    Some(ParentKinds {
+        document: kinds.contains(&crate::db::notifications::ContentKind::Document),
+        task: kinds.contains(&crate::db::notifications::ContentKind::Task),
+    })
 }
 
 fn internal(err: sqlx::Error) -> AppError {

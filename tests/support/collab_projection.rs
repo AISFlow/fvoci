@@ -508,6 +508,7 @@ pub async fn collab_app_state_with_pool(
         },
         collab: Some(hub.clone()),
         meili: None,
+        search_embedder: None,
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,

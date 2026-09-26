@@ -46,6 +46,8 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `GITHUB_STATE_SECRET` | Server-only key (at least 32 bytes) for the install `state` MAC. If unset it is derived (HKDF-SHA256) from the active `ENCRYPTION_KEYS` key; with neither, a configured GitHub App fails at boot. The webhook secret is not used because GitHub App managers also hold it. |
 | `GITHUB_API_URL` | GitHub REST base (default `https://api.github.com`). Must be `https`; plain `http` only for a loopback host (tests point it at a local fake). |
 | `FVOCI_AI_ENABLED`, `FVOCI_AI_SECRET` | Document AI actions (summarize / generate-tasks / suggest-links) when `FVOCI_AI_ENABLED=1` and the secret is set (source gate). They are local text heuristics over the document markdown (no external model) and also need `FVOCI_DOCUMENT_CONVERT_BIN`. Otherwise members get `503 ai_unavailable`. |
+| `FVOCI_AI_EMBEDDINGS_BASE_URL`, `FVOCI_AI_EMBEDDINGS_MODEL`, `FVOCI_AI_EMBEDDINGS_DIM` | Semantic search (source contract). With `FVOCI_AI_ENABLED=1` and a base URL, the server calls an OpenAI-compatible `POST {base}/embeddings` (model default `text-embedding-3-small`, `FVOCI_AI_SECRET` as the optional bearer, never logged). The extract job embeds extracted attachment text chunks (stored in `attachment_text.embedding`, copied to Meili `_vectors.attachments`), so vectors need `FVOCI_EXTRACTOR_BIN`; older chunks and failed calls are backfilled with backoff. Workspace search with `mode=hybrid` (the web command palette) RRF-merges Meili lexical hits with the nearest chunks; global search and any embedder failure answer lexically. `FVOCI_AI_EMBEDDINGS_DIM` must be `1536` (startup refuses anything else). A bad base URL refuses startup. |
+| `FVOCI_AI_EMBEDDINGS_ALLOW_PRIVATE` | `1` lets the embeddings URL resolve to a private or loopback address (a local model server) and only then use plain `http`; public hosts must use `https`. Link-local/metadata addresses are always refused, redirects are never followed and each call is pinned to the checked address. Default `0` (FVOCI hardening; the source has no such rule). |
 
 Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. The crate uses SQLx `runtime-tokio-rustls`.
 
@@ -486,7 +488,9 @@ application role, restores the dump, restores storage, then runs the one-shot
 idempotent on this path), rebases the outbox, rebuilds search, and runs
 `fvoci-migrate --verify-storage` with the server's own environment: every
 `stored` attachment in the restored database must exist in the configured
-storage with its recorded size, or the restore stops before the server starts.
+storage with its recorded size, and every branding asset (logo/favicon) the
+restored instance settings reference must exist with its recorded SHA-256, or
+the restore stops before the server starts.
 Then it starts the server. Confirm login with the original password, document
 body, attachment bytes, extraction text, and tasks.
 
@@ -525,10 +529,15 @@ with `STORAGE_DRIVER=s3`. The supported model for S3 is:
      run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
    ```
 
-   It prints `{"checked":N,"missing":[...],"sizeMismatch":[...]}` and exits
-   non-zero when any stored attachment is missing or has a different size, or
-   when the bucket cannot be read (credentials, wrong bucket, network). Restore
-   the listed objects from bucket versions before starting the server.
+   It prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
+   and exits non-zero when any stored attachment is missing or has a different
+   size, when a branding asset referenced by the instance settings
+   (`logo`/`favicon`, uploaded in the admin console) is missing or does not
+   match its recorded SHA-256, or when the bucket cannot be read (credentials,
+   wrong bucket, network). Restore the listed objects from bucket versions
+   before starting the server. Branding assets are stored like attachments
+   (same driver, key from the setting), so the local volume archive and the S3
+   bucket protection above cover them too.
 
 A scripted S3-aware backup/restore (dump-only archives, bucket snapshot
 orchestration) is not implemented.

@@ -131,3 +131,47 @@ dispatch `ctx_cd611507a373`, Claude Code `claude-opus-5-5` medium(requested/effe
 requested/effective 모두 `claude-opus-5-5`/`medium`임을 확인했다(예: ctx_a7cca29eeb44).
 진행 중이던 cursor Composer(가져오기·내보내기)·Grok(S3) 작업은 WIP 커밋·인계 기록 후
 종료하고 Opus 워커가 같은 브랜치에서 이어받는다. 과거 실행 기록은 수정하지 않는다.
+
+## 2026-09-26 역할 재배정 (사용자 통합 지시)
+
+사용자 지시로 AGENTS.md의 역할 표를 교체했다. 이전 All-Opus 강제 규칙은 현재 운영 규칙에서 해제하고
+당시 실행 기록은 위 절에 그대로 둔다. 확인한 실제 실행 경로:
+
+| 역할 | 실행 경로·모델 | 확인 근거 |
+| --- | --- | --- |
+| 코디네이터 | Claude Code 2.1.283, `claude-fable-5-1`, `/effort medium` | 현재 세션 `/model`·`/effort` 출력, Run `run_b01d432a9dee`에 `run-use`로 terminal `term_77898e46` 바인딩 |
+| 주 구현 | Orca `worker-start --agent claude --model claude-opus-5-5 --effort medium` | 첫 dispatch `ctx_07898f6011b7`(#85 수정) receipt requested/effective 모두 `claude-opus-5-5`/`medium` |
+| 조사·검증 | Orca `worker-start --agent cursor --model cursor-grok-4.6-high` | 첫 dispatch `ctx_6612f5d79ee2`(읽기 전용 감사) receipt requested/effective `cursor-grok-4.6-high`, effort null(모델 ID에 포함, 별도 옵션 없음). `cursor-agent --list-models`에 Grok 4.6 계열 확인 |
+| 독립 검토 | Orca `worker-start --agent claude --model claude-fable-5-1 --effort medium`, 별도 세션 | 첫 검토 dispatch receipt를 아래 후속 기록으로 확인한다 |
+
+인계 시점: main `90a3df02`(#84), 열린 PR #81(`2d858c2`)·#82(`e95261e`)·#85(`c475fab`), 미푸시 task-api
+`982f8637`, 활성 Opus 워커 collab-join-flake(`ctx_3a6ef72c2404`). 진행 중 프로세스를 강제 종료하지
+않았고 기존 코드·검토·측정 근거는 그대로 재사용한다. 코디네이터 인계 메모는
+`/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-26.md`.
+
+## 2026-09-26 CodeGraph (선택적 개발 탐색 도구)
+
+- 사용자 지시로 코드 탐색·호출 관계·영향 조사 보조로만 도입한다. 새 모델·독립 검토자가 아니며 제품 런타임의
+  Node 예외 승인이 아니다. Cargo.toml·제품 package.json·Docker 이미지·CI required check에 넣지 않는다.
+- 설치는 이미 있던 `~/.codegraph/versions/v1.6.0`(`~/.local/bin/codegraph` 셸 래퍼, 번들 Node)이다. 릴리스
+  v1.6.0(2026-08-26, tag commit `dfccdf62`)의 `codegraph-linux-x64.tar.gz` SHA-256
+  `de3391f7…16b0`가 `SHA256SUMS`와 일치하고, 추출 내용이 설치본과 동일(`diff -rq` 차이 없음)함을 확인했다.
+  GitHub attestation API에 SLSA v1 provenance 1건(release.yml, 빌드 commit `b59023f0`=tag의 부모)이 있다.
+  gh 2.46에는 `gh attestation verify`가 없어 API 조회로 대신했다. 자동 upgrade는 켜지 않았다.
+- telemetry: `codegraph telemetry off`로 `~/.codegraph/telemetry.json` `enabled:false`, 대기열 삭제. MCP 서버
+  env에 `CODEGRAPH_TELEMETRY=0`·`DO_NOT_TRACK=1`을 넣었다(`telemetry status`가 DO_NOT_TRACK 우선을 표시).
+  `update-check.json`은 남아 있어 수동 실행 시 버전 확인이 갈 수 있다.
+- Claude Code 연결: `claude mcp add codegraph -s local …`로 daggertooth 프로젝트 범위(`~/.claude.json`)에만
+  등록했다. `codegraph install`(전역·자동 허용·지침 삽입)은 쓰지 않았다. 노출 도구는 기본 `codegraph_explore`
+  1개이며 stdio 초기화·tools/list·실제 explore 호출을 확인했다(0.2 s, 응답 25 KB ≈ 6k 토큰).
+  cursor-agent(Grok)는 전역 `~/.cursor/mcp.json` 변경 없이 검증된 CLI(`codegraph explore|callers|impact`)를 쓴다.
+- 인덱스: daggertooth(624 파일, 15.9k 노드, 66.9k 엣지, 4 s, 피크 RSS 1.2 GB, DB 74 MB). `target/`·
+  `node_modules/`는 미포함. `.codegraph/`는 `.gitignore`·`.dockerignore`(PR #89)와 git info/exclude로 제외.
+  worktree마다 별도 인덱스이며 `.codegraph`를 링크·복사하지 않는다. 검토자는 고정 SHA checkout에서 필요하면
+  따로 init한다. HEAD·git status와 staleness 배너를 함께 본다.
+- 정확도 관찰(사례 A·B·C): explore "ConvertClient callers"는 convert.rs·document_body·import_body·admin·
+  export·project_documents를 찾았으나 share.rs(공개 PDF)·integrations.rs(AI 요약)는 누락했다(감사 E표는 rg로
+  발견). `callers link_for_user`는 "없음"을 반환했으나 실제 호출이 src/oidc/flow.rs에 있다(메서드 호출 엣지
+  누락). `impact ObjectStorage`는 157 심볼 후보를 반환했다. 따라서 결과는 조사 후보이며 SQL·RLS·cfg·IPC·
+  trait dispatch 경계와 보안·삭제 결론은 실제 코드와 검사로 확인한다. 서버가 주입하는 "grep으로 재검증하지
+  말라" 지침은 이 프로젝트의 검토·보안·데이터 보존 원칙을 대체하지 않는다.

@@ -157,6 +157,7 @@ async fn app_state(app_url: &str) -> AppState {
         },
         collab: None,
         meili: None,
+        search_embedder: None,
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,
@@ -4247,6 +4248,40 @@ async fn server_exits_when_schema_is_behind() {
     assert_schema_gate_process_failure(
         &output,
         &[
+            "behind compiled version",
+            migrate::SCHEMA_GATE_OPERATOR_HINT,
+        ],
+    );
+    let _ = std::fs::remove_dir_all(storage_root);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn server_exits_when_a_lower_migration_is_missing_behind_the_latest() {
+    // A migration numbered below the latest one can merge after it (031 after
+    // 032). max(version) then matches the binary, but the set does not.
+    let harness = TestDb::bootstrap().await;
+    let compiled = migrate::compiled_migration_versions();
+    let missing = compiled[compiled.len() - 2];
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.schema_migrations WHERE version = $1")
+        .bind(missing)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let storage_root = std::env::temp_dir().join(format!("fvoci-schema-gate-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).expect("storage root");
+    let output = run_gated_server(server_process_env(&harness.app_url, &storage_root));
+    assert_schema_gate_process_failure(
+        &output,
+        &[
+            &format!("missing migrations [{missing}]"),
             "behind compiled version",
             migrate::SCHEMA_GATE_OPERATOR_HINT,
         ],

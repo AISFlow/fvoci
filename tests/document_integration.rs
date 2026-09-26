@@ -157,6 +157,7 @@ async fn app_state(app_url: &str) -> AppState {
         },
         collab: None,
         meili: None,
+        search_embedder: None,
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,
@@ -886,7 +887,8 @@ async fn foreign_parent_affiliation_depth_and_unsupported_queries_are_rejected()
     let (status, body, _, _) = json_request(
         app.clone(),
         "GET",
-        &format!("/api/v1/workspaces/{workspace_id}/documents/{last_id}/body?format=md"),
+        // `format=md` is supported (document_api_integration); other formats are not.
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{last_id}/body?format=html"),
         None,
         Some(&cookie),
         &[],

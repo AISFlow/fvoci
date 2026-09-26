@@ -545,15 +545,42 @@ pub async fn visible_document_ids(
 #[derive(Debug, Clone)]
 pub struct SharePublicMeta {
     pub title: String,
+    /// Link-unfurl one-liner; empty without `with_excerpt` and for project shares.
+    pub excerpt: String,
     pub document_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub expires_at: DateTime<Utc>,
 }
 
-/// Source `getSharePublicMeta` (without the OG excerpt).
+/// Source `EXCERPT_MAX_CHARS` (UTF-16 code units, like `String.slice`).
+pub const SHARE_EXCERPT_MAX_UTF16: usize = 200;
+
+/// Source `shareExcerpt`: folded plain text of a Tiptap doc, cut to 200 UTF-16
+/// units. The cut never splits a surrogate pair (JS `slice` could leave half
+/// of one, which HTML output would turn into U+FFFD).
+pub fn share_excerpt(content_json: &Value) -> String {
+    if !crate::share_render::is_tiptap_doc(content_json) {
+        return String::new();
+    }
+    let folded = fold_one_line(&extract_text(content_json));
+    let mut units = 0;
+    let mut end = folded.len();
+    for (index, c) in folded.char_indices() {
+        if units + c.len_utf16() > SHARE_EXCERPT_MAX_UTF16 {
+            end = index;
+            break;
+        }
+        units += c.len_utf16();
+    }
+    folded[..end].to_string()
+}
+
+/// Source `getSharePublicMeta`; `with_excerpt` is the OG head path only (it
+/// walks the whole document body).
 pub async fn share_public_meta(
     pool: &PgPool,
     raw_token: &str,
+    with_excerpt: bool,
 ) -> Result<Option<SharePublicMeta>, sqlx::Error> {
     let Some(ShareTx { mut tx, share }) = open_share(pool, raw_token).await? else {
         return Ok(None);
@@ -562,29 +589,42 @@ pub async fn share_public_meta(
         tx.rollback().await?;
         return Ok(None);
     };
-    let title = match share.project_id {
+    let (title, excerpt) = match share.project_id {
         Some(project_id) if share.document_id.is_none() => {
-            sqlx::query_scalar::<_, String>(
+            let name = sqlx::query_scalar::<_, String>(
                 "SELECT name FROM fvoci.projects WHERE workspace_id = $1 AND id = $2",
             )
             .bind(share.workspace_id)
             .bind(project_id)
             .fetch_one(&mut *tx)
-            .await?
+            .await?;
+            (name, String::new())
+        }
+        _ if with_excerpt => {
+            let (title, content_json) = sqlx::query_as::<_, (String, Value)>(
+                "SELECT title, content_json FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(share.workspace_id)
+            .bind(root)
+            .fetch_one(&mut *tx)
+            .await?;
+            (title, share_excerpt(&content_json))
         }
         _ => {
-            sqlx::query_scalar::<_, String>(
+            let title = sqlx::query_scalar::<_, String>(
                 "SELECT title FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
             )
             .bind(share.workspace_id)
             .bind(root)
             .fetch_one(&mut *tx)
-            .await?
+            .await?;
+            (title, String::new())
         }
     };
     tx.commit().await?;
     Ok(Some(SharePublicMeta {
         title: fold_one_line(&title),
+        excerpt,
         document_id: Some(root),
         project_id: share.project_id,
         expires_at: share.expires_at,
