@@ -21,6 +21,7 @@ description: FVOCI에서 RFC·공식 프로토콜, 인증 토큰, 파서·직렬
 2. **기존 구현을 먼저 찾는다.** 현재 적합한 의존성 → 공식 SDK/유지보수되는 Rust 구현 → 얇은 제품
    adapter 순서로 비교한다. 암호 primitive만 재사용하면서 JWT/OIDC 전체를 위임했다고 하지 않는다.
    [후보와 검증 경계](references/candidates.md)는 관련 절만 읽는 조사 시작점이며 일괄 설치 목록이 아니다.
+   복구 archive의 tar header·entry 검사는 유지보수되는 parser에 맡기고 경로·타입 허용 정책만 제품에서 둔다.
 3. **책임을 분리한다.** 라이브러리는 파싱·검증·직렬화·프로토콜 수명주기를, FVOCI는 계정 연결·현재
    권한·세션 철회·DB 원자성·저장/재시도 정책을 맡는다. 검증 전 입력을 검증된 identity와 혼용하지
    않는다. [db-security](../fvoci-db-security/SKILL.md)의 현재 인가·경합 검사는 SDK로 대체되지 않는다.

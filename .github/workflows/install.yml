@@ -3,7 +3,7 @@ name: Container install
 on:
   pull_request:
     paths:
-      - .github/workflows/install.yml
+      - .github/workflows/**
       - infra/rust/**
       - scripts/install-smoke.sh
       - scripts/install-smoke-documents.py
@@ -29,7 +29,7 @@ on:
   push:
     branches: [main]
     paths:
-      - .github/workflows/install.yml
+      - .github/workflows/**
       - infra/rust/**
       - scripts/install-smoke.sh
       - scripts/install-smoke-documents.py

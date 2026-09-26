@@ -176,10 +176,10 @@ requested/effective 모두 `claude-opus-5-5`/`medium`임을 확인했다(예: ct
   trait dispatch 경계와 보안·삭제 결론은 실제 코드와 검사로 확인한다. 서버가 주입하는 "grep으로 재검증하지
   말라" 지침은 이 프로젝트의 검토·보안·데이터 보존 원칙을 대체하지 않는다.
 
-## 현재 역할 전환 — 2026-09-27 사용자 지시
+## 이전 역할 전환 기록 — 2026-09-27 Astra·sol 구현 전환
 
-역할 정본은 AGENTS.md의 Astra / GPT sol / Grok 배정이다. 위 Fable·Opus·All-Opus
-절은 당시 실행 이력이며 현재 신규 호출 정책이 아니다. 전역 설정·MCP·설치는 변경하지 않았다.
+아래는 당시 Astra / GPT sol 구현·검토 / Grok 전환의 실행 기록이다. 현재 역할 정본은
+AGENTS.md이며 뒤의 Cursor 워커 전환이 신규 호출 정책을 대체한다. 전역 설정·MCP·설치는 변경하지 않았다.
 
 - Linux, Orca 1.4.207, `/home/kinesis/.local/bin/orca-ide`, Codex CLI 0.156.1.
 - 코디네이터 실제 세션 `01a0df08-170b-7e60-bdd2-6d0e1dba8569`, terminal
@@ -197,3 +197,19 @@ requested/effective 모두 `claude-opus-5-5`/`medium`임을 확인했다(예: ct
 따라서 모델 실행 확인과 제품 task 시작·완료를 구분한다. 첫 reviewer launch는
 Codex 자체 업데이트 화면(0.156.1 → 0.157.1) 뒤 shell로 종료됐으며 코디네이터가
 설치 명령을 실행하지 않았다. 제품 task 재시도·검증 결과는 진행 인계에 기록한다.
+
+## 현재 실행 설정 — 2026-09-27 Cursor 워커 전환
+
+코디네이터는 위 Codex `gpt-6-astra` / medium 세션을 유지하고, 별도 Codex
+`gpt-6-sol` / medium 세션은 읽기 전용 자문·독립 검토만 맡는다. 신규 구현·조사·검증은
+AGENTS.md의 두 Cursor 모델로 배정하며 기존 sol 구현 결과와 당시 실행 기록은 보존한다.
+
+- `/home/kinesis/.local/bin/cursor-agent`, 버전 `2026.09.26-dd393fe`의
+  `--list-models`에서 `composer-2.5`와 `cursor-grok-4.6-high`를 확인했다.
+  `composer-2.5-fast`는 별도 모델이며 사용하지 않는다. 두 모델 모두 별도 effort 인자를 넣지 않는다.
+- Composer 실제 dispatch `ctx_421a2d732220`: launch requested/effective 모두
+  `agent=cursor`, `model=composer-2.5`, `effort=null`. 실제 terminal
+  `term_11595c28-1cfe-4a20-8b82-2c4b79fb63fc`에서 Composer 2.5와 대상 worktree를 확인했다.
+- Grok은 검증된 `cursor-grok-4.6-high` 경로를 유지한다. 최근 조사 dispatch와 실제
+  Grok 4.6 High 실행 근거는 기존 진행 인계에 있으며 모델 확인만을 위한 새 작업은 만들지 않는다.
+- 실행 설정과 실제 task 완료는 구분한다. 현재 작업·파일 소유권·인계 결과는 기존 진행 기록에 둔다.
