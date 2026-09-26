@@ -1850,6 +1850,13 @@ async fn oidc_id_token_validation_failures_issue_nothing() {
         Misbehave::AlgNone,
         Misbehave::ForeignKey,
         Misbehave::NoIdToken,
+        Misbehave::HmacWithJwks,
+        Misbehave::HmacWithClientSecret,
+        Misbehave::UnknownKid,
+        Misbehave::ExpiredBeyondSkew,
+        Misbehave::IssuedInFuture,
+        Misbehave::ExtraAudience,
+        Misbehave::Oversize,
     ]
     .into_iter()
     .enumerate()
@@ -1888,7 +1895,8 @@ async fn oidc_id_token_validation_failures_issue_nothing() {
         1
     );
     // ForeignKey named the published kid with the other key type, which no
-    // cached key matches: exactly one forced refresh.
+    // cached key matches: exactly one forced refresh. UnknownKid right after
+    // is inside the refresh window and does not refetch.
     assert_eq!(fake.jwks_hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 
     h.finish().await;
@@ -1937,6 +1945,129 @@ async fn oidc_jwks_rotation_refreshes_once() {
     );
     assert_eq!(fake.jwks_hits.load(std::sync::atomic::Ordering::SeqCst), 2);
     h.finish().await;
+}
+
+#[tokio::test]
+async fn oidc_rotation_removing_the_old_key_and_clock_skew() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::ec("ec-1")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Generic]).await;
+    let (_user_id, _email, cookie) = h.member("skew").await;
+    h.oidc_round(
+        &fake,
+        "/api/v1/auth/oidc/generic/link",
+        "generic",
+        Profile::new("ext-skew", "skew@example.com", true),
+        Some(&cookie),
+        peer(110),
+    )
+    .await;
+    let login = |from| {
+        h.oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/generic/start",
+            "generic",
+            Profile::new("ext-skew", "skew@example.com", true),
+            None,
+            from,
+        )
+    };
+    // exp 30 s ago is inside the tolerated skew.
+    fake.set(|i| i.misbehave = Misbehave::ExpiredWithinSkew);
+    assert_eq!(login(peer(111)).await.location(), "http://localhost/");
+    assert_eq!(fake.jwks_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // The provider replaces ec-1 with ec-2: the cached set misses the new
+    // kid, one forced refresh picks it up.
+    fake.set(|i| {
+        let old = std::mem::replace(&mut i.keys, vec![Key::ec("ec-2")]);
+        i.retired = old.into_iter().next();
+    });
+    assert_eq!(login(peer(112)).await.location(), "http://localhost/");
+    assert_eq!(fake.jwks_hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // A token under the removed key is refused, without another fetch.
+    fake.set(|i| i.misbehave = Misbehave::RetiredKey);
+    let res = login(peer(113)).await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_provider_error"
+    );
+    assert!(res.cookie().is_none());
+    assert_eq!(fake.jwks_hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn oidc_redirecting_jwks_and_private_issuers_are_refused() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::ec("ec-1")).await;
+    let target = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::ec("ec-1")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Generic]).await;
+    let (user_id, _email, cookie) = h.member("redir").await;
+    // Redirect to a JWKS that would verify the token: never followed.
+    fake.set(|i| i.redirect_jwks_to = Some(format!("{}/jwks", target.base)));
+    target.set(|i| i.keys = vec![Key::ec("ec-1")]);
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/generic/link",
+            "generic",
+            Profile::new("ext-redir", "redir@example.com", true),
+            Some(&cookie),
+            peer(120),
+        )
+        .await;
+    assert!(
+        res.location().contains("error=oidc_provider_error"),
+        "{}",
+        res.location()
+    );
+    assert_eq!(fake.jwks_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        target.jwks_hits.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        h.count(
+            "SELECT count(*) FROM fvoci.identity_links WHERE user_id = $1",
+            user_id
+        )
+        .await,
+        0
+    );
+    h.finish().await;
+
+    // Instance providers on private or link-local addresses are refused
+    // before any request, with and without the loopback development mode.
+    for (issuer, insecure) in [
+        ("https://10.0.0.5", false),
+        ("https://192.168.1.10", true),
+        ("http://169.254.169.254", true),
+        ("https://[fd00::1]", false),
+    ] {
+        let h = Harness::start_with(Options {
+            encryption: true,
+            oidc: oidc_settings(
+                vec![provider(ProviderKey::Generic, issuer, CLIENT_SECRET)],
+                insecure,
+            ),
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let res = call(
+            &h.app,
+            "GET",
+            "/api/v1/auth/oidc/generic/start",
+            None,
+            None,
+            peer(121),
+        )
+        .await;
+        assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR, "{issuer}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{issuer}"
+        );
+        h.finish().await;
+    }
 }
 
 #[tokio::test]

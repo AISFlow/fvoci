@@ -541,6 +541,17 @@ is refused. Microsoft `common`/`organizations` discovery reports the tenant
 template issuer, so the pin does not separate tenants (the per-app subject
 still does).
 
+OIDC providers are read with the `openidconnect` crate (4.0.1) over the
+server's own guarded fetch (https only, public addresses, no redirects or
+proxy, 10 s and 256 KiB per request; `OIDC_ALLOW_INSECURE=1` admits plain
+http to loopback only). A provider must publish the discovery fields OpenID
+Discovery requires (`issuer`, `authorization_endpoint`, `token_endpoint`,
+`jwks_uri`, `response_types_supported`, `subject_types_supported`,
+`id_token_signing_alg_values_supported`). id_tokens must be RS256 (2048 to
+4096 bit keys) or ES256, carry a `kid` when the key set has more than one
+eligible key, name only this client in `aud`, and send `email_verified` as a
+JSON boolean; anything else fails the sign-in with `oidc_provider_error`.
+
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
 project/task, a document comment, an MFA secret sealed with `ENCRYPTION_KEYS`),

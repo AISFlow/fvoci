@@ -42,6 +42,9 @@ futures-util = { version = "=0.3.34", default-features = false, features = ["sin
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 hex = "0.4"
 hmac = "0.12"
+# OIDC id_token/JWKS/discovery types and the code exchange. No HTTP backend:
+# every request goes through src/oidc/fetch.rs (SSRF policy). MIT.
+openidconnect = { version = "=4.0.1", default-features = false }
 rand = "0.9"
 regex = "1"
 ring = "0.17"
