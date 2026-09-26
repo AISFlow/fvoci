@@ -98,6 +98,8 @@ fn passthrough(envs: &mut Vec<(&'static str, String)>, names: &[&'static str]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doctor_passes_a_healthy_install_and_names_each_broken_setting() {
+    // The doctor launches this sibling executable for its conversion check.
+    assert!(std::path::Path::new(env!("CARGO_BIN_EXE_fvoci-server")).is_file());
     let harness = TestDb::bootstrap().await;
     let storage = std::env::temp_dir().join(format!("fvoci-doctor-store-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage).unwrap();
@@ -137,6 +139,7 @@ async fn doctor_passes_a_healthy_install_and_names_each_broken_setting() {
         "meilisearch",
         "smtp",
         "extractor",
+        "document_convert",
     ] {
         assert_eq!(check(&report, name)["ok"], true, "{name}: {report}");
     }
