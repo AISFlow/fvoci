@@ -22,6 +22,7 @@ on:
       - packages/**
       - scripts/generate-api.sh
       - scripts/grant-app-role.sql
+      - scripts/encryption_keys.py
       - compat/fixtures/**
   push:
     branches: [main]
@@ -45,6 +46,7 @@ on:
       - packages/**
       - scripts/generate-api.sh
       - scripts/grant-app-role.sql
+      - scripts/encryption_keys.py
       - compat/fixtures/**
 
 concurrency:
