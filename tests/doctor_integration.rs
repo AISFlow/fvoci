@@ -236,6 +236,22 @@ async fn doctor_passes_a_healthy_install_and_names_each_broken_setting() {
         }
     }
 
+    // Missing storage root: reported as failing, and the doctor creates nothing.
+    let missing = storage.join(format!("missing-{}", Uuid::now_v7().simple()));
+    let mut envs = healthy.clone();
+    for pair in envs.iter_mut() {
+        if pair.0 == "FVOCI_STORAGE_DIR" {
+            pair.1 = missing.display().to_string();
+        }
+    }
+    let (code, report, _) = doctor(&envs).await;
+    assert_eq!(code, 1, "{report}");
+    assert_eq!(check(&report, "storage")["ok"], false, "{report}");
+    assert!(
+        !missing.exists(),
+        "the doctor must not create the storage root"
+    );
+
     // Missing required env: a failing env check, still valid JSON and exit 1.
     let (code, report, _) = doctor(&[]).await;
     assert_eq!(code, 1);

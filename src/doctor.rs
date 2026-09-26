@@ -63,8 +63,9 @@ impl Checks {
 
 /// `scheme://user:password@` → `scheme://***@` in any message.
 pub fn mask_urls(text: &str) -> String {
-    // Up to the last `@` of the token, so a userinfo with a raw `/` is masked too.
-    let re = regex::Regex::new(r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s@]*@").expect("static pattern");
+    // Greedy up to the last `@` of the token, so a userinfo containing a raw
+    // `/` or `@` is masked too (over-masking a path is harmless).
+    let re = regex::Regex::new(r"([A-Za-z][A-Za-z0-9+.-]*://)\S*@").expect("static pattern");
     re.replace_all(text, "${1}***@").into_owned()
 }
 
@@ -367,6 +368,7 @@ mod tests {
             mask_urls("connect postgres://app:s3cret@db:5432/fvoci failed"),
             "connect postgres://***@db:5432/fvoci failed"
         );
+        assert_eq!(mask_urls("postgres://u:p@ss@db/x"), "postgres://***@db/x");
         assert_eq!(mask_urls("no url here"), "no url here");
     }
 
@@ -397,6 +399,7 @@ mod review_tests {
             mask_urls("connect postgres://u:pa/ss@db:5432/x failed"),
             "connect postgres://***@db:5432/x failed"
         );
+        assert_eq!(mask_urls("postgres://u:p@ss@db/x"), "postgres://***@db/x");
         assert_eq!(mask_urls("no url here"), "no url here");
     }
 }

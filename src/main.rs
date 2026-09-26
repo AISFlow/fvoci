@@ -232,6 +232,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         }
         None => None,
     };
+    fvoci_server::config::ensure_storage_root(&config.storage)?;
     let storage = ObjectStorage::from_settings(&config.storage)?;
     storage.probe().await?;
     let extract_job = match ExtractJobSettings::from_env()? {
