@@ -354,6 +354,10 @@ impl MarkdownHelper {
             .arg("--cpu-secs")
             .arg(limits.timeout.as_secs().max(1).to_string())
             .env_clear()
+            .envs(
+                std::env::var_os(crate::documents::pdf::FONT_DIR_ENV)
+                    .map(|v| (crate::documents::pdf::FONT_DIR_ENV, v)),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
