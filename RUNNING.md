@@ -385,7 +385,9 @@ or configure; the server re-executes itself (`current_exe`). The public share pa
 Markdown/HTML in-process without the parser (its Markdown keeps the first pass of the `$`
 self-check). Tiptap -> Yjs seeding (body `PUT`, duplicate, imports) runs in the `collab-engine`
 child (`FVOCI_COLLAB_ENGINE`, op `seed_from_tiptap`, same limits as the room child). The Node
-helper (`FVOCI_DOCUMENT_CONVERT_BIN`) is still used for PDF/DOCX/PPTX/Markdown exports.
+helper (`FVOCI_DOCUMENT_CONVERT_BIN`) is still used for PDF/PPTX/Markdown exports. DOCX export
+(`GET …/documents/{id}/docx`, wiki and project) runs in the same child as the Markdown
+conversions (`--op tiptap-to-docx`), see "DOCX export" below.
 
 The child is chosen before any runtime, config or credential is loaded, gets a cleared
 environment, RLIMIT_AS 2 GiB and RLIMIT_CPU 30 s, reads one input from stdin (4 MiB cap; the
@@ -405,6 +407,34 @@ to 1 MiB takes 0.3–1.1 s and at most 0.62 GB RSS; 1 MiB of 3-line tables or of
 1.1–1.2 s and about 1 GB RSS. The 30 s watchdog is about 25x the slowest ordinary body. Still super-linear, as in the JS parser:
 deeply nested emphasis (60 KB of nested `*a ` 12.9 s), 50,000 nested `>` (15.5 s) and a
 1,000-level indented list (11 s); such bodies stop at the 30 s watchdog as `invalid_input`.
+
+## DOCX export
+
+`GET …/documents/{id}/docx` (wiki and project routes) is written in Rust by the Markdown child
+above (`--op tiptap-to-docx`, same rlimits, 30 s watchdog and two-per-process concurrency) with
+docx-rs 0.4.22 (MIT, `image` feature off); it does not need `FVOCI_DOCUMENT_CONVERT_BIN`. The
+Tiptap body is walked into one export model (`src/documents/export_model.rs`, meant for the PDF
+and PPTX writers too) and written as Word paragraphs, headings, numbering, tables and runs
+(`src/documents/docx.rs`). Fonts are named only (code in Consolas); attachment bytes are never
+read (attachments export as their names, as before). Only absolute `http`/`https`/`mailto` links
+become hyperlinks. The package is deflated after docx-rs writes it.
+
+Contract as before: `application/vnd.openxmlformats-officedocument.wordprocessingml.document`,
+`Content-Disposition` with an RFC 5987 `filename*`, `private, no-store`, `nosniff`; a stored body
+over 1 MiB or a file over 20,000,000 bytes is `413`, a body that is not a Tiptap doc `400`, and a
+child killed by the watchdog or a resource limit, or a writer failure, `500` (as the Node
+export's timeout and serializer errors). Exports share the two-per-process conversion slots with
+Markdown imports and body conversions and wait for a free one.
+
+Differences a user can notice against the Node export (full list with fixtures in
+`compat/fixtures/export-docx/README.md`): task items show a ☑/☐ glyph instead of a clickable Word
+checkbox, empty list items are kept as empty items, file attachments are their name without the
+in-app `attachment:` link, relative in-app links (`/docs/1`) are plain text, and underline and
+highlight are kept.
+
+Measured (release, 1 MiB stored bodies, one child each): mixed corpus 0.15 s / 83 MB RSS / 85 KB
+file; Korean text 0.03 s / 26 MB / 19 KB; 67 tables of 20×8 cells 0.16 s / 97 MB / 42 KB; tiny marked
+runs with links 0.11 s / 71 MB / 45 KB (the Node helper: 1.3–3.9 s, 0.37–0.73 GB RSS).
 
 ## Container install
 

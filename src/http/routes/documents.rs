@@ -25,7 +25,7 @@ use crate::db::documents::{
     DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
 };
 use crate::documents::export::{
-    export_filename, render_document_export, ExportFormat, ExportRenderError,
+    export_filename, render_document_export, render_docx_export, ExportFormat, ExportRenderError,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
@@ -640,28 +640,37 @@ pub(crate) async fn export_document(
         Ok(meta) => meta,
         Err(err) => return Err(map_document_error(err)),
     };
-    let Some(convert) = state.document_convert.as_ref() else {
-        tracing::error!("document export requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
-        return Err(AppError::internal().into());
-    };
-    let rendered =
-        match render_document_export(convert, format, &meta.title, &meta.content_json).await {
-            Ok(v) => v,
-            Err(ExportRenderError::InvalidInput) => {
-                return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-            }
-            Err(ExportRenderError::TooLarge) => {
-                return Err(DocumentApiError::Coded {
-                    status: StatusCode::PAYLOAD_TOO_LARGE,
-                    code: "document_body_exceeds_document_max_body_bytes",
-                    title: "document body exceeds document max body bytes".to_string(),
-                    params: None,
-                });
-            }
-            Err(ExportRenderError::Failed | ExportRenderError::Busy) => {
-                return Err(AppError::internal().into());
-            }
+    let rendered = if format == ExportFormat::Docx {
+        // DOCX is written by this binary's `--internal-markdown` child.
+        let Some(markdown) = state.markdown.as_ref() else {
+            tracing::error!("docx export requested but the markdown child is unavailable");
+            return Err(AppError::internal().into());
         };
+        render_docx_export(markdown, &meta.title, &meta.content_json).await
+    } else {
+        let Some(convert) = state.document_convert.as_ref() else {
+            tracing::error!("document export requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
+            return Err(AppError::internal().into());
+        };
+        render_document_export(convert, format, &meta.title, &meta.content_json).await
+    };
+    let rendered = match rendered {
+        Ok(v) => v,
+        Err(ExportRenderError::InvalidInput) => {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+        Err(ExportRenderError::TooLarge) => {
+            return Err(DocumentApiError::Coded {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: "document_body_exceeds_document_max_body_bytes",
+                title: "document body exceeds document max body bytes".to_string(),
+                params: None,
+            });
+        }
+        Err(ExportRenderError::Failed | ExportRenderError::Busy) => {
+            return Err(AppError::internal().into());
+        }
+    };
     let filename = export_filename(&meta.title, &rendered.ext);
     let mut headers = HeaderMap::new();
     headers.insert(

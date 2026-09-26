@@ -1,0 +1,99 @@
+{
+ "content": [
+  {
+   "type": "paragraph"
+  },
+  {
+   "text": "bare",
+   "type": "text"
+  },
+  {
+   "content": [
+    {
+     "content": [
+      {
+       "text": "inner of unknown",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    }
+   ],
+   "type": "unknownBlock"
+  },
+  {
+   "content": [
+    {
+     "content": [
+      {
+       "text": "wrapped ",
+       "type": "text"
+      },
+      {
+       "marks": [
+        {
+         "type": "bold"
+        }
+       ],
+       "text": "bold",
+       "type": "text"
+      }
+     ],
+     "type": "wrapper"
+    }
+   ],
+   "type": "paragraph"
+  },
+  {
+   "content": [
+    {
+     "marks": [
+      {
+       "attrs": {
+        "href": "javascript:alert(1)"
+       },
+       "type": "link"
+      }
+     ],
+     "text": "js",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "attrs": {
+        "href": "/docs/1"
+       },
+       "type": "link"
+      }
+     ],
+     "text": " rel",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "attrs": {
+        "href": "data:text/html,x"
+       },
+       "type": "link"
+      }
+     ],
+     "text": " data",
+     "type": "text"
+    }
+   ],
+   "type": "paragraph"
+  },
+  {
+   "content": [
+    {
+     "text": "ctl\u0001\bx",
+     "type": "text"
+    }
+   ],
+   "type": "paragraph"
+  }
+ ],
+ "type": "doc"
+}

@@ -2,6 +2,8 @@ use serde_json::Value;
 
 use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
 use crate::documents::convert::{ConvertClient, ConvertError};
+use crate::documents::docx::DOCX_CONTENT_TYPE;
+use crate::documents::markdown_helper::{MarkdownError, MarkdownHelper};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -63,6 +65,34 @@ pub async fn render_document_export(
         bytes,
         content_type,
         ext,
+    })
+}
+
+/// DOCX in Rust (source `export_docx`): the same 1 MiB body check, then the
+/// `--internal-markdown` child writes the file.
+pub async fn render_docx_export(
+    helper: &MarkdownHelper,
+    title: &str,
+    content_json: &Value,
+) -> Result<RenderedExport, ExportRenderError> {
+    let serialized =
+        serde_json::to_vec(content_json).map_err(|_| ExportRenderError::InvalidInput)?;
+    if serialized.len() > DOCUMENT_MAX_BODY_BYTES {
+        return Err(ExportRenderError::TooLarge);
+    }
+    let bytes = match helper.tiptap_to_docx(title, content_json).await {
+        Ok(bytes) => bytes,
+        Err(MarkdownError::InvalidInput(_)) => return Err(ExportRenderError::InvalidInput),
+        Err(MarkdownError::TooLarge) => return Err(ExportRenderError::TooLarge),
+        Err(MarkdownError::Failed(detail)) => {
+            tracing::error!(%detail, "docx export child failed");
+            return Err(ExportRenderError::Failed);
+        }
+    };
+    Ok(RenderedExport {
+        bytes,
+        content_type: DOCX_CONTENT_TYPE.to_string(),
+        ext: "docx".to_string(),
     })
 }
 

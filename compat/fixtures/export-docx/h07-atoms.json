@@ -1,0 +1,75 @@
+{
+ "content": [
+  {
+   "content": [
+    {
+     "text": "안녕 ",
+     "type": "text"
+    },
+    {
+     "attrs": {
+      "id": "u1",
+      "label": "김철수"
+     },
+     "type": "mention"
+    },
+    {
+     "text": " ",
+     "type": "text"
+    },
+    {
+     "attrs": {
+      "name": "smile"
+     },
+     "type": "emoji"
+    },
+    {
+     "attrs": {
+      "emoji": "🇰🇷",
+      "name": "flag-kr"
+     },
+     "type": "emoji"
+    }
+   ],
+   "type": "paragraph"
+  },
+  {
+   "attrs": {
+    "id": "att-1",
+    "image": true,
+    "name": "사진.png"
+   },
+   "type": "attachment"
+  },
+  {
+   "attrs": {
+    "id": "att-2",
+    "image": false,
+    "name": "report.pdf"
+   },
+   "type": "attachment"
+  },
+  {
+   "attrs": {
+    "entity": "document",
+    "ref": "doc-1"
+   },
+   "type": "embed"
+  },
+  {
+   "attrs": {
+    "entity": "task",
+    "ref": "PRJ-12"
+   },
+   "type": "embed"
+  },
+  {
+   "attrs": {
+    "entity": "url",
+    "ref": "https://example.com/embed"
+   },
+   "type": "embed"
+  }
+ ],
+ "type": "doc"
+}

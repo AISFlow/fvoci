@@ -1,0 +1,139 @@
+{
+ "content": [
+  {
+   "attrs": {
+    "level": 1
+   },
+   "content": [
+    {
+     "text": "제목 1",
+     "type": "text"
+    }
+   ],
+   "type": "heading"
+  },
+  {
+   "attrs": {
+    "level": 2
+   },
+   "content": [
+    {
+     "text": "제목 2",
+     "type": "text"
+    }
+   ],
+   "type": "heading"
+  },
+  {
+   "attrs": {
+    "level": 3
+   },
+   "content": [
+    {
+     "text": "제목 3",
+     "type": "text"
+    }
+   ],
+   "type": "heading"
+  },
+  {
+   "attrs": {
+    "level": 4
+   },
+   "content": [
+    {
+     "text": "제목 4",
+     "type": "text"
+    }
+   ],
+   "type": "heading"
+  },
+  {
+   "attrs": {
+    "level": 5
+   },
+   "content": [
+    {
+     "text": "제목 5",
+     "type": "text"
+    }
+   ],
+   "type": "heading"
+  },
+  {
+   "attrs": {
+    "level": 6
+   },
+   "content": [
+    {
+     "text": "제목 6",
+     "type": "text"
+    }
+   ],
+   "type": "heading"
+  },
+  {
+   "type": "horizontalRule"
+  },
+  {
+   "content": [
+    {
+     "content": [
+      {
+       "text": "요약",
+       "type": "text"
+      }
+     ],
+     "type": "detailsSummary"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "text": "숨은 본문",
+         "type": "text"
+        }
+       ],
+       "type": "paragraph"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "content": [
+            {
+             "text": "item",
+             "type": "text"
+            }
+           ],
+           "type": "paragraph"
+          }
+         ],
+         "type": "listItem"
+        }
+       ],
+       "type": "bulletList"
+      }
+     ],
+     "type": "detailsContent"
+    }
+   ],
+   "type": "details"
+  },
+  {
+   "type": "horizontalRule"
+  },
+  {
+   "content": [
+    {
+     "text": "끝",
+     "type": "text"
+    }
+   ],
+   "type": "paragraph"
+  }
+ ],
+ "type": "doc"
+}

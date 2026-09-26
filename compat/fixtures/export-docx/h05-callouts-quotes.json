@@ -1,0 +1,117 @@
+{
+ "content": [
+  {
+   "attrs": {
+    "kind": "note"
+   },
+   "content": [
+    {
+     "content": [
+      {
+       "text": "노트 본문",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    }
+   ],
+   "type": "callout"
+  },
+  {
+   "attrs": {
+    "kind": "warning"
+   },
+   "content": [
+    {
+     "content": [
+      {
+       "text": "첫 문단",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "text": "둘째 문단",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    }
+   ],
+   "type": "callout"
+  },
+  {
+   "attrs": {
+    "kind": "tip"
+   },
+   "content": [
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "tip list",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "listItem"
+      }
+     ],
+     "type": "bulletList"
+    }
+   ],
+   "type": "callout"
+  },
+  {
+   "content": [
+    {
+     "content": [
+      {
+       "text": "kind 없음",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    }
+   ],
+   "type": "callout"
+  },
+  {
+   "content": [
+    {
+     "content": [
+      {
+       "text": "인용",
+       "type": "text"
+      }
+     ],
+     "type": "paragraph"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "text": "중첩 인용",
+         "type": "text"
+        }
+       ],
+       "type": "paragraph"
+      }
+     ],
+     "type": "blockquote"
+    }
+   ],
+   "type": "blockquote"
+  }
+ ],
+ "type": "doc"
+}
