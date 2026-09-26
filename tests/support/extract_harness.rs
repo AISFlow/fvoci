@@ -376,8 +376,10 @@ fn extract_job_settings_with(
     test_hang_ms: Option<u64>,
 ) -> ExtractJobSettings {
     ExtractJobSettings {
-        extractor_bin,
+        extractor_bin: Some(extractor_bin),
         limits: document_extract_client::Limits::for_tests(),
+        office_helper: Some(server_bin()),
+        office_limits: fvoci_server::documents::office::OfficeLimits::attachment(),
         poll_interval,
         retry_backoff,
         test_hang_ms,

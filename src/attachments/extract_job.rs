@@ -13,19 +13,27 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::attachments::ObjectStorage;
+use crate::attachments::{pick_extractor, ExtractorKind, ObjectStorage};
 use crate::db::attachment_extract::{
     claim_extract, default_extract_limits, finish_extract, load_extract_input,
     oversize_resource_limit, release_extract, FinishExtract, EXTRACT_LEASE_SECS,
     EXTRACT_RETRY_BACKOFF_MS,
+};
+use crate::documents::office::{
+    run_office_helper, OfficeCancelled, OfficeLimits, OfficeMode, OfficeOutcome,
 };
 
 const _: () = assert!(EXTRACT_LEASE_SECS * 1000 > DEFAULT_TIMEOUT_MS);
 
 #[derive(Debug, Clone)]
 pub struct ExtractJobSettings {
-    pub extractor_bin: PathBuf,
+    /// Native HWP/HWPX helper (`FVOCI_EXTRACTOR_BIN`); `None` finishes HWP
+    /// attachments as `skipped`.
+    pub extractor_bin: Option<PathBuf>,
     pub limits: Limits,
+    /// This binary, run as the `--internal-office-extract` child.
+    pub office_helper: Option<PathBuf>,
+    pub office_limits: OfficeLimits,
     pub poll_interval: Duration,
     pub retry_backoff: Duration,
     /// Test-only hang injection; compiled only for `extract-native-tests`.
@@ -46,13 +54,21 @@ fn extract_request_test_hang(settings: &ExtractJobSettings) -> Option<u64> {
 }
 
 impl ExtractJobSettings {
+    /// `None` only when neither the native helper nor this executable's
+    /// path is available.
     pub fn from_env() -> Result<Option<Self>, String> {
-        let raw = match std::env::var("FVOCI_EXTRACTOR_BIN") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => return Ok(None),
+        let extractor_bin = match std::env::var("FVOCI_EXTRACTOR_BIN") {
+            Ok(value) if !value.trim().is_empty() => {
+                let path = PathBuf::from(value.trim());
+                validate_extractor_bin(&path)?;
+                Some(path)
+            }
+            _ => None,
         };
-        let extractor_bin = PathBuf::from(raw.trim());
-        validate_extractor_bin(&extractor_bin)?;
+        let office_helper = std::env::current_exe().ok();
+        if extractor_bin.is_none() && office_helper.is_none() {
+            return Ok(None);
+        }
 
         let poll_secs = parse_positive_u64(
             "FVOCI_EXTRACT_POLL_SECS",
@@ -68,6 +84,8 @@ impl ExtractJobSettings {
         Ok(Some(Self {
             extractor_bin,
             limits,
+            office_helper,
+            office_limits: OfficeLimits::attachment(),
             poll_interval: Duration::from_secs(poll_secs),
             retry_backoff: Duration::from_millis(EXTRACT_RETRY_BACKOFF_MS),
             #[cfg(feature = "extract-native-tests")]
@@ -223,7 +241,7 @@ async fn process_one_claim(
                 .map_err(|e| format!("release after cancel failed: {e}"))?;
             return Ok(true);
         }
-        match run_native_extract(settings, &input.name, bytes, cancel).await? {
+        match run_extractor(settings, &input.name, &input.mime, bytes, cancel).await? {
             Some(finish) => finish,
             None => {
                 let _ = release_extract(pool, &claim)
@@ -278,8 +296,114 @@ pub async fn read_extract_input(
         .map_err(|e| format!("storage read failed: {e}"))
 }
 
+fn skipped() -> FinishExtract {
+    FinishExtract {
+        status: "skipped".into(),
+        text: String::new(),
+        warnings: vec![],
+        rhwp_rev: None,
+    }
+}
+
+/// Source `pickExtractor` dispatch. `Ok(None)` = cancelled (release the lease).
+async fn run_extractor(
+    settings: &ExtractJobSettings,
+    name: &str,
+    mime: &str,
+    bytes: Vec<u8>,
+    cancel: &CancellationToken,
+) -> Result<Option<FinishExtract>, String> {
+    match pick_extractor(name, mime) {
+        None => Ok(Some(skipped())),
+        Some(ExtractorKind::Hwp) => match &settings.extractor_bin {
+            Some(bin) => run_native_extract(settings, bin, name, bytes, cancel).await,
+            None => Ok(Some(skipped())),
+        },
+        Some(ExtractorKind::Office(kind)) => {
+            let Some(helper) = settings.office_helper.as_deref() else {
+                return Ok(Some(skipped()));
+            };
+            match run_office_helper(
+                helper,
+                bytes,
+                kind,
+                OfficeMode::Text,
+                &settings.office_limits,
+                cancel,
+            )
+            .await
+            {
+                Ok(outcome) => Ok(Some(map_office_outcome(outcome))),
+                Err(OfficeCancelled) => Ok(None),
+            }
+        }
+        Some(ExtractorKind::Utf8) => Ok(Some(utf8_extract(
+            &bytes,
+            settings.office_limits.max_output,
+        ))),
+    }
+}
+
+/// Source `decodeExtractText`: lossy UTF-8, NUL dropped, capped in chars.
+fn utf8_extract(bytes: &[u8], max_chars: usize) -> FinishExtract {
+    let decoded = String::from_utf8_lossy(bytes).replace('\0', "");
+    let truncated = decoded.chars().count() > max_chars;
+    let text: String = decoded.chars().take(max_chars).collect();
+    let status = if text.trim().is_empty() {
+        "empty"
+    } else if truncated {
+        "partial"
+    } else {
+        "ok"
+    };
+    FinishExtract {
+        status: status.into(),
+        text: if status == "empty" {
+            String::new()
+        } else {
+            text
+        },
+        warnings: if truncated {
+            vec!["output truncated at the character limit".to_string()]
+        } else {
+            vec![]
+        },
+        rhwp_rev: None,
+    }
+}
+
+fn map_office_outcome(outcome: OfficeOutcome) -> FinishExtract {
+    let (status, text, warnings) = match outcome {
+        OfficeOutcome::Ok { text, truncated } => {
+            let (text, status, extra) =
+                sanitize_text(text, if truncated { "partial" } else { "ok" });
+            let mut warnings = Vec::new();
+            if truncated {
+                warnings.push("output truncated at the character limit".to_string());
+            }
+            (status, text, merge_warnings(warnings, extra))
+        }
+        OfficeOutcome::Empty => ("empty".to_string(), String::new(), vec![]),
+        OfficeOutcome::Unsupported { .. } => ("unsupported".to_string(), String::new(), vec![]),
+        OfficeOutcome::Corrupt { .. } => ("corrupt".to_string(), String::new(), vec![]),
+        OfficeOutcome::ResourceLimit { .. } => {
+            ("resource_limit".to_string(), String::new(), vec![])
+        }
+        OfficeOutcome::WorkerFailure { .. } => {
+            ("worker_failure".to_string(), String::new(), vec![])
+        }
+    };
+    FinishExtract {
+        status,
+        text,
+        warnings,
+        rhwp_rev: None,
+    }
+}
+
 async fn run_native_extract(
     settings: &ExtractJobSettings,
+    extractor_bin: &std::path::Path,
     name: &str,
     bytes: Vec<u8>,
     cancel: &CancellationToken,
@@ -289,7 +413,7 @@ async fn run_native_extract(
         bytes,
         name: name.to_string(),
         limits: settings.limits,
-        extractor_bin: settings.extractor_bin.clone(),
+        extractor_bin: extractor_bin.to_path_buf(),
         test_hang_ms: extract_request_test_hang(settings),
     };
     let worker_cancel = cancel_flag.clone();

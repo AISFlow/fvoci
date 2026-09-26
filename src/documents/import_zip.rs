@@ -233,6 +233,17 @@ pub fn unzip_bounded_with_limit(
     buf: &[u8],
     max_total: u64,
 ) -> Result<Vec<ZipEntry>, ZipImportError> {
+    unzip_bounded_select(buf, max_total, |_| true)
+}
+
+/// Like [`unzip_bounded_with_limit`], but only entries whose normalized name
+/// passes `select` are inflated and returned. Every entry's headers are still
+/// validated, so a malformed or traversal entry rejects the whole archive.
+pub fn unzip_bounded_select(
+    buf: &[u8],
+    max_total: u64,
+    select: impl Fn(&str) -> bool,
+) -> Result<Vec<ZipEntry>, ZipImportError> {
     if buf.is_empty() {
         return Err(ZipImportError::Empty);
     }
@@ -276,7 +287,7 @@ pub fn unzip_bounded_with_limit(
                 size,
             },
         )?;
-        if !name.ends_with('/') {
+        if !name.ends_with('/') && select(&zip_entry_name(&name)) {
             let remaining = max_total.saturating_sub(total);
             let data = if method == 0 {
                 if payload.len() as u64 > remaining {

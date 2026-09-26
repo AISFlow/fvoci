@@ -444,8 +444,58 @@ pub async fn reset_import_refs(pool: &PgPool, claim: &ImportClaim) -> Result<boo
     .bind(claim.lease_token)
     .execute(&mut *tx)
     .await?;
+    if result.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    discard_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
     tx.commit().await?;
-    Ok(result.rows_affected() == 1)
+    Ok(true)
+}
+
+/// Drops events a run parked (the rows they describe were or will be
+/// compensated, so they must never reach the outbox).
+async fn discard_deferred_events(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    job_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM fvoci.import_deferred_events WHERE workspace_id = $1 AND import_job_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(job_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Source `commitImport`: parked events go to fvoci.events in their original
+/// order, in the transaction that makes the job `completed`.
+async fn publish_deferred_events(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    job_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let published = sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (
+            id, workspace_id, actor_user_id, verb, target_type, target_id, payload,
+            channel, created_at
+        )
+        SELECT id, workspace_id, actor_user_id, verb, target_type, target_id, payload,
+               channel, created_at
+        FROM fvoci.import_deferred_events
+        WHERE workspace_id = $1 AND import_job_id = $2
+        ORDER BY seq
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(job_id)
+    .execute(&mut **tx)
+    .await?;
+    discard_deferred_events(tx, workspace_id, job_id).await?;
+    Ok(published.rows_affected())
 }
 
 /// Extends the lease without new refs (e.g. after a long parse).
@@ -469,6 +519,24 @@ pub async fn extend_import_lease(pool: &PgPool, claim: &ImportClaim) -> Result<b
     Ok(result.rows_affected() == 1)
 }
 
+/// Which `created_refs` list a fenced write appends to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportRefKind {
+    Document,
+    Task,
+    StoredKey,
+}
+
+impl ImportRefKind {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Document => "documentIds",
+            Self::Task => "taskIds",
+            Self::StoredKey => "storedKeys",
+        }
+    }
+}
+
 /// Source `saveProgress` for one created document, inside the transaction
 /// that created it: the ref is durable exactly when the document is.
 pub async fn append_import_document_ref(
@@ -478,13 +546,36 @@ pub async fn append_import_document_ref(
     lease_token: Uuid,
     document_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
+    append_import_ref(
+        tx,
+        workspace_id,
+        job_id,
+        lease_token,
+        ImportRefKind::Document,
+        &document_id.to_string(),
+    )
+    .await
+}
+
+/// Source `saveProgress` for any created row or object key, inside the
+/// transaction that created it; also renews the lease. `false` = the fence is
+/// lost and the caller must roll back.
+pub async fn append_import_ref(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    job_id: Uuid,
+    lease_token: Uuid,
+    kind: ImportRefKind,
+    value: &str,
+) -> Result<bool, sqlx::Error> {
+    let key = kind.key();
     let result = sqlx::query(&format!(
         r#"
         UPDATE fvoci.import_jobs
         SET created_refs = jsonb_set(
                 created_refs,
-                '{{documentIds}}',
-                (created_refs -> 'documentIds') || jsonb_build_array($4::text)
+                '{{{key}}}',
+                (created_refs -> '{key}') || jsonb_build_array($4::text)
             ),
             lease_until = now() + make_interval(secs => $5),
             updated_at = now()
@@ -494,7 +585,30 @@ pub async fn append_import_document_ref(
     .bind(workspace_id)
     .bind(job_id)
     .bind(lease_token)
-    .bind(document_id.to_string())
+    .bind(value)
+    .bind(IMPORT_LEASE_SECS as f64)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Fence check inside a caller's transaction (renews the lease). `false` =
+/// the lease is no longer this run's.
+pub async fn hold_import_fence(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    fence: crate::db::documents::ImportFence,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(&format!(
+        r#"
+        UPDATE fvoci.import_jobs
+        SET lease_until = now() + make_interval(secs => $4), updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}
+        "#
+    ))
+    .bind(workspace_id)
+    .bind(fence.job_id)
+    .bind(fence.lease_token)
     .bind(IMPORT_LEASE_SECS as f64)
     .execute(&mut **tx)
     .await?;
@@ -523,8 +637,18 @@ pub async fn finish_import_job(
     .bind(status.as_str())
     .execute(&mut *tx)
     .await?;
+    if result.rows_affected() != 1 {
+        // Fence lost: the sweep owns the row and its parked events.
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    if status == ImportStatus::Completed {
+        publish_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
+    } else {
+        discard_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
+    }
     tx.commit().await?;
-    Ok(result.rows_affected() == 1)
+    Ok(true)
 }
 
 /// Source `claimExpired`: atomically fails one running job whose lease
@@ -551,6 +675,9 @@ pub async fn claim_expired_import_job(pool: &PgPool) -> Result<Option<ExpiredImp
     )
     .fetch_optional(&mut *tx)
     .await?;
+    if let Some((workspace_id, job_id, _, _)) = &row {
+        discard_deferred_events(&mut tx, *workspace_id, *job_id).await?;
+    }
     restore_system(&mut tx, &previous).await?;
     tx.commit().await?;
     Ok(
@@ -611,6 +738,79 @@ pub async fn purge_imported_document(
         },
     )
     .await?;
+    tx.commit().await?;
+    Ok(Some(keys.into_iter().map(|(key,)| key).collect()))
+}
+
+/// Compensation of one imported task (source `compensateImport` →
+/// `detachChildrenForTaskRemoval` + `tasks.remove`): children another user
+/// attached meanwhile are detached (a subtask becomes a task), attachment
+/// rows are removed (their keys returned for the caller to delete) and the
+/// task is hard-deleted; comments, dependencies, assignees, labels, stars and
+/// activity cascade. `Ok(None)` = already gone.
+pub async fn purge_imported_task(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    task_id: Uuid,
+) -> Result<Option<Vec<String>>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT project_id FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if exists.is_none() {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let detached: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        UPDATE fvoci.tasks
+        SET parent_id = NULL,
+            type = CASE WHEN type = 'subtask' THEN 'task' ELSE type END,
+            updated_at = now()
+        WHERE workspace_id = $1 AND parent_id = $2
+        RETURNING id, type
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    for (child_id, child_type) in detached {
+        crate::db::identity::append_event(
+            &mut tx,
+            crate::db::identity::EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace_id),
+                actor_user_id: None,
+                verb: "task.updated".to_string(),
+                target_type: Some("task".to_string()),
+                target_id: Some(child_id),
+                payload: json!({
+                    "taskId": child_id.to_string(),
+                    "parentId": null,
+                    "type": child_type,
+                }),
+            },
+        )
+        .await?;
+    }
+    let keys: Vec<(String,)> = sqlx::query_as(
+        "DELETE FROM fvoci.attachments WHERE workspace_id = $1 AND task_id = $2 RETURNING storage_key",
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id)
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(Some(keys.into_iter().map(|(key,)| key).collect()))
 }
