@@ -18,6 +18,8 @@ chmod +x "$FIXTURE_ROOT/scripts/run-web-e2e.sh"
 cat >"$FIXTURE_ROOT/scripts/web-e2e-run-group.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+# Child processes must not drain the parent's shard plan when stdin is wired incorrectly.
+cat >/dev/null || true
 echo "fvoci-web-e2e-run-group $*"
 exit "${FVOCI_TEST_RUN_GROUP_EXIT:-0}"
 STUB
@@ -95,17 +97,37 @@ populate_e2e_tree \
   extra-22-flow.spec.ts extra-23-flow.spec.ts extra-24-flow.spec.ts \
   extra-25-flow.spec.ts extra-26-flow.spec.ts
 
+planned_groups_file="$(mktemp)"
+python3 -c '
+import pathlib, sys, importlib.util
+root = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("web_e2e_groups", root / "scripts" / "web-e2e-groups.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+e2e = root / "apps" / "web" / "e2e"
+for line in mod.shard_plan_lines(e2e, 0, 8):
+    print(" ".join(line["specs"]))
+' "$FIXTURE_ROOT" >"$planned_groups_file"
+
 log="$(run_shard 0)"
 build_once="$(grep -c 'fvoci-web-e2e-fake-generate-api' <<<"$log" || true)"
-group_count="$(grep -c 'fvoci-web-e2e-run-group' <<<"$log" || true)"
+mapfile -t executed_groups < <(grep '^fvoci-web-e2e-run-group ' <<<"$log" | sed 's/^fvoci-web-e2e-run-group //')
 if [[ "$build_once" -ne 1 ]]; then
   echo "expected exactly one build in --ci-shard fixture run, got ${build_once}" >&2
   exit 1
 fi
-if [[ "$group_count" -ne 4 ]]; then
-  echo "expected four group runs in shard 0 fixture run (stdin-safe plan loop), got ${group_count}" >&2
+mapfile -t planned_groups <"$planned_groups_file"
+if ((${#executed_groups[@]} != ${#planned_groups[@]})); then
+  echo "planned ${#planned_groups[@]} groups but executed ${#executed_groups[@]}" >&2
   exit 1
 fi
+for i in "${!planned_groups[@]}"; do
+  if [[ "${executed_groups[$i]}" != "${planned_groups[$i]}" ]]; then
+    echo "group mismatch at ${i}: planned=${planned_groups[$i]} executed=${executed_groups[$i]}" >&2
+    exit 1
+  fi
+done
+rm -f "$planned_groups_file"
 
 # Plan failure must happen before build markers.
 rm -rf "$FIXTURE_ROOT/apps/web/e2e"

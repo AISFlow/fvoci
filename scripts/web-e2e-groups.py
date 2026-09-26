@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -128,29 +127,13 @@ def assign_shards(groups: list[list[str]], shard_count: int) -> list[list[list[s
     return shards
 
 
-def cmd_list_groups(_: argparse.Namespace) -> None:
-    for group in discover_groups():
-        print(json.dumps({"specs": group}, separators=(",", ":")))
-
-
-def cmd_shard_jsonl(args: argparse.Namespace) -> None:
-    groups = discover_groups()
-    shards = assign_shards(groups, args.shards)
-    if args.index < 0 or args.index >= args.shards:
-        raise SystemExit(f"shard index {args.index} out of range 0..{args.shards - 1}")
-    shard_groups = shards[args.index]
-    if not shard_groups:
-        raise SystemExit(f"shard {args.index} has no groups")
-    for group in shard_groups:
-        for spec in group:
-            validate_spec_relpath(spec)
-        print(json.dumps({"specs": group}, separators=(",", ":")))
-
-
-def cmd_verify(args: argparse.Namespace) -> None:
-    directory = DEFAULT_E2E_DIR.resolve()
-    groups = discover_groups()
-    shard_count = args.shards
+def verify_plan(
+    directory: Path | None,
+    shard_count: int,
+) -> dict[str, int | list[int]]:
+    """Validate discovery and sharding for a fixture or production e2e tree."""
+    root = (directory or DEFAULT_E2E_DIR).resolve()
+    groups = discover_groups(root)
     shards = assign_shards(groups, shard_count)
 
     spec_paths: list[str] = []
@@ -161,7 +144,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
     if len(spec_paths) != len(set(spec_paths)):
         raise SystemExit("duplicate spec membership across groups")
 
-    expected_specs = sorted(p.name for p in directory.glob("*.spec.ts"))
+    expected_specs = sorted(p.name for p in root.glob("*.spec.ts"))
     discovered_specs = sorted(Path(s).name for s in spec_paths)
     if expected_specs != discovered_specs:
         raise SystemExit(
@@ -180,17 +163,47 @@ def cmd_verify(args: argparse.Namespace) -> None:
     ]:
         raise SystemExit(f"workspace pair integrity failed: {pair!r}")
 
-    print(
-        json.dumps(
-            {
-                "group_count": len(groups),
-                "spec_count": len(spec_paths),
-                "shard_count": shard_count,
-                "groups_per_shard": [len(s) for s in shards],
-            },
-            separators=(",", ":"),
-        )
-    )
+    return {
+        "group_count": len(groups),
+        "spec_count": len(spec_paths),
+        "shard_count": shard_count,
+        "groups_per_shard": [len(s) for s in shards],
+    }
+
+
+def shard_plan_lines(
+    directory: Path | None,
+    index: int,
+    shard_count: int,
+) -> list[dict[str, list[str]]]:
+    groups = discover_groups(directory)
+    shards = assign_shards(groups, shard_count)
+    if index < 0 or index >= shard_count:
+        raise SystemExit(f"shard index {index} out of range 0..{shard_count - 1}")
+    shard_groups = shards[index]
+    if not shard_groups:
+        raise SystemExit(f"shard {index} has no groups")
+    lines: list[dict[str, list[str]]] = []
+    for group in shard_groups:
+        for spec in group:
+            validate_spec_relpath(spec)
+        lines.append({"specs": group})
+    return lines
+
+
+def cmd_list_groups(_: argparse.Namespace) -> None:
+    for group in discover_groups():
+        print(json.dumps({"specs": group}, separators=(",", ":")))
+
+
+def cmd_shard_jsonl(args: argparse.Namespace) -> None:
+    for line in shard_plan_lines(None, args.index, args.shards):
+        print(json.dumps(line, separators=(",", ":")))
+
+
+def cmd_verify(args: argparse.Namespace) -> None:
+    summary = verify_plan(None, args.shards)
+    print(json.dumps(summary, separators=(",", ":")))
 
 
 def main() -> None:

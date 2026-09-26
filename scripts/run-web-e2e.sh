@@ -125,7 +125,7 @@ run_ci_shard() {
     if ((${#specs_line[@]} > 1)); then
       group_label="${group_label}+$(basename "${specs_line[1]%.spec.ts}")"
     fi
-    if ! bash "$ROOT/scripts/web-e2e-run-group.sh" "${specs_line[@]}"; then
+    if ! bash "$ROOT/scripts/web-e2e-run-group.sh" "${specs_line[@]}" </dev/null; then
       echo "shard ${shard_index} failed on group: ${group_label}" >&2
       exit 1
     fi
