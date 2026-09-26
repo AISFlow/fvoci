@@ -19,7 +19,6 @@ use fvoci_server::db::api_tokens::{create_api_token, CreateApiTokenInput};
 use fvoci_server::db::documents::CreateDocumentInput;
 use fvoci_server::db::pool;
 use fvoci_server::db::workspace::{self, WorkspaceRole};
-use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::state::AppState;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
@@ -45,17 +44,12 @@ where
         .unwrap_or_else(|_| panic!("{name} hung (>{TEST_TIMEOUT:?})"));
 }
 
-fn convert_client() -> ConvertClient {
-    ConvertClient::from_env().expect(
-        "FVOCI_DOCUMENT_CONVERT_BIN is required (scripts/prepare-document-convert.sh prints it)",
-    )
-}
-
 async fn app_state(
     harness: &TestDb,
 ) -> (AppState, std::sync::Arc<fvoci_server::collab::CollabHub>) {
-    let (mut state, hub) = collab_app_state(&harness.app_url, test_collab_config(8, 60_000)).await;
-    state.document_convert = Some(convert_client());
+    // No Node helper: body writes, Markdown and duplicate seeds are Rust children.
+    let (state, hub) = collab_app_state(&harness.app_url, test_collab_config(8, 60_000)).await;
+    assert!(state.document_convert.is_none());
     (state, hub)
 }
 
@@ -423,6 +417,99 @@ async fn put_body_markdown_goes_through_live_room_and_survives_restart() {
         auth_and_join(&mut fresh, &key, 22).await;
         complete_sync_handshake(&mut fresh, &key).await;
         let _ = fresh.close(None).await;
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+/// Rich Tiptap JSON already in schema-normal form (defaults present, no nulls,
+/// full mark attrs, marks in name order) reads back unchanged: the Rust seed
+/// round-trips through the room, the durable log and a fresh room.
+#[tokio::test]
+async fn put_body_rich_json_round_trips_through_rust_seed() {
+    run_test("put_body_rich_json_round_trips_through_rust_seed", async {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let s = &wiki.session;
+        let (state, hub) = app_state(&run.harness).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let link = json!({"href": "https://x.example/?q=가", "target": "_blank",
+            "rel": "noopener noreferrer nofollow", "class": null, "title": null});
+        let doc = json!({"type": "doc", "content": [
+            {"type": "heading", "attrs": {"id": "h-1", "level": 2},
+             "content": [{"type": "text", "text": "제목 😀 𝒜 👩‍👩‍👧"}]},
+            {"type": "paragraph", "attrs": {"id": "p-1", "textAlign": "center"}, "content": [
+                {"type": "text", "text": "굵게", "marks": [{"type": "bold", "attrs": {}}]},
+                {"type": "text", "text": " 링크", "marks": [
+                    {"type": "italic", "attrs": {}}, {"type": "link", "attrs": link}]},
+                {"type": "text", "text": " "},
+                {"type": "mention", "attrs": {"entity": "user", "id": "u-1", "label": "김"}},
+                {"type": "hardBreak"},
+                {"type": "mathInline", "attrs": {"latex": "x^2"}},
+                {"type": "text", "text": "끝", "marks": [
+                    {"type": "highlight", "attrs": {"color": "#ff0"}}]}
+            ]},
+            {"type": "taskList", "attrs": {"id": "tl"}, "content": [
+                {"type": "taskItem", "attrs": {"id": "ti", "checked": true}, "content": [
+                    {"type": "paragraph", "attrs": {"id": "p-2"},
+                     "content": [{"type": "text", "text": "완료"}]}]}]},
+            {"type": "codeBlock", "attrs": {"id": "cb", "language": "rust", "highlightLines": [1]},
+             "content": [{"type": "text", "text": "fn main() {}\n"}]},
+            {"type": "table", "attrs": {"id": "t"}, "content": [{"type": "tableRow", "content": [
+                {"type": "tableHeader", "attrs": {"colspan": 2, "rowspan": 1, "colwidth": [100, 50]},
+                 "content": [{"type": "paragraph", "attrs": {"id": "p-3"},
+                              "content": [{"type": "text", "text": "H"}]}]}]}]},
+            {"type": "callout", "attrs": {"id": "c", "kind": "tip"},
+             "content": [{"type": "paragraph", "attrs": {"id": "p-4"}}]},
+            {"type": "attachment", "attrs": {"id": "a-1", "name": "사진.png", "image": true, "width": 320}},
+            {"type": "embed", "attrs": {"id": "e-1", "entity": "url", "ref": "https://v.example"}}
+        ]});
+        let (status, meta) = session_call(
+            addr,
+            Method::PUT,
+            &wiki_path(s, wiki.document_id, "/body"),
+            &s.session_token,
+            Some(json!({"contentJson": doc})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{meta}");
+        let live =
+            support::get_document_body(addr, &s.session_token, s.workspace_id, wiki.document_id)
+                .await;
+        assert_eq!(live["contentJson"], doc);
+
+        // A fresh server (new room loads the durable log) reads the same tree,
+        // and a collab client completes the sync handshake on it.
+        run.shutdown_last_server().await.expect("stop");
+        let (state, hub) = app_state(&run.harness).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(s.workspace_id, wiki.document_id);
+        let mut client = connect_member(addr, &s.session_token).await;
+        auth_and_join(&mut client, &key, 31).await;
+        complete_sync_handshake(&mut client, &key).await;
+        let _ = client.close(None).await;
+        let durable =
+            support::get_document_body(addr, &s.session_token, s.workspace_id, wiki.document_id)
+                .await;
+        assert_eq!(durable["contentJson"], doc);
+
+        // Schema refusals from the seed (unknown node, empty text) stay 400.
+        for bad in [
+            json!({"type": "doc", "content": [{"type": "paragraph",
+                   "content": [{"type": "text", "text": ""}]}]}),
+            json!({"type": "doc", "content": [{"type": "paragraph",
+                   "content": [{"type": "text", "text": "x", "marks": [{"type": "nope"}]}]}]}),
+        ] {
+            let (status, body) = session_call(
+                addr,
+                Method::PUT,
+                &wiki_path(s, wiki.document_id, "/body"),
+                &s.session_token,
+                Some(json!({"contentJson": bad})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
         run.finish().await.expect("cleanup");
     })
     .await;

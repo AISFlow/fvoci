@@ -1,0 +1,6 @@
+{"type":"doc","content":[
+ {"type":"math","attrs":{"latex":"\\int_0^1 x\\,dx = \\frac{1}{2}"}},
+ {"type":"math"},
+ {"type":"mermaid","attrs":{"source":"graph TD\n  A-->B"}},
+ {"type":"paragraph","content":[{"type":"text","text":"a "},{"type":"mathInline","attrs":{"latex":"\\$5"}},{"type":"text","text":" b"}]}
+]}

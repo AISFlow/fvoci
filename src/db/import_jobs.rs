@@ -24,6 +24,9 @@ pub const IMPORT_HTTP_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// A claim may run a job at most twice: the first run and one recovery after
 /// a crash (source: BullMQ `maxStalledCount` 1). Later expiries are swept.
 pub const IMPORT_MAX_ATTEMPTS: i16 = 2;
+/// A run released after a transient failure (no collab seed slot) is
+/// claimable again this long after the release.
+pub const IMPORT_RETRY_BACKOFF_SECS: i64 = 30;
 /// Source `IMPORT_SWEEP_MAX`.
 pub const IMPORT_SWEEP_MAX: usize = 100;
 
@@ -344,7 +347,8 @@ pub async fn get_import_job(
 }
 
 /// Claims the oldest queued job, or one whose previous run died (expired
-/// lease) and still has an attempt left. Cross-tenant, so it runs in the
+/// lease) or was released for retry (after [`IMPORT_RETRY_BACKOFF_SECS`])
+/// and still has an attempt left. Cross-tenant, so it runs in the
 /// system context; `SKIP LOCKED` lets replicas claim different jobs.
 pub async fn claim_next_import_job(pool: &PgPool) -> Result<Option<ImportClaim>, sqlx::Error> {
     let lease_token = Uuid::now_v7();
@@ -361,6 +365,9 @@ pub async fn claim_next_import_job(pool: &PgPool) -> Result<Option<ImportClaim>,
               AND session_id IS NOT NULL
               AND attempts < $1
               AND (lease_until IS NULL OR lease_until < now())
+              AND (attempts = 0
+                   OR lease_until IS NOT NULL
+                   OR updated_at < now() - make_interval(secs => $4))
             ORDER BY created_at, id
             LIMIT 1
             FOR UPDATE SKIP LOCKED
@@ -379,6 +386,7 @@ pub async fn claim_next_import_job(pool: &PgPool) -> Result<Option<ImportClaim>,
     .bind(IMPORT_MAX_ATTEMPTS)
     .bind(lease_token)
     .bind(IMPORT_LEASE_SECS as f64)
+    .bind(IMPORT_RETRY_BACKOFF_SECS as f64)
     .fetch_optional(&mut *tx)
     .await?;
     restore_system(&mut tx, &previous).await?;
@@ -647,6 +655,42 @@ pub async fn finish_import_job(
     } else {
         discard_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
     }
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Gives a claimed run back to the queue after a transient failure: the
+/// runner already compensated its rows, so refs and parked events are
+/// cleared, the lease is dropped (fencing this runner out) and the row is
+/// claimable again [`IMPORT_RETRY_BACKOFF_SECS`] after the release (from
+/// `updated_at`). The spent attempt stays counted, so
+/// [`IMPORT_MAX_ATTEMPTS`] still bounds the retries.
+pub async fn release_import_job_for_retry(
+    pool: &PgPool,
+    claim: &ImportClaim,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, claim.workspace_id).await?;
+    let result = sqlx::query(&format!(
+        r#"
+        UPDATE fvoci.import_jobs
+        SET created_refs = '{{"documentIds":[],"taskIds":[],"storedKeys":[]}}'::jsonb,
+            lease_token = NULL,
+            lease_until = NULL,
+            updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}
+        "#
+    ))
+    .bind(claim.workspace_id)
+    .bind(claim.job_id)
+    .bind(claim.lease_token)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    discard_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
     tx.commit().await?;
     Ok(true)
 }

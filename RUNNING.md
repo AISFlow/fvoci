@@ -383,9 +383,11 @@ Markdown (member `GET …/body?format=md`, AI actions) and legal Markdown -> HTM
 hidden mode of the server binary: `fvoci-server --internal-markdown`. There is nothing to install
 or configure; the server re-executes itself (`current_exe`). The public share page renders its
 Markdown/HTML in-process without the parser (its Markdown keeps the first pass of the `$`
-self-check). The Node helper (`FVOCI_DOCUMENT_CONVERT_BIN`) is still used for Yjs seeding and
-PDF/PPTX/Markdown exports. DOCX export (`GET …/documents/{id}/docx`, wiki and project) runs in
-the same child (`--op tiptap-to-docx`), see "DOCX export" below.
+self-check). Tiptap -> Yjs seeding (body `PUT`, duplicate, imports) runs in the `collab-engine`
+child (`FVOCI_COLLAB_ENGINE`, op `seed_from_tiptap`, same limits as the room child). The Node
+helper (`FVOCI_DOCUMENT_CONVERT_BIN`) is still used for PDF/PPTX/Markdown exports. DOCX export
+(`GET …/documents/{id}/docx`, wiki and project) runs in the same child as the Markdown
+conversions (`--op tiptap-to-docx`), see "DOCX export" below.
 
 The child is chosen before any runtime, config or credential is loaded, gets a cleared
 environment, RLIMIT_AS 2 GiB and RLIMIT_CPU 30 s, reads one input from stdin (4 MiB cap; the

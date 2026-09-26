@@ -45,7 +45,7 @@ fn body() -> serde_json::Value {
 }
 
 /// Stored bodies are written directly: `PUT …/body` also seeds the Yjs
-/// state, which still goes through the Node helper this app does not have.
+/// state through the collab hub, which this app state does not configure.
 async fn store_body(harness: &TestDb, id: &str) {
     let admin = admin_pool(harness).await;
     sqlx::query("UPDATE fvoci.documents SET content_json = $1 WHERE id = $2::uuid")

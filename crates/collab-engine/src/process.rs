@@ -8,16 +8,22 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::frame::{read_frame, write_frame, FrameError};
-use crate::limits::{Limits, DEFAULT_MAX_CHILD_CONCURRENCY, MAX_CHILD_STDERR_BYTES, RSS_POLL_MS};
+use crate::limits::{
+    Limits, DEFAULT_MAX_CHILD_CONCURRENCY, DEFAULT_MAX_SEED_CHILD_CONCURRENCY,
+    MAX_CHILD_STDERR_BYTES, RSS_POLL_MS,
+};
 use crate::outcome::{EngineReport, EngineStatus, LimitKind, WorkerFailureReason};
 use crate::protocol::Request;
 
 static PRIMARY_CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
 static VALIDATOR_CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
+static SEED_CHILD_SLOTS: OnceLock<Mutex<usize>> = OnceLock::new();
 static MAX_PRIMARY_CHILD_CONCURRENCY_RUNTIME: AtomicUsize =
     AtomicUsize::new(DEFAULT_MAX_CHILD_CONCURRENCY);
 static MAX_VALIDATOR_CHILD_CONCURRENCY_RUNTIME: AtomicUsize =
     AtomicUsize::new(DEFAULT_MAX_CHILD_CONCURRENCY);
+static MAX_SEED_CHILD_CONCURRENCY_RUNTIME: AtomicUsize =
+    AtomicUsize::new(DEFAULT_MAX_SEED_CHILD_CONCURRENCY);
 static LIVE_CHILD_PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
 
 /// Configure the process-wide primary (per-room) live-child cap. Last write wins.
@@ -52,12 +58,32 @@ pub fn max_validator_child_concurrency() -> usize {
     max_validator_child_concurrency_limit()
 }
 
+/// Configure the process-wide one-shot seed child cap. Last write wins.
+pub fn set_max_seed_child_concurrency(limit: usize) {
+    MAX_SEED_CHILD_CONCURRENCY_RUNTIME.store(limit.max(1), Ordering::Release);
+}
+
+fn max_seed_child_concurrency_limit() -> usize {
+    MAX_SEED_CHILD_CONCURRENCY_RUNTIME
+        .load(Ordering::Acquire)
+        .max(1)
+}
+
+/// Current seed live-child cap for this process.
+pub fn max_seed_child_concurrency() -> usize {
+    max_seed_child_concurrency_limit()
+}
+
 fn primary_slots() -> &'static Mutex<usize> {
     PRIMARY_CHILD_SLOTS.get_or_init(|| Mutex::new(0))
 }
 
 fn validator_slots() -> &'static Mutex<usize> {
     VALIDATOR_CHILD_SLOTS.get_or_init(|| Mutex::new(0))
+}
+
+fn seed_slots() -> &'static Mutex<usize> {
+    SEED_CHILD_SLOTS.get_or_init(|| Mutex::new(0))
 }
 
 fn wait_poll_timeout(deadline: Instant) -> Duration {
@@ -107,6 +133,9 @@ pub enum ChildSlotKind {
     #[default]
     Primary,
     Validator,
+    /// One-shot Tiptap → Yjs seed children (HTTP body writes, imports), kept
+    /// out of the primary pool so bursts cannot take room-open headroom.
+    Seed,
 }
 
 struct SlotGuard {
@@ -125,6 +154,11 @@ impl SlotGuard {
                 validator_slots(),
                 max_validator_child_concurrency_limit(),
                 "validator collab children",
+            ),
+            ChildSlotKind::Seed => (
+                seed_slots(),
+                max_seed_child_concurrency_limit(),
+                "seed collab children",
             ),
         };
         let mut used = mutex.lock().map_err(|_| {
@@ -170,6 +204,7 @@ impl Drop for SlotGuard {
         let mutex = match self.kind {
             ChildSlotKind::Primary => primary_slots(),
             ChildSlotKind::Validator => validator_slots(),
+            ChildSlotKind::Seed => seed_slots(),
         };
         if let Ok(mut used) = mutex.lock() {
             *used = used.saturating_sub(1);
@@ -188,7 +223,8 @@ pub struct SpawnRequest {
     pub engine_bin: PathBuf,
     pub limits: Limits,
     pub slot_kind: ChildSlotKind,
-    /// When set for [`ChildSlotKind::Validator`], block up to this duration for a slot.
+    /// When set for [`ChildSlotKind::Validator`] or [`ChildSlotKind::Seed`],
+    /// block up to this duration for a slot.
     pub slot_wait: Option<Duration>,
     pub test_hang_ms: Option<u64>,
     /// `--features test-hang` only: child exits with this code after one request frame.
@@ -284,12 +320,8 @@ impl EngineSession {
             let slot_started = Instant::now();
             let slot = match (req.slot_kind, req.slot_wait) {
                 (ChildSlotKind::Primary, _) => SlotGuard::try_acquire(ChildSlotKind::Primary)?,
-                (ChildSlotKind::Validator, Some(wait)) => {
-                    SlotGuard::acquire_with_wait(ChildSlotKind::Validator, wait)?
-                }
-                (ChildSlotKind::Validator, None) => {
-                    SlotGuard::try_acquire(ChildSlotKind::Validator)?
-                }
+                (kind, Some(wait)) => SlotGuard::acquire_with_wait(kind, wait)?,
+                (kind, None) => SlotGuard::try_acquire(kind)?,
             };
             let slot_wait_us = slot_started.elapsed().as_micros() as u64;
             let spawn_started = Instant::now();

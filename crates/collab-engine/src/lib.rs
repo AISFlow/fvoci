@@ -29,14 +29,17 @@ pub mod protocol;
 pub mod engine;
 #[cfg(feature = "worker")]
 mod project;
+#[cfg(feature = "worker")]
+pub mod seed;
 
 #[cfg(feature = "worker")]
 pub use engine::{new_doc, CollabEngine, FRAGMENT as ENGINE_FRAGMENT};
 pub use limits::Limits;
 pub use outcome::{EngineReport, EngineStatus, LimitKind, UnsupportedReason, WorkerFailureReason};
 pub use process::{
-    apply_rlimits_now, max_child_concurrency, max_validator_child_concurrency,
-    raise_nofile_to_hard_limit, set_max_child_concurrency, set_max_validator_child_concurrency,
+    apply_rlimits_now, max_child_concurrency, max_seed_child_concurrency,
+    max_validator_child_concurrency, raise_nofile_to_hard_limit, set_max_child_concurrency,
+    set_max_seed_child_concurrency, set_max_validator_child_concurrency,
     sum_live_children_rss_bytes, ChildSlotKind, EngineSession, SpawnPhaseTimings, SpawnRequest,
 };
 #[cfg(feature = "test-hang")]

@@ -26,6 +26,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::attachments::{sniff_mime_from_bytes, ObjectStorage};
+use crate::collab::seed::SeedEngine;
 use crate::db::attachment_extract::default_extract_limits;
 use crate::db::attachments::{create_import_attachment, mark_import_attachment_stored};
 use crate::db::context::defer_import_events;
@@ -33,12 +34,12 @@ use crate::db::documents::ImportFence;
 use crate::db::import_jobs::{
     claim_expired_import_job, claim_next_import_job, extend_import_lease, finish_import_job,
     finish_sync_import_job, load_import_payload, purge_imported_document, purge_imported_task,
-    reset_import_refs, ImportClaim, ImportJobRefs, ImportSource, ImportStatus, IMPORT_SWEEP_MAX,
+    release_import_job_for_retry, reset_import_refs, ImportClaim, ImportJobRefs, ImportSource,
+    ImportStatus, IMPORT_MAX_ATTEMPTS, IMPORT_SWEEP_MAX,
 };
 use crate::db::quota::StorageQuota;
 use crate::db::tasks::{create_import_task, project_status_names, CreateTaskInput};
 use crate::db::workspace::list_members;
-use crate::documents::convert::ConvertClient;
 use crate::documents::import_body::{
     apply_imported_markdown, create_fenced_wiki_document, create_imported_wiki_document,
     ImportBodyError,
@@ -53,13 +54,14 @@ const DEFAULT_POLL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct ImportJobSettings {
-    pub convert: ConvertClient,
     pub extractor_bin: Option<PathBuf>,
     pub extract_limits: Limits,
     /// This binary, run as the `--internal-office-extract` child.
     pub office_helper: Option<PathBuf>,
     /// This binary, run as the `--internal-markdown` child.
     pub markdown: Option<MarkdownHelper>,
+    /// `collab-engine` child that turns imported Tiptap JSON into the Yjs seed.
+    pub seed: Option<SeedEngine>,
     pub office_limits: OfficeLimits,
     /// Storage quota imported Notion assets reserve against (source
     /// `requireStorageReservation`; unlimited until the license port).
@@ -68,13 +70,19 @@ pub struct ImportJobSettings {
 }
 
 impl ImportJobSettings {
+    fn seed_engine(&self) -> Result<&SeedEngine, RunError> {
+        self.seed
+            .as_ref()
+            .ok_or_else(|| RunError::Failed("collab engine unavailable".into()))
+    }
+
     fn markdown_helper(&self) -> Result<&MarkdownHelper, RunError> {
         self.markdown
             .as_ref()
             .ok_or_else(|| RunError::Failed("markdown helper unavailable".into()))
     }
 
-    pub fn from_env(convert: ConvertClient) -> Self {
+    pub fn from_env() -> Self {
         let extractor_bin = std::env::var("FVOCI_EXTRACTOR_BIN")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -86,11 +94,11 @@ impl ImportJobSettings {
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_POLL);
         Self {
-            convert,
             extractor_bin,
             extract_limits: default_extract_limits(),
             office_helper: std::env::current_exe().ok(),
             markdown: MarkdownHelper::current_exe().ok(),
+            seed: SeedEngine::from_env(),
             office_limits: OfficeLimits::import(),
             quota: StorageQuota::default(),
             poll_interval,
@@ -207,6 +215,9 @@ enum RunError {
     Fenced,
     /// Shutdown between items.
     Aborted,
+    /// Capacity pressure (no collab seed slot / engine did not start):
+    /// retried while attempts remain.
+    Transient(String),
     Failed(String),
 }
 
@@ -214,6 +225,7 @@ impl From<ImportBodyError> for RunError {
     fn from(err: ImportBodyError) -> Self {
         match err {
             ImportBodyError::Fenced => RunError::Fenced,
+            ImportBodyError::Unavailable => RunError::Transient(err.to_string()),
             other => RunError::Failed(other.to_string()),
         }
     }
@@ -264,9 +276,29 @@ async fn run_claimed(
                     "import.compensate_failed"
                 );
             }
+            if let RunError::Transient(detail) = &err {
+                if claim.attempt < IMPORT_MAX_ATTEMPTS {
+                    match release_import_job_for_retry(pool, claim).await {
+                        Ok(true) => warn!(
+                            workspace_id = %claim.workspace_id,
+                            import_job_id = %claim.job_id,
+                            attempt = claim.attempt,
+                            reason = error_hash(detail),
+                            "import.retry_scheduled"
+                        ),
+                        Ok(false) => {
+                            warn!(import_job_id = %claim.job_id, "import.retry_after_fence_lost")
+                        }
+                        Err(e) => {
+                            error!(error = %e, import_job_id = %claim.job_id, "import.retry_failed")
+                        }
+                    }
+                    return;
+                }
+            }
             let reason = match &err {
                 RunError::Aborted => "shutdown".to_string(),
-                RunError::Failed(detail) => error_hash(detail),
+                RunError::Failed(detail) | RunError::Transient(detail) => error_hash(detail),
                 RunError::Fenced => unreachable!(),
             };
             match finish_import_job(pool, claim, ImportStatus::Failed).await {
@@ -375,7 +407,7 @@ async fn run_office_import(
     }
     apply_imported_markdown(
         pool,
-        &settings.convert,
+        settings.seed_engine()?,
         settings.markdown_helper()?,
         claim.workspace_id,
         claim.created_by,
@@ -502,7 +534,7 @@ async fn run_notion_import(
         if !page.markdown.is_empty() {
             apply_imported_markdown(
                 pool,
-                &settings.convert,
+                settings.seed_engine()?,
                 settings.markdown_helper()?,
                 claim.workspace_id,
                 claim.created_by,
@@ -1047,7 +1079,7 @@ pub enum SyncImportError {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_markdown_zip_import(
     pool: &PgPool,
-    convert: &ConvertClient,
+    seed: &SeedEngine,
     markdown_helper: &MarkdownHelper,
     workspace_id: Uuid,
     job_id: Uuid,
@@ -1057,7 +1089,7 @@ pub async fn run_markdown_zip_import(
 ) -> Result<Vec<Uuid>, SyncImportError> {
     let result = markdown_zip_documents(
         pool,
-        convert,
+        seed,
         markdown_helper,
         workspace_id,
         actor_user_id,
@@ -1083,7 +1115,7 @@ pub async fn run_markdown_zip_import(
 
 async fn markdown_zip_documents(
     pool: &PgPool,
-    convert: &ConvertClient,
+    seed: &SeedEngine,
     markdown_helper: &MarkdownHelper,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -1118,7 +1150,7 @@ async fn markdown_zip_documents(
         .map_err(map)?;
         apply_imported_markdown(
             pool,
-            convert,
+            seed,
             markdown_helper,
             workspace_id,
             actor_user_id,
