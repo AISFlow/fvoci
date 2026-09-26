@@ -42,10 +42,9 @@ pub fn router() -> Router<AppState> {
 }
 
 fn allowed_kinds(scopes: Option<&[ApiTokenScope]>, write: bool) -> Vec<TemplateKind> {
-    if scopes.is_none() {
+    let Some(scopes) = scopes else {
         return vec![TemplateKind::Document, TemplateKind::Task];
-    }
-    let scopes = scopes.unwrap();
+    };
     let mut kinds = Vec::new();
     let doc = if write {
         ApiTokenScope::DocumentsWrite
@@ -69,9 +68,13 @@ fn allowed_kinds(scopes: Option<&[ApiTokenScope]>, write: bool) -> Vec<TemplateK
 fn map_error(err: TemplateDbError) -> ApiError {
     match err {
         TemplateDbError::NotFound => AppError::from_code(ProblemCode::NotFound).into(),
-        TemplateDbError::Forbidden => AppError::from_code(ProblemCode::InsufficientPermissions).into(),
+        TemplateDbError::Forbidden => {
+            AppError::from_code(ProblemCode::InsufficientPermissions).into()
+        }
         TemplateDbError::InvalidInput => AppError::from_code(ProblemCode::InvalidInput).into(),
-        TemplateDbError::ProjectArchived => AppError::from_code(ProblemCode::ProjectArchived).into(),
+        TemplateDbError::ProjectArchived => {
+            AppError::from_code(ProblemCode::ProjectArchived).into()
+        }
     }
 }
 
@@ -147,7 +150,7 @@ async fn create_route(
     check_origin(&headers, &state.public_origin)?;
     let (auth, actor) = auth_actor(&state, &headers, &jar, workspace_id, Some(peer)).await?;
     let Json(body) = body.map_err(AppError::from)?;
-    let kind = TemplateKind::parse(&body.kind).ok_or_else(|| invalid())?;
+    let kind = TemplateKind::parse(&body.kind).ok_or_else(invalid)?;
     require_kind_scope(&auth, kind, true)?;
     let row = create_template(
         &state.auth.db.pool,
@@ -175,7 +178,11 @@ async fn apply_route(
     let (auth, actor) = auth_actor(&state, &headers, &jar, workspace_id, Some(peer)).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let kinds = allowed_kinds(auth.token_scopes.as_deref(), true);
-    let channel = if auth.token_scopes.is_some() { "api" } else { "web" };
+    let channel = if auth.token_scopes.is_some() {
+        "api"
+    } else {
+        "web"
+    };
     let ip = peer_ip(peer.ip());
     let applied = apply_template(
         &state.auth.db.pool,

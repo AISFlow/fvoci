@@ -5,25 +5,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useNavigate } from "react-router-dom";
+import { QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Spinner } from "@/components/ui/spinner";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { projectsQuery } from "@/features/projects/queries";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { formFieldMessage } from "@/lib/form-issues";
@@ -32,6 +17,7 @@ import { templatesQuery } from "@/lib/queries";
 import type { components } from "@/generated/api";
 import { z } from "zod";
 import "./settings-shell.css";
+import "@/features/collections/collections.css";
 
 type TemplateOutput = components["schemas"]["TemplateOutput"];
 type TemplateCreateBody = components["schemas"]["TemplateCreateBody"];
@@ -48,6 +34,9 @@ export type TemplateApplyInput = {
   kind: TemplateOutput["kind"];
   projectId?: string;
 };
+
+const selectClass =
+  "h-11 min-w-28 rounded-md border border-input bg-background px-3 text-ui";
 
 function failMessage(err: unknown): string {
   return err instanceof ProblemError ? err.title : t("error.network");
@@ -66,7 +55,6 @@ function TemplateCreateForm({
     defaultValues: { kind: "document", title: "" },
   });
   const titleError = formFieldMessage(form.formState.errors.title, "title");
-  const kind = form.watch("kind");
 
   return (
     <form
@@ -100,23 +88,16 @@ function TemplateCreateForm({
       </div>
       <div className="flex flex-col gap-1.5">
         <Label htmlFor={`${id}-kind`}>{t("template.kind")}</Label>
-        <Select
-          value={kind}
-          onValueChange={(value) => {
-            const parsed = templateCreateFields.shape.kind.safeParse(value);
-            if (parsed.success) {
-              form.setValue("kind", parsed.data, { shouldValidate: true });
-            }
-          }}
+        <select
+          id={`${id}-kind`}
+          className={selectClass}
+          disabled={pending}
+          aria-label={t("template.kind")}
+          {...form.register("kind")}
         >
-          <SelectTrigger id={`${id}-kind`} size="sm" aria-label={t("template.kind")}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="document">{t("template.kind.document")}</SelectItem>
-            <SelectItem value="task">{t("template.kind.task")}</SelectItem>
-          </SelectContent>
-        </Select>
+          <option value="document">{t("template.kind.document")}</option>
+          <option value="task">{t("template.kind.task")}</option>
+        </select>
       </div>
       <Button type="submit" size="sm" className="w-fit" disabled={pending}>
         {t("template.create")}
@@ -134,6 +115,7 @@ export function WorkspaceTemplatesSection({
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const projectFieldId = useId();
   const [projectId, setProjectId] = useState("none");
   const [actionError, setActionError] = useState<string | null>(null);
   const listQuery = useQuery(templatesQuery(workspaceId));
@@ -198,68 +180,76 @@ export function WorkspaceTemplatesSection({
               {error}
             </p>
           ) : null}
-          {loading ? <Spinner /> : null}
+          {loading ? <QueryLoading /> : null}
           {!loading && templates.length === 0 ? (
             <p className="text-ui text-muted-foreground">{t("template.empty")}</p>
           ) : null}
           {templates.some((row) => row.kind === "task") ? (
             <div className="flex flex-col gap-1.5">
-              <Label>{t("template.project")}</Label>
-              <Select value={projectId} onValueChange={setProjectId}>
-                <SelectTrigger size="sm" aria-label={t("template.project")}>
-                  <SelectValue placeholder={t("template.project.placeholder")} />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">{t("template.project.placeholder")}</SelectItem>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label htmlFor={projectFieldId}>{t("template.project")}</Label>
+              <select
+                id={projectFieldId}
+                className={selectClass}
+                aria-label={t("template.project")}
+                value={projectId}
+                disabled={pending}
+                onChange={(event) => setProjectId(event.target.value)}
+              >
+                <option value="none">{t("template.project.placeholder")}</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
             </div>
           ) : null}
           {templates.length > 0 ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("template.title")}</TableHead>
-                  <TableHead>{t("template.kind")}</TableHead>
-                  <TableHead />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {templates.map((row) => {
-                  const taskBlocked = row.kind === "task" && projectId === "none";
-                  return (
-                    <TableRow key={row.id}>
-                      <TableCell className="text-ui">{row.title}</TableCell>
-                      <TableCell className="text-ui">
-                        {row.kind === "task" ? t("template.kind.task") : t("template.kind.document")}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={pending || taskBlocked}
-                          onClick={() => {
-                            void apply.mutateAsync({
-                              id: row.id,
-                              kind: row.kind,
-                              projectId: row.kind === "task" ? projectId : undefined,
-                            });
-                          }}
-                        >
-                          {t("template.apply")}
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+            <div className="data-table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">{t("template.title")}</th>
+                    <th scope="col">{t("template.kind")}</th>
+                    <th scope="col">
+                      <span className="sr-only">{t("template.apply")}</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {templates.map((row) => {
+                    const taskBlocked = row.kind === "task" && projectId === "none";
+                    return (
+                      <tr key={row.id}>
+                        <td className="text-ui">{row.title}</td>
+                        <td className="text-ui">
+                          {row.kind === "task"
+                            ? t("template.kind.task")
+                            : t("template.kind.document")}
+                        </td>
+                        <td className="text-right">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={pending || taskBlocked}
+                            onClick={() => {
+                              void apply.mutateAsync({
+                                id: row.id,
+                                kind: row.kind,
+                                projectId: row.kind === "task" ? projectId : undefined,
+                              });
+                            }}
+                          >
+                            {t("template.apply")}
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           ) : null}
         </div>
       </section>

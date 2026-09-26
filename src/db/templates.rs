@@ -1,4 +1,5 @@
 //! Workspace document/task templates (source `packages/core/src/template.ts`).
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -7,9 +8,7 @@ use uuid::Uuid;
 
 use crate::db::collections::{begin_member, scope_access, Actor, CollectionDbError};
 use crate::db::context::set_tenant;
-use crate::db::documents::{
-    create_wiki_document, CreateDocumentInput, DocumentDbError,
-};
+use crate::db::documents::{create_wiki_document, CreateDocumentInput, DocumentDbError};
 use crate::db::project_documents::create_project_document;
 use crate::db::projects::{lock_project, ProjectDbError};
 use crate::db::tasks::{create_task, CreateTaskInput};
@@ -118,10 +117,6 @@ pub async fn list_templates(
     actor: &Actor,
     kinds: &[TemplateKind],
 ) -> TemplateResult<Vec<TemplateRow>> {
-    if kinds.is_empty() {
-        return Ok(Ok(vec![]));
-    }
-    let kind_filter: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
     let mut tx = pool.begin().await?;
     let role = match begin_member(&mut tx, workspace_id, actor, false).await? {
         Ok(role) => role,
@@ -134,6 +129,11 @@ pub async fn list_templates(
         tx.rollback().await?;
         return Ok(Err(TemplateDbError::NotFound));
     }
+    if kinds.is_empty() {
+        tx.commit().await?;
+        return Ok(Ok(vec![]));
+    }
+    let kind_filter: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
     let rows: Vec<(
         Uuid,
         Uuid,
@@ -258,9 +258,7 @@ async fn find_template(
     .bind(&kind_filter)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(row.and_then(|r| {
-        row_from_tuple(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7)
-    }))
+    Ok(row.and_then(|r| row_from_tuple(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7)))
 }
 
 fn resolved_title(template: &TemplateRow) -> String {
@@ -362,6 +360,9 @@ pub async fn apply_template(
                     Ok(meta) => meta,
                     Err(DocumentDbError::Forbidden) => return Ok(Err(TemplateDbError::Forbidden)),
                     Err(DocumentDbError::NotFound) => return Ok(Err(TemplateDbError::NotFound)),
+                    Err(DocumentDbError::AffiliationMismatch) => {
+                        return Ok(Err(TemplateDbError::NotFound));
+                    }
                     Err(_) => return Ok(Err(TemplateDbError::InvalidInput)),
                 };
                 return Ok(Ok(AppliedTemplate {
@@ -387,6 +388,9 @@ pub async fn apply_template(
                 Ok(meta) => meta,
                 Err(DocumentDbError::Forbidden) => return Ok(Err(TemplateDbError::Forbidden)),
                 Err(DocumentDbError::NotFound) => return Ok(Err(TemplateDbError::NotFound)),
+                Err(DocumentDbError::AffiliationMismatch) => {
+                    return Ok(Err(TemplateDbError::NotFound));
+                }
                 Err(_) => return Ok(Err(TemplateDbError::InvalidInput)),
             };
             let display_id = meta

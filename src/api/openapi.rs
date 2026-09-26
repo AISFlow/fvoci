@@ -66,9 +66,8 @@ use crate::api::dto::{
 use crate::api::dto::{
     AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
     GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
-    WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
     TemplateApplyBody, TemplateApplyOutput, TemplateCreateBody, TemplateListResponse,
-    TemplateOutput,
+    TemplateOutput, WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
