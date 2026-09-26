@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-checks-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/collab-engine/src/**') }}
+          key: v2-web-checks-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}
           restore-keys: v2-web-checks-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
       - name: Prepare locked dependencies
         run: |
@@ -154,7 +154,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/collab-engine/src/**') }}
+          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}
           restore-keys: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
       - name: Restore production collaboration helper outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -209,7 +209,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/collab-engine/src/**') }}
+          key: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}
           restore-keys: v2-web-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
       - name: Restore production collaboration helper outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

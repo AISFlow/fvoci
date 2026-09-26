@@ -18,6 +18,7 @@ on:
       - migrations/**
       - src/**
       - crates/**
+      - vendor/**
       - apps/web/**
       - packages/**
       - scripts/generate-api.sh
@@ -44,6 +45,7 @@ on:
       - migrations/**
       - src/**
       - crates/**
+      - vendor/**
       - apps/web/**
       - packages/**
       - scripts/generate-api.sh
