@@ -2,56 +2,16 @@ name: Container install
 
 on:
   pull_request:
-    paths:
-      - .github/workflows/**
-      - infra/rust/**
-      - scripts/install-smoke.sh
-      - scripts/install-smoke-documents.py
-      - scripts/install-smoke-collab.mjs
-      - scripts/backup.sh
-      - scripts/restore.sh
-      - scripts/backup-restore-smoke.sh
-      - Dockerfile
-      - .dockerignore
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - migrations/**
-      - src/**
-      - crates/**
-      - vendor/**
-      - apps/web/**
-      - packages/**
-      - scripts/generate-api.sh
-      - scripts/grant-app-role.sql
-      - scripts/encryption_keys.py
-      - compat/fixtures/**
   push:
     branches: [main]
-    paths:
-      - .github/workflows/**
-      - infra/rust/**
-      - scripts/install-smoke.sh
-      - scripts/install-smoke-documents.py
-      - scripts/install-smoke-collab.mjs
-      - scripts/backup.sh
-      - scripts/restore.sh
-      - scripts/backup-restore-smoke.sh
-      - Dockerfile
-      - .dockerignore
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - migrations/**
-      - src/**
-      - crates/**
-      - vendor/**
-      - apps/web/**
-      - packages/**
-      - scripts/generate-api.sh
-      - scripts/grant-app-role.sql
-      - scripts/encryption_keys.py
-      - compat/fixtures/**
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      ci_mode:
+        description: auto runs selection on pull_request shapes; otherwise full
+        type: choice
+        options: [full, auto]
+        default: full
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
@@ -61,7 +21,35 @@ permissions:
   contents: read
 
 jobs:
+  ci-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      select_install_smoke: ${{ steps.plan.outputs.select_install_smoke }}
+      select_backup_restore_smoke: ${{ steps.plan.outputs.select_backup_restore_smoke }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+      - id: plan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 scripts/ci_selection.py plan \
+            --workflow install \
+            --event-json "$GITHUB_EVENT_PATH" \
+            --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-selection-plan-install
+          path: ${{ runner.temp }}/ci-selection-plan.json
+
   install-smoke:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_install_smoke == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -84,6 +72,8 @@ jobs:
 
   # Native GitHub-hosted ubuntu-24.04 and ubuntu-24.04-arm (not a cross-build).
   backup-restore-smoke:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_backup_restore_smoke == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -102,3 +92,31 @@ jobs:
           node-version: '24.21.0'
       - name: Run container backup/restore smoke
         run: bash scripts/backup-restore-smoke.sh
+
+  ci-gate:
+    name: ci-gate
+    needs: [ci-plan, install-smoke, backup-restore-smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-selection-plan-install
+          path: ${{ runner.temp }}/ci-plan
+      - name: Fail closed on selection results
+        env:
+          PLAN_READY: ${{ needs.ci-plan.result }}
+          JOB_INSTALL_SMOKE: ${{ needs.install-smoke.result }}
+          JOB_BACKUP_RESTORE_SMOKE: ${{ needs.backup-restore-smoke.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$PLAN_READY" != success ]]; then
+            echo "ci-plan did not succeed ($PLAN_READY)"
+            exit 1
+          fi
+          python3 scripts/ci_selection.py gate --workflow install \
+            --plan "$RUNNER_TEMP/ci-plan/ci-selection-plan.json" \
+            --job-result install-smoke="$JOB_INSTALL_SMOKE" \
+            --job-result backup-restore-smoke="$JOB_BACKUP_RESTORE_SMOKE"

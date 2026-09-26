@@ -4,6 +4,14 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      ci_mode:
+        description: auto runs selection on pull_request shapes; otherwise full
+        type: choice
+        options: [full, auto]
+        default: full
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
@@ -19,9 +27,38 @@ permissions:
   contents: read
 
 jobs:
+  ci-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      select_web_checks: ${{ steps.plan.outputs.select_web_checks }}
+      select_workspace_browser_shard: ${{ steps.plan.outputs.select_workspace_browser_shard }}
+      select_collaboration_flow: ${{ steps.plan.outputs.select_collaboration_flow }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+      - id: plan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 scripts/ci_selection.py plan \
+            --workflow web \
+            --event-json "$GITHUB_EVENT_PATH" \
+            --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-selection-plan-web
+          path: ${{ runner.temp }}/ci-selection-plan.json
+
   # API contract, schema/static transport and unit regressions run once per SHA
   # here instead of in every browser job (same target, features and options).
   web-checks:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_web_checks == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -70,6 +107,8 @@ jobs:
         run: bash scripts/test-web-e2e-groups.sh
 
   workspace-browser-shard:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_workspace_browser_shard == 'true'
     name: web-browser-shard-${{ matrix.shard }}
     strategy:
       fail-fast: false
@@ -129,6 +168,8 @@ jobs:
           if-no-files-found: warn
 
   collaboration-flow:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_collaboration_flow == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -187,3 +228,33 @@ jobs:
           path: ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
           retention-days: 3
           if-no-files-found: warn
+
+  ci-gate:
+    name: ci-gate
+    needs: [ci-plan, web-checks, workspace-browser-shard, collaboration-flow]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-selection-plan-web
+          path: ${{ runner.temp }}/ci-plan
+      - name: Fail closed on selection results
+        env:
+          PLAN_READY: ${{ needs.ci-plan.result }}
+          JOB_WEB_CHECKS: ${{ needs.web-checks.result }}
+          JOB_WORKSPACE_BROWSER_SHARD: ${{ needs.workspace-browser-shard.result }}
+          JOB_COLLABORATION_FLOW: ${{ needs.collaboration-flow.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$PLAN_READY" != success ]]; then
+            echo "ci-plan did not succeed ($PLAN_READY)"
+            exit 1
+          fi
+          python3 scripts/ci_selection.py gate --workflow web \
+            --plan "$RUNNER_TEMP/ci-plan/ci-selection-plan.json" \
+            --job-result web-checks="$JOB_WEB_CHECKS" \
+            --job-result workspace-browser-shard="$JOB_WORKSPACE_BROWSER_SHARD" \
+            --job-result collaboration-flow="$JOB_COLLABORATION_FLOW"

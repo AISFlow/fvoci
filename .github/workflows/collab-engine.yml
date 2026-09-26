@@ -4,6 +4,14 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      ci_mode:
+        description: auto runs selection on pull_request shapes; otherwise full
+        type: choice
+        options: [full, auto]
+        default: full
 
 # Only obsolete runs of this workflow on the same PR are cancelled.
 concurrency:
@@ -20,7 +28,34 @@ permissions:
   contents: read
 
 jobs:
+  ci-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      select_native_collab_engine: ${{ steps.plan.outputs.select_native_collab_engine }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+      - id: plan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 scripts/ci_selection.py plan \
+            --workflow collab-engine \
+            --event-json "$GITHUB_EVENT_PATH" \
+            --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-selection-plan-collab-engine
+          path: ${{ runner.temp }}/ci-selection-plan.json
+
   native-collab-engine:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_native_collab_engine == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -59,3 +94,29 @@ jobs:
         run: cargo test --locked --offline --all-targets --features worker
       - name: Parent API compiles without the CRDT engine
         run: cargo check --locked --offline --lib --no-default-features
+
+  ci-gate:
+    name: ci-gate
+    needs: [ci-plan, native-collab-engine]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-selection-plan-collab-engine
+          path: ${{ runner.temp }}/ci-plan
+      - name: Fail closed on selection results
+        env:
+          PLAN_READY: ${{ needs.ci-plan.result }}
+          JOB_NATIVE_COLLAB_ENGINE: ${{ needs.native-collab-engine.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$PLAN_READY" != success ]]; then
+            echo "ci-plan did not succeed ($PLAN_READY)"
+            exit 1
+          fi
+          python3 scripts/ci_selection.py gate --workflow collab-engine \
+            --plan "$RUNNER_TEMP/ci-plan/ci-selection-plan.json" \
+            --job-result native-collab-engine="$JOB_NATIVE_COLLAB_ENGINE"

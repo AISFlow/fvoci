@@ -44,3 +44,9 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 2. 샤드 래퍼 고정 검사: `bash scripts/fixtures/web-e2e/run-ci-shard-fixture-test.sh` 가 stub 빌드·run-group으로 `--ci-shard` 플로우(플랜 선검증, 샤드당 빌드 1회, 그룹 실패 전파, 샤드 수 override 거부)를 검증한다. 프로덕션 래퍼에는 dry-run·디렉터리 override가 없다.
 3. 통합 스크립트: `bash scripts/test-web-e2e-groups.sh` 가 위를 묶는다. CI `web-checks` 와 동일 명령을 로컬에서 먼저 돌린다.
 4. 대표 브라우저 샤드( PostgreSQL·Chromium )는 코디네이터 배정 후 `bash scripts/run-web-e2e.sh --ci-shard N` 으로만 실행한다. 전체 8 샤드·원격 `web.yml` 은 통합 수락 경로에서 확인한다.
+
+## CI selection planner/gate (workflow changes)
+
+1. `bash scripts/test-ci-selection.sh` — `python3 scripts/ci_selection.py verify-workflows` 와 `python3 -m unittest scripts.test_ci_selection` 을 DB·브라우저 없이 실행한다. 플래너는 `scripts/ci_selection.py` 단일 구현만 사용한다.
+2. 각 `.github/workflows/{web,rust,documents,collab-engine,install}.yml` 은 `ci-plan`·`ci-gate` 를 항상 실행하고, 제품 job 은 plan 출력 boolean 으로만 skip 한다. matrix job 은 job-level `if` 로 통째로 skip 하며 빈 matrix 를 만들지 않는다.
+3. 원격 Actions·merge_group·`workflow_dispatch` full 경로는 통합 수락에서 확인한다. 로컬에서는 플래너/게이트 단위 테스트만 최소 충분으로 돌린다.
