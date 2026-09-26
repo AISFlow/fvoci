@@ -1938,7 +1938,7 @@ fn lookup_display_id() {}
     get,
     path = "/api/v1/search",
     tag = "search",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read", "tasks.read"])),
     params(
         ("q" = String, Query, description = "Search query"),
         ("type" = Option<String>, Query, description = "Result kind filter"),
@@ -1962,7 +1962,7 @@ fn global_search() {}
     get,
     path = "/api/v1/workspaces/{workspace_id}/search",
     tag = "search",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read", "tasks.read"])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("q" = String, Query, description = "Search query"),
@@ -2876,9 +2876,11 @@ fn move_project_document() {}
         ("workspace_id" = String, description = "Workspace id"),
         ("project_id" = String, description = "Project id"),
         ("document_id" = String, description = "Document id"),
+        ("format" = Option<String>, Query, description = "`md` answers Markdown (contentMd)"),
     ),
     responses(
-        (status = 200, description = "Project document body", body = BodyResponse),
+        (status = 200, description = "Project document body (JSON or Markdown)", body = crate::api::documents_dto::DocumentBodyResponse),
+        (status = 400, description = "Invalid format", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
     )
 )]
@@ -3189,13 +3191,15 @@ fn get_ancestors() {}
     get,
     path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/body",
     tag = "documents",
-    security(("fvoci_session" = [])),
+    security(("fvoci_session" = []), ("bearer_api_token" = ["documents.read"])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("document_id" = String, description = "Document id"),
+        ("format" = Option<String>, Query, description = "`md` answers Markdown (contentMd)"),
     ),
     responses(
-        (status = 200, description = "Document body", body = BodyResponse),
+        (status = 200, description = "Document body (JSON or Markdown)", body = crate::api::documents_dto::DocumentBodyResponse),
+        (status = 400, description = "Invalid format", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
     )
 )]
@@ -3777,6 +3781,7 @@ fn get_attachment_preview_html() {}
 pub fn spec_json() -> String {
     let mut doc = ApiDoc::openapi();
     doc.merge(crate::api::openapi_identity::IdentityApiDoc::openapi());
+    doc.merge(crate::api::openapi_documents::DocumentsApiDoc::openapi());
     doc.to_pretty_json().expect("openapi json")
 }
 

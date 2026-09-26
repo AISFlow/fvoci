@@ -242,8 +242,28 @@ pub struct MeiliSearchInput {
     pub stem: String,
     pub scopes: Vec<MeiliSearchScope>,
     pub kind: Option<SearchSourceKind>,
+    /// API-token domain narrowing by parent (source `parentKindClause`); `None` is unrestricted.
+    pub parent_kinds: Option<ParentKinds>,
     pub limit: u32,
     pub offset: u32,
+}
+
+/// Which parents (document / task) an API token may read through mixed content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentKinds {
+    pub document: bool,
+    pub task: bool,
+}
+
+/// Source `parentKindClause`: narrows hits by their parent before pagination.
+pub fn parent_kind_clause(kinds: Option<ParentKinds>) -> Option<&'static str> {
+    let kinds = kinds?;
+    match (kinds.document, kinds.task) {
+        (true, true) => None,
+        (true, false) => Some("documentId IS NOT NULL"),
+        (false, true) => Some("taskId IS NOT NULL"),
+        (false, false) => Some("documentId IS NULL AND taskId IS NULL"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -848,6 +868,9 @@ async fn search_meili_op(
     if let Some(kind) = input.kind {
         filter = format!("({filter}) AND {}", meili_eq("kind", kind.as_str())?);
     }
+    if let Some(parent) = parent_kind_clause(input.parent_kinds) {
+        filter = format!("({filter}) AND {parent}");
+    }
     let body = json!({
         "q": q,
         "filter": filter,
@@ -888,6 +911,8 @@ async fn search_meili_op(
 pub struct MeiliVectorSearchInput {
     pub vector: Vec<f32>,
     pub scopes: Vec<MeiliSearchScope>,
+    /// API-token scope narrowing (source `allowedKinds`); `None` for sessions.
+    pub parent_kinds: Option<ParentKinds>,
     pub limit: u32,
 }
 
@@ -897,8 +922,8 @@ pub fn meili_vector_score(ranking_score: f64) -> f64 {
     2.0 * ranking_score - 1.0
 }
 
-/// Source `searchMeiliVector` (no `allowedKinds`: FVOCI search is session-only,
-/// so the parent-kind clause is never needed). Attachment chunks only.
+/// Source `searchMeiliVector`: attachment chunks only, narrowed by the
+/// token's parent kinds like the lexical search.
 async fn search_meili_vector_op(
     config: &MeiliConfig,
     input: &MeiliVectorSearchInput,
@@ -918,11 +943,14 @@ async fn search_meili_vector_op(
     if scopes.is_empty() {
         return Ok(Vec::new());
     }
-    let filter = format!(
+    let mut filter = format!(
         "({}) AND {}",
         scopes.join(" OR "),
         meili_eq("kind", SearchSourceKind::Attachment.as_str())?
     );
+    if let Some(parent) = parent_kind_clause(input.parent_kinds) {
+        filter = format!("{filter} AND {parent}");
+    }
     ensure_meili_index(config).await?;
     let body = json!({
         "q": "",

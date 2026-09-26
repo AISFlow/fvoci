@@ -1382,3 +1382,108 @@ fn walk_marked_text(json: &Value, visit: &mut impl FnMut(&Value)) {
         _ => {}
     }
 }
+
+fn replace_update_of(engine: &mut CollabEngine, seed: &[u8]) -> Vec<u8> {
+    match engine.handle(&Request::ReplaceFromUpdate {
+        update_b64: seed.to_vec(),
+        encoding: 1,
+    }) {
+        EngineStatus::Ok {
+            applied: true,
+            update_b64: Some(s),
+            ..
+        } => collab_engine::b64::decode(&s).expect("replace update b64"),
+        other => panic!("replace_from_update: {other:?}"),
+    }
+}
+
+fn project_seed(seed: &[u8]) -> Value {
+    let mut fresh = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&fresh.handle(&Request::Load {
+        snapshot_b64: Some(seed.to_vec()),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    project_of(&mut fresh)
+}
+
+/// External body write (PUT body / patch block): the live fragment becomes the
+/// seed Doc's fragment through one forward update; the live Doc is untouched
+/// until the parent applies it, and a peer that holds the old state converges.
+#[test]
+fn replace_from_update_is_a_forward_update_to_the_seed_fragment() {
+    for (live_fixture, seed_fixture) in [
+        ("structured.v1", "marks_link_bold.v1"),
+        ("marks_link_bold.v1", "utf8_korean.v1"),
+    ] {
+        let mut engine = CollabEngine::new(Limits::for_tests());
+        assert_ok_applied(&engine.handle(&Request::Load {
+            snapshot_b64: Some(load_bytes(live_fixture)),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        }));
+        let before = project_of(&mut engine);
+        let seed = load_bytes(seed_fixture);
+        let target = project_seed(&seed);
+        let forward = replace_update_of(&mut engine, &seed);
+        assert_eq!(
+            project_of(&mut engine),
+            before,
+            "ReplaceFromUpdate must not mutate the live Doc"
+        );
+        // A peer at the same state applies the same bytes and converges.
+        let mut peer = CollabEngine::new(Limits::for_tests());
+        assert_ok_applied(&peer.handle(&Request::Load {
+            snapshot_b64: Some(load_bytes(live_fixture)),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        }));
+        for e in [&mut engine, &mut peer] {
+            assert_ok_applied(&e.handle(&Request::Apply {
+                update_b64: forward.clone(),
+                encoding: 1,
+            }));
+        }
+        let replaced = project_of(&mut engine);
+        assert_eq!(replaced, target, "{live_fixture} -> {seed_fixture}");
+        assert_eq!(project_of(&mut peer), replaced);
+    }
+}
+
+#[test]
+fn replace_from_update_rejects_bad_seeds() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("structured.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    for seed in [Vec::new(), vec![0xff, 0xff, 0xff, 0xff, 0x0f]] {
+        let status = engine.handle(&Request::ReplaceFromUpdate {
+            update_b64: seed.clone(),
+            encoding: 1,
+        });
+        assert!(
+            !matches!(status, EngineStatus::Ok { .. }),
+            "seed {seed:?} must be refused, got {status:?}"
+        );
+    }
+    let mut limits = Limits::for_tests();
+    limits.max_input_bytes = 4;
+    limits.max_output_bytes = 4;
+    let mut small = CollabEngine::new(limits);
+    let status = small.handle(&Request::ReplaceFromUpdate {
+        update_b64: load_bytes("structured.v1"),
+        encoding: 1,
+    });
+    assert!(
+        matches!(
+            status,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                ..
+            }
+        ),
+        "{status:?}"
+    );
+}

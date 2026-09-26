@@ -921,5 +921,64 @@ async fn task_attachments_are_embedded_and_found_by_hybrid_search() {
     let (status, body) = search(&app, &member.cookie, workspace_id, "cat", "mode=hybrid").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ids_of(&body), vec![open_attachment.to_string()]);
+
+    // Source `allowedKinds`: a token narrows the lexical and the vector leg of
+    // hybrid search to the parents it can read.
+    let path = format!("/api/v1/workspaces/{workspace_id}/search?q=cat&mode=hybrid");
+    let docs = create_scoped_token(
+        app.clone(),
+        &owner_cookie,
+        workspace_id,
+        &["documents.read"],
+    )
+    .await;
+    let (status, body) = bearer_get(app.clone(), &docs, &path).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        ids_of(&body).is_empty(),
+        "document token saw task files: {body}"
+    );
+    let tasks =
+        create_scoped_token(app.clone(), &owner_cookie, workspace_id, &["tasks.read"]).await;
+    let (status, body) = bearer_get(app.clone(), &tasks, &path).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids_of(&body).len(), 2, "{body}");
     harness.cleanup().await;
+}
+
+async fn bearer_get(app: Router, token: &str, path: &str) -> (StatusCode, Value) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(project_harness::test_peer()));
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default();
+    (status, serde_json::from_slice(&bytes).unwrap_or(json!({})))
+}
+
+async fn create_scoped_token(
+    app: Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    scopes: &[&str],
+) -> String {
+    let (status, created) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": format!("semantic {}", scopes.join(" ")), "scopes": scopes})),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    created["token"].as_str().unwrap().to_string()
 }
