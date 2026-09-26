@@ -586,6 +586,35 @@ async fn task_room_revocation_mid_session_closes_writer() {
         )
         .await;
 
+        // Archiving the containing project after a writer joined also
+        // downgrades admission; the live writer must be closed on the poll.
+        admin_exec(
+            &run.harness,
+            "UPDATE fvoci.tasks SET archived_at = NULL WHERE id = $1",
+            f.task_id,
+        )
+        .await;
+        let mut ws_project = connect_member(addr, &editor2.session_token).await;
+        assert_eq!(
+            authenticate(&mut ws_project, &key, 24).await,
+            Ok("read-write".into())
+        );
+        complete_sync_handshake(&mut ws_project, &key).await;
+        admin_exec(
+            &run.harness,
+            "UPDATE fvoci.projects SET status = 'archived' WHERE id = $1",
+            f.project_id,
+        )
+        .await;
+        wait_for_ws_close_code(
+            &mut ws_project,
+            1008,
+            Duration::from_secs(5),
+            false,
+            Some("permission revoked"),
+        )
+        .await;
+
         // Trashing the task closes a readonly socket too.
         let mut ws3 = connect_member(addr, &f.owner.session_token).await;
         assert_eq!(
@@ -750,10 +779,47 @@ async fn task_revisions_create_list_get_restore_through_room() {
         ).bind(f.task_id).bind(&revision_id).fetch_one(&admin).await.unwrap();
         assert_eq!(requested, 1);
 
-        // PAT is refused on revision routes (session-only like document revisions).
-        let pat = insert_pat(&run.harness, ws_id, s.user_id, &["tasks.read", "tasks.write"]).await;
-        let (status, _) = call(addr, Method::GET, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&pat), None).await;
+        // Task revision PAT access follows tasks.read/write; document
+        // revision routes remain session-only and rooms still need a cookie.
+        let reader = insert_pat(&run.harness, ws_id, s.user_id, &["tasks.read"]).await;
+        let writer = insert_pat(&run.harness, ws_id, s.user_id, &["tasks.write"]).await;
+        let wrong = insert_pat(&run.harness, ws_id, s.user_id, &["documents.read"]).await;
+        let (status, list) = call(addr, Method::GET, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&reader), None).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        let (status, detail) = call(addr, Method::GET, &task_path(s, f.task_id, &format!("/revisions/{revision_id}")), Cred::Bearer(&reader), None).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["id"], revision_id.as_str());
+        let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&reader), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), Cred::Bearer(&reader), Some(json!({}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(addr, Method::GET, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&wrong), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(addr, Method::GET,
+            &format!("/api/v1/workspaces/{ws_id}/documents/{}/revisions", f.task_id),
+            Cred::Bearer(&writer), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let viewer_writer = insert_pat(&run.harness, ws_id, viewer.user_id, &["tasks.write"]).await;
+        let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&viewer_writer), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "PAT scope cannot replace project Edit");
+
+        let (status, _) = session_call(addr, Method::PATCH, &task_path(s, f.task_id, "/blocks/r-1"), &s.session_token,
+            Some(json!({"type":"paragraph","content":[{"type":"text","text":"PAT version"}]}))).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, pat_created) = call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&writer), None).await;
+        assert_eq!(status, StatusCode::CREATED, "{pat_created}");
+        assert_ne!(pat_created["id"], revision_id.as_str());
+        let (status, restored) = call(addr, Method::POST, &task_path(s, f.task_id, &format!("/revisions/{revision_id}/restore")), Cred::Bearer(&writer), Some(json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{restored}");
+        assert_eq!(restored["restored"], true);
+        let (content, _, _) = wait_task_content_contains(&admin, ws_id, f.task_id, "첫 버전").await;
+        assert!(!content.to_string().contains("PAT version"));
+        sqlx::query("DELETE FROM fvoci.api_tokens WHERE token_hash = $1")
+            .bind(fvoci_server::auth::token::hash_token(&writer))
+            .execute(&admin).await.unwrap();
+        let (status, _) = call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), Cred::Bearer(&writer), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "revoked PAT cannot create");
 
         // Archived task: list still works, create/restore are 409 task_archived.
         sqlx::query("UPDATE fvoci.tasks SET archived_at = now() WHERE id = $1").bind(f.task_id).execute(&admin).await.unwrap();
@@ -960,4 +1026,65 @@ async fn task_origin_create_replay_and_get_authz() {
         run.finish().await.expect("cleanup");
     })
     .await;
+}
+
+#[tokio::test]
+async fn task_origin_replay_rechecks_edit_and_concurrent_request_is_single_create() {
+    run_test("task_origin_replay_rechecks_edit_and_concurrent_request_is_single_create", async {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let (addr, f) = setup_task(&mut run, 5_000).await;
+        let ws_id = f.owner.workspace_id;
+        let editor = create_user_session(&run.harness, ws_id, WorkspaceRole::Member).await;
+        add_project_member(&run.harness, ws_id, f.project_id, editor.user_id, "member").await;
+        let wiki = fvoci_server::db::documents::create_wiki_document(
+            &f.owner.pool,
+            ws_id,
+            f.owner.user_id,
+            f.owner.session_id,
+            CreateDocumentInput { parent_id: None, title: "Origin source", icon: None },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+        let path = format!("/api/v1/workspaces/{ws_id}/documents/{wiki}/tasks");
+        let body = json!({"projectId": f.project_id, "requestId": Uuid::now_v7(), "task": {"title": "Replay target"}});
+        let (status, created) = session_call(addr, Method::POST, &path, &editor.session_token, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let first_id = created["taskId"].as_str().unwrap();
+        let admin = admin_pool(&run.harness).await;
+        sqlx::query("UPDATE fvoci.project_members SET role = 'viewer' WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3")
+            .bind(ws_id).bind(f.project_id).bind(editor.user_id).execute(&admin).await.unwrap();
+        let (status, _) = session_call(addr, Method::POST, &path, &editor.session_token, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "replay needs current Edit");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.task_origins WHERE workspace_id = $1 AND document_id = $2")
+            .bind(ws_id).bind(wiki).fetch_one(&admin).await.unwrap();
+        assert_eq!(count, 1);
+        let tasks_after_denial: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.tasks WHERE workspace_id = $1 AND project_id = $2 AND title = 'Replay target'")
+            .bind(ws_id).bind(f.project_id).fetch_one(&admin).await.unwrap();
+        assert_eq!(tasks_after_denial, 1);
+        sqlx::query("UPDATE fvoci.project_members SET role = 'member' WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3")
+            .bind(ws_id).bind(f.project_id).bind(editor.user_id).execute(&admin).await.unwrap();
+        let (status, replay) = session_call(addr, Method::POST, &path, &editor.session_token, Some(body)).await;
+        assert_eq!(status, StatusCode::CREATED, "{replay}");
+        assert_eq!(replay["taskId"], first_id);
+
+        let concurrent = json!({"projectId": f.project_id, "requestId": Uuid::now_v7(), "task": {"title": "Concurrent target"}});
+        let (a, b) = tokio::join!(
+            session_call(addr, Method::POST, &path, &editor.session_token, Some(concurrent.clone())),
+            session_call(addr, Method::POST, &path, &editor.session_token, Some(concurrent)),
+        );
+        assert_eq!(a.0, StatusCode::CREATED, "{}", a.1);
+        assert_eq!(b.0, StatusCode::CREATED, "{}", b.1);
+        assert_eq!(a.1["taskId"], b.1["taskId"]);
+        let origins: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.task_origins WHERE workspace_id = $1 AND document_id = $2")
+            .bind(ws_id).bind(wiki).fetch_one(&admin).await.unwrap();
+        assert_eq!(origins, 2);
+        let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.tasks WHERE workspace_id = $1 AND project_id = $2 AND title = 'Concurrent target'")
+            .bind(ws_id).bind(f.project_id).fetch_one(&admin).await.unwrap();
+        assert_eq!(tasks, 1);
+        admin.close().await;
+        run.finish().await.expect("cleanup");
+    }).await;
 }

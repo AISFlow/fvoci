@@ -15,7 +15,9 @@ use uuid::Uuid;
 
 use crate::db::context::{lock_key_from_uuid, recheck_session, session_is_live, set_tenant};
 use crate::db::documents::{document_permission, lock_membership_users, workspace_is_live};
-use crate::db::projects::{project_permission_by_id, ProjectDbError};
+use crate::db::projects::{
+    lock_project, project_permission, project_permission_by_id, ProjectDbError,
+};
 use crate::db::tasks::{create_task_tx, CreateTaskInput};
 use crate::projects::ProjectPermission;
 
@@ -206,6 +208,18 @@ async fn create_document_task_tx(
     let document_permission =
         document_view_permission(tx, workspace_id, actor_user_id, request.document_id).await?;
     if !document_permission.at_least(ProjectPermission::View) {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    // The source checks current Edit before looking up a requestId. Hold the
+    // same project write lock used by create_task_tx so a grant revocation
+    // cannot slip between this check and a replay response.
+    let Some(project) = lock_project(tx, workspace_id, request.project_id).await? else {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    };
+    if !project_permission(tx, workspace_id, actor_user_id, &project)
+        .await?
+        .at_least(ProjectPermission::Edit)
+    {
         return Ok(Err(TaskOriginDbError::NotFound));
     }
     let existing: Option<(Uuid, String)> = sqlx::query_as(
