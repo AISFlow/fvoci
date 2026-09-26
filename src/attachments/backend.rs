@@ -251,6 +251,30 @@ impl ObjectStorage {
         }
     }
 
+    /// Writes `bytes` as one complete object at a fresh `key` through the
+    /// same single-part multipart path branding assets use. On failure every
+    /// upload handle and any partial object for the key is purged.
+    pub async fn put_bytes(&self, key: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
+        let len = bytes.len() as u64;
+        let upload_ref = self.create_multipart(key).await?;
+        let chunk: Result<Bytes, io::Error> = Ok(Bytes::from(bytes));
+        let stream = futures_util::stream::iter(vec![chunk]);
+        let result = async {
+            let mut staged = self
+                .stage_part_stream(key, upload_ref.as_deref(), 1, stream, Some(len), len)
+                .await?;
+            let part = self.publish_staged_part(key, 1, &mut staged).await?;
+            self.assemble_multipart(key, upload_ref.as_deref(), &[(1, part.etag)])
+                .await?;
+            self.finalize_multipart(key).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = self.purge_key(key).await;
+        }
+        result
+    }
+
     pub async fn sniff_mime(&self, key: &str) -> Result<String, StorageError> {
         match self {
             Self::Local(local) => local.sniff_mime(key).await,

@@ -8,6 +8,7 @@ import type { MemberOutput } from "@/lib/contracts";
 import { TaskActivityPanel } from "@/features/comments/task-activity-panel";
 import { StarToggle } from "@/features/share/star-toggle";
 import { TaskCollectionProperties } from "@/features/collections/task-collection-properties";
+import { TaskAttachmentsPanel } from "./task-attachments";
 import "@/features/projects/projects.css";
 
 export function TaskDetailView({
@@ -132,6 +133,11 @@ export function TaskDetailView({
       <section className="task-detail__body" aria-label={t("doc.body.a11y")}>
         <p className="task-home__note">{t("task.body.unavailable")}</p>
       </section>
+      <TaskAttachmentsPanel
+        workspaceId={workspaceId}
+        taskId={task.id}
+        readOnly={readOnly || task.archivedAt != null}
+      />
       {currentUserId ? (
         <TaskActivityPanel
           key={task.id}

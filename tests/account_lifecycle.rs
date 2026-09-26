@@ -242,6 +242,7 @@ impl Harness {
             document_convert: None,
             import_wake: None,
             import_extractor_available: false,
+            quota: Default::default(),
         };
         let app = router(state, None);
         let admin = admin_pool(&db).await;

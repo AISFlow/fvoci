@@ -1437,7 +1437,8 @@ async fn hydrate_in_tx(
                 String,
                 String,
                 String,
-                Uuid,
+                Option<Uuid>,
+                Option<Uuid>,
                 Option<Uuid>,
                 i32,
                 DateTime<Utc>,
@@ -1445,8 +1446,8 @@ async fn hydrate_in_tx(
             ),
         >(
             r#"
-            SELECT a.id, a.name, a.extract_text, a.extract_status, a.document_id, d.project_id,
-                   d.number, date_trunc('milliseconds', a.created_at), p.key
+            SELECT a.id, a.name, a.extract_text, a.extract_status, a.document_id, NULL::uuid,
+                   d.project_id, d.number, date_trunc('milliseconds', a.created_at), p.key
             FROM fvoci.attachments a
             JOIN fvoci.documents d
               ON d.workspace_id = a.workspace_id AND d.id = a.document_id
@@ -1457,6 +1458,20 @@ async fn hydrate_in_tx(
               AND a.scan_status <> 'infected'
               AND d.deleted_at IS NULL
               AND d.status <> 'archived'
+              AND a.id = ANY($2)
+            UNION ALL
+            SELECT a.id, a.name, a.extract_text, a.extract_status, NULL::uuid, a.task_id,
+                   t.project_id, t.number, date_trunc('milliseconds', a.created_at), p.key
+            FROM fvoci.attachments a
+            JOIN fvoci.tasks t
+              ON t.workspace_id = a.workspace_id AND t.id = a.task_id
+            LEFT JOIN fvoci.projects p
+              ON p.workspace_id = t.workspace_id AND p.id = t.project_id AND p.deleted_at IS NULL
+            WHERE a.workspace_id = $1
+              AND a.status = 'stored'
+              AND a.scan_status <> 'infected'
+              AND t.deleted_at IS NULL
+              AND t.archived_at IS NULL
               AND a.id = ANY($2)
             "#,
         )
@@ -1470,6 +1485,7 @@ async fn hydrate_in_tx(
             body,
             extract_status,
             document_id,
+            task_id,
             project_id,
             number,
             updated_at,
@@ -1483,7 +1499,7 @@ async fn hydrate_in_tx(
                 project_filter,
                 acl,
                 project_id,
-                Some(document_id),
+                document_id,
             )
             .await?
             {
@@ -1497,8 +1513,8 @@ async fn hydrate_in_tx(
                     title,
                     body,
                     project_id,
-                    document_id: Some(document_id),
-                    task_id: None,
+                    document_id,
+                    task_id,
                     number: Some(number),
                     project_key,
                     extract_status: Some(extract_status),

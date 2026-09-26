@@ -126,6 +126,7 @@ impl Harness {
             meili: None,
             search_embedder: None,
             mailer: Arc::new(Mailer::from_smtp(None)),
+            quota: Default::default(),
             document_convert: None,
             import_wake: None,
             import_extractor_available: false,

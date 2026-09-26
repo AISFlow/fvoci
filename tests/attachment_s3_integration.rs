@@ -195,6 +195,7 @@ async fn app_state_with_part_size(
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,
+        quota: Default::default(),
     }
 }
 
@@ -1794,5 +1795,122 @@ async fn s3_part_put_slots_bound_concurrent_uploads() {
     // The slot is released with the finished request.
     let (status, _) = put_part(&app, &cookie, &urls[1], b"bbbb").await;
     assert_eq!(status, StatusCode::OK);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn s3_image_preview_is_stored_served_and_reclaimed() {
+    let harness = TestDb::bootstrap().await;
+    let storage = s3_backend().await;
+    let state = app_state_with_part_size(
+        &harness.app_url,
+        storage.clone(),
+        fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+    )
+    .await;
+    let pool = state.auth.db.pool.clone();
+    let (app, cookie, workspace_id) = setup_session_with_state(&harness, state).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+
+    let img = image::RgbaImage::from_fn(2000, 1000, |x, y| {
+        image::Rgba([(x % 251) as u8, (y % 241) as u8, 7, 255])
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+        Some(json!({"name": "s3.png", "sizeBytes": png.len()})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        created["parts"][0]["url"].as_str().unwrap(),
+        Some(png.clone()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers["etag"].to_str().unwrap().to_string();
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({"parts": [{"partNumber": 1, "etag": etag}]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let settings = fvoci_server::attachments::PreviewJobSettings::new(std::path::PathBuf::from(
+        env!("CARGO_BIN_EXE_fvoci-server"),
+    ));
+    let worked = fvoci_server::attachments::process_one_preview(
+        &settings,
+        &pool,
+        &storage,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(worked);
+    let (status, meta, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta["preview"], json!({"width": 1600, "height": 800}));
+    let (status, body, headers) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download?variant=preview"
+        ),
+        None,
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/webp");
+    let decoded = image::load_from_memory_with_format(&body, image::ImageFormat::WebP).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (1600, 800));
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (original, preview): (String, String) = sqlx::query_as(
+        "SELECT storage_key, variants -> 'preview' ->> 'key' FROM fvoci.attachments WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&attachment_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    let (status, _, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(storage.head(&original).await.unwrap(), None);
+    assert_eq!(storage.head(&preview).await.unwrap(), None);
     harness.cleanup().await;
 }
