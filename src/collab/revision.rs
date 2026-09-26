@@ -58,3 +58,39 @@ pub fn prepare_revision_text(content_json: &Value) -> Result<String, RevisionCap
         .map(|body| body.text().to_string())
         .map_err(|_| RevisionCaptureError::Unavailable)
 }
+
+/// Tiptap JSON of persisted collab state (snapshot + tail) in an isolated
+/// helper, without a room (source `contentJsonFromPersistedYjs`).
+pub fn project_persisted_offline(
+    engine_bin: PathBuf,
+    limits: Limits,
+    snapshot: Vec<u8>,
+    tail: Vec<Vec<u8>>,
+) -> Result<Value, RevisionCaptureError> {
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin,
+        limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .map_err(|_| RevisionCaptureError::Unavailable)?;
+    let load = session.call(&Request::Load {
+        snapshot_b64: Some(snapshot),
+        tail_b64: tail,
+        encoding: 1,
+    });
+    if !load.outcome.is_applied_ok() {
+        return Err(RevisionCaptureError::Unavailable);
+    }
+    match session.call(&Request::Project { encoding: 1 }).outcome {
+        EngineStatus::Ok {
+            content_json: Some(json),
+            ..
+        } => Ok(json),
+        _ => Err(RevisionCaptureError::Unavailable),
+    }
+}

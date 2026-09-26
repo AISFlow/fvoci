@@ -828,6 +828,7 @@ async fn collect_share_hits(
                     stem: stem.to_string(),
                     scopes: scopes.clone(),
                     kind: Some(SearchSourceKind::Document),
+                    parent_kinds: None,
                     limit: SHARE_MEILI_PAGE,
                     offset,
                 },
@@ -847,6 +848,7 @@ async fn collect_share_hits(
         stem: stem.to_string(),
         scopes: scopes.clone(),
         kind: Some(SearchSourceKind::Document),
+        parent_kinds: None,
         limit: SHARE_SEARCH_LIMIT as u32,
         offset: 0,
     };
