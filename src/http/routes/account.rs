@@ -179,32 +179,7 @@ async fn withdraw(
                     AppError::from_code(ProblemCode::AuthenticationRequired)
                 }
             })?;
-    // Source sendErasureCancelMail: awaited; a failure only turns mailSent off
-    // because the cancel token already committed.
-    let mail_sent = if state.mailer.enabled() {
-        let url = format!(
-            "{}/cancel-withdraw#token={}",
-            state.public_origin.trim_end_matches('/'),
-            scheduled.cancel_token
-        );
-        match state
-            .mailer
-            .send(
-                &scheduled.email,
-                templates::WITHDRAW_CANCEL_SUBJECT,
-                &templates::withdraw_cancel_text(&url),
-            )
-            .await
-        {
-            Ok(()) => true,
-            Err(err) => {
-                tracing::warn!(message = %err, "mail.send_failed");
-                false
-            }
-        }
-    } else {
-        false
-    };
+    let mail_sent = send_erasure_cancel_mail(&state, &scheduled).await;
     let response = Json(ErasureScheduleOutput {
         ok: true,
         cancel_token: scheduled.cancel_token,
@@ -216,6 +191,38 @@ async fn withdraw(
         response,
         clear_session_cookie(state.cookie_secure),
     ))
+}
+
+/// Source `sendErasureCancelMail`: awaited; a failure only turns `mailSent`
+/// off because the cancel token already committed. A replayed admin schedule
+/// has no token and sends nothing.
+pub(crate) async fn send_erasure_cancel_mail(
+    state: &AppState,
+    scheduled: &account::WithdrawScheduled,
+) -> bool {
+    if scheduled.cancel_token.is_empty() || !state.mailer.enabled() {
+        return false;
+    }
+    let url = format!(
+        "{}/cancel-withdraw#token={}",
+        state.public_origin.trim_end_matches('/'),
+        scheduled.cancel_token
+    );
+    match state
+        .mailer
+        .send(
+            &scheduled.email,
+            templates::WITHDRAW_CANCEL_SUBJECT,
+            &templates::withdraw_cancel_text(&url),
+        )
+        .await
+    {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!(message = %err, "mail.send_failed");
+            false
+        }
+    }
 }
 
 async fn cancel_withdraw(

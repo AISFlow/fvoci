@@ -3,13 +3,18 @@ use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use std::net::SocketAddr;
+
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::extract::ConnectInfo;
+use axum::http::{header, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use tower::{Service, ServiceExt};
 use tower_http::services::ServeFile;
 
 use crate::error::{AppError, ProblemCode};
+use crate::http::spa_head::{inject_share_og, share_shell_token, ShareOgMeta};
+use crate::http::state::AppState;
 
 pub fn validate_static_root(path: &Path) -> Result<PathBuf, String> {
     let canonical = path
@@ -40,17 +45,32 @@ pub fn resolve_static_index(root: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn static_router(root: PathBuf) -> axum::Router {
+    static_fallback(root, None)
+}
+
+/// `static_router` whose `/s/{token}` shell carries the share's title and
+/// Open Graph tags (source server.ts SPA fallback).
+pub fn static_router_with_share_head(root: PathBuf, state: AppState) -> axum::Router {
+    static_fallback(root, Some(state))
+}
+
+fn static_fallback(root: PathBuf, share_head: Option<AppState>) -> axum::Router {
     let root = root
         .canonicalize()
         .expect("static root must exist when serving assets");
     let index = resolve_static_index(&root).expect("static index must exist when serving assets");
-    axum::Router::new().fallback_service(StaticFallback { root, index })
+    axum::Router::new().fallback_service(StaticFallback {
+        root,
+        index,
+        share_head,
+    })
 }
 
 #[derive(Clone)]
 struct StaticFallback {
     root: PathBuf,
     index: PathBuf,
+    share_head: Option<AppState>,
 }
 
 impl Service<Request<Body>> for StaticFallback {
@@ -65,7 +85,27 @@ impl Service<Request<Body>> for StaticFallback {
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let root = self.root.clone();
         let index = self.index.clone();
-        Box::pin(async move { Ok(serve_static(req, root, index).await) })
+        let share_head = self.share_head.clone();
+        Box::pin(async move {
+            if let Some(state) = share_head {
+                if req.method() == Method::GET {
+                    if let Some(token) = share_shell_token(req.uri().path()) {
+                        let token = token.to_string();
+                        let peer = req
+                            .extensions()
+                            .get::<ConnectInfo<SocketAddr>>()
+                            .map(|info| info.0);
+                        let mut response = share_shell(&state, peer, &token, &index).await;
+                        response.headers_mut().insert(
+                            header::REFERRER_POLICY,
+                            header::HeaderValue::from_static("no-referrer"),
+                        );
+                        return Ok(response);
+                    }
+                }
+            }
+            Ok(serve_static(req, root, index).await)
+        })
     }
 }
 
@@ -114,6 +154,53 @@ async fn serve_static_file(req: Request<Body>, root: PathBuf, index: PathBuf) ->
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// Source server.ts `/s/:token` shell: never cached (`private, no-store`),
+/// `x-robots-tag: noindex`, and the share's head tags when the token resolves
+/// while sharing is enabled and the caller is inside the share-ip limit. An
+/// invalid, expired, revoked or rate-limited token gets the plain shell, so
+/// the head never tells whether a token exists.
+async fn share_shell(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    token: &str,
+    index: &Path,
+) -> Response {
+    let html = match tokio::fs::read_to_string(index).await {
+        Ok(html) => html,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let meta = match crate::http::routes::share::shell_head_meta(state, peer, token).await {
+        Ok(meta) => meta,
+        Err(err) => return err.into_response(),
+    };
+    let html = match meta {
+        Some(meta) => inject_share_og(
+            &html,
+            &ShareOgMeta {
+                title: &meta.title,
+                excerpt: &meta.excerpt,
+                url: &crate::http::routes::share::share_page_url(&state.public_origin, token),
+            },
+        ),
+        None => html,
+    };
+    let mut response = Response::new(Body::from(html));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-robots-tag"),
+        header::HeaderValue::from_static("noindex"),
+    );
+    response
 }
 
 fn resolve_static_file(root: &Path, uri_path: &str) -> Option<PathBuf> {

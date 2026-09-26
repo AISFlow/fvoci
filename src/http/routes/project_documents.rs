@@ -10,8 +10,8 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    BodyResponse, CreateDocumentBody, DocumentMetaResponse, MoveDocumentBody, OkResponse,
-    PatchDocumentBody, RequiredNullable, SortDocumentBody, TreeNodeResponse, TreeResponse,
+    CreateDocumentBody, DocumentMetaResponse, MoveDocumentBody, OkResponse, PatchDocumentBody,
+    RequiredNullable, SortDocumentBody, TreeNodeResponse, TreeResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::db::documents::{CreateDocumentInput, UpdateDocumentMetaInput};
@@ -265,32 +265,18 @@ async fn get_body(
     headers: HeaderMap,
     jar: CookieJar,
     Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
-) -> Result<Json<BodyResponse>, DocumentApiError> {
-    let (_user, user_id, session_id) = require_session(
+    Query(query): Query<crate::http::routes::document_body::BodyQuery>,
+) -> Result<Json<crate::api::documents_dto::DocumentBodyResponse>, DocumentApiError> {
+    crate::http::routes::document_body::read_body(
         &state,
         &headers,
         &jar,
-        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
-        Some(workspace_id),
-    )
-    .await?;
-    let result = get_project_document(
-        &state.auth.db.pool,
         workspace_id,
-        project_id,
+        crate::db::document_ops::DocumentScope::Project(project_id),
         document_id,
-        user_id,
-        session_id,
+        query.format.as_deref(),
     )
     .await
-    .map_err(internal)?;
-    match result {
-        Ok(meta) => Ok(Json(BodyResponse {
-            content_json: meta.content_json,
-            version: meta.version,
-        })),
-        Err(err) => Err(map_document_error(err)),
-    }
 }
 
 async fn patch_document(

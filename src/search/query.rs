@@ -27,7 +27,7 @@ use crate::display_id::format_display_id;
 use crate::projects::ProjectPermission;
 use crate::search::meili::{
     search_meili, MeiliConfig, MeiliError, MeiliHit, MeiliSearchInput, MeiliSearchScope,
-    SearchSourceKind, MEILI_MAX_TOTAL_HITS,
+    ParentKinds, SearchSourceKind, MEILI_MAX_TOTAL_HITS,
 };
 use crate::search::text::{is_chosung_query, stem_text};
 
@@ -152,6 +152,8 @@ pub struct WorkspaceSearchRequest<'a> {
     pub cursor: Option<&'a str>,
     pub limit: u32,
     pub meili: &'a MeiliConfig,
+    /// API-token scope narrowing (source `allowedContentKinds`); `None` for sessions.
+    pub allowed_kinds: Option<ParentKinds>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +166,10 @@ pub struct GlobalSearchRequest<'a> {
     pub cursor: Option<&'a str>,
     pub limit: u32,
     pub meili: &'a MeiliConfig,
+    /// API-token scope narrowing (source `allowedContentKinds`); `None` for sessions.
+    pub allowed_kinds: Option<ParentKinds>,
+    /// API tokens search only their own workspace (source `apiTokenWorkspaceId`).
+    pub token_workspace_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -308,7 +314,10 @@ pub async fn query_global_search(
         Err(err) => return Ok(Err(err)),
     };
 
-    let visible = load_visible_acls(pool, input.actor_user_id, input.session_id).await?;
+    let mut visible = load_visible_acls(pool, input.actor_user_id, input.session_id).await?;
+    if let Some(token_workspace_id) = input.token_workspace_id {
+        visible.retain(|entry| entry.workspace_id == token_workspace_id);
+    }
     if visible.is_empty() {
         return Ok(Ok(SearchResultPage {
             items: Vec::new(),
@@ -520,6 +529,22 @@ fn restrict_search_acl(acl: SearchAcl, project_filter: Option<Uuid>) -> SearchAc
     }
 }
 
+/// Cursor fingerprint suffix for token narrowing; empty for sessions so their cursors are unchanged.
+fn kinds_key(kinds: Option<ParentKinds>) -> String {
+    match kinds {
+        None => String::new(),
+        Some(k) => format!("|k:{}{}", u8::from(k.document), u8::from(k.task)),
+    }
+}
+
+/// PG-side recheck of the Meili parent filter: a hit is readable only through an allowed parent.
+fn parent_allowed(row: &HydratedRow, kinds: Option<ParentKinds>) -> bool {
+    let Some(kinds) = kinds else {
+        return true;
+    };
+    (kinds.document && row.document_id.is_some()) || (kinds.task && row.task_id.is_some())
+}
+
 fn scope_key(acl: &SearchAcl) -> String {
     let mut projects: Vec<String> = acl.project_ids.iter().map(ToString::to_string).collect();
     projects.sort();
@@ -567,7 +592,7 @@ fn global_search_filters(
         ws: None,
         pj: None,
         mode: "lexical".to_string(),
-        sh: fnv1a(&scope),
+        sh: fnv1a(&format!("{scope}{}", kinds_key(input.allowed_kinds))),
     }
 }
 
@@ -616,7 +641,11 @@ fn search_filters(input: &WorkspaceSearchRequest<'_>, acl: &SearchAcl) -> Cursor
         ws: Some(input.workspace_id.to_string()),
         pj: input.project_id.map(|id| id.to_string()),
         mode: "lexical".to_string(),
-        sh: fnv1a(&scope_key(acl)),
+        sh: fnv1a(&format!(
+            "{}{}",
+            scope_key(acl),
+            kinds_key(input.allowed_kinds)
+        )),
     }
 }
 
@@ -731,6 +760,7 @@ async fn scan_lexical_global(
                 stem: prepared.stem.clone(),
                 scopes: scopes.clone(),
                 kind: prepared.r#type.meili_kind(),
+                parent_kinds: input.allowed_kinds,
                 limit: want,
                 offset,
             },
@@ -800,6 +830,9 @@ async fn scan_lexical_global(
             let Some(row) = by_key.get(key) else {
                 continue;
             };
+            if !parent_allowed(row, input.allowed_kinds) {
+                continue;
+            }
             if items.len() >= prepared.limit as usize {
                 stopped_mid = true;
                 next_off = *at;
@@ -869,6 +902,7 @@ async fn scan_lexical(
                 stem: prepared.stem.clone(),
                 scopes: scopes.to_vec(),
                 kind: prepared.r#type.meili_kind(),
+                parent_kinds: input.allowed_kinds,
                 limit: want,
                 offset,
             },
@@ -908,6 +942,9 @@ async fn scan_lexical(
             let Some(row) = by_key.get(key) else {
                 continue;
             };
+            if !parent_allowed(row, input.allowed_kinds) {
+                continue;
+            }
             if items.len() >= prepared.limit as usize {
                 stopped_mid = true;
                 next_off = *at;

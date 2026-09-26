@@ -73,6 +73,11 @@ async function main() {
 			const html = tiptapDocToSafeHtml(mdToTiptapJson(req.markdown ?? ""));
 			return respond(true, { html });
 		}
+		if (op === "tiptap_to_md") {
+			// Source documentContentMd: a stored body that is not a Tiptap doc reads as "".
+			const markdown = isTiptapDoc(req.contentJson) ? tiptapDocToMd(req.contentJson) : "";
+			return respond(true, { markdown });
+		}
 		if (op === "tiptap_to_yjs_update") {
 			if (!isTiptapDoc(req.contentJson)) {
 				return respond(false, { code: "invalid_input" });

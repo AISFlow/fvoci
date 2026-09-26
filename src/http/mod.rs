@@ -5,6 +5,7 @@ pub mod json_input;
 pub mod rate_limit;
 pub mod routes;
 pub mod security_headers;
+pub mod spa_head;
 pub mod state;
 pub mod static_assets;
 
@@ -135,6 +136,7 @@ pub fn router_with_settings(
     identity: std::sync::Arc<crate::identity::Identity>,
 ) -> Router {
     let public_origin = state.public_origin.clone();
+    let share_state = state.clone();
     let collab = Router::new()
         .route("/collab", get(collab_entry))
         .with_state(state.clone());
@@ -154,6 +156,7 @@ pub fn router_with_settings(
         .merge(routes::search::router())
         .merge(routes::tasks::router())
         .merge(routes::documents::router())
+        .merge(routes::document_body::router())
         .merge(routes::import::router())
         .merge(routes::revisions::router())
         .merge(routes::attachments::router())
@@ -178,7 +181,10 @@ pub fn router_with_settings(
         static_dir.as_deref(),
     ));
     let app = match static_dir {
-        Some(root) => api.merge(static_assets::static_router(root)),
+        Some(root) => api.merge(static_assets::static_router_with_share_head(
+            root,
+            share_state,
+        )),
         None => api.fallback(static_assets::unknown_api_fallback),
     };
     app.layer(middleware::map_response(move |mut response: Response| {

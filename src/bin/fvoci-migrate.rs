@@ -86,7 +86,8 @@ async fn rebuild(workspace_id: Option<Uuid>) -> Result<(), Box<dyn std::error::E
 }
 
 /// Post-restore check: every stored attachment exists in the configured
-/// storage (local volume or S3 bucket) with its recorded size. Runs with the
+/// storage (local volume or S3 bucket) with its recorded size, and every
+/// branding asset the instance settings reference exists with its digest. Runs with the
 /// server's environment (`DATABASE_APP_URL` and the storage variables), so it
 /// needs no owner credentials and reads under the app role's RLS.
 async fn verify_storage() -> Result<(), Box<dyn std::error::Error>> {
@@ -102,9 +103,11 @@ async fn verify_storage() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", serde_json::to_string(&report)?);
     if !report.is_complete() {
         return Err(format!(
-            "storage is missing {} and has {} size-mismatched stored attachment(s)",
+            "storage is missing {} and has {} size-mismatched stored attachment(s); branding assets missing {:?}, mismatched {:?}",
             report.missing.len(),
-            report.size_mismatch.len()
+            report.size_mismatch.len(),
+            report.branding_missing,
+            report.branding_mismatch
         )
         .into());
     }

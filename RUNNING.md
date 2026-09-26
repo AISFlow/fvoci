@@ -503,7 +503,9 @@ application role, restores the dump, restores storage, then runs the one-shot
 idempotent on this path), rebases the outbox, rebuilds search, and runs
 `fvoci-migrate --verify-storage` with the server's own environment: every
 `stored` attachment in the restored database must exist in the configured
-storage with its recorded size, or the restore stops before the server starts.
+storage with its recorded size, and every branding asset (logo/favicon) the
+restored instance settings reference must exist with its recorded SHA-256, or
+the restore stops before the server starts.
 Then it starts the server. Confirm login with the original password, document
 body, attachment bytes, extraction text, and tasks.
 
@@ -542,10 +544,15 @@ with `STORAGE_DRIVER=s3`. The supported model for S3 is:
      run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
    ```
 
-   It prints `{"checked":N,"missing":[...],"sizeMismatch":[...]}` and exits
-   non-zero when any stored attachment is missing or has a different size, or
-   when the bucket cannot be read (credentials, wrong bucket, network). Restore
-   the listed objects from bucket versions before starting the server.
+   It prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
+   and exits non-zero when any stored attachment is missing or has a different
+   size, when a branding asset referenced by the instance settings
+   (`logo`/`favicon`, uploaded in the admin console) is missing or does not
+   match its recorded SHA-256, or when the bucket cannot be read (credentials,
+   wrong bucket, network). Restore the listed objects from bucket versions
+   before starting the server. Branding assets are stored like attachments
+   (same driver, key from the setting), so the local volume archive and the S3
+   bucket protection above cover them too.
 
 A scripted S3-aware backup/restore (dump-only archives, bucket snapshot
 orchestration) is not implemented.

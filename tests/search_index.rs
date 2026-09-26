@@ -351,6 +351,7 @@ async fn search_hits(
                 wiki_document_ids: Vec::new(),
             }],
             kind: None,
+            parent_kinds: None,
             limit: 50,
             offset: 0,
         },

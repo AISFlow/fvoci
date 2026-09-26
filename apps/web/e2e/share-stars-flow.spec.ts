@@ -81,19 +81,42 @@ test("owner stars and shares a wiki document; the public link needs no session a
   await expect(recent.getByRole("link", { name: new RegExp(rootTitle) })).toBeVisible();
   await expect(recent.getByRole("link", { name: new RegExp(childTitle) })).toBeVisible();
 
+  // The instance share policy drives the dialog's expiry choices.
+  const policy = await page.request.patch("/api/v1/admin/instance-settings", {
+    data: { share: { enabled: true, defaultExpiresDays: 14, maxExpiresDays: 30 } },
+  });
+  expect(policy.status()).toBe(200);
+
   // Share dialog: create a 30-day link and read the one-time URL.
   await starred.getByRole("link", { name: new RegExp(rootTitle) }).click();
   await expect(page).toHaveURL(new RegExp(`/w/acme/WIKI-${root.number}$`));
   await page.getByRole("button", { name: "공유 링크" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("공유 링크가 없습니다")).toBeVisible();
-  await dialog.getByLabel("만료 기간").selectOption("30");
+  const expires = dialog.getByLabel("만료 기간");
+  await expect(expires).toHaveValue("14");
+  expect(await expires.locator("option").evaluateAll((els) => els.map((el) => (el as HTMLOptionElement).value))).toEqual([
+    "7",
+    "14",
+    "30",
+  ]);
+  await expires.selectOption("30");
   await dialog.getByRole("button", { name: "공유 링크", exact: true }).click();
   const urlBox = dialog.getByRole("textbox", { name: "공유 링크" });
   await expect(urlBox).toHaveValue(/\/s\/[A-Za-z0-9_-]+$/);
   const shareUrl = await urlBox.inputValue();
   await expect(dialog.getByRole("button", { name: "해제" })).toHaveCount(1);
   const sharePath = new URL(shareUrl).pathname;
+
+  // The /s/:token shell carries the share's title and excerpt for link unfurlers.
+  const shell = await page.request.get(sharePath);
+  expect(shell.status()).toBe(200);
+  expect(shell.headers()["x-robots-tag"]).toBe("noindex");
+  expect(shell.headers()["cache-control"]).toBe("private, no-store");
+  const shellHtml = await shell.text();
+  expect(shellHtml).toContain(`<title>${rootTitle}</title>`);
+  expect(shellHtml).toContain(`<meta property="og:title" content="${rootTitle}"/>`);
+  expect(shellHtml).toMatch(new RegExp(`<meta property="og:description" content="[^"]*${bodyText}`));
 
   // Anonymous reader in a fresh context without cookies.
   const anon = await browser.newContext();
@@ -146,6 +169,18 @@ test("owner stars and shares a wiki document; the public link needs no session a
   await expect(reader.getByRole("alert")).toHaveText("공유 링크가 만료되었습니다");
   await expect(reader).toHaveURL(publicUrl);
   await anon.close();
+
+  // With sharing disabled by the admin, the dialog says so and cannot create.
+  const disabled = await page.request.patch("/api/v1/admin/instance-settings", {
+    data: { share: { enabled: false, defaultExpiresDays: 14, maxExpiresDays: 30 } },
+  });
+  expect(disabled.status()).toBe(200);
+  await page.reload();
+  await page.getByRole("button", { name: "공유 링크" }).click();
+  const off = page.getByRole("dialog");
+  await expect(off.getByRole("alert")).toHaveText("관리자가 공개 공유를 비활성화했습니다.");
+  await expect(off.getByRole("button", { name: "공유 링크", exact: true })).toBeDisabled();
+  await expect(off.getByLabel("만료 기간")).toBeDisabled();
   expect(cspViolations).toEqual([]);
   expect(readerCspViolations).toEqual([]);
 });

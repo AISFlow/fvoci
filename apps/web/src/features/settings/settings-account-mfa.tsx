@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { problemMessage } from "@/lib/api";
+import { qrModules } from "@/lib/qr";
 import type { components } from "@/generated/api";
 import "./settings-shell.css";
 
@@ -20,6 +21,23 @@ interface MfaSectionProps {
   onSetup: (input: MfaSetupInput) => Promise<MfaSetupOutput>;
   onEnable: (code: string) => Promise<void>;
   onDisable: (input: MfaDisableInput) => Promise<void>;
+}
+
+/* WHY: QR 은 모듈 격자를 path 하나로 그린다 — 라이브러리의 SVG 문자열 주입(innerHTML)을 피한다. */
+function QrSvg({ text }: { text: string }) {
+  const { size, path } = qrModules(text);
+  return (
+    <svg
+      viewBox={`-2 -2 ${size + 4} ${size + 4}`}
+      shapeRendering="crispEdges"
+      className="size-44 rounded-md bg-white"
+      aria-hidden="true"
+      data-testid="mfa-qr"
+    >
+      <title>QR</title>
+      <path d={path} fill="#000" />
+    </svg>
+  );
 }
 
 async function copyText(value: string): Promise<void> {
@@ -99,25 +117,21 @@ function SetupFlow({
       className="flex flex-col gap-2"
     >
       <p className="break-keep text-ui text-muted-foreground">{t("auth.account.mfa.scan")}</p>
-      {/*
-        TODO(coordinator decision pending): the source renders the otpauth URI
-        as a QR code with the npm `qrcode-generator` package, which is not a
-        dependency of this app. Until the coordinator decides whether to add
-        it (or an in-repo encoder), show the otpauth URI as a link/text and the
-        base32 secret for manual entry.
-      */}
-      <div className="flex min-w-0 flex-col gap-1.5">
+      <div className="flex flex-wrap items-start gap-4">
         <a
           href={setup.otpauthUri}
-          className="break-all font-mono text-dense text-muted-foreground underline underline-offset-2"
+          className="shrink-0"
+          aria-label={t("auth.account.mfa.scan")}
           data-testid="mfa-otpauth-uri"
         >
-          {setup.otpauthUri}
+          <QrSvg text={setup.otpauthUri} />
         </a>
-        <p className="text-ui font-medium">{t("auth.account.mfa.manualKey")}</p>
-        <code className="break-all font-mono text-ui" data-testid="mfa-secret">
-          {setup.secret}
-        </code>
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <p className="text-ui font-medium">{t("auth.account.mfa.manualKey")}</p>
+          <code className="break-all font-mono text-ui" data-testid="mfa-secret">
+            {setup.secret}
+          </code>
+        </div>
       </div>
       <Label htmlFor="settings-mfa-code">{t("auth.mfa.code")}</Label>
       <Input
