@@ -65,7 +65,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/035_identity_link_issuer.sql"),
         35,
     ),
-    // 036 is reserved by another branch.
+    (
+        include_str!("../../migrations/036_identity_link_template_repin.sql"),
+        36,
+    ),
     (include_str!("../../migrations/037_task_collab.sql"), 37),
 ];
 
@@ -555,6 +558,10 @@ mod tests {
         (
             35,
             "9ab2a7432d458d2663e3caa796cf9ac71a6cda1117a94d1ccdeb5c8bc8585b69",
+        ),
+        (
+            36,
+            "6932eba2f27535ac16801d00bafbf5fa1c25e6b0f84c4ff42ea63957103e576c",
         ),
         (
             37,

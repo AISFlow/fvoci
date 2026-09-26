@@ -204,6 +204,11 @@ pub struct Inner {
     pub oversized_discovery: bool,
     pub redirect_discovery_to: Option<String>,
     pub redirect_jwks_to: Option<String>,
+    /// Microsoft tenant id put in the id_token as `tid` (set `issuer` to the
+    /// matching tenant issuer and `discovery_issuer` to the template).
+    pub tid: Option<String>,
+    /// Microsoft-style `issuer` metadata on every published key.
+    pub key_issuer: Option<String>,
 }
 
 #[derive(Clone)]
@@ -238,6 +243,8 @@ impl FakeOidc {
             oversized_discovery: false,
             redirect_discovery_to: None,
             redirect_jwks_to: None,
+            tid: None,
+            key_issuer: None,
         }));
         let fake = Self {
             base,
@@ -336,7 +343,14 @@ async fn discovery(State(fake): State<FakeOidc>) -> Response {
 }
 
 fn jwks_document(inner: &Inner) -> Value {
-    json!({ "keys": inner.keys.iter().map(Key::jwk).collect::<Vec<_>>() })
+    let keys = inner.keys.iter().map(|key| {
+        let mut jwk = key.jwk();
+        if let Some(issuer) = &inner.key_issuer {
+            jwk["issuer"] = json!(issuer);
+        }
+        jwk
+    });
+    json!({ "keys": keys.collect::<Vec<_>>() })
 }
 
 async fn jwks(State(fake): State<FakeOidc>) -> Response {
@@ -439,6 +453,9 @@ async fn token(
     }
     if let Some(name) = &pending.profile.name {
         claims["name"] = json!(name);
+    }
+    if let Some(tid) = &inner.tid {
+        claims["tid"] = json!(tid);
     }
     let misbehave = std::mem::replace(&mut inner.misbehave, Misbehave::None);
     match misbehave {

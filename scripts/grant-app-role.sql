@@ -58,6 +58,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_states TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.document_collab_updates TO :"app_role";
 GRANT SELECT, INSERT ON fvoci.document_collab_op_receipts TO :"app_role";
 REVOKE UPDATE, DELETE ON fvoci.document_collab_op_receipts FROM :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_states TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_collab_updates TO :"app_role";
+GRANT SELECT, INSERT ON fvoci.task_collab_op_receipts TO :"app_role";
+REVOKE UPDATE, DELETE ON fvoci.task_collab_op_receipts FROM :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.task_origins TO :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.attachments TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.attachment_text TO :"app_role";
@@ -237,3 +242,7 @@ GRANT EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) TO :"app_
 -- 035 identity link issuer (write-once backfill; no UPDATE on the table).
 REVOKE EXECUTE ON FUNCTION fvoci.app_identity_link_backfill_issuer(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_identity_link_backfill_issuer(uuid, text) TO :"app_role";
+
+-- 036 identity link template re-pin (exact template only; no UPDATE on the table).
+REVOKE EXECUTE ON FUNCTION fvoci.app_identity_link_repin_template(uuid, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_identity_link_repin_template(uuid, text, text) TO :"app_role";
