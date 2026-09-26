@@ -76,7 +76,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -117,7 +117,7 @@ jobs:
         run: npm exec --no -- playwright install --with-deps chromium
       - name: Real React browser shard ${{ matrix.shard }} with PostgreSQL app role
         id: browser
-        run: bash scripts/run-web-e2e-shard.sh ${{ matrix.shard }}
+        run: bash scripts/run-web-e2e.sh --ci-shard ${{ matrix.shard }}
       - name: Retain failed browser DOM diagnostics
         if: failure() && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

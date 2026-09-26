@@ -5,90 +5,89 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-E2E_DIR = ROOT / "apps" / "web" / "e2e"
+DEFAULT_E2E_DIR = ROOT / "apps" / "web" / "e2e"
 PAIR_FIRST = "workspace-flow.spec.ts"
 PAIR_SECOND = "workspace-wiki-flow.spec.ts"
 DEFAULT_SHARD_COUNT = 8
+SPEC_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.spec\.ts$")
+REL_SPEC_RE = re.compile(r"^e2e/[A-Za-z0-9][A-Za-z0-9._-]*\.spec\.ts$")
 
-# Legacy web.yml workspace-flow matrix `flow` names (28 jobs) for listing comparison.
-LEGACY_FLOW_NAMES = [
-    "workspace-flow",
-    "project-task-flow",
-    "project-home-flow",
-    "project-trash-flow",
-    "invite-flow",
-    "task-edit-flow",
-    "task-assign-labels-flow",
-    "workspace-groups-flow",
-    "task-milestones-deps-flow",
-    "notifications-flow",
-    "task-comments-flow",
-    "task-activity-flow",
-    "task-ops-flow",
-    "search-flow",
-    "schedule-ics-flow",
-    "workspace-lifecycle-flow",
-    "mail-reset-flow",
-    "wiki-lifecycle-flow",
-    "comments-flow",
-    "api-token-flow",
-    "import-export-flow",
-    "integrations-flow",
-    "share-stars-flow",
-    "account-lifecycle-flow",
-    "admin-console-flow",
-    "collections-flow",
-    "mfa-flow",
-    "task-attachments-flow",
-]
+UNSUPPORTED_SUFFIXES = (
+    ".spec.tsx",
+    ".spec.js",
+    ".spec.jsx",
+    ".test.ts",
+    ".test.tsx",
+    ".test.js",
+    ".test.jsx",
+)
 
-LEGACY_FLOW_TO_LEAD_SPEC = {
-    "workspace-flow": "workspace-flow.spec.ts",
-    "project-task-flow": "project-task-flow.spec.ts",
-    "project-home-flow": "project-home-flow.spec.ts",
-    "project-trash-flow": "project-trash-flow.spec.ts",
-    "invite-flow": "workspace-invite-flow.spec.ts",
-    "task-edit-flow": "task-edit-flow.spec.ts",
-    "task-assign-labels-flow": "task-assign-labels-flow.spec.ts",
-    "workspace-groups-flow": "workspace-groups-flow.spec.ts",
-    "task-milestones-deps-flow": "task-milestones-deps-flow.spec.ts",
-    "notifications-flow": "notifications-flow.spec.ts",
-    "task-comments-flow": "task-comments-flow.spec.ts",
-    "task-activity-flow": "task-activity-flow.spec.ts",
-    "task-ops-flow": "task-ops-flow.spec.ts",
-    "search-flow": "search-flow.spec.ts",
-    "schedule-ics-flow": "schedule-ics-flow.spec.ts",
-    "workspace-lifecycle-flow": "workspace-lifecycle-flow.spec.ts",
-    "mail-reset-flow": "mail-reset-flow.spec.ts",
-    "wiki-lifecycle-flow": "workspace-wiki-lifecycle.spec.ts",
-    "comments-flow": "comments-flow.spec.ts",
-    "api-token-flow": "api-token-flow.spec.ts",
-    "import-export-flow": "workspace-import-export.spec.ts",
-    "integrations-flow": "integrations-flow.spec.ts",
-    "share-stars-flow": "share-stars-flow.spec.ts",
-    "account-lifecycle-flow": "account-lifecycle-flow.spec.ts",
-    "admin-console-flow": "admin-console-flow.spec.ts",
-    "collections-flow": "collections-flow.spec.ts",
-    "mfa-flow": "mfa-flow.spec.ts",
-    "task-attachments-flow": "task-attachments-flow.spec.ts",
-}
+
+def e2e_dir() -> Path:
+    override = os.environ.get("FVOCI_WEB_E2E_DIR")
+    if override:
+        return Path(override).resolve()
+    return DEFAULT_E2E_DIR
 
 
 def rel_spec(path: Path) -> str:
-    return path.relative_to(ROOT / "apps" / "web").as_posix()
+    rel = f"e2e/{path.name}"
+    if not REL_SPEC_RE.fullmatch(rel):
+        raise SystemExit(f"unsupported spec path (expected e2e/*.spec.ts): {rel}")
+    return rel
+
+
+def validate_spec_relpath(rel: str) -> None:
+    if not REL_SPEC_RE.fullmatch(rel):
+        raise SystemExit(f"invalid spec path in plan: {rel!r}")
+
+
+def find_unsupported_playwright_paths(directory: Path) -> list[str]:
+    """Fail closed on Playwright-like files that discovery does not cover."""
+    unsupported: list[str] = []
+    if not directory.is_dir():
+        return unsupported
+
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(directory).as_posix()
+        name = path.name
+        if path.suffix == ".ts" and name.endswith(".spec.ts"):
+            if "/" in rel:
+                unsupported.append(f"{rel} (nested spec.ts is not supported in normal e2e)")
+            elif not SPEC_BASENAME_RE.fullmatch(name):
+                unsupported.append(f"{rel} (unsupported spec.ts basename)")
+            continue
+        for suffix in UNSUPPORTED_SUFFIXES:
+            if name.endswith(suffix):
+                unsupported.append(f"{rel} (unsupported Playwright pattern {suffix})")
+                break
+    return unsupported
 
 
 def discover_groups() -> list[list[str]]:
-    if not E2E_DIR.is_dir():
-        raise SystemExit(f"missing e2e directory: {E2E_DIR}")
+    directory = e2e_dir()
 
-    specs = sorted(E2E_DIR.glob("*.spec.ts"), key=lambda p: p.name)
+    if not directory.is_dir():
+        raise SystemExit(f"missing e2e directory: {directory}")
+
+    unsupported = find_unsupported_playwright_paths(directory)
+    if unsupported:
+        raise SystemExit(
+            "unsupported Playwright paths under normal e2e; fix or move to e2e-pending:\n"
+            + "\n".join(f"  - {item}" for item in unsupported)
+        )
+
+    specs = sorted(directory.glob("*.spec.ts"), key=lambda p: p.name)
     if not specs:
-        raise SystemExit(f"no normal e2e specs under {E2E_DIR}")
+        raise SystemExit(f"no normal e2e specs under {directory}")
 
     seen: set[str] = set()
     groups: list[list[str]] = []
@@ -96,6 +95,8 @@ def discover_groups() -> list[list[str]]:
 
     for path in specs:
         name = path.name
+        if not SPEC_BASENAME_RE.fullmatch(name):
+            raise SystemExit(f"unsupported spec.ts basename: {name}")
         if name == PAIR_SECOND:
             if paired_wiki:
                 continue
@@ -105,7 +106,7 @@ def discover_groups() -> list[list[str]]:
         if name in seen:
             raise SystemExit(f"duplicate spec filename in discovery: {name}")
         if name == PAIR_FIRST:
-            wiki = E2E_DIR / PAIR_SECOND
+            wiki = directory / PAIR_SECOND
             if not wiki.is_file():
                 raise SystemExit(f"missing paired spec: {wiki}")
             groups.append([rel_spec(path), rel_spec(wiki)])
@@ -134,23 +135,12 @@ def assign_shards(groups: list[list[str]], shard_count: int) -> list[list[list[s
     return shards
 
 
-def group_label(group: list[str]) -> str:
-    first = Path(group[0]).stem
-    if len(group) == 1:
-        return first.replace(".spec", "")
-    return first.replace(".spec", "")
-
-
-def legacy_group_leads(groups: list[list[str]]) -> list[str]:
-    return [Path(g[0]).name for g in groups]
-
-
 def cmd_list_groups(_: argparse.Namespace) -> None:
     for group in discover_groups():
-        print(" ".join(group))
+        print(json.dumps({"specs": group}, separators=(",", ":")))
 
 
-def cmd_shard(args: argparse.Namespace) -> None:
+def cmd_shard_jsonl(args: argparse.Namespace) -> None:
     groups = discover_groups()
     shards = assign_shards(groups, args.shards)
     if args.index < 0 or args.index >= args.shards:
@@ -159,7 +149,9 @@ def cmd_shard(args: argparse.Namespace) -> None:
     if not shard_groups:
         raise SystemExit(f"shard {args.index} has no groups")
     for group in shard_groups:
-        print(" ".join(group))
+        for spec in group:
+            validate_spec_relpath(spec)
+        print(json.dumps({"specs": group}, separators=(",", ":")))
 
 
 def cmd_verify(args: argparse.Namespace) -> None:
@@ -169,30 +161,18 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
     spec_paths: list[str] = []
     for group in groups:
+        for spec in group:
+            validate_spec_relpath(spec)
         spec_paths.extend(group)
     if len(spec_paths) != len(set(spec_paths)):
         raise SystemExit("duplicate spec membership across groups")
 
-    expected_specs = sorted(p.name for p in E2E_DIR.glob("*.spec.ts"))
+    expected_specs = sorted(p.name for p in e2e_dir().glob("*.spec.ts"))
     discovered_specs = sorted(Path(s).name for s in spec_paths)
     if expected_specs != discovered_specs:
         raise SystemExit(
             "unregistered or missing specs: "
             f"tree={expected_specs!r} groups={discovered_specs!r}"
-        )
-
-    if len(groups) != len(LEGACY_FLOW_NAMES):
-        raise SystemExit(
-            f"expected {len(LEGACY_FLOW_NAMES)} groups, discovered {len(groups)}"
-        )
-
-    legacy_leads = {LEGACY_FLOW_TO_LEAD_SPEC[name] for name in LEGACY_FLOW_NAMES}
-    discovered_leads = set(legacy_group_leads(groups))
-    if legacy_leads != discovered_leads:
-        raise SystemExit(
-            "legacy flow lead specs do not match discovered groups: "
-            f"missing={sorted(legacy_leads - discovered_leads)!r} "
-            f"extra={sorted(discovered_leads - legacy_leads)!r}"
         )
 
     empty = [i for i, shard in enumerate(shards) if not shard]
@@ -213,18 +193,10 @@ def cmd_verify(args: argparse.Namespace) -> None:
                 "spec_count": len(spec_paths),
                 "shard_count": shard_count,
                 "groups_per_shard": [len(s) for s in shards],
-            }
+            },
+            separators=(",", ":"),
         )
     )
-
-
-def cmd_compare_legacy(_: argparse.Namespace) -> None:
-    groups = discover_groups()
-    labels = [group_label(g) for g in groups]
-    # invite-flow label differs from filename; compare via lead specs only in verify.
-    if len(labels) != len(LEGACY_FLOW_NAMES):
-        raise SystemExit("legacy flow count mismatch")
-    print("legacy listing matches discovered groups")
 
 
 def main() -> None:
@@ -234,17 +206,14 @@ def main() -> None:
     p_list = sub.add_parser("list-groups")
     p_list.set_defaults(func=cmd_list_groups)
 
-    p_shard = sub.add_parser("shard")
+    p_shard = sub.add_parser("shard-jsonl")
     p_shard.add_argument("--index", type=int, required=True)
     p_shard.add_argument("--shards", type=int, default=DEFAULT_SHARD_COUNT)
-    p_shard.set_defaults(func=cmd_shard)
+    p_shard.set_defaults(func=cmd_shard_jsonl)
 
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("--shards", type=int, default=DEFAULT_SHARD_COUNT)
     p_verify.set_defaults(func=cmd_verify)
-
-    p_legacy = sub.add_parser("compare-legacy")
-    p_legacy.set_defaults(func=cmd_compare_legacy)
 
     args = parser.parse_args()
     args.func(args)

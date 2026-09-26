@@ -5,38 +5,41 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 python3 scripts/web-e2e-groups.py verify --shards 8
-python3 scripts/web-e2e-groups.py compare-legacy
+python3 scripts/test_web_e2e_groups.py -v
 
-# Pair must stay adjacent in shard output when co-located (same line).
-pair_line="$(python3 scripts/web-e2e-groups.py list-groups | grep -F 'workspace-flow.spec.ts' || true)"
-if [[ "$pair_line" != *"workspace-wiki-flow.spec.ts"* ]]; then
-  echo "workspace flow pair not grouped on one line: $pair_line" >&2
+dry_log="$(mktemp)"
+trap 'rm -f "$dry_log"; rm -rf "${tmpdir:-}"' EXIT
+
+# Plan must succeed before a dry-run shard executes groups.
+if ! FVOCI_WEB_E2E_DRY_RUN=1 bash scripts/run-web-e2e.sh --ci-shard 0 2>"$dry_log"; then
+  cat "$dry_log" >&2
+  exit 1
+fi
+build_once_count="$(grep -c 'fvoci-web-e2e-build-once' "$dry_log" || true)"
+group_count="$(grep -c 'fvoci-web-e2e-run-group' "$dry_log" || true)"
+if [[ "$build_once_count" -ne 1 ]]; then
+  echo "expected exactly one build in --ci-shard dry run, got ${build_once_count}" >&2
+  exit 1
+fi
+if [[ "$group_count" -lt 1 ]]; then
+  echo "expected at least one group run in shard 0 dry run" >&2
   exit 1
 fi
 
-# Every shard must receive at least one group.
-for shard in $(seq 0 7); do
-  count="$(python3 scripts/web-e2e-groups.py shard --index "$shard" --shards 8 | wc -l)"
-  if [[ "$count" -lt 1 ]]; then
-    echo "shard $shard is empty" >&2
-    exit 1
-  fi
-done
-
-# run-web-e2e-shard must not call the full wrapper per group (build once).
-if grep -q 'run-web-e2e\.sh' scripts/run-web-e2e-shard.sh; then
-  echo "run-web-e2e-shard.sh must not re-invoke run-web-e2e.sh per group" >&2
+# Invalid shard plan must fail before build (dry run should not print build marker).
+tmpdir="$(mktemp -d)"
+export FVOCI_WEB_E2E_DIR="$tmpdir"
+if FVOCI_WEB_E2E_DRY_RUN=1 bash scripts/run-web-e2e.sh --ci-shard 0 2>"$tmpdir/err.log"; then
+  echo "expected failure for empty e2e fixture dir" >&2
   exit 1
 fi
-if ! grep -q 'build_current_artifacts' scripts/run-web-e2e-shard.sh; then
-  echo "run-web-e2e-shard.sh must build once" >&2
+if grep -q 'fvoci-web-e2e-build-once' "$tmpdir/err.log"; then
+  echo "build ran despite plan failure" >&2
   exit 1
 fi
 
-# collaboration-flow still uses run-web-e2e.sh without spec args under FVOCI_E2E_PENDING.
-if ! grep -q 'FVOCI_E2E_PENDING' scripts/web-e2e-run-group.sh; then
-  echo "web-e2e-run-group.sh must allow pending collab with no spec args" >&2
-  exit 1
-fi
+# Local default path still accepts pending collab with no spec args (syntax only).
+bash -n scripts/run-web-e2e.sh
+bash -n scripts/web-e2e-run-group.sh
 
 echo "test-web-e2e-groups: ok"

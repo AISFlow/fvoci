@@ -37,3 +37,10 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 ## 결과
 
 검사명, 정확한 명령/cwd/SHA, 실행 범위/개수, 결과와 exit code, 소요 시간·조건, 생략 이유와 남은 위험을 반환한다. 누락된 DB나 브라우저 환경이 필요한 검사는 미실행/실패로 분명히 표시한다.
+
+## Web Playwright CI shard (browser job only)
+
+1. 정책·플래너: `python3 scripts/web-e2e-groups.py verify --shards 8` 와 `python3 -m unittest scripts.test_web_e2e_groups` 는 DB·브라우저 없이 실행한다. `apps/web/e2e/*.spec.ts` 만 정상 범위이며, 중첩·`.test.ts` 등 미지원 패턴은 플래너가 실패로 막는다.
+2. 래퍼 dry-run: `FVOCI_WEB_E2E_DRY_RUN=1 bash scripts/run-web-e2e.sh --ci-shard N` 은 플랜 검증 후 빌드·그룹 호출 횟수만 확인한다(실제 `npm`/`cargo`/Playwright 없음). 빌드는 샤드당 한 번이어야 한다.
+3. 통합 스크립트: `bash scripts/test-web-e2e-groups.sh` 가 위를 묶는다. CI `web-checks` 와 동일 명령을 로컬에서 먼저 돌린다.
+4. 대표 브라우저 샤드( PostgreSQL·Chromium )는 코디네이터 배정 후 `bash scripts/run-web-e2e.sh --ci-shard N` 으로만 실행한다. 전체 8 샤드·원격 `web.yml` 은 통합 수락 경로에서 확인한다.
