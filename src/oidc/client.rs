@@ -51,9 +51,9 @@ const MAX_TOKEN_BYTES: usize = 16 * 1024;
 /// Token endpoint response cap applied before the OIDC crate parses it
 /// (access/refresh/id tokens together; fetch.rs caps every body at 256 KiB).
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
-/// RSA keys shorter than this are dropped from a JWKS (the `rsa` backend has
-/// no lower bound of its own).
-const MIN_RSA_MODULUS_BYTES: usize = 256;
+/// RSA keys with a shorter modulus are dropped from a JWKS (the `rsa` backend
+/// has no lower bound of its own).
+const MIN_RSA_MODULUS_BITS: usize = 2048;
 /// The only id_token algorithms accepted (the crate default is RS256 only;
 /// `none` and HMAC are never accepted).
 const ALLOWED_ALGS: [CoreJwsSigningAlgorithm; 2] = [
@@ -166,7 +166,7 @@ fn claims_error(err: &ClaimsVerificationError) -> ExchangeError {
 #[derive(Default)]
 struct CacheInner {
     discovery: HashMap<String, (Instant, Arc<Discovery>)>,
-    jwks: HashMap<String, (Instant, Arc<CoreJsonWebKeySet>)>,
+    jwks: HashMap<String, (Instant, Arc<KeySet>)>,
     forced: HashMap<String, Instant>,
 }
 
@@ -219,7 +219,15 @@ fn tenant_template(provider: &ResolvedProvider) -> bool {
             .is_some_and(|t| matches!(t, "common" | "organizations" | "consumers"))
 }
 
-/// Drops RSA keys under 2048 bits before the crate sees the set.
+/// Bit length of a big-endian unsigned integer (leading zero bytes ignored).
+fn bit_length(be: &[u8]) -> usize {
+    match be.iter().position(|b| *b != 0) {
+        Some(first) => (be.len() - first) * 8 - be[first].leading_zeros() as usize,
+        None => 0,
+    }
+}
+
+/// Drops RSA keys with a modulus under 2048 bits before the crate sees the set.
 fn without_short_rsa_keys(mut raw: Value) -> Value {
     if let Some(keys) = raw.get_mut("keys").and_then(Value::as_array_mut) {
         keys.retain(|key| {
@@ -228,12 +236,66 @@ fn without_short_rsa_keys(mut raw: Value) -> Value {
                     .get("n")
                     .and_then(Value::as_str)
                     .and_then(|n| URL_SAFE_NO_PAD.decode(n).ok())
-                    .is_some_and(|n| {
-                        n.iter().skip_while(|b| **b == 0).count() >= MIN_RSA_MODULUS_BYTES
-                    })
+                    .is_some_and(|n| bit_length(&n) >= MIN_RSA_MODULUS_BITS)
         });
     }
     raw
+}
+
+/// A provider key set as the crate reads it, plus Microsoft's per-key
+/// `issuer` metadata, which the crate's JWK type does not keep.
+struct KeySet {
+    set: CoreJsonWebKeySet,
+    /// The raw keys, kept only when at least one of them names an `issuer`.
+    issuer_bound: Option<Vec<Value>>,
+}
+
+impl KeySet {
+    fn parse(raw: Value) -> Result<Self, ExchangeError> {
+        let raw = without_short_rsa_keys(raw);
+        let issuer_bound = raw
+            .get("keys")
+            .and_then(Value::as_array)
+            .filter(|keys| keys.iter().any(|key| key.get("issuer").is_some()))
+            .cloned();
+        let set = serde_json::from_value(raw).map_err(|_| ExchangeError::Response("jwks"))?;
+        Ok(Self { set, issuer_bound })
+    }
+
+    /// The keys allowed to sign for the verified issuer `iss`: keys without
+    /// `issuer` metadata, and keys whose `issuer` is `iss` or a `{tenantid}`
+    /// template that the verified GUID `tid` turns into `iss`.
+    fn for_issuer(&self, iss: &str, tid: Option<&str>) -> Option<CoreJsonWebKeySet> {
+        let keys = self.issuer_bound.as_ref()?;
+        let allowed: Vec<&Value> = keys
+            .iter()
+            .filter(|key| match key.get("issuer") {
+                None => true,
+                Some(Value::String(bound)) => {
+                    bound == iss
+                        || tid.is_some_and(|tid| {
+                            is_guid(tid)
+                                && bound.contains(MICROSOFT_TENANT_TEMPLATE)
+                                && bound.replace(MICROSOFT_TENANT_TEMPLATE, tid) == iss
+                        })
+                }
+                Some(_) => false,
+            })
+            .collect();
+        // Keys that parsed as part of the whole set parse again; an empty set
+        // on failure only refuses.
+        Some(serde_json::from_value(serde_json::json!({ "keys": allowed })).unwrap_or_default())
+    }
+}
+
+/// Microsoft tenant ids are GUIDs (8-4-4-4-12 hex digits).
+fn is_guid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 impl OidcCache {
@@ -287,7 +349,7 @@ impl OidcCache {
         policy: FetchPolicy,
         uri: &str,
         force: bool,
-    ) -> Result<Option<Arc<CoreJsonWebKeySet>>, ExchangeError> {
+    ) -> Result<Option<Arc<KeySet>>, ExchangeError> {
         {
             let mut inner = self.inner.lock().expect("cache");
             if force {
@@ -306,9 +368,7 @@ impl OidcCache {
             }
         }
         let raw: Value = policy.get_json(uri, None).await?;
-        let set: CoreJsonWebKeySet = serde_json::from_value(without_short_rsa_keys(raw))
-            .map_err(|_| ExchangeError::Response("jwks"))?;
-        let set = Arc::new(set);
+        let set = Arc::new(KeySet::parse(raw)?);
         insert_bounded(
             &mut self.inner.lock().expect("cache").jwks,
             uri.to_string(),
@@ -379,14 +439,24 @@ fn verifier<'a>(set: &CoreJsonWebKeySet, check: &IdTokenCheck<'a>) -> CoreIdToke
 }
 
 fn verify_with(
-    set: &CoreJsonWebKeySet,
+    keys: &KeySet,
     id_token: &IdToken,
     check: &IdTokenCheck<'_>,
 ) -> Result<Claims, ExchangeError> {
+    let nonce = Nonce::new(check.nonce.to_string());
     let claims = id_token
-        .claims(&verifier(set, check), &Nonce::new(check.nonce.to_string()))
+        .claims(&verifier(&keys.set, check), &nonce)
         .map_err(|err| claims_error(&err))?;
     relying_party_rules(claims, check)?;
+    // A key bound to an issuer may only sign for that issuer: verify again
+    // with just the keys the now verified `iss` (and `tid`) allow, so the
+    // result does not depend on which kid the token named.
+    let tid = claims.additional_claims().tid.as_deref();
+    if let Some(allowed) = keys.for_issuer(claims.issuer().as_str(), tid) {
+        id_token
+            .claims(&verifier(&allowed, check), &nonce)
+            .map_err(|_| ExchangeError::Token("key issuer"))?;
+    }
     Ok(claims.clone())
 }
 
@@ -397,9 +467,7 @@ fn relying_party_rules(claims: &Claims, check: &IdTokenCheck<'_>) -> Result<(), 
             .additional_claims()
             .tid
             .as_deref()
-            .filter(|tid| {
-                !tid.is_empty() && tid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            })
+            .filter(|tid| is_guid(tid))
             .ok_or(ExchangeError::Token("iss"))?;
         let expected = check
             .discovery
@@ -435,10 +503,14 @@ fn relying_party_rules(claims: &Claims, check: &IdTokenCheck<'_>) -> Result<(), 
 #[derive(Debug, Clone)]
 pub struct SocialProfile {
     pub sub: String,
-    /// The issuer the subject was verified against: the discovery issuer
-    /// (which the id_token `iss` matched), or the configured base URL for an
-    /// OAuth2 provider without discovery. `sub` is only unique within it.
+    /// The issuer the subject was verified against: the id_token `iss` (the
+    /// discovery issuer, or for Microsoft's `{tenantid}` template the tenant
+    /// issuer the `tid` fills in), or the configured base URL for an OAuth2
+    /// provider without discovery. `sub` is only unique within it.
     pub issuer: String,
+    /// Microsoft's `{tenantid}` discovery issuer when `issuer` was filled from
+    /// it (links stored before 036 hold this string).
+    pub issuer_template: Option<String>,
     pub email: Option<String>,
     pub name: Option<String>,
     pub email_verified: bool,
@@ -597,7 +669,10 @@ pub async fn oidc_exchange(
     let text = |value: Option<&str>| value.filter(|v| !v.is_empty()).map(str::to_string);
     Ok(SocialProfile {
         sub: claims.subject().as_str().to_string(),
-        issuer: discovery.issuer().as_str().to_string(),
+        // The crate matched it to the discovery issuer, or relying_party_rules
+        // to the tenant template filled with the verified `tid`.
+        issuer: claims.issuer().as_str().to_string(),
+        issuer_template: template.then(|| discovery.issuer().as_str().to_string()),
         email: normalize_provider_email(text(claims.email().map(|e| e.as_str()))),
         name: text(claims.name().and_then(|n| n.get(None)).map(|n| n.as_str())).or_else(|| {
             text(
@@ -679,6 +754,7 @@ pub async fn naver_exchange(
     Ok(SocialProfile {
         sub,
         issuer: provider.issuer.clone(),
+        issuer_template: None,
         email: normalize_provider_email(body.email),
         name: body.name.or(body.nickname),
         email_verified: false,
@@ -694,6 +770,9 @@ mod tests {
     use std::str::FromStr;
 
     const NOW: i64 = 2_000_000_050;
+    const TENANT_A: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
+    const TENANT_B: &str = "72F988BF-86F1-41AF-91AB-2D7CD011DB47";
+    const MS_TEMPLATE: &str = "https://login.microsoftonline.com/{tenantid}/v2.0";
 
     struct Signer {
         pair: EcdsaKeyPair,
@@ -745,8 +824,8 @@ mod tests {
         )
     }
 
-    fn set(keys: Vec<Value>) -> CoreJsonWebKeySet {
-        serde_json::from_value(json!({ "keys": keys })).unwrap()
+    fn set(keys: Vec<Value>) -> KeySet {
+        KeySet::parse(json!({ "keys": keys })).unwrap()
     }
 
     fn discovery(extra: Value) -> Discovery {
@@ -775,7 +854,7 @@ mod tests {
     fn verify(
         doc: &Discovery,
         template: bool,
-        keys: &CoreJsonWebKeySet,
+        keys: &KeySet,
         token: &str,
     ) -> Result<Claims, ExchangeError> {
         let id_token = IdToken::from_str(token).map_err(|_| ExchangeError::Response("parse"))?;
@@ -957,11 +1036,28 @@ mod tests {
             c["tid"] = tid;
             verify(&ms, true, &keys, &signer.sign(&c))
         };
-        let iss = "https://login.microsoftonline.com/abc-123/v2.0";
-        assert!(tenant(iss, json!("abc-123")).is_ok());
+        let iss = format!("https://login.microsoftonline.com/{TENANT_A}/v2.0");
+        let iss = iss.as_str();
+        assert!(tenant(iss, json!(TENANT_A)).is_ok());
         assert_eq!(reason(tenant(iss, json!("other"))), "iss");
-        assert_eq!(reason(tenant(iss, json!("abc-123/../x"))), "iss");
+        assert_eq!(reason(tenant(iss, json!(TENANT_B))), "iss");
+        assert_eq!(
+            reason(tenant(iss, json!(format!("{TENANT_A}/../x")))),
+            "iss"
+        );
         assert_eq!(reason(tenant(iss, Value::Null)), "iss");
+        // Microsoft tenant ids are GUIDs; anything else is refused even when
+        // the issuer is filled consistently.
+        for tid in [
+            "abc-123",
+            "9188040d-6c67-4c5b-b112-36a304b66da",
+            "9188040d-6c67-4c5b-b112-36a304b66dadd",
+            "9188040d6c674c5bb11236a304b66dad0000",
+            "9188040g-6c67-4c5b-b112-36a304b66dad",
+        ] {
+            let filled = format!("https://login.microsoftonline.com/{tid}/v2.0");
+            assert_eq!(reason(tenant(&filled, json!(tid))), "iss", "{tid}");
+        }
         // Without the template rule the literal template issuer never matches.
         assert_eq!(
             reason(verify(
@@ -971,7 +1067,7 @@ mod tests {
                 &signer.sign(&{
                     let mut c = claims();
                     c["iss"] = json!(iss);
-                    c["tid"] = json!("abc-123");
+                    c["tid"] = json!(TENANT_A);
                     c
                 })
             )),
@@ -992,15 +1088,34 @@ mod tests {
         assert_eq!(verified.email_verified(), Some(true));
     }
 
+    /// A modulus of exactly `bits` bits (top bit set), with `pad` explicit
+    /// leading zero bytes.
+    fn rsa_jwk(kid: &str, bits: usize, pad: usize) -> Value {
+        let mut n = vec![0xffu8; bits.div_ceil(8)];
+        n[0] = 0xff >> (n.len() * 8 - bits);
+        n.splice(0..0, std::iter::repeat_n(0u8, pad));
+        json!({"kty": "RSA", "kid": kid, "n": URL_SAFE_NO_PAD.encode(n), "e": "AQAB"})
+    }
+
     #[test]
-    fn short_rsa_keys_are_dropped() {
-        let rsa = |bytes: usize| {
-            let mut n = vec![0xc5u8; bytes];
-            n.insert(0, 0);
-            json!({"kty": "RSA", "kid": format!("r{bytes}"), "n": URL_SAFE_NO_PAD.encode(n), "e": "AQAB"})
-        };
+    fn short_rsa_keys_are_dropped_by_bit_length() {
+        assert_eq!(bit_length(&[]), 0);
+        assert_eq!(bit_length(&[0, 0]), 0);
+        assert_eq!(bit_length(&[0, 1]), 1);
+        assert_eq!(bit_length(&[0x80, 0]), 16);
         let ec = Signer::new("e").jwk();
-        let raw = json!({"keys": [rsa(128), rsa(255), rsa(256), rsa(512), ec]});
+        let raw = json!({"keys": [
+            rsa_jwk("r1024", 1024, 0),
+            rsa_jwk("r2041", 2041, 0),
+            // 2047 bits still fill 256 bytes: a byte count would keep it.
+            rsa_jwk("r2047", 2047, 0),
+            rsa_jwk("r2047-pad", 2047, 1),
+            rsa_jwk("r2048", 2048, 0),
+            // DER-style sign byte: 257 bytes, 2048 bits.
+            rsa_jwk("r2048-pad", 2048, 1),
+            rsa_jwk("r4096", 4096, 0),
+            ec,
+        ]});
         let kept = without_short_rsa_keys(raw);
         let kids: Vec<&str> = kept["keys"]
             .as_array()
@@ -1008,7 +1123,103 @@ mod tests {
             .iter()
             .map(|k| k["kid"].as_str().unwrap())
             .collect();
-        assert_eq!(kids, ["r256", "r512", "e"]);
+        assert_eq!(kids, ["r2048", "r2048-pad", "r4096", "e"]);
+    }
+
+    #[test]
+    fn key_issuer_metadata_binds_the_key_to_its_issuer() {
+        let signer = Signer::new("k1");
+        let ms = discovery(json!({ "issuer": MS_TEMPLATE }));
+        let token_for = |tid: &str| {
+            let mut c = claims();
+            c["iss"] = json!(format!("https://login.microsoftonline.com/{tid}/v2.0"));
+            c["tid"] = json!(tid);
+            signer.sign(&c)
+        };
+        let with_issuer = |issuer: Value| {
+            let mut jwk = signer.jwk();
+            jwk["issuer"] = issuer;
+            set(vec![jwk])
+        };
+        // Microsoft's common JWKS: the template, filled by the verified tid.
+        assert!(verify(
+            &ms,
+            true,
+            &with_issuer(json!(MS_TEMPLATE)),
+            &token_for(TENANT_A)
+        )
+        .is_ok());
+        // A key bound to one tenant signs only for that tenant.
+        let tenant_a = format!("https://login.microsoftonline.com/{TENANT_A}/v2.0");
+        let bound_a = with_issuer(json!(tenant_a));
+        assert!(verify(&ms, true, &bound_a, &token_for(TENANT_A)).is_ok());
+        assert_eq!(
+            reason(verify(&ms, true, &bound_a, &token_for(TENANT_B))),
+            "key issuer"
+        );
+        // Another issuer template (e.g. the v1 endpoint) does not cover v2.
+        let v1 = with_issuer(json!("https://sts.windows.net/{tenantid}/"));
+        assert_eq!(
+            reason(verify(&ms, true, &v1, &token_for(TENANT_A))),
+            "key issuer"
+        );
+        // Unusable metadata binds the key to nothing.
+        assert_eq!(
+            reason(verify(
+                &ms,
+                true,
+                &with_issuer(json!(7)),
+                &token_for(TENANT_A)
+            )),
+            "key issuer"
+        );
+        // The same public key published under a second kid bound to another
+        // issuer: naming that kid does not borrow the first key's binding.
+        let raw_mixed = {
+            let mut a = signer.jwk();
+            a["issuer"] = json!(tenant_a);
+            let mut b = signer.jwk();
+            b["kid"] = json!("k2");
+            b["issuer"] = json!("https://evil.test");
+            set(vec![a, b])
+        };
+        assert!(verify(&ms, true, &raw_mixed, &token_for(TENANT_A)).is_ok());
+        let kid2 = {
+            let mut c = claims();
+            c["iss"] = json!(tenant_a);
+            c["tid"] = json!(TENANT_A);
+            signer.sign_with(json!({"alg": "ES256", "kid": "k2"}), &c)
+        };
+        assert_eq!(reason(verify(&ms, true, &raw_mixed, &kid2)), "key issuer");
+
+        // Keys without metadata (Google, Kakao, generic) are unchanged.
+        let plain = set(vec![signer.jwk()]);
+        assert!(plain.issuer_bound.is_none());
+        assert!(verify(
+            &discovery(json!({})),
+            false,
+            &plain,
+            &signer.sign(&claims())
+        )
+        .is_ok());
+        let bound_idp = with_issuer(json!("https://idp.test"));
+        assert!(verify(
+            &discovery(json!({})),
+            false,
+            &bound_idp,
+            &signer.sign(&claims())
+        )
+        .is_ok());
+        let bound_other = with_issuer(json!("https://other.test"));
+        assert_eq!(
+            reason(verify(
+                &discovery(json!({})),
+                false,
+                &bound_other,
+                &signer.sign(&claims())
+            )),
+            "key issuer"
+        );
     }
 
     #[test]
