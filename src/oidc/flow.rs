@@ -15,7 +15,6 @@ use chrono::{Duration, Utc};
 use rand::RngCore;
 use ring::hmac;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -110,10 +109,6 @@ fn random_b64(bytes: usize) -> String {
     let mut raw = vec![0u8; bytes];
     rand::rng().fill_bytes(&mut raw);
     URL_SAFE_NO_PAD.encode(raw)
-}
-
-fn pkce_challenge(verifier: &str) -> String {
-    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 fn state_context(state_hash: &str) -> String {
@@ -256,18 +251,15 @@ pub async fn begin(
                 .discovery(settings.fetch_policy(), &provider)
                 .await
                 .map_err(|err| BeginError::Provider(err.to_string()))?;
-            let mut url = url::Url::parse(&discovery.authorization_endpoint)
-                .map_err(|_| BeginError::Provider("authorization endpoint".into()))?;
-            url.query_pairs_mut()
-                .append_pair("response_type", "code")
-                .append_pair("client_id", &provider.client_id)
-                .append_pair("redirect_uri", &redirect_uri)
-                .append_pair("scope", provider.scope)
-                .append_pair("code_challenge", &pkce_challenge(&verifier))
-                .append_pair("code_challenge_method", "S256")
-                .append_pair("nonce", &nonce)
-                .append_pair("state", &state);
-            url.to_string()
+            client::authorization_url(
+                &discovery,
+                &provider,
+                &redirect_uri,
+                &state,
+                &nonce,
+                &verifier,
+            )
+            .map_err(|err| BeginError::Provider(err.to_string()))?
         }
     };
 
@@ -407,7 +399,7 @@ pub async fn complete(
                     pkce_verifier: &stored.pkce_verifier,
                     nonce: &stored.nonce,
                     iss_param: params.query.get("iss").map(String::as_str),
-                    now_secs: Utc::now().timestamp(),
+                    now: Utc::now(),
                 },
             )
             .await
@@ -623,14 +615,6 @@ mod tests {
         let other =
             Keyring::parse_named(&format!(r#"{{"c":"{}"}}"#, "33".repeat(32)), "c", "X").unwrap();
         assert!(!verify_signed_state(&other, "abc", Some(&signed)));
-    }
-
-    #[test]
-    fn pkce_s256_matches_rfc7636_example() {
-        assert_eq!(
-            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
-            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
-        );
     }
 
     #[test]

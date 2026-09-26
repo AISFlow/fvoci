@@ -3,7 +3,6 @@
 pub mod client;
 pub mod fetch;
 pub mod flow;
-pub mod jwt;
 pub mod providers;
 
 pub use providers::{OidcSettings, ProviderKey, ProviderKind, ResolvedProvider};
