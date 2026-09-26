@@ -7,6 +7,8 @@
 //! fragment (source `replaceLiveCollabContent`), appended durably before it is
 //! broadcast and projected into the derived body like any collaborator edit.
 
+#![allow(clippy::too_many_arguments)]
+
 use std::net::SocketAddr;
 use std::time::Duration;
 

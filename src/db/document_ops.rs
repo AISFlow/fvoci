@@ -917,26 +917,6 @@ pub async fn commit_duplicate(
     Ok(Ok(meta))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn jsonpath_only_embeds_canonical_uuid() {
-        let id = Uuid::parse_str("0190c6b8-8f3e-7a1b-9c2d-3e4f5a6b7c8d").unwrap();
-        let path = internal_ref_jsonpath("document", id);
-        assert!(path.contains(r#"like_regex "^0190c6b8-8f3e-7a1b-9c2d-3e4f5a6b7c8d$" flag "i""#));
-        assert!(path.contains(r#"@.attrs.entity == "document""#));
-    }
-
-    #[test]
-    fn duplicate_title_falls_back_when_suffix_overflows() {
-        assert_eq!(duplicate_title("회의록"), "회의록 (복사)");
-        let long = "가".repeat(300);
-        assert_eq!(duplicate_title(&long), long);
-    }
-}
-
 /// Source `workspaceIdForDocument`: the actor's workspace holding the document
 /// (trashed included; the per-route checks decide visibility) and its project.
 pub async fn locate_document(
@@ -967,4 +947,24 @@ pub async fn locate_document(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonpath_only_embeds_canonical_uuid() {
+        let id = Uuid::parse_str("0190c6b8-8f3e-7a1b-9c2d-3e4f5a6b7c8d").unwrap();
+        let path = internal_ref_jsonpath("document", id);
+        assert!(path.contains(r#"like_regex "^0190c6b8-8f3e-7a1b-9c2d-3e4f5a6b7c8d$" flag "i""#));
+        assert!(path.contains(r#"@.attrs.entity == "document""#));
+    }
+
+    #[test]
+    fn duplicate_title_falls_back_when_suffix_overflows() {
+        assert_eq!(duplicate_title("회의록"), "회의록 (복사)");
+        let long = "가".repeat(300);
+        assert_eq!(duplicate_title(&long), long);
+    }
 }
