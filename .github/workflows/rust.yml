@@ -50,6 +50,7 @@ jobs:
       - run: cargo test --locked --offline --test docx_export_process
       - run: cargo test --locked --offline --test pdf_export_process
       - run: cargo test --locked --offline --test pptx_export_process
+      - run: cargo test --locked --offline --test doctor_conversion
       - run: cargo test --locked --offline --manifest-path vendor/markdown/Cargo.toml --target-dir target/vendor-markdown
   postgres:
     name: ${{ matrix.check }}
