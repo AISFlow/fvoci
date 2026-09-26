@@ -9,3 +9,7 @@ pub mod openapi;
 #[cfg(feature = "api-schema")]
 #[allow(dead_code)]
 pub mod openapi_identity;
+
+#[cfg(feature = "api-schema")]
+#[allow(dead_code)]
+pub mod openapi_documents;
