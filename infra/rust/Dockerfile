@@ -10,7 +10,6 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY migrations ./migrations
 COPY src ./src
-COPY examples ./examples
 # `fvoci-migrate --init-env` renders this template (include_str!).
 COPY infra/rust/.env.example ./infra/rust/.env.example
 COPY scripts ./scripts
@@ -30,13 +29,6 @@ ENV CARGO_TARGET_DIR=/src/target
 RUN cargo build --locked --release --bin fvoci-server --bin fvoci-migrate \
  && cargo build --locked --release --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine \
  && cargo build --locked --release --manifest-path crates/document-extract/Cargo.toml --bin document-extract
-
-# Export a native Rust test client using the same release dependency build.
-# This target is used only by install-smoke and is not copied into runtime.
-FROM rust-build AS install-client-build
-RUN cargo build --locked --release --example install-smoke
-FROM scratch AS install-client
-COPY --from=install-client-build /src/target/release/examples/install-smoke /install-smoke
 
 FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS web-build
 WORKDIR /src

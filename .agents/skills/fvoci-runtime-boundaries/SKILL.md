@@ -36,6 +36,10 @@ child·DB 연결 등 소유 자원, 기존 취소·종료·복구 회귀. 미완
 6. **배포와 복구까지 전환한다.** 확인된 경로의 기존 runtime·패키지·환경 변수·스크립트를 제거하고,
    Docker/build 입력·설치 CI 경로 필터·manifest/lockfile은 AGENTS.md의 소유권 조정을 받은 뒤에만 맞춘다. 개발/비교 fixture의 JS까지 무조건 삭제하지 않는다.
    새 helper·객체 종류가 생기면 설치·취소·재시작·저장소/암호화 키 복구 확인에도 연결한다.
+   옛 converter 어댑터 제거는 변환 기능·진단 제거가 아니다. doctor는 실제 제품 실행 파일의 Rust child를
+   작은 입력으로 점검하며 실행 파일·글꼴·한도 오류를 실패로 보고한다. migrate의 current_exe를 서버로 간주하지 않는다.
+   개발·CI·fixture·독립 reader의 Python은 언어만을 이유로 재작성하지 않는다. 운영 Python은 실제 호스트·
+   관리/제품 컨테이너 중 실행 위치와 준비 검사를 명시한다. 대체 시 검사 독립성·부정 검사·복구 책임을 보존한다.
 
 ## 비용과 최종 검증
 
@@ -46,6 +50,8 @@ feature·의존성 재사용을 본다. 측정하지 않은 성능 개선을 주
 전체 Node 제거 수락은 Node/Bun/Deno·내장 JS 엔진이 없는 최종 제품 환경에서 실제 변환·공유·설치·
 복구 경로를 실행한 근거가 필요하다. PATH에서 node만 숨기고 번들 runtime을 남긴 것은 제거가 아니다.
 개발 호스트의 Node/CodeGraph, 브라우저 JS, 합의한 외부 시스템은 제품 서버 런타임과 구분한다.
+PDF 헤더·ZIP/XML·문자열 검사는 출력 품질 전체를 증명하지 않는다. 기존 소비자·독립 reader/renderer 근거를
+재사용하고 미실행 시각 품질 범위를 남긴다. 내용·서식 축소는 ‘의도적 차이’ 표기만으로 수락하지 않는다.
 필요한 DB·협업 검사는 [fast-verify](../fvoci-fast-verify/SKILL.md)와
 [db-security](../fvoci-db-security/SKILL.md)를 사용하고 관련 없는 전체 검증을 반복하지 않는다.
 
