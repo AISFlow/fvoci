@@ -212,4 +212,4 @@ jobs:
           set -o pipefail
           cargo test --locked --offline --features db-tests --test collab_product collab_primary_huge_varint_memory_rejected_1008 -- --exact | tee "$RUNNER_TEMP/native-admission-test.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/native-admission-test.log"
-          cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration --test document_api_integration --test document_import_export_integration --test document_import_formats_integration
+          cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration --test document_api_integration --test document_import_export_integration --test document_import_formats_integration --test task_collab_integration
