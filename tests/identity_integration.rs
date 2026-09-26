@@ -3028,6 +3028,337 @@ async fn pre_issuer_links_sign_in_once_and_are_pinned_to_that_issuer() {
     h.finish().await;
 }
 
+const TENANT_A: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
+const TENANT_B: &str = "72f988bf-86f1-41af-91ab-2d7cd011db47";
+
+/// Makes `fake` a Microsoft `common` endpoint: the discovery issuer is the
+/// `{tenantid}` template and id_tokens come from `tenant`.
+fn ms_tenant(fake: &FakeOidc, tenant: &str) -> String {
+    let issuer = format!("{}/{tenant}/v2.0", fake.base);
+    let template = ms_template(fake);
+    let tenant = tenant.to_string();
+    let token_issuer = issuer.clone();
+    fake.set(move |i| {
+        i.discovery_issuer = Some(template);
+        i.issuer = token_issuer;
+        i.tid = Some(tenant);
+    });
+    issuer
+}
+
+fn ms_template(fake: &FakeOidc) -> String {
+    format!("{}/{{tenantid}}/v2.0", fake.base)
+}
+
+async fn user_count(h: &Harness) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM fvoci.users")
+        .fetch_one(&h.admin)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn microsoft_links_pin_the_tenant_issuer_and_refuse_other_tenants() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-ms")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Microsoft]).await;
+    // Microsoft's common JWKS binds every key to the issuer template.
+    let template = ms_template(&fake);
+    fake.set(|i| i.key_issuer = Some(template.clone()));
+    let issuer_a = ms_tenant(&fake, TENANT_A);
+    let (kim, kim_email, kim_cookie) = h.member("kim").await;
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/microsoft/link",
+            "microsoft",
+            Profile::new("ms-sub", &kim_email, true),
+            Some(&kim_cookie),
+            peer(80),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
+    // The verified tenant issuer is stored, not the discovery template.
+    assert_eq!(
+        link_row(&h, "microsoft", "ms-sub").await,
+        Some((kim, Some(issuer_a.clone())))
+    );
+
+    // Tenant B issues a token with the same `sub` (and even kim's email).
+    ms_tenant(&fake, TENANT_B);
+    let sessions = "SELECT count(*) FROM fvoci.sessions WHERE user_id = $1";
+    let before = h.count(sessions, kim).await;
+    let users = user_count(&h).await;
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/microsoft/start",
+            "microsoft",
+            Profile::new("ms-sub", &kim_email, true),
+            None,
+            peer(81),
+        )
+        .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_not_linked"
+    );
+    assert!(res.cookie().is_none());
+    assert_eq!(h.count(sessions, kim).await, before);
+    assert_eq!(user_count(&h).await, users, "no account is created");
+    // Nor can another account link tenant B's `sub`.
+    let (_lee, lee_email, lee_cookie) = h.member("lee").await;
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/microsoft/link",
+            "microsoft",
+            Profile::new("ms-sub", &lee_email, true),
+            Some(&lee_cookie),
+            peer(82),
+        )
+        .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/settings/account?error=oidc_already_linked"
+    );
+    assert_eq!(
+        link_row(&h, "microsoft", "ms-sub").await,
+        Some((kim, Some(issuer_a.clone())))
+    );
+
+    // Tenant A still signs kim in.
+    ms_tenant(&fake, TENANT_A);
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/microsoft/start",
+            "microsoft",
+            Profile::new("ms-sub", &kim_email, true),
+            None,
+            peer(83),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/");
+    assert!(res.cookie().is_some());
+    assert_eq!(h.count(sessions, kim).await, before + 1);
+
+    // A key bound to tenant A does not verify tenant B's token, although the
+    // signature is valid.
+    fake.set(|i| i.key_issuer = Some(issuer_a.clone()));
+    let app = h.app_with_oidc(oidc_settings(
+        vec![provider(ProviderKey::Microsoft, &fake.base, CLIENT_SECRET)],
+        true,
+    ));
+    ms_tenant(&fake, TENANT_B);
+    let res = oidc_round_on(
+        &app,
+        &fake,
+        "/api/v1/auth/oidc/microsoft/start",
+        "microsoft",
+        Profile::new("ms-sub", &kim_email, true),
+        None,
+        peer(84),
+    )
+    .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_provider_error"
+    );
+    ms_tenant(&fake, TENANT_A);
+    let res = oidc_round_on(
+        &app,
+        &fake,
+        "/api/v1/auth/oidc/microsoft/start",
+        "microsoft",
+        Profile::new("ms-sub", &kim_email, true),
+        None,
+        peer(85),
+    )
+    .await;
+    assert_eq!(res.location(), "http://localhost/");
+    // A non-GUID tid is refused even with a consistent issuer.
+    fake.set(|i| i.key_issuer = None);
+    let bad = format!("{}/abc-123/v2.0", fake.base);
+    fake.set(move |i| {
+        i.issuer = bad;
+        i.tid = Some("abc-123".into());
+    });
+    let res = oidc_round_on(
+        &app,
+        &fake,
+        "/api/v1/auth/oidc/microsoft/start",
+        "microsoft",
+        Profile::new("ms-sub", &kim_email, true),
+        None,
+        peer(86),
+    )
+    .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_provider_error"
+    );
+    assert_eq!(
+        link_row(&h, "microsoft", "ms-sub").await,
+        Some((kim, Some(issuer_a)))
+    );
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn microsoft_template_links_are_repinned_to_the_first_verified_tenant() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-ms")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Microsoft]).await;
+    let template = ms_template(&fake);
+    let (user_id, email, _cookie) = h.member("legacy").await;
+    // A link written before 036 stored the discovery template.
+    let link_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, email, issuer) VALUES ($1, $2, 'microsoft', 'ms-legacy', NULL, $3)")
+        .bind(link_id)
+        .bind(user_id)
+        .bind(&template)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let issuer_a = ms_tenant(&fake, TENANT_A);
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/microsoft/start",
+            "microsoft",
+            Profile::new("ms-legacy", &email, true),
+            None,
+            peer(90),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/");
+    assert!(res.cookie().is_some());
+    assert_eq!(
+        link_row(&h, "microsoft", "ms-legacy").await,
+        Some((user_id, Some(issuer_a.clone())))
+    );
+    // Pinned: tenant B's same `sub` is refused.
+    let issuer_b = ms_tenant(&fake, TENANT_B);
+    let sessions = "SELECT count(*) FROM fvoci.sessions WHERE user_id = $1";
+    let before = h.count(sessions, user_id).await;
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/microsoft/start",
+            "microsoft",
+            Profile::new("ms-legacy", &email, true),
+            None,
+            peer(91),
+        )
+        .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_not_linked"
+    );
+    assert_eq!(h.count(sessions, user_id).await, before);
+    assert_eq!(
+        link_row(&h, "microsoft", "ms-legacy").await,
+        Some((user_id, Some(issuer_a.clone())))
+    );
+
+    // The function never rewrites anything but the exact template, and only
+    // to a GUID tenant instance of it.
+    let repin = |id: Uuid, template: String, issuer: String| {
+        let pool = h.app_pool.clone();
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            fvoci_server::db::context::set_system(&mut tx)
+                .await
+                .unwrap();
+            let done: bool =
+                sqlx::query_scalar("SELECT fvoci.app_identity_link_repin_template($1, $2, $3)")
+                    .bind(id)
+                    .bind(template)
+                    .bind(issuer)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            tx.commit().await.unwrap();
+            done
+        }
+    };
+    // A stored real issuer: the template does not match it.
+    assert!(!repin(link_id, template.clone(), issuer_b.clone()).await);
+    assert_eq!(
+        link_row(&h, "microsoft", "ms-legacy").await,
+        Some((user_id, Some(issuer_a.clone())))
+    );
+    let other = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, issuer) VALUES ($1, $2, 'google', 'tmpl-g', $3)")
+        .bind(other)
+        .bind(user_id)
+        .bind(&template)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    for issuer in [
+        template.clone(),
+        "https://evil.test".to_string(),
+        format!("{}/abc-123/v2.0", fake.base),
+        format!("{}/{TENANT_B}/v2.0/x", fake.base),
+        format!("https://evil.test/{TENANT_B}/v2.0"),
+    ] {
+        assert!(
+            !repin(other, template.clone(), issuer.clone()).await,
+            "{issuer}"
+        );
+    }
+    // A template argument that is not the stored value.
+    assert!(
+        !repin(
+            other,
+            format!("{}/{{tenantid}}/v1", fake.base),
+            issuer_b.clone()
+        )
+        .await
+    );
+    assert_eq!(
+        link_row(&h, "google", "tmpl-g").await,
+        Some((user_id, Some(template.clone())))
+    );
+    // Outside the system context (and not the owner) RLS hides the row.
+    let claimed: bool =
+        sqlx::query_scalar("SELECT fvoci.app_identity_link_repin_template($1, $2, $3)")
+            .bind(other)
+            .bind(&template)
+            .bind(&issuer_b)
+            .fetch_one(&h.app_pool)
+            .await
+            .unwrap();
+    assert!(!claimed);
+    assert_eq!(
+        link_row(&h, "google", "tmpl-g").await,
+        Some((user_id, Some(template.clone())))
+    );
+    // The app role still cannot UPDATE identity_links directly.
+    let mut tx = h.app_pool.begin().await.unwrap();
+    fvoci_server::db::context::set_system(&mut tx)
+        .await
+        .unwrap();
+    let err = sqlx::query("UPDATE fvoci.identity_links SET issuer = $2 WHERE id = $1")
+        .bind(other)
+        .bind(&issuer_b)
+        .execute(&mut *tx)
+        .await
+        .expect_err("app role has no UPDATE on identity_links");
+    assert_eq!(
+        err.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
+    );
+    tx.rollback().await.unwrap();
+    // The exact template to a tenant instance of it is the one rewrite.
+    assert!(repin(other, template.clone(), issuer_b.clone()).await);
+    assert_eq!(
+        link_row(&h, "google", "tmpl-g").await,
+        Some((user_id, Some(issuer_b)))
+    );
+    h.finish().await;
+}
+
 /// Waits (bounded) until a backend of this test database is blocked on a
 /// row lock: the callback's link transaction queued behind `lock_sign_in`.
 async fn wait_for_lock_waiter(h: &Harness) {

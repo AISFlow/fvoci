@@ -237,3 +237,7 @@ GRANT EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) TO :"app_
 -- 035 identity link issuer (write-once backfill; no UPDATE on the table).
 REVOKE EXECUTE ON FUNCTION fvoci.app_identity_link_backfill_issuer(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_identity_link_backfill_issuer(uuid, text) TO :"app_role";
+
+-- 036 identity link template re-pin (exact template only; no UPDATE on the table).
+REVOKE EXECUTE ON FUNCTION fvoci.app_identity_link_repin_template(uuid, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_identity_link_repin_template(uuid, text, text) TO :"app_role";
