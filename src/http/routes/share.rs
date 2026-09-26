@@ -30,10 +30,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::api::dto::{
-    AttachmentDownloadQuery, AttachmentOutput, DocumentShareLinkCreateBody, OkResponse,
-    SearchItemOutput, SearchListResponse, SearchSnippetPiece, ShareCreateBody,
-    ShareLinkCreatedOutput, ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput,
-    TreeNodeResponse, TreeResponse,
+    AttachmentDownloadQuery, AttachmentOutput, AttachmentPreviewResponse,
+    DocumentShareLinkCreateBody, OkResponse, SearchItemOutput, SearchListResponse,
+    SearchSnippetPiece, ShareCreateBody, ShareLinkCreatedOutput, ShareLinkListResponse,
+    ShareLinkOutput, SharePublicMetaOutput, TreeNodeResponse, TreeResponse,
 };
 use crate::attachments::content_disposition_attachment;
 use crate::auth::scopes::ApiTokenScope;
@@ -516,7 +516,7 @@ fn strong_etag(updated_at_iso: &str, format: BodyFormat) -> String {
 }
 
 /// Source `ifNoneMatches`: weak comparison, `*` matches.
-fn if_none_matches(header: &str, tag: &str) -> bool {
+pub(crate) fn if_none_matches(header: &str, tag: &str) -> bool {
     if header.trim() == "*" {
         return true;
     }
@@ -1054,34 +1054,49 @@ async fn public_attachment_route(
         scan_status: att.scan_status,
         created_at: att.created_at,
         completed_at: att.completed_at,
-        preview: None,
+        preview: crate::db::attachments::preview_variant_of(&att.variants).map(|p| {
+            AttachmentPreviewResponse {
+                width: p.width as i32,
+                height: p.height as i32,
+            }
+        }),
     }))
 }
 
 /// Source share download: full body only, `application/octet-stream`,
-/// `attachment` disposition, sandbox CSP. Previews are not generated yet, so
-/// `variant=preview` is 404 like the member route.
+/// `attachment` disposition, sandbox CSP; `variant=preview` serves the
+/// published WebP preview (no Range, like the source share route).
 async fn public_download_route(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request_headers: HeaderMap,
     Path((token, attachment_id)): Path<(String, Uuid)>,
     query: Result<Query<AttachmentDownloadQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
     ensure_sharing_enabled(&state).await?;
     let Query(query) = query.map_err(AppError::from)?;
-    match query.variant.as_deref() {
-        None => {}
-        Some("preview") => {
-            enforce_share_limit(&state, peer).await?;
-            return Err(not_found());
-        }
+    let preview = match query.variant.as_deref() {
+        None => false,
+        Some("preview") => true,
         Some(_) => return Err(AppError::from_code(ProblemCode::InvalidInput)),
-    }
+    };
     enforce_share_limit(&state, peer).await?;
     let att = share_attachment(&state.auth.db.pool, &token, attachment_id)
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
+    if preview {
+        let variant =
+            crate::db::attachments::preview_variant_of(&att.variants).ok_or_else(not_found)?;
+        return crate::http::routes::attachments::serve_preview(
+            &state,
+            &request_headers,
+            &variant,
+            false,
+            false,
+        )
+        .await;
+    }
     let size = att.size_bytes.ok_or_else(AppError::internal)?;
     let mut headers = HeaderMap::new();
     headers.insert(

@@ -174,6 +174,13 @@ pub async fn share_policy(pool: &PgPool) -> Result<SharePolicy, sqlx::Error> {
     Ok(resolve(rows, 0, "FVOCI").values.share)
 }
 
+/// Read API for other features: the attachment preview mode (`auto`,
+/// `client` or `server`), read per request like the source settings store.
+pub async fn attachment_preview_mode(pool: &PgPool) -> Result<String, sqlx::Error> {
+    let rows = load_rows(pool).await?;
+    Ok(resolve(rows, 0, "FVOCI").values.attachment_preview.mode)
+}
+
 /// Effective values without touching the boot snapshot.
 pub async fn current_values(
     pool: &PgPool,

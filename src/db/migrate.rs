@@ -40,6 +40,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         28,
     ),
     (include_str!("../../migrations/029_mfa_oidc.sql"), 29),
+    (
+        include_str!("../../migrations/030_attachments_complete.sql"),
+        30,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -482,6 +486,10 @@ mod tests {
         (
             29,
             "fa1870fbfc05a77fe6efbe9adaa59f22b275b5faef7fb09712f214374a3df531",
+        ),
+        (
+            30,
+            "c5fb3f817fb536b10dd9ab68b626b9cd598c2a4198eded19b2dd8d58c385d1e8",
         ),
     ];
 

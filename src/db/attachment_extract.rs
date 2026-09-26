@@ -96,9 +96,9 @@ pub async fn finish_extract(
     let mut tx = pool.begin().await?;
     crate::db::context::set_tenant(&mut tx, claim.workspace_id).await?;
 
-    let document_id: Option<(Uuid,)> = sqlx::query_as(
+    let parent: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
         r#"
-        SELECT document_id
+        SELECT document_id, task_id
         FROM fvoci.attachments
         WHERE workspace_id = $1
           AND id = $2
@@ -112,7 +112,7 @@ pub async fn finish_extract(
     .bind(claim.lease_token)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((document_id,)) = document_id else {
+    let Some(parent) = parent else {
         tx.rollback().await?;
         return Ok(false);
     };
@@ -127,29 +127,43 @@ pub async fn finish_extract(
         return Ok(false);
     }
 
-    let document_live: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
-        r#"
-        SELECT deleted_at
-        FROM fvoci.documents
-        WHERE workspace_id = $1 AND id = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(claim.workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if !document_live
-        .map(|(deleted,)| deleted.is_none())
-        .unwrap_or(false)
-    {
+    let parent_live = match parent {
+        (Some(document_id), _) => sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT deleted_at IS NULL
+            FROM fvoci.documents
+            WHERE workspace_id = $1 AND id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(claim.workspace_id)
+        .bind(document_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false),
+        (None, Some(task_id)) => sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT deleted_at IS NULL
+            FROM fvoci.tasks
+            WHERE workspace_id = $1 AND id = $2
+            FOR NO KEY UPDATE
+            "#,
+        )
+        .bind(claim.workspace_id)
+        .bind(task_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false),
+        (None, None) => false,
+    };
+    if !parent_live {
         tx.rollback().await?;
         return Ok(false);
     }
 
-    let attachment_locked: Option<(Uuid,)> = sqlx::query_as(
+    let attachment_locked: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
         r#"
-        SELECT document_id
+        SELECT document_id, task_id
         FROM fvoci.attachments
         WHERE workspace_id = $1
           AND id = $2
@@ -164,7 +178,7 @@ pub async fn finish_extract(
     .bind(claim.lease_token)
     .fetch_optional(&mut *tx)
     .await?;
-    if attachment_locked.as_ref().map(|(id,)| *id) != Some(document_id) {
+    if attachment_locked != Some(parent) {
         tx.rollback().await?;
         return Ok(false);
     }

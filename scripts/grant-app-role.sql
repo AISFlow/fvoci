@@ -61,6 +61,7 @@ REVOKE UPDATE, DELETE ON fvoci.document_collab_op_receipts FROM :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.attachments TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.attachment_text TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.attachment_object_cleanups TO :"app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.projects TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.project_members TO :"app_role";
@@ -137,6 +138,8 @@ GRANT EXECUTE ON FUNCTION fvoci.app_magic_purge_expired(timestamptz, integer) TO
 
 REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_extract() TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_claim_attachment_preview(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_claim_attachment_preview(integer) TO :"app_role";
 
 REVOKE ALL ON fvoci.outbox_consumers FROM :"app_role";
 REVOKE ALL ON fvoci.outbox_failures FROM :"app_role";
