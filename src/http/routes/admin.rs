@@ -21,10 +21,13 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::api::dto::{
-    AdminInstanceSettingsOutput, AdminSystemOutput, AdminUserItemOutput, AdminUserListResponse,
-    AdminUserPatchBody, AdminUserPatchOutput, AdminWorkspaceItemOutput, AdminWorkspaceListResponse,
-    AuditLogItemOutput, AuditLogListResponse, AuditLogQuery, InstanceAdminBody,
-    LegalDocumentOutput, LegalPublishBody, OkResponse,
+    AdminEraseBody, AdminErasureScheduleOutput, AdminInstanceSettingsOutput, AdminSystemOutput,
+    AdminUserItemOutput, AdminUserListResponse, AdminUserPatchBody, AdminUserPatchOutput,
+    AdminWorkspaceItemOutput, AdminWorkspaceListResponse, AuditLogItemOutput, AuditLogListResponse,
+    AuditLogQuery, InstanceAdminBody, LegalDocumentOutput, LegalPublishBody, OkResponse,
+};
+use crate::db::account::{
+    admin_cancel_user_erasure, schedule_user_erasure, AdminEraseOutcome, CancelWithdrawOutcome,
 };
 use crate::db::admin::{
     decode_audit_cursor, instance_directory, list_audit, list_users, list_workspaces,
@@ -53,6 +56,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/admin/audit", get(get_audit))
         .route("/api/v1/admin/system", get(get_system))
         .route("/api/v1/admin/users", get(get_users).patch(patch_users))
+        .route("/api/v1/admin/users/erase", post(erase_user))
+        .route("/api/v1/admin/users/cancel-erase", post(cancel_erase_user))
         .route("/api/v1/admin/workspaces", get(get_workspaces))
         .route(
             "/api/v1/admin/instance-settings",
@@ -313,6 +318,67 @@ async fn patch_instance_admins(
     .ok_or_else(not_found)?;
     map_patch_outcome(outcome)?;
     Ok(Json(OkResponse { ok: true }))
+}
+
+/// Source `POST /admin/users/erase` (`scheduleUserErasure`). The cancel
+/// token goes to the user by mail only; the admin sees the deadline.
+async fn erase_user(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    body: Result<Json<AdminEraseBody>, JsonRejection>,
+) -> Result<Json<AdminErasureScheduleOutput>, AppError> {
+    check_origin(&headers, &state.public_origin)?;
+    let auth = session(&state, &headers, &jar).await?;
+    let Json(body) = body.map_err(AppError::from)?;
+    let ip = peer_ip(peer.ip());
+    let outcome = schedule_user_erasure(&state.auth.db.pool, auth.user_id, body.user_id, Some(&ip))
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    let scheduled = match outcome {
+        AdminEraseOutcome::Scheduled(scheduled) => scheduled,
+        AdminEraseOutcome::NotFound => return Err(not_found()),
+        AdminEraseOutcome::OwnerTransferRequired => {
+            return Err(AppError::from_code(ProblemCode::OwnerTransferRequired))
+        }
+        AdminEraseOutcome::LastInstanceAdmin => {
+            return Err(AppError::from_code(ProblemCode::LastInstanceAdmin))
+        }
+    };
+    // Sessions and API tokens were revoked in the same transaction; open
+    // collab sockets close on their next credential poll.
+    let mail_sent = super::account::send_erasure_cancel_mail(&state, &scheduled).await;
+    Ok(Json(AdminErasureScheduleOutput {
+        ok: true,
+        erase_at: scheduled.erase_at,
+        mail_sent,
+    }))
+}
+
+/// Source `POST /admin/users/cancel-erase`: 404 when nothing is pending (a
+/// replay after success included), 409 `conflict` past the deadline.
+async fn cancel_erase_user(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    body: Result<Json<AdminEraseBody>, JsonRejection>,
+) -> Result<Json<OkResponse>, AppError> {
+    check_origin(&headers, &state.public_origin)?;
+    let auth = session(&state, &headers, &jar).await?;
+    let Json(body) = body.map_err(AppError::from)?;
+    let ip = peer_ip(peer.ip());
+    match admin_cancel_user_erasure(&state.auth.db.pool, auth.user_id, body.user_id, Some(&ip))
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?
+    {
+        CancelWithdrawOutcome::Ok => Ok(Json(OkResponse { ok: true })),
+        CancelWithdrawOutcome::NotFound => Err(not_found()),
+        CancelWithdrawOutcome::DeadlinePassed => Err(AppError::from_code(ProblemCode::Conflict)),
+    }
 }
 
 // ---------------------------------------------------------------- legal

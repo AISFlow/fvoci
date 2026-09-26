@@ -6,13 +6,22 @@
 //! S3 they come from the operator's bucket (versioning or replication), which
 //! the backup scripts do not copy. This check HEADs every stored key through
 //! `ObjectStorage`, so it answers the same question for both drivers.
+//!
+//! Branding assets (instance `branding.logo` / `branding.favicon`) live in the
+//! same storage under their recorded key. They have no recorded size, so each
+//! one is read back (at most `BRANDING_ASSET_MAX_BYTES`) and must hash to its
+//! recorded SHA-256, the same check the public branding route makes before
+//! serving it.
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::ObjectStorage;
 use crate::db::attachments::{list_all_workspace_ids, list_workspace_stored_objects};
+use crate::http::routes::admin::BRANDING_ASSET_MAX_BYTES;
+use crate::settings::BrandingAssetKind;
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,11 +31,21 @@ pub struct StorageVerifyReport {
     pub missing: Vec<Uuid>,
     /// Attachment ids whose object size differs from `size_bytes`.
     pub size_mismatch: Vec<Uuid>,
+    /// Branding assets referenced by the instance settings.
+    pub branding_checked: u64,
+    /// Branding asset kinds (`logo`, `favicon`) whose object is missing.
+    pub branding_missing: Vec<&'static str>,
+    /// Branding asset kinds whose object is empty, over the size limit or
+    /// does not match the recorded SHA-256.
+    pub branding_mismatch: Vec<&'static str>,
 }
 
 impl StorageVerifyReport {
     pub fn is_complete(&self) -> bool {
-        self.missing.is_empty() && self.size_mismatch.is_empty()
+        self.missing.is_empty()
+            && self.size_mismatch.is_empty()
+            && self.branding_missing.is_empty()
+            && self.branding_mismatch.is_empty()
     }
 }
 
@@ -56,5 +75,46 @@ pub async fn verify_stored_objects(
             }
         }
     }
+    verify_branding_assets(pool, storage, &mut report).await?;
     Ok(report)
+}
+
+async fn verify_branding_assets(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    report: &mut StorageVerifyReport,
+) -> Result<(), String> {
+    // The display-name default does not matter here; only asset leaves are read.
+    let values = crate::settings::current_values(pool, "FVOCI")
+        .await
+        .map_err(|e| format!("read instance settings: {e}"))?;
+    for kind in [BrandingAssetKind::Logo, BrandingAssetKind::Favicon] {
+        let Some(asset) = values.branding.asset(kind) else {
+            continue;
+        };
+        report.branding_checked += 1;
+        let key = asset.key.to_string();
+        let storage_error = |err: super::StorageError| {
+            format!("storage check for branding {}: {err}", kind.as_str())
+        };
+        let size = match storage.head(&key).await.map_err(storage_error)? {
+            None => {
+                report.branding_missing.push(kind.as_str());
+                continue;
+            }
+            Some(size) => size,
+        };
+        if size == 0 || size > BRANDING_ASSET_MAX_BYTES as u64 {
+            report.branding_mismatch.push(kind.as_str());
+            continue;
+        }
+        let bytes = storage
+            .read_range(&key, 0, size - 1)
+            .await
+            .map_err(storage_error)?;
+        if hex::encode(Sha256::digest(&bytes)) != asset.sha256 {
+            report.branding_mismatch.push(kind.as_str());
+        }
+    }
+    Ok(())
 }
