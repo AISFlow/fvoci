@@ -6,6 +6,18 @@ pub const TREE_LOCK_NAMESPACE: i32 = 1_907_005;
 pub const SEARCH_INDEX_LOCK_NAMESPACE: i32 = 1_907_007;
 pub const SEARCH_REBUILD_LOCK_KEY: i64 = 1_907_008;
 
+tokio::task_local! {
+    /// Import job whose run is in progress on this task. Every tenant
+    /// transaction begun inside [`defer_import_events`] parks its events for
+    /// that job (migration 032) instead of publishing them.
+    static IMPORT_DEFER_JOB: Uuid;
+}
+
+/// Runs `fut` with event deferral to `job_id` (source `deferEvents`).
+pub async fn defer_import_events<F: std::future::Future>(job_id: Uuid, fut: F) -> F::Output {
+    IMPORT_DEFER_JOB.scope(job_id, fut).await
+}
+
 pub async fn set_tenant(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -14,6 +26,12 @@ pub async fn set_tenant(
         .bind(workspace_id.to_string())
         .execute(&mut **tx)
         .await?;
+    if let Ok(job_id) = IMPORT_DEFER_JOB.try_with(|job| *job) {
+        sqlx::query("SELECT set_config('app.import_defer_job', $1, true)")
+            .bind(job_id.to_string())
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
 }
 

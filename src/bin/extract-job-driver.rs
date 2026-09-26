@@ -30,8 +30,10 @@ fn pid_alive(pid: u32) -> bool {
 
 fn hang_settings(extractor_bin: PathBuf) -> ExtractJobSettings {
     ExtractJobSettings {
-        extractor_bin,
+        extractor_bin: Some(extractor_bin),
         limits: document_extract_client::Limits::for_tests(),
+        office_helper: None,
+        office_limits: fvoci_server::documents::office::OfficeLimits::attachment(),
         poll_interval: Duration::from_millis(50),
         retry_backoff: Duration::from_millis(50),
         test_hang_ms: Some(20_000),
@@ -154,8 +156,10 @@ async fn run() -> Result<(), String> {
         }
         "complete_pending" => {
             let settings = ExtractJobSettings {
-                extractor_bin,
+                extractor_bin: Some(extractor_bin),
                 limits: document_extract_client::Limits::for_tests(),
+                office_helper: None,
+                office_limits: fvoci_server::documents::office::OfficeLimits::attachment(),
                 poll_interval: Duration::from_millis(100),
                 retry_backoff: Duration::from_millis(100),
                 test_hang_ms: None,

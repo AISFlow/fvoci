@@ -111,6 +111,9 @@ jobs:
       - name: Check native product test feature
         working-directory: .
         run: cargo clippy --locked --offline --all-targets --features extract-native-tests -- -D warnings
+      - name: Office documents through the isolated office child (rlimits, hostile inputs)
+        working-directory: .
+        run: cargo test --locked --offline --features extract-native-tests --test office_extract_process
       - name: Authenticated HWP and HWPX through the production helper
         working-directory: .
         env:

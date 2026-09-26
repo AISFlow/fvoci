@@ -61,7 +61,7 @@ jobs:
           - runner: ubuntu-24.04
             check: postgres-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test mcp_integration --test doctor_integration --test search_semantic
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test mcp_integration --test doctor_integration --test search_semantic --test document_import_formats_integration
           - runner: ubuntu-24.04-arm
             check: postgres-arm64
             shard: a
@@ -69,7 +69,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             check: postgres-arm64-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test mcp_integration --test doctor_integration --test search_semantic
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test mcp_integration --test doctor_integration --test search_semantic --test document_import_formats_integration
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     services:

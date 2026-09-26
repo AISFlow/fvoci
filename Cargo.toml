@@ -73,6 +73,9 @@ rusty-s3 = "0.8"
 # primitive (ListMultipartUploads) and to parse/serialize S3 XML.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 quick-xml = { version = "0.38", features = ["serialize"] }
+# Office import / attachment text: PDF text, parsed only in the rlimited
+# `--internal-office-extract` child (OOXML/ODF use zip + quick-xml above).
+pdf-extract = "0.12"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
@@ -100,6 +103,11 @@ required-features = ["db-tests"]
 [[test]]
 name = "document_import_export_integration"
 path = "tests/document_import_export_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "document_import_formats_integration"
+path = "tests/document_import_formats_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
