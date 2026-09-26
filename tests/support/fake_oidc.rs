@@ -142,6 +142,23 @@ pub enum Misbehave {
     NoIdToken,
     /// Sign with a key the JWKS does not list yet (rotation).
     UnpublishedKey,
+    /// HS256 keyed with the published JWKS document.
+    HmacWithJwks,
+    /// HS256 keyed with the client secret.
+    HmacWithClientSecret,
+    /// A kid the JWKS does not list, signed by the foreign key.
+    UnknownKid,
+    /// Sign with `retired` (a key already removed from the JWKS).
+    RetiredKey,
+    /// `exp` just beyond / inside the relying party's clock skew.
+    ExpiredBeyondSkew,
+    ExpiredWithinSkew,
+    /// `iat` further ahead than the relying party accepts.
+    IssuedInFuture,
+    /// `aud` also names another client (with a matching `azp`).
+    ExtraAudience,
+    /// An id_token larger than the relying party accepts.
+    Oversize,
 }
 
 #[derive(Clone, Debug)]
@@ -179,12 +196,14 @@ pub struct Inner {
     pub keys: Vec<Key>,
     pub unpublished: Option<Key>,
     pub foreign: Key,
+    pub retired: Option<Key>,
     pub misbehave: Misbehave,
     codes: HashMap<String, PendingCode>,
     naver_tokens: HashMap<String, Profile>,
     pub post_auth_only: bool,
     pub oversized_discovery: bool,
     pub redirect_discovery_to: Option<String>,
+    pub redirect_jwks_to: Option<String>,
 }
 
 #[derive(Clone)]
@@ -211,12 +230,14 @@ impl FakeOidc {
             keys: vec![key],
             unpublished: None,
             foreign: Key::ec("foreign"),
+            retired: None,
             misbehave: Misbehave::None,
             codes: HashMap::new(),
             naver_tokens: HashMap::new(),
             post_auth_only: false,
             oversized_discovery: false,
             redirect_discovery_to: None,
+            redirect_jwks_to: None,
         }));
         let fake = Self {
             base,
@@ -305,6 +326,7 @@ async fn discovery(State(fake): State<FakeOidc>) -> Response {
         "token_endpoint": format!("{}/token", fake.base),
         "jwks_uri": format!("{}/jwks", fake.base),
         "response_types_supported": ["code"],
+        "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256", "ES256"],
     });
     if inner.post_auth_only {
@@ -313,10 +335,26 @@ async fn discovery(State(fake): State<FakeOidc>) -> Response {
     Json(doc).into_response()
 }
 
-async fn jwks(State(fake): State<FakeOidc>) -> Json<Value> {
+fn jwks_document(inner: &Inner) -> Value {
+    json!({ "keys": inner.keys.iter().map(Key::jwk).collect::<Vec<_>>() })
+}
+
+async fn jwks(State(fake): State<FakeOidc>) -> Response {
     fake.jwks_hits.fetch_add(1, Ordering::SeqCst);
     let inner = fake.inner.lock().unwrap();
-    Json(json!({ "keys": inner.keys.iter().map(Key::jwk).collect::<Vec<_>>() }))
+    if let Some(to) = &inner.redirect_jwks_to {
+        return (StatusCode::FOUND, [("location", to.clone())]).into_response();
+    }
+    Json(jwks_document(&inner)).into_response()
+}
+
+fn hs256(claims: &Value, kid: &str, secret: &[u8]) -> String {
+    let h = URL_SAFE_NO_PAD.encode(json!({"alg": "HS256", "kid": kid}).to_string());
+    let p = URL_SAFE_NO_PAD.encode(claims.to_string());
+    let input = format!("{h}.{p}");
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret);
+    let tag = ring::hmac::sign(&key, input.as_bytes());
+    format!("{input}.{}", URL_SAFE_NO_PAD.encode(tag.as_ref()))
 }
 
 fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
@@ -408,6 +446,14 @@ async fn token(
         Misbehave::WrongIssuer => claims["iss"] = json!("https://evil.example"),
         Misbehave::WrongNonce => claims["nonce"] = json!("other-nonce"),
         Misbehave::Expired => claims["exp"] = json!(now - 3600),
+        Misbehave::ExpiredBeyondSkew => claims["exp"] = json!(now - 61),
+        Misbehave::ExpiredWithinSkew => claims["exp"] = json!(now - 30),
+        Misbehave::IssuedInFuture => claims["iat"] = json!(now + 400),
+        Misbehave::ExtraAudience => {
+            claims["aud"] = json!([inner.client_id, "someone-else"]);
+            claims["azp"] = json!(inner.client_id);
+        }
+        Misbehave::Oversize => claims["pad"] = json!("x".repeat(20 * 1024)),
         _ => {}
     }
     let id_token = match misbehave {
@@ -431,6 +477,22 @@ async fn token(
             inner.keys.push(key);
             Some(token)
         }
+        Misbehave::HmacWithJwks => {
+            let secret = jwks_document(&inner).to_string();
+            Some(hs256(&claims, &inner.keys[0].kid, secret.as_bytes()))
+        }
+        Misbehave::HmacWithClientSecret => Some(hs256(
+            &claims,
+            &inner.keys[0].kid,
+            inner.client_secret.as_bytes(),
+        )),
+        Misbehave::UnknownKid => {
+            let signed = inner.foreign.sign(&claims);
+            let header =
+                URL_SAFE_NO_PAD.encode(json!({"alg": "ES256", "kid": "not-published"}).to_string());
+            Some(format!("{header}.{}", signed.split_once('.').unwrap().1))
+        }
+        Misbehave::RetiredKey => Some(inner.retired.as_ref().expect("retired key").sign(&claims)),
         Misbehave::NoIdToken => None,
         _ => Some(inner.keys[0].sign(&claims)),
     };
