@@ -12,6 +12,7 @@ pub mod comments;
 pub mod context;
 pub mod dashboard;
 pub mod document_ops;
+pub mod document_purge;
 pub mod document_tags;
 pub mod documents;
 pub mod group_grants;

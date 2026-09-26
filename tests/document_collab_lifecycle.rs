@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use crate::support::{
     auth_and_join, complete_sync_handshake, connect_member, engine_fixture, setup_wiki_doc,
-    sync_update_frame, test_collab_config, wait_for_ws_close_code, TestDb, TestRun,
+    sync_update_frame, test_collab_config, wait_for_sync_applied, wait_for_ws_close_code, TestDb,
+    TestRun,
 };
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, SinkExt, StreamExt};
@@ -196,7 +197,11 @@ async fn http_move(
     );
 }
 
-async fn http_create_project(addr: SocketAddr, session_token: &str, workspace_id: Uuid) -> Uuid {
+async fn http_create_project(
+    addr: SocketAddr,
+    session_token: &str,
+    workspace_id: Uuid,
+) -> (Uuid, Uuid) {
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/api/v1/workspaces/{workspace_id}/projects");
     let resp = client
@@ -208,7 +213,10 @@ async fn http_create_project(addr: SocketAddr, session_token: &str, workspace_id
         .expect("create project");
     assert_eq!(resp.status(), 201);
     let body: serde_json::Value = resp.json().await.expect("project json");
-    Uuid::parse_str(body["rootDocumentId"].as_str().unwrap()).unwrap()
+    (
+        Uuid::parse_str(body["id"].as_str().unwrap()).unwrap(),
+        Uuid::parse_str(body["rootDocumentId"].as_str().unwrap()).unwrap(),
+    )
 }
 
 #[tokio::test]
@@ -335,34 +343,105 @@ async fn document_trash_closes_two_collab_sockets_within_acl_poll() {
 }
 
 #[tokio::test]
-async fn document_move_into_project_closes_collab_room() {
-    run_collab_test("document_move_into_project_closes_collab_room", |run| {
-        Box::pin(async move {
-            let wiki = setup_wiki_doc(&run.harness).await;
-            let app_url = run.harness.app_url.clone();
-            let addr = run.spawn_router(&app_url, collab_config_fast_acl()).await;
-            let routing_key = routing_key(wiki.session.workspace_id, wiki.document_id);
-            let project_root =
-                http_create_project(addr, &wiki.session.session_token, wiki.session.workspace_id)
-                    .await;
-
-            let mut writer = connect_member(addr, &wiki.session.session_token).await;
-            auth_and_join(&mut writer, &routing_key, 301).await;
-            complete_sync_handshake(&mut writer, &routing_key).await;
-
-            http_move(
-                addr,
-                &wiki.session.session_token,
-                wiki.session.workspace_id,
-                wiki.document_id,
-                project_root,
-            )
-            .await;
-
-            let within = Duration::from_millis(ACL_POLL_MS + 400);
-            wait_for_ws_close_code(&mut writer, 1008, within, false, Some("permission revoked"))
+async fn document_move_into_project_keeps_room_until_project_access_is_revoked() {
+    run_collab_test(
+        "document_move_into_project_keeps_room_until_project_access_is_revoked",
+        |run| {
+            Box::pin(async move {
+                let wiki = setup_wiki_doc(&run.harness).await;
+                let app_url = run.harness.app_url.clone();
+                let addr = run.spawn_router(&app_url, collab_config_fast_acl()).await;
+                let routing_key = routing_key(wiki.session.workspace_id, wiki.document_id);
+                let (project_id, project_root) = http_create_project(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                )
                 .await;
-        })
-    })
+
+                let mut writer = connect_member(addr, &wiki.session.session_token).await;
+                auth_and_join(&mut writer, &routing_key, 301).await;
+                complete_sync_handshake(&mut writer, &routing_key).await;
+
+                http_move(
+                    addr,
+                    &wiki.session.session_token,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                    project_root,
+                )
+                .await;
+
+                // Project documents share the collab room under project
+                // permission: the writer keeps editing after the ACL poll.
+                tokio::time::sleep(Duration::from_millis(ACL_POLL_MS + 400)).await;
+                writer
+                    .send(Message::Binary(
+                        sync_update_frame(&routing_key, &engine_fixture("utf8_korean.v1")).into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_for_sync_applied(&mut writer, Duration::from_secs(5)).await,
+                    "edit must apply after the move into a project the writer can edit"
+                );
+
+                // Losing project access (private, no grant) revokes the room.
+                let admin = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&run.harness.admin_url)
+                    .await
+                    .unwrap();
+                // Another member becomes lead so the private-lead invariant holds.
+                let other = Uuid::now_v7();
+                sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, $2, 'Lead')")
+                    .bind(other)
+                    .bind(format!("lead-{other}@example.com"))
+                    .execute(&admin)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+                )
+                .bind(wiki.session.workspace_id)
+                .bind(other)
+                .execute(&admin)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES (gen_random_uuid(), $1, $2, $3, 'lead')",
+                )
+                .bind(wiki.session.workspace_id)
+                .bind(project_id)
+                .bind(other)
+                .execute(&admin)
+                .await
+                .unwrap();
+                sqlx::query("UPDATE fvoci.projects SET visibility = 'private' WHERE id = $1")
+                    .bind(project_id)
+                    .execute(&admin)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "DELETE FROM fvoci.project_members WHERE project_id = $1 AND user_id = $2",
+                )
+                .bind(project_id)
+                .bind(wiki.session.user_id)
+                .execute(&admin)
+                .await
+                .unwrap();
+                admin.close().await;
+                let within = Duration::from_millis(ACL_POLL_MS + 400);
+                wait_for_ws_close_code(
+                    &mut writer,
+                    1008,
+                    within,
+                    false,
+                    Some("permission revoked"),
+                )
+                .await;
+            })
+        },
+    )
     .await;
 }

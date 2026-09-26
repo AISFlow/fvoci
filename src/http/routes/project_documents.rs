@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -10,21 +10,23 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    CreateDocumentBody, DocumentMetaResponse, MoveDocumentBody, PatchDocumentBody,
-    RequiredNullable, TreeNodeResponse, TreeResponse,
+    CreateDocumentBody, DocumentMetaResponse, MoveDocumentBody, OkResponse, PatchDocumentBody,
+    RequiredNullable, SortDocumentBody, TreeNodeResponse, TreeResponse,
 };
 use crate::auth::session::SessionUser;
 use crate::db::documents::{CreateDocumentInput, UpdateDocumentMetaInput};
 use crate::db::project_documents::{
     create_project_document, get_project_document, list_project_document_tree,
-    move_project_document, update_project_document_meta,
+    move_project_document, reorder_project_document, restore_project_document,
+    trash_project_document, update_project_document_meta,
 };
 use crate::documents::export::ExportFormat;
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::routes::documents::{
-    export_document, map_document_error, meta_response, DocumentApiError,
+    export_document, map_document_error, meta_response, parse_trash_children, DocumentApiError,
+    TrashQuery,
 };
 use crate::http::state::AppState;
 
@@ -36,11 +38,29 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
-            get(get_document).patch(patch_document),
+            get(get_document)
+                .patch(patch_document)
+                .delete(trash_document),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/trash",
+            post(trash_document),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/restore",
+            post(restore_document),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/sort",
+            post(sort_document),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/move",
             post(move_document),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/body",
+            get(get_body),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/md",
@@ -240,6 +260,25 @@ async fn get_document(
     }
 }
 
+async fn get_body(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+    Query(query): Query<crate::http::routes::document_body::BodyQuery>,
+) -> Result<Json<crate::api::documents_dto::DocumentBodyResponse>, DocumentApiError> {
+    crate::http::routes::document_body::read_body(
+        &state,
+        &headers,
+        &jar,
+        workspace_id,
+        crate::db::document_ops::DocumentScope::Project(project_id),
+        document_id,
+        query.format.as_deref(),
+    )
+    .await
+}
+
 async fn patch_document(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -323,6 +362,114 @@ async fn move_document(
         user_id,
         session_id,
         body.new_parent_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(meta) => Ok(Json(meta_response(&meta, true))),
+        Err(err) => Err(map_document_error(err)),
+    }
+}
+
+async fn trash_document(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+    Query(query): Query<TrashQuery>,
+) -> Result<Json<OkResponse>, DocumentApiError> {
+    check_origin(&headers, &state.public_origin)?;
+    let children = parse_trash_children(query.children.as_deref())?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let ip = peer_ip(peer.ip());
+    let result = trash_project_document(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        document_id,
+        user_id,
+        session_id,
+        children,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_document_error(err)),
+    }
+}
+
+async fn restore_document(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Json<OkResponse>, DocumentApiError> {
+    check_origin(&headers, &state.public_origin)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let ip = peer_ip(peer.ip());
+    let result = restore_project_document(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        document_id,
+        user_id,
+        session_id,
+        Some(&ip),
+    )
+    .await
+    .map_err(internal)?;
+    match result {
+        Ok(()) => Ok(Json(OkResponse { ok: true })),
+        Err(err) => Err(map_document_error(err)),
+    }
+}
+
+async fn sort_document(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+    body: Result<Json<SortDocumentBody>, JsonRejection>,
+) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
+    let Json(body) = body.map_err(AppError::from)?;
+    check_origin(&headers, &state.public_origin)?;
+    let (_user, user_id, session_id) = require_session(
+        &state,
+        &headers,
+        &jar,
+        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsWrite),
+        Some(workspace_id),
+    )
+    .await?;
+    let ip = peer_ip(peer.ip());
+    let result = reorder_project_document(
+        &state.auth.db.pool,
+        workspace_id,
+        project_id,
+        document_id,
+        user_id,
+        session_id,
+        body.after_id,
         Some(&ip),
     )
     .await

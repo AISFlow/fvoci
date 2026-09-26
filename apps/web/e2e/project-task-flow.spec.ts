@@ -130,9 +130,9 @@ test("member creates a workspace project, task, and sees counts after reload", a
         entry.kind === "document" && entry.displayId === "LAB-1" && entry.projectId,
     ),
   ).toBe(true);
-  await expect(
-    page.getByText("프로젝트 문서는 이 슬라이스에서 아직 지원하지 않습니다."),
-  ).toBeVisible();
+  // The project root document opens in the full editor view.
+  await expect(page.getByTestId("document-LAB-1")).toBeVisible();
+  await expect(page.getByLabel("문서 제목")).toBeVisible();
   await expect(page.getByText("태스크를 찾을 수 없습니다")).toHaveCount(0);
   await expect(page).toHaveURL(/\/w\/acme\/LAB-1$/);
 

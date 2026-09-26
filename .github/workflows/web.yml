@@ -80,6 +80,8 @@ jobs:
             specs: e2e/project-task-flow.spec.ts
           - flow: project-home-flow
             specs: e2e/project-home-flow.spec.ts
+          - flow: project-trash-flow
+            specs: e2e/project-trash-flow.spec.ts
           - flow: invite-flow
             specs: e2e/workspace-invite-flow.spec.ts
           - flow: task-edit-flow

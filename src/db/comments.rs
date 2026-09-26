@@ -327,7 +327,7 @@ async fn require_wiki_document_access(
         return Err(CommentDbError::NotFound);
     }
     if writable {
-        let writable = assert_document_writable(tx, workspace_id, document.document_id)
+        let writable = assert_document_writable(tx, workspace_id, document.document_id, None)
             .await
             .map_err(|_| CommentDbError::NotFound)?;
         writable.map_err(map_document_error)?;
@@ -364,9 +364,10 @@ async fn require_project_document_access(
         if locked.status == "archived" {
             return Err(CommentDbError::ProjectArchived);
         }
-        let writable = assert_document_writable(tx, workspace_id, document.document_id)
-            .await
-            .map_err(|_| CommentDbError::NotFound)?;
+        let writable =
+            assert_document_writable(tx, workspace_id, document.document_id, Some(project_id))
+                .await
+                .map_err(|_| CommentDbError::NotFound)?;
         writable.map_err(map_document_error)?;
     }
     Ok(())

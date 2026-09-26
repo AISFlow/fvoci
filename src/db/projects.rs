@@ -69,6 +69,7 @@ pub struct ProjectListItem {
     pub task_count: i64,
     pub open_task_count: i64,
     pub can_edit: bool,
+    pub can_manage: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -412,6 +413,42 @@ pub(crate) async fn project_permission_by_id(
         workspace_role,
         &visibility,
         member_role,
+    )))
+}
+
+/// Effective permission on a live project under a `FOR SHARE` row lock, plus
+/// whether the project is archived. Collab writers on sibling documents share
+/// the lock; project mutations that take `FOR NO KEY UPDATE` (visibility,
+/// archive, trash, member/group grants) wait until this transaction ends, so a
+/// revocation cannot interleave between this check and the caller's write.
+pub(crate) async fn share_lock_project_permission(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<(ProjectPermission, bool)>, sqlx::Error> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT visibility, status
+        FROM fvoci.projects
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+        FOR SHARE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((visibility, status)) = row else {
+        return Ok(None);
+    };
+    let workspace_role = membership_role(tx, workspace_id, actor_user_id)
+        .await?
+        .unwrap_or(WorkspaceRole::Guest);
+    let member_role = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
+    Ok(Some((
+        effective_permission(workspace_role, &visibility, member_role),
+        status == "archived",
     )))
 }
 
@@ -1137,9 +1174,9 @@ pub async fn list_projects(
             created_at: row.9,
             updated_at: row.10,
         };
-        let can_edit = project_permission(&mut tx, workspace_id, actor_user_id, &locked)
-            .await?
-            .at_least(ProjectPermission::Edit);
+        let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+        let can_edit = permission.at_least(ProjectPermission::Edit);
+        let can_manage = permission.at_least(ProjectPermission::Manage);
 
         items.push(ProjectListItem {
             project: ProjectRow {
@@ -1159,6 +1196,7 @@ pub async fn list_projects(
             task_count: counts.0,
             open_task_count: counts.1,
             can_edit,
+            can_manage,
         });
     }
     tx.commit().await?;
@@ -1816,4 +1854,393 @@ pub async fn get_project_workflow(
             )
             .collect(),
     }))
+}
+
+fn row_from_locked(workspace_id: Uuid, locked: LockedProject) -> ProjectRow {
+    ProjectRow {
+        id: locked.id,
+        workspace_id,
+        key: locked.key,
+        name: locked.name,
+        description: locked.description,
+        icon: locked.icon,
+        visibility: locked.visibility,
+        root_document_id: locked.root_document_id,
+        status: locked.status,
+        created_by: locked.created_by,
+        created_at: locked.created_at,
+        updated_at: locked.updated_at,
+    }
+}
+
+async fn begin_project_manage(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    tree_lock: bool,
+) -> Result<Result<LockedProject, ProjectDbError>, sqlx::Error> {
+    set_tenant(tx, workspace_id).await?;
+    lock_membership_users(tx, &[actor_user_id]).await?;
+    if !recheck_session(tx, actor_user_id, session_id).await? {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !workspace_is_live(tx, workspace_id).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    if tree_lock {
+        lock_tree(tx, workspace_id).await?;
+    }
+    let Some(locked) = lock_project(tx, workspace_id, project_id).await? else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
+    if !permission.at_least(ProjectPermission::Manage) {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    Ok(Ok(locked))
+}
+
+/// Source `purgeProject` (DELETE project): a soft delete. Every live document in
+/// the project's tree is trashed with the project's own `deleted_at` stamp so
+/// `restore_project` can bring back exactly those rows.
+pub async fn trash_project(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let locked = match begin_project_manage(
+        &mut tx,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        true,
+    )
+    .await?
+    {
+        Ok(locked) => locked,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+    let (stamp,): (DateTime<Utc>,) = sqlx::query_as(
+        r#"
+        UPDATE fvoci.projects
+        SET deleted_at = now(), updated_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+        RETURNING deleted_at
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if let Some(root_id) = locked.root_document_id {
+        let subtree = crate::db::documents::subtree_ids(&mut tx, workspace_id, root_id).await?;
+        crate::db::documents::lock_document_rows(&mut tx, workspace_id, &subtree).await?;
+        let trashed: Vec<(Uuid,)> = sqlx::query_as(
+            r#"
+            UPDATE fvoci.documents
+            SET deleted_at = $3, updated_at = now()
+            WHERE workspace_id = $1 AND id = ANY($2) AND deleted_at IS NULL
+            RETURNING id
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&subtree)
+        .bind(stamp)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (id,) in trashed {
+            record_project_event_and_audit(
+                &mut tx,
+                ProjectChangeRecord {
+                    workspace_id,
+                    actor_user_id,
+                    verb: "document.trashed",
+                    target_type: "document",
+                    target_id: id,
+                    payload: json!({
+                        "documentId": id.to_string(),
+                        "projectId": project_id.to_string(),
+                    }),
+                    client_ip,
+                },
+            )
+            .await?;
+        }
+    }
+    record_project_event_and_audit(
+        &mut tx,
+        ProjectChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "project.deleted",
+            target_type: "project",
+            target_id: project_id,
+            payload: json!({ "projectId": project_id.to_string() }),
+            client_ip,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(()))
+}
+
+/// Source `restoreProject`: workspace admins only. Restores documents trashed
+/// together with the project (same stamp); documents trashed on their own stay
+/// in the trash. A project past the trash retention is gone (its documents may
+/// already be purged).
+pub async fn restore_project(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    if !role.is_some_and(|role| role.at_least(WorkspaceRole::Admin)) {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    lock_tree(&mut tx, workspace_id).await?;
+    let row: Option<(Option<Uuid>, DateTime<Utc>)> = sqlx::query_as(
+        r#"
+        SELECT root_document_id, deleted_at
+        FROM fvoci.projects
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NOT NULL
+        FOR NO KEY UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((root_document_id, stamp)) = row else {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    if crate::db::documents::trash_expired(&mut tx, stamp).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    sqlx::query(
+        "UPDATE fvoci.projects SET deleted_at = NULL, updated_at = now() WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .execute(&mut *tx)
+    .await?;
+    if let Some(root_id) = root_document_id {
+        let subtree = crate::db::documents::subtree_ids(&mut tx, workspace_id, root_id).await?;
+        crate::db::documents::lock_document_rows(&mut tx, workspace_id, &subtree).await?;
+        let restored: Vec<(Uuid,)> = sqlx::query_as(
+            r#"
+            UPDATE fvoci.documents
+            SET deleted_at = NULL, updated_at = now()
+            WHERE workspace_id = $1 AND id = ANY($2) AND deleted_at = $3
+            RETURNING id
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&subtree)
+        .bind(stamp)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (id,) in restored {
+            record_project_event_and_audit(
+                &mut tx,
+                ProjectChangeRecord {
+                    workspace_id,
+                    actor_user_id,
+                    verb: "document.restored",
+                    target_type: "document",
+                    target_id: id,
+                    payload: json!({
+                        "documentId": id.to_string(),
+                        "projectId": project_id.to_string(),
+                    }),
+                    client_ip,
+                },
+            )
+            .await?;
+        }
+    }
+    record_project_event_and_audit(
+        &mut tx,
+        ProjectChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: "project.restored",
+            target_type: "project",
+            target_id: project_id,
+            payload: json!({ "projectId": project_id.to_string() }),
+            client_ip,
+        },
+    )
+    .await?;
+    let Some(locked) = lock_project(&mut tx, workspace_id, project_id).await? else {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    tx.commit().await?;
+    Ok(Ok(row_from_locked(workspace_id, locked)))
+}
+
+/// Source `archiveProject` / `unarchiveProject`: project status only. Archived
+/// projects are read-only everywhere writes check `status = 'archived'`.
+pub async fn set_project_archived(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    archived: bool,
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    if let Err(err) = begin_project_manage(
+        &mut tx,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        false,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(err));
+    }
+    let status = if archived { "archived" } else { "active" };
+    sqlx::query(
+        "UPDATE fvoci.projects SET status = $3, updated_at = now() WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(status)
+    .execute(&mut *tx)
+    .await?;
+    record_project_event_and_audit(
+        &mut tx,
+        ProjectChangeRecord {
+            workspace_id,
+            actor_user_id,
+            verb: if archived {
+                "project.archived"
+            } else {
+                "project.unarchived"
+            },
+            target_type: "project",
+            target_id: project_id,
+            payload: json!({ "projectId": project_id.to_string() }),
+            client_ip,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(()))
+}
+
+/// Source `listDeletedProjects` (`GET projects?deleted=true`): workspace admins
+/// only; rows past the trash retention are not restorable and are left out.
+pub async fn list_deleted_projects(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<ProjectRow>, ProjectDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    if !role.is_some_and(|role| role.at_least(WorkspaceRole::Admin)) {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    type Row = (
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<Uuid>,
+        String,
+        Uuid,
+        DateTime<Utc>,
+        DateTime<Utc>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"
+        SELECT id, key, name, description, icon, visibility, root_document_id, status,
+               created_by, created_at, updated_at
+        FROM fvoci.projects
+        WHERE workspace_id = $1 AND deleted_at IS NOT NULL
+          AND deleted_at > now() - make_interval(days => $2)
+        ORDER BY deleted_at DESC, id DESC
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(crate::db::documents::TRASH_RETENTION_DAYS)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                key,
+                name,
+                description,
+                icon,
+                visibility,
+                root_document_id,
+                status,
+                created_by,
+                created_at,
+                updated_at,
+            )| ProjectRow {
+                id,
+                workspace_id,
+                key,
+                name,
+                description,
+                icon,
+                visibility,
+                root_document_id,
+                status,
+                created_by,
+                created_at,
+                updated_at,
+            },
+        )
+        .collect()))
 }

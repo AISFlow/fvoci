@@ -68,7 +68,7 @@ pub fn router() -> Router<AppState> {
         .route(&format!("{WS_DOC}/duplicate"), post(duplicate_wiki))
         .route(
             &format!("{PROJECT_DOC}/body"),
-            get(get_body_project).put(put_body_project),
+            axum::routing::put(put_body_project),
         )
         .route(
             &format!("{PROJECT_DOC}/blocks/{{block_id}}"),
@@ -90,7 +90,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Deserialize)]
 pub(crate) struct BodyQuery {
-    format: Option<String>,
+    pub(crate) format: Option<String>,
 }
 
 type WikiPath = Path<(Uuid, Uuid)>;
@@ -264,25 +264,6 @@ pub(crate) async fn read_body(
         content_md,
         version: meta.version,
     })))
-}
-
-async fn get_body_project(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Path((workspace_id, project_id, document_id)): ProjectPath,
-    Query(query): Query<BodyQuery>,
-) -> Result<Json<DocumentBodyResponse>, DocumentApiError> {
-    read_body(
-        &state,
-        &headers,
-        &jar,
-        workspace_id,
-        DocumentScope::Project(project_id),
-        document_id,
-        query.format.as_deref(),
-    )
-    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,13 +999,10 @@ async fn locate(
     document_id: Uuid,
 ) -> Result<(RequestAuth, Uuid, DocumentScope), DocumentApiError> {
     let auth = require_request_auth(state, headers, jar, Access::Session, None).await?;
-    let located = crate::db::document_ops::locate_document(
-        &state.auth.db.pool,
-        auth.user_id,
-        document_id,
-    )
-    .await
-    .map_err(internal)?;
+    let located =
+        crate::db::document_ops::locate_document(&state.auth.db.pool, auth.user_id, document_id)
+            .await
+            .map_err(internal)?;
     let Some((workspace_id, project_id)) = located else {
         return Err(AppError::from_code(ProblemCode::NotFound).into());
     };
