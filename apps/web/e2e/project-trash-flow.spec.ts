@@ -74,7 +74,6 @@ test("project document: edit, trash, restore; project delete and admin restore",
   const editor = page.locator(".fvoci-editor .ProseMirror");
   await expect(editor).toBeVisible();
   // Attachment uploads are not supported here yet: a notice outside the editor.
-  await expect(page.getByText("프로젝트 문서의 첨부 업로드는 아직 지원하지 않습니다.")).toBeVisible();
   await editor.click();
   await page.keyboard.type("기획 본문");
   await page.getByRole("button", { name: "저장", exact: true }).click();

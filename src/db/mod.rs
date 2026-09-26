@@ -2,6 +2,7 @@ pub mod account;
 pub mod admin;
 pub mod api_tokens;
 pub mod attachment_extract;
+pub mod attachment_preview;
 pub mod attachments;
 pub mod collab;
 pub mod collab_delivery;

@@ -8,16 +8,19 @@ use sqlx::{Acquire, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::attachments::{
-    initial_extract_status, is_image_mime, StagedPart, UploadLimits, ATTACHMENT_LOCK_NAMESPACE,
-    MAX_PART_COUNT, STORAGE_LOCK_NAMESPACE,
+    initial_extract_status, is_hwp_attachment, is_image_mime, StagedPart, UploadLimits,
+    ATTACHMENT_LOCK_NAMESPACE, MAX_PART_COUNT, STORAGE_LOCK_NAMESPACE,
 };
 use crate::attachments::{ObjectStorage, StorageError};
 use crate::db::context::{lock_key_from_uuid, restore_system, set_system, set_tenant};
 use crate::db::documents::{
-    document_permission, lock_membership_users, membership_role_for_update, recheck_session,
-    session_is_live, workspace_is_live,
+    document_permission, lock_membership_users, membership_role, membership_role_for_update,
+    recheck_session, session_is_live, workspace_is_live,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::db::projects::project_member_role;
+use crate::db::quota::{StorageQuota, StorageQuotaError};
+use crate::projects::effective_permission;
 use crate::projects::ProjectPermission;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +36,8 @@ pub struct UploadMeta {
 pub struct AttachmentRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
-    pub document_id: Uuid,
+    pub document_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
     pub uploader_id: Uuid,
     pub status: String,
     pub name: String,
@@ -46,11 +50,72 @@ pub struct AttachmentRow {
     pub scan_status: String,
     pub extract_status: String,
     pub upload_meta: Option<Value>,
+    pub variants: Value,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug)]
+/// Source `attachments_parent_xor_check`: exactly one parent, fixed at insert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentParent {
+    Document(Uuid),
+    Task(Uuid),
+}
+
+/// Source `previewVariantOf`: a published preview object and its size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewVariant {
+    pub key: String,
+    pub width: i64,
+    pub height: i64,
+    pub bytes: i64,
+}
+
+pub fn preview_variant_of(variants: &Value) -> Option<PreviewVariant> {
+    let preview = variants.get("preview")?;
+    let key = preview.get("key")?.as_str()?;
+    let positive = |name: &str| {
+        preview
+            .get(name)
+            .and_then(Value::as_i64)
+            .filter(|v| *v > 0 && *v <= 9_007_199_254_740_991)
+    };
+    if key.is_empty() {
+        return None;
+    }
+    Some(PreviewVariant {
+        key: key.to_string(),
+        width: positive("width")?,
+        height: positive("height")?,
+        bytes: positive("bytes")?,
+    })
+}
+
+impl AttachmentRow {
+    pub fn preview(&self) -> Option<PreviewVariant> {
+        preview_variant_of(&self.variants)
+    }
+
+    pub fn parent(&self) -> AttachmentParent {
+        match (self.document_id, self.task_id) {
+            (Some(document_id), _) => AttachmentParent::Document(document_id),
+            (None, Some(task_id)) => AttachmentParent::Task(task_id),
+            (None, None) => unreachable!("attachments_parent_xor_check"),
+        }
+    }
+}
+
+/// Where a new upload is created. The document routes carry the affiliation
+/// of the URL (wiki or one project) so a document is only reachable through
+/// its own route (source `getDocument` + `affiliationFromParams`).
+#[derive(Debug, Clone, Copy)]
+pub enum UploadTarget {
+    WikiDocument(Uuid),
+    ProjectDocument { project_id: Uuid, document_id: Uuid },
+    Task(Uuid),
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum AttachmentDbError {
     NotFound,
     Forbidden,
@@ -61,6 +126,11 @@ pub enum AttachmentDbError {
     InvalidInput,
     EtagMismatch,
     Infected,
+    ProjectArchived,
+    TaskArchived,
+    NotHwp,
+    StorageLimit,
+    UploadLimit,
 }
 
 pub struct CreateUploadInput {
@@ -146,6 +216,9 @@ async fn with_upload_xact_lock(
     Ok(())
 }
 
+/// Source `countWorkspaceReservedBytes`: every row of the workspace counts,
+/// stored ones included, so the limit bounds total storage, not just uploads
+/// in flight.
 async fn count_reserved_bytes(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -154,7 +227,7 @@ async fn count_reserved_bytes(
         r#"
         SELECT COALESCE(SUM(reserved_size_bytes), 0)::bigint
         FROM fvoci.attachments
-        WHERE workspace_id = $1 AND status IN ('uploading', 'assembling')
+        WHERE workspace_id = $1
         "#,
     )
     .bind(workspace_id)
@@ -168,6 +241,7 @@ fn row_to_attachment(row: &sqlx::postgres::PgRow) -> AttachmentRow {
         id: row.get("id"),
         workspace_id: row.get("workspace_id"),
         document_id: row.get("document_id"),
+        task_id: row.get("task_id"),
         uploader_id: row.get("uploader_id"),
         status: row.get("status"),
         name: row.get("name"),
@@ -180,25 +254,24 @@ fn row_to_attachment(row: &sqlx::postgres::PgRow) -> AttachmentRow {
         scan_status: row.get("scan_status"),
         extract_status: row.get("extract_status"),
         upload_meta: row.get("upload_meta"),
+        variants: row.get("variants"),
         created_at: row.get("created_at"),
         completed_at: row.get("completed_at"),
     }
 }
+
+const ATTACHMENT_COLUMNS: &str = "id, workspace_id, document_id, task_id, uploader_id, status, \
+     name, mime, declared_mime, size_bytes, reserved_size_bytes, storage_key, image, scan_status, \
+     extract_status, upload_meta, variants, created_at, completed_at";
 
 async fn fetch_attachment(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     attachment_id: Uuid,
 ) -> Result<Option<AttachmentRow>, sqlx::Error> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, workspace_id, document_id, uploader_id, status, name, mime,
-               declared_mime, size_bytes, reserved_size_bytes, storage_key, image,
-               scan_status, extract_status, upload_meta, created_at, completed_at
-        FROM fvoci.attachments
-        WHERE workspace_id = $1 AND id = $2
-        "#,
-    )
+    let row = sqlx::query(&format!(
+        "SELECT {ATTACHMENT_COLUMNS} FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2"
+    ))
     .bind(workspace_id)
     .bind(attachment_id)
     .fetch_optional(&mut **tx)
@@ -206,46 +279,123 @@ async fn fetch_attachment(
     Ok(row.map(|row| row_to_attachment(&row)))
 }
 
-async fn parent_document_live(
-    tx: &mut Transaction<'_, Postgres>,
-    workspace_id: Uuid,
-    document_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let row: Option<(Option<DateTime<Utc>>, Option<Uuid>)> = sqlx::query_as(
-        r#"
-        SELECT deleted_at, project_id
-        FROM fvoci.documents
-        WHERE workspace_id = $1 AND id = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row
-        .map(|(deleted, project_id)| deleted.is_none() && project_id.is_none())
-        .unwrap_or(false))
+/// The caller's effective level on an attachment parent and whether the parent
+/// accepts writes (source `parentProjectId` + `requirePermission` +
+/// `assertAttachmentParentWritable`). A trashed parent or a deleted project is
+/// `NotFound`. `lock` takes the parent (and project) row locks writers use so
+/// a concurrent trash/archive cannot interleave with the write.
+struct ParentAccess {
+    permission: ProjectPermission,
+    project_id: Option<Uuid>,
+    writable: Result<(), AttachmentDbError>,
 }
 
+async fn parent_access(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    parent: AttachmentParent,
+    lock: bool,
+) -> Result<Result<ParentAccess, AttachmentDbError>, sqlx::Error> {
+    let (project_id, task_archived) = match parent {
+        AttachmentParent::Document(document_id) => {
+            let sql = if lock {
+                "SELECT project_id, deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR UPDATE"
+            } else {
+                "SELECT project_id, deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2"
+            };
+            let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(sql)
+                .bind(workspace_id)
+                .bind(document_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+            match row {
+                Some((project_id, None)) => (project_id, false),
+                _ => return Ok(Err(AttachmentDbError::NotFound)),
+            }
+        }
+        AttachmentParent::Task(task_id) => {
+            let sql = if lock {
+                "SELECT project_id, archived_at FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+            } else {
+                "SELECT project_id, archived_at FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL"
+            };
+            let row: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(sql)
+                .bind(workspace_id)
+                .bind(task_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+            match row {
+                Some((project_id, archived_at)) => (Some(project_id), archived_at.is_some()),
+                None => return Ok(Err(AttachmentDbError::NotFound)),
+            }
+        }
+    };
+    let Some(project_id) = project_id else {
+        let AttachmentParent::Document(document_id) = parent else {
+            unreachable!("tasks always belong to a project");
+        };
+        let permission =
+            document_permission(tx, workspace_id, actor_user_id, document_id, true).await?;
+        return Ok(Ok(ParentAccess {
+            permission,
+            project_id: None,
+            writable: Ok(()),
+        }));
+    };
+    let sql = if lock {
+        "SELECT visibility, status FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+    } else {
+        "SELECT visibility, status FROM fvoci.projects WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL"
+    };
+    let project: Option<(String, String)> = sqlx::query_as(sql)
+        .bind(workspace_id)
+        .bind(project_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let Some((visibility, status)) = project else {
+        return Ok(Err(AttachmentDbError::NotFound));
+    };
+    let permission = match membership_role(tx, workspace_id, actor_user_id).await? {
+        None => ProjectPermission::None,
+        Some(role) => {
+            let member = project_member_role(tx, workspace_id, project_id, actor_user_id).await?;
+            effective_permission(role, &visibility, member)
+        }
+    };
+    let writable = if status == "archived" {
+        Err(AttachmentDbError::ProjectArchived)
+    } else if task_archived {
+        Err(AttachmentDbError::TaskArchived)
+    } else {
+        Ok(())
+    };
+    Ok(Ok(ParentAccess {
+        permission,
+        project_id: Some(project_id),
+        writable,
+    }))
+}
+
+/// Source `requireUploadAccess`: edit on the parent, then uploader, then a
+/// writable parent.
 async fn require_upload_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     att: &AttachmentRow,
 ) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
-    let permission =
-        document_permission(tx, workspace_id, actor_user_id, att.document_id, true).await?;
-    if !permission.at_least(ProjectPermission::Edit) {
+    let access = match parent_access(tx, workspace_id, actor_user_id, att.parent(), true).await? {
+        Ok(access) => access,
+        Err(err) => return Ok(Err(err)),
+    };
+    if !access.permission.at_least(ProjectPermission::Edit) {
         return Ok(Err(AttachmentDbError::Forbidden));
     }
     if att.uploader_id != actor_user_id {
         return Ok(Err(AttachmentDbError::UploadForbidden));
     }
-    if !parent_document_live(tx, workspace_id, att.document_id).await? {
-        return Ok(Err(AttachmentDbError::NotFound));
-    }
-    Ok(Ok(()))
+    Ok(access.writable)
 }
 
 async fn require_view_access(
@@ -253,16 +403,15 @@ async fn require_view_access(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     att: &AttachmentRow,
-) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
-    let permission =
-        document_permission(tx, workspace_id, actor_user_id, att.document_id, true).await?;
-    if !permission.at_least(ProjectPermission::View) {
+) -> Result<Result<ParentAccess, AttachmentDbError>, sqlx::Error> {
+    let access = match parent_access(tx, workspace_id, actor_user_id, att.parent(), false).await? {
+        Ok(access) => access,
+        Err(err) => return Ok(Err(err)),
+    };
+    if !access.permission.at_least(ProjectPermission::View) {
         return Ok(Err(AttachmentDbError::Forbidden));
     }
-    if !parent_document_live(tx, workspace_id, att.document_id).await? {
-        return Ok(Err(AttachmentDbError::NotFound));
-    }
-    Ok(Ok(()))
+    Ok(Ok(access))
 }
 
 async fn recheck_upload_write_access(
@@ -297,6 +446,7 @@ async fn record_attachment_event(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
+    verb: &str,
     attachment_id: Uuid,
     payload: Value,
     client_ip: Option<&str>,
@@ -307,7 +457,7 @@ async fn record_attachment_event(
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
             actor_user_id: Some(actor_user_id),
-            verb: "attachment.completed".to_string(),
+            verb: verb.to_string(),
             target_type: Some("attachment".to_string()),
             target_id: Some(attachment_id),
             payload: payload.clone(),
@@ -320,7 +470,7 @@ async fn record_attachment_event(
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
             actor_user_id: Some(actor_user_id),
-            verb: "attachment.completed".to_string(),
+            verb: verb.to_string(),
             target_type: Some("attachment".to_string()),
             target_id: Some(attachment_id),
             payload,
@@ -331,13 +481,109 @@ async fn record_attachment_event(
     Ok(())
 }
 
+/// Source event payload parent fields: `documentId` (null for a task
+/// attachment) plus `taskId` when the parent is a task.
+fn parent_payload(att: &AttachmentRow, payload: &mut serde_json::Map<String, Value>) {
+    payload.insert(
+        "documentId".into(),
+        att.document_id
+            .map(|id| Value::String(id.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    if let Some(task_id) = att.task_id {
+        payload.insert("taskId".into(), Value::String(task_id.to_string()));
+    }
+}
+
+/// What a new upload reserves a row against: a parent from the URL, or the
+/// parent of an HWP/HWPX attachment being saved as an edited copy (source
+/// `createDerivedCopyUpload`).
+#[derive(Debug, Clone, Copy)]
+pub enum UploadReservation {
+    Target(UploadTarget),
+    DerivedCopy { source_attachment_id: Uuid },
+}
+
+/// Authorizes a reservation under the caller's transaction and returns the
+/// parent the new row hangs off plus the source's declared MIME for a copy.
+async fn authorize_reservation(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    reservation: UploadReservation,
+) -> Result<Result<(AttachmentParent, Option<String>), AttachmentDbError>, sqlx::Error> {
+    match reservation {
+        UploadReservation::Target(target) => {
+            let (parent, affiliation) = match target {
+                UploadTarget::WikiDocument(id) => (AttachmentParent::Document(id), Some(None)),
+                UploadTarget::ProjectDocument {
+                    project_id,
+                    document_id,
+                } => (
+                    AttachmentParent::Document(document_id),
+                    Some(Some(project_id)),
+                ),
+                UploadTarget::Task(id) => (AttachmentParent::Task(id), None),
+            };
+            let access = match parent_access(tx, workspace_id, actor_user_id, parent, true).await? {
+                Ok(access) => access,
+                Err(err) => return Ok(Err(err)),
+            };
+            if affiliation.is_some_and(|expected| expected != access.project_id) {
+                return Ok(Err(AttachmentDbError::NotFound));
+            }
+            if !access.permission.at_least(ProjectPermission::Edit) {
+                return Ok(Err(AttachmentDbError::Forbidden));
+            }
+            if let Err(err) = access.writable {
+                return Ok(Err(err));
+            }
+            Ok(Ok((parent, None)))
+        }
+        UploadReservation::DerivedCopy {
+            source_attachment_id,
+        } => {
+            let Some(source) = fetch_attachment(tx, workspace_id, source_attachment_id).await?
+            else {
+                return Ok(Err(AttachmentDbError::NotFound));
+            };
+            let access = match parent_access(tx, workspace_id, actor_user_id, source.parent(), true)
+                .await?
+            {
+                Ok(access) => access,
+                Err(err) => return Ok(Err(err)),
+            };
+            if !access.permission.at_least(ProjectPermission::View) {
+                return Ok(Err(AttachmentDbError::Forbidden));
+            }
+            if source.status != "stored" {
+                return Ok(Err(AttachmentDbError::NotFound));
+            }
+            if source.scan_status == "infected" {
+                return Ok(Err(AttachmentDbError::Infected));
+            }
+            if !is_hwp_attachment(&source.name, &source.mime) {
+                return Ok(Err(AttachmentDbError::NotHwp));
+            }
+            if !access.permission.at_least(ProjectPermission::Edit) {
+                return Ok(Err(AttachmentDbError::Forbidden));
+            }
+            if let Err(err) = access.writable {
+                return Ok(Err(err));
+            }
+            Ok(Ok((source.parent(), source.declared_mime)))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn create_upload(
     pool: &PgPool,
     storage: &ObjectStorage,
     limits: &UploadLimits,
+    quota: &StorageQuota,
     workspace_id: Uuid,
-    document_id: Uuid,
+    reservation: UploadReservation,
     actor_user_id: Uuid,
     session_id: Uuid,
     input: CreateUploadInput,
@@ -372,33 +618,43 @@ pub async fn create_upload(
         return Ok(Err(AttachmentDbError::NotFound));
     }
     membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
-    let permission =
-        document_permission(&mut tx, workspace_id, actor_user_id, document_id, true).await?;
-    if !permission.at_least(ProjectPermission::Edit) {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::Forbidden));
-    }
-    if !parent_document_live(&mut tx, workspace_id, document_id).await? {
-        tx.rollback().await?;
-        return Ok(Err(AttachmentDbError::NotFound));
-    }
+    let (parent, inherited_mime) =
+        match authorize_reservation(&mut tx, workspace_id, actor_user_id, reservation).await? {
+            Ok(v) => v,
+            Err(err) => {
+                tx.rollback().await?;
+                return Ok(Err(err));
+            }
+        };
     lock_workspace_storage(&mut tx, workspace_id).await?;
-    let _reserved = count_reserved_bytes(&mut tx, workspace_id).await?;
+    let reserved = count_reserved_bytes(&mut tx, workspace_id).await?;
+    if let Err(err) = quota.check(reserved, input.size_bytes) {
+        tx.rollback().await?;
+        return Ok(Err(match err {
+            StorageQuotaError::Upload => AttachmentDbError::UploadLimit,
+            StorageQuotaError::Storage => AttachmentDbError::StorageLimit,
+        }));
+    }
 
+    let (document_id, task_id) = match parent {
+        AttachmentParent::Document(id) => (Some(id), None),
+        AttachmentParent::Task(id) => (None, Some(id)),
+    };
     sqlx::query(
         r#"
         INSERT INTO fvoci.attachments (
-            id, workspace_id, document_id, uploader_id, status, name, declared_mime,
+            id, workspace_id, document_id, task_id, uploader_id, status, name, declared_mime,
             reserved_size_bytes, storage_key, upload_meta
-        ) VALUES ($1, $2, $3, $4, 'uploading', $5, $6, $7, $8, $9)
+        ) VALUES ($1, $2, $3, $4, $5, 'uploading', $6, $7, $8, $9, $10)
         "#,
     )
     .bind(attachment_id)
     .bind(workspace_id)
     .bind(document_id)
+    .bind(task_id)
     .bind(actor_user_id)
     .bind(&input.name)
-    .bind(&input.declared_mime)
+    .bind(input.declared_mime.or(inherited_mime))
     .bind(input.size_bytes)
     .bind(&storage_key)
     .bind(json!(upload_meta))
@@ -848,7 +1104,6 @@ async fn complete_owned_inner(
 
     let storage_key = att.storage_key.clone();
     let att_name = att.name.clone();
-    let document_id = att.document_id;
     let needs_assembly = if att.status == "assembling" {
         true
     } else if att.status == "uploading" {
@@ -921,6 +1176,11 @@ async fn complete_owned_inner(
         .map_err(|e| sqlx::Error::Io(std::io::Error::other(e.to_string())))?;
     let image = is_image_mime(&mime);
     let extract_status = initial_extract_status(&att_name, &mime);
+    let preview_status = if image && crate::attachments::preview::preview_mime_supported(&mime) {
+        "pending"
+    } else {
+        "skipped"
+    };
 
     #[cfg(feature = "db-tests")]
     test_barrier::wait_pre_mark_stored_barrier(attachment_id).await;
@@ -957,8 +1217,8 @@ async fn complete_owned_inner(
         r#"
         UPDATE fvoci.attachments
         SET status = 'stored', mime = $3, size_bytes = $4, image = $5,
-            scan_status = 'skipped', extract_status = $6, upload_meta = NULL,
-            completed_at = now()
+            scan_status = 'skipped', extract_status = $6, preview_status = $7,
+            upload_meta = NULL, completed_at = now()
         WHERE workspace_id = $1 AND id = $2 AND status IN ('uploading', 'assembling')
         "#,
     )
@@ -968,6 +1228,7 @@ async fn complete_owned_inner(
     .bind(size_bytes as i64)
     .bind(image)
     .bind(extract_status)
+    .bind(preview_status)
     .execute(&mut *tx)
     .await?;
     if updated.rows_affected() == 0 {
@@ -980,17 +1241,18 @@ async fn complete_owned_inner(
         tx.rollback().await?;
         return Ok(CompleteAttempt::Retry);
     }
+    let mut payload = serde_json::Map::new();
+    payload.insert("name".into(), json!(att_name));
+    parent_payload(&att, &mut payload);
+    payload.insert("sizeBytes".into(), json!(size_bytes));
+    payload.insert("mime".into(), json!(mime));
     record_attachment_event(
         &mut tx,
         workspace_id,
         actor_user_id,
+        "attachment.completed",
         attachment_id,
-        json!({
-            "name": att_name,
-            "documentId": document_id.to_string(),
-            "sizeBytes": size_bytes,
-            "mime": mime,
-        }),
+        Value::Object(payload),
         client_ip,
     )
     .await?;
@@ -1063,7 +1325,7 @@ pub async fn get_attachment_meta(
         }
     };
     match require_view_access(&mut tx, workspace_id, actor_user_id, &att).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         Ok(Err(err)) => {
             tx.rollback().await?;
             return Ok(Err(err));
@@ -1103,7 +1365,7 @@ pub async fn open_download(
         }
     };
     match require_view_access(&mut tx, workspace_id, actor_user_id, &att).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         Ok(Err(err)) => {
             tx.rollback().await?;
             return Ok(Err(err));
@@ -1120,6 +1382,381 @@ pub async fn open_download(
     }
     tx.commit().await?;
     Ok(Ok(att))
+}
+
+/// Stored extract text of an attachment the caller already opened through
+/// [`open_download`] (source `att.extractText`).
+pub async fn attachment_extract_text(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let text: Option<String> = sqlx::query_scalar(
+        "SELECT extract_text FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2 AND status = 'stored'",
+    )
+    .bind(workspace_id)
+    .bind(attachment_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(text)
+}
+
+/// Parent kind of an attachment, for API-token scope checks before an
+/// operation runs (source `authorizeTarget`). The parent never changes after
+/// insert, so reading it ahead of the operation's own transaction is sound.
+pub async fn attachment_parent(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<Option<AttachmentParent>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let att = fetch_attachment(&mut tx, workspace_id, attachment_id).await?;
+    tx.commit().await?;
+    Ok(att.map(|att| att.parent()))
+}
+
+/// Source `listTaskAttachments`: view on the task's project, every row of the
+/// task (any status), oldest first.
+pub async fn list_task_attachments(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<AttachmentRow>, AttachmentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
+    let parent = AttachmentParent::Task(task_id);
+    match parent_access(&mut tx, workspace_id, actor_user_id, parent, false).await? {
+        Ok(access) if access.permission.at_least(ProjectPermission::View) => {}
+        Ok(_) => {
+            tx.rollback().await?;
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    }
+    let rows = sqlx::query(&format!(
+        "SELECT {ATTACHMENT_COLUMNS} FROM fvoci.attachments \
+         WHERE workspace_id = $1 AND task_id = $2 ORDER BY created_at, id"
+    ))
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(rows.iter().map(row_to_attachment).collect()))
+}
+
+/// Source `purgeAttachment`: the uploader needs edit on the parent, anyone
+/// else manage; a stored attachment also needs a writable parent. The row and
+/// its `attachment.deleted` event/audit commit together; the delete trigger
+/// journals every storage key in the same transaction, and
+/// [`reclaim_attachment_objects`] removes the objects afterwards.
+pub async fn delete_attachment(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
+    // No upload advisory lock here: a complete holds it for its whole
+    // assembly. The row lock taken by DELETE orders this against complete's
+    // mark-stored UPDATE, which then finds no row, and the object journal
+    // waits for that complete's session lock before reclaiming the key.
+    let Some(att) = fetch_attachment(&mut tx, workspace_id, attachment_id).await? else {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    };
+    let access =
+        match parent_access(&mut tx, workspace_id, actor_user_id, att.parent(), true).await? {
+            Ok(access) => access,
+            Err(err) => {
+                tx.rollback().await?;
+                return Ok(Err(err));
+            }
+        };
+    let needed = if att.uploader_id == actor_user_id {
+        ProjectPermission::Edit
+    } else {
+        ProjectPermission::Manage
+    };
+    if !access.permission.at_least(needed) {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::Forbidden));
+    }
+    if att.status == "stored" {
+        if let Err(err) = access.writable {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    }
+    let deleted = sqlx::query("DELETE FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id)
+        .bind(attachment_id)
+        .execute(&mut *tx)
+        .await?;
+    if deleted.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
+    let mut payload = serde_json::Map::new();
+    payload.insert("name".into(), json!(att.name));
+    parent_payload(&att, &mut payload);
+    payload.insert(
+        "projectId".into(),
+        access
+            .project_id
+            .map(|id| Value::String(id.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    record_attachment_event(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        "attachment.deleted",
+        attachment_id,
+        Value::Object(payload),
+        client_ip,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(()))
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachmentEditContext {
+    pub source_attachment_id: Uuid,
+    pub name: String,
+    pub mime: String,
+    pub editable: bool,
+}
+
+/// Source `getAttachmentEditContext`: view access to a stored, clean
+/// attachment; `editable` only for HWP/HWPX the caller may copy-edit.
+pub async fn attachment_edit_context(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<AttachmentEditContext, AttachmentDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
+    let Some(att) = fetch_attachment(&mut tx, workspace_id, attachment_id).await? else {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    };
+    let access = match require_view_access(&mut tx, workspace_id, actor_user_id, &att).await? {
+        Ok(access) => access,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+    if att.status != "stored" {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
+    if att.scan_status == "infected" {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::Infected));
+    }
+    let editable = is_hwp_attachment(&att.name, &att.mime)
+        && access.permission.at_least(ProjectPermission::Edit)
+        && access.writable.is_ok();
+    tx.commit().await?;
+    Ok(Ok(AttachmentEditContext {
+        source_attachment_id: att.id,
+        name: att.name,
+        mime: att.mime,
+        editable,
+    }))
+}
+
+/// Retry delay for a journal row whose object is busy or failed to delete
+/// (source `ATTACHMENT_OBJECT_RETRY_MS`).
+pub const OBJECT_CLEANUP_RETRY: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectCleanupStats {
+    pub claimed: u32,
+    pub reclaimed: u32,
+    /// A complete for the same attachment held its upload session lock.
+    pub busy: u32,
+    pub failed: u32,
+}
+
+/// Drains due `attachment_object_cleanups` rows (source
+/// `cleanupAttachmentObjects`), optionally only those of one attachment right
+/// after it was deleted. Each row takes the attachment's upload session lock
+/// so an in-flight complete cannot recreate a key after it was deleted; busy
+/// or failed rows are rescheduled. A key still referenced by a live row is
+/// never deleted (the journal row is simply dropped).
+pub async fn reclaim_attachment_objects(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    only: Option<(Uuid, Uuid)>,
+    limit: i64,
+) -> Result<ObjectCleanupStats, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let previous = set_system(&mut tx).await?;
+    let rows: Vec<(Uuid, Uuid, Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT id, workspace_id, attachment_id, storage_key
+        FROM fvoci.attachment_object_cleanups
+        WHERE due_at <= clock_timestamp()
+          AND ($1::uuid IS NULL OR (workspace_id = $1 AND attachment_id = $2))
+        ORDER BY due_at, id
+        LIMIT $3
+        "#,
+    )
+    .bind(only.map(|(ws, _)| ws))
+    .bind(only.map(|(_, id)| id))
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    restore_system(&mut tx, &previous).await?;
+    tx.commit().await?;
+
+    let mut stats = ObjectCleanupStats::default();
+    for (id, workspace_id, attachment_id, key) in rows {
+        stats.claimed += 1;
+        let Some(mut lock) = AttachmentSessionLock::try_acquire(pool, attachment_id).await? else {
+            stats.busy += 1;
+            reschedule_object_cleanup(pool, id, false).await?;
+            continue;
+        };
+        let outcome = reclaim_one_object(&mut lock, storage, id, workspace_id, &key).await;
+        lock.release().await;
+        match outcome {
+            Ok(true) => stats.reclaimed += 1,
+            Ok(false) => {
+                stats.failed += 1;
+                reschedule_object_cleanup(pool, id, true).await?;
+            }
+            Err(err) => {
+                stats.failed += 1;
+                tracing::warn!(%attachment_id, error = %err, "attachment.object_cleanup_failed");
+                reschedule_object_cleanup(pool, id, true).await?;
+            }
+        }
+    }
+    Ok(stats)
+}
+
+async fn reclaim_one_object(
+    lock: &mut AttachmentSessionLock,
+    storage: &ObjectStorage,
+    id: Uuid,
+    workspace_id: Uuid,
+    key: &str,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = lock.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    // Serialise with `publish_preview`, which holds this row while it
+    // publishes a journaled preview key: whoever locks first decides.
+    let still_journaled: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM fvoci.attachment_object_cleanups WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if still_journaled.is_none() {
+        tx.commit().await?;
+        return Ok(true);
+    }
+    let referenced: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM fvoci.attachments
+            WHERE workspace_id = $1
+              AND (storage_key = $2 OR variants -> 'preview' ->> 'key' = $2)
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(key)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !referenced {
+        if let Err(err) = storage.purge_key(key).await {
+            tracing::warn!(error = %err, "attachment.object_cleanup_storage_failed");
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        match storage.head(key).await {
+            Ok(None) => {}
+            _ => {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+    }
+    sqlx::query("DELETE FROM fvoci.attachment_object_cleanups WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+async fn reschedule_object_cleanup(
+    pool: &PgPool,
+    id: Uuid,
+    failed: bool,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let previous = set_system(&mut tx).await?;
+    sqlx::query(
+        r#"
+        UPDATE fvoci.attachment_object_cleanups
+        SET due_at = clock_timestamp() + ($2 * interval '1 second'),
+            attempts = attempts + CASE WHEN $3 THEN 1 ELSE 0 END
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(OBJECT_CLEANUP_RETRY.as_secs() as f64)
+    .bind(failed)
+    .execute(&mut *tx)
+    .await?;
+    restore_system(&mut tx, &previous).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 impl std::fmt::Display for AttachmentDbError {

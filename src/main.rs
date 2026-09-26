@@ -9,7 +9,8 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use fvoci_server::attachments::{
-    spawn_extract_job, ExtractJobHandle, ExtractJobSettings, ObjectStorage,
+    spawn_extract_job, spawn_preview_job, ExtractJobHandle, ExtractJobSettings, ObjectStorage,
+    PreviewJobHandle, PreviewJobSettings,
 };
 use fvoci_server::auth::AuthService;
 use fvoci_server::collab::hub::ShutdownStatus;
@@ -95,8 +96,17 @@ struct DrainOutcome {
     import: Result<(), String>,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The image preview child is this binary in a hidden mode: decide before
+    // a runtime, logger or config exists, so the child holds nothing else.
+    if let Some(code) = fvoci_server::attachments::preview::maybe_run_helper() {
+        std::process::exit(code);
+    }
+    server_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn server_main() -> Result<(), Box<dyn std::error::Error>> {
     collab_engine::process::raise_nofile_to_hard_limit();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("fvoci_server=info".parse()?))
@@ -247,6 +257,17 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             None
         }
     };
+    let preview_job = match fvoci_server::attachments::preview::default_helper_path() {
+        Some(helper) => Some(spawn_preview_job(
+            PreviewJobSettings::new(helper),
+            pool.clone(),
+            storage.clone(),
+        )),
+        None => {
+            tracing::warn!("attachment previews disabled: current executable path unavailable");
+            None
+        }
+    };
     let mailer = std::sync::Arc::new(fvoci_server::mail::Mailer::from_smtp(config.smtp.clone()));
     if mailer.enabled() {
         tracing::info!("smtp mailer enabled");
@@ -335,12 +356,16 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         document_convert,
         import_wake,
         import_extractor_available,
+        // Source self-host policy: storage/upload limits come only from the
+        // signed license, which is not ported; unlimited until it is.
+        quota: Default::default(),
     };
 
     let deadline = config.shutdown_deadline;
     let (signaled_tx, signaled_rx) = tokio::sync::oneshot::channel::<Instant>();
     let hub_task = Arc::new(tokio::sync::Mutex::new(None::<HubShutdownTask>));
     let extract_task = Arc::new(tokio::sync::Mutex::new(extract_job));
+    let preview_task = Arc::new(tokio::sync::Mutex::new(preview_job));
     let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
     let webhook_task = Arc::new(tokio::sync::Mutex::new(webhook_sender));
     let maintenance_task = Arc::new(tokio::sync::Mutex::new(maintenance));
@@ -348,6 +373,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let collab_for_signal = collab.clone();
     let hub_task_for_signal = hub_task.clone();
     let extract_task_for_signal = extract_task.clone();
+    let preview_task_for_signal = preview_task.clone();
     let outbox_task_for_signal = outbox_task.clone();
     let webhook_task_for_signal = webhook_task.clone();
     let maintenance_task_for_signal = maintenance_task.clone();
@@ -365,6 +391,9 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             if let Some(job) = extract_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
                 tracing::info!("attachment extract shutdown started concurrently with HTTP drain");
+            }
+            if let Some(job) = preview_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
             }
             if let Some(job) = outbox_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
@@ -419,7 +448,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             wait_for_deadline(
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
-                    let extract = join_extract_finished(&extract_task).await;
+                    let extract = join_extract_finished(&extract_task, &preview_task).await;
                     let outbox = join_outbox_finished(&outbox_task, &webhook_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
                     let import = join_import_finished(&import_task).await;
@@ -452,7 +481,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 async {
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
-                    let extract = join_extract_finished(&extract_task).await;
+                    let extract = join_extract_finished(&extract_task, &preview_task).await;
                     let outbox = join_outbox_finished(&outbox_task, &webhook_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
                     let import = join_import_finished(&import_task).await;
@@ -487,7 +516,12 @@ fn map_serve_result(
 
 async fn join_extract_finished(
     extract_task: &tokio::sync::Mutex<Option<ExtractJobHandle>>,
+    preview_task: &tokio::sync::Mutex<Option<PreviewJobHandle>>,
 ) -> Result<(), String> {
+    if let Some(job) = preview_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await?;
+    }
     if let Some(job) = extract_task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;

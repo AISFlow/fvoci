@@ -27,7 +27,10 @@ import {
 import { projectAncestors } from "./project-ancestors";
 import { projectDocumentsQuery } from "@/features/projects/queries";
 import { CommentPanel } from "@/features/comments/comment-panel";
-import { createAttachmentBridge } from "@/features/workspace/attachment-upload";
+import {
+  createAttachmentBridge,
+  createProjectDocumentAttachmentBridge,
+} from "@/features/workspace/attachment-upload";
 import { bindBlockPresence, isBlockPresenceAwareness } from "./block-presence";
 import { collabBadge } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
@@ -117,11 +120,15 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
     setStatus(metaQuery.data.status);
   }, [metaQuery.data]);
 
-  // Project document uploads are not ported yet: no bridge, so the editor
-  // ignores file drops/pastes instead of inserting a failing attachment block.
+  // Project documents upload through the project route (affiliation checked
+  // by the server), wiki documents through the wiki route.
+  const projectIdForUploads = project?.id ?? null;
   const attachmentBridge = useMemo(
-    () => (project ? null : createAttachmentBridge(workspaceId, documentId)),
-    [workspaceId, documentId, project],
+    () =>
+      projectIdForUploads
+        ? createProjectDocumentAttachmentBridge(workspaceId, projectIdForUploads, documentId)
+        : createAttachmentBridge(workspaceId, documentId),
+    [workspaceId, documentId, projectIdForUploads],
   );
   const collabUser = useMemo(() => {
     if (!me.data) return null;
@@ -575,9 +582,6 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
           </p>
         ) : null}
         {!ready && collabSession?.status !== "unauthorized" ? <QueryLoading /> : null}
-        {project && !readOnly ? (
-          <p className="document-page__body-note">{t("doc.attachment.projectUnsupported")}</p>
-        ) : null}
         {ready && collabSession && collabUser ? (
           <AttachmentBlockContext.Provider value={attachmentBridge}>
             <FvociEditor

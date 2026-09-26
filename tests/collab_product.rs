@@ -589,6 +589,7 @@ async fn collab_app_state_with_config(app_url: &str, cfg: CollabConfig) -> AppSt
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,
+        quota: Default::default(),
         mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }
@@ -634,6 +635,7 @@ async fn collab_app_state(
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,
+        quota: Default::default(),
         mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     };
     (state, helper_capacity)

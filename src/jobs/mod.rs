@@ -50,6 +50,9 @@ pub use workspace::{
     run_workspace_purge, WorkspacePurgeStats, WORKSPACE_PURGE_AFTER_DAYS, WORKSPACE_PURGE_BATCH,
 };
 
+/// Journal rows reclaimed per upload-GC run (source `OBJECT_CLEANUP_BATCH`).
+pub const OBJECT_CLEANUP_BATCH: i64 = 100;
+
 const DEFAULT_TICK: Duration = Duration::from_secs(60);
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_UPLOAD_GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -219,7 +222,30 @@ pub async fn run_stale_upload_sweep(
         .checked_sub_signed(ttl)
         .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC);
     let result = run_stale_upload_gc(pool, storage, cutoff, after, UPLOAD_GC_BATCH, cancel).await;
+    // Same claim: drain the object journal written by attachment deletes.
+    let cleanup = if cancel.is_cancelled() {
+        Ok(Default::default())
+    } else {
+        crate::db::attachments::reclaim_attachment_objects(
+            pool,
+            storage,
+            None,
+            OBJECT_CLEANUP_BATCH,
+        )
+        .await
+    };
     claim.release().await;
+    match cleanup {
+        Ok(cleanup) if cleanup.claimed > 0 => info!(
+            claimed = cleanup.claimed,
+            reclaimed = cleanup.reclaimed,
+            busy = cleanup.busy,
+            failed = cleanup.failed,
+            "maintenance.attachment_object_cleanup"
+        ),
+        Ok(_) => {}
+        Err(err) => warn!(error = %err, "maintenance.attachment_object_cleanup_failed"),
+    }
     let stats = result?;
     if stats.claimed > 0 {
         info!(
