@@ -20,3 +20,6 @@ scripts/backup-restore-smoke.sh
 compat/target
 scripts/document-convert/node_modules
 .cargo-target
+
+# CodeGraph dev-tool index
+.codegraph
