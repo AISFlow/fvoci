@@ -543,6 +543,17 @@ const MAX_CONCURRENT_TEST_SERVERS: usize = 3;
 static TEST_SERVER_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TEST_SERVERS)));
 
+/// One concurrent-server slot (see `MAX_CONCURRENT_TEST_SERVERS`). Suites that
+/// build `CollabHub`s directly instead of through `spawn_server` hold one permit
+/// per live hub and drop it only after `hub.shutdown()` has reaped its children.
+pub async fn acquire_test_server_slot() -> tokio::sync::OwnedSemaphorePermit {
+    TEST_SERVER_SLOTS
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("test server slot")
+}
+
 impl TestServer {
     pub fn hub(&self) -> Arc<CollabHub> {
         self.hub.clone()
