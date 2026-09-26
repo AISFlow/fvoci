@@ -48,6 +48,7 @@ openidconnect = { version = "=4.0.1", default-features = false, features = ["acc
 rand = "0.9"
 regex = "1"
 ring = "0.17"
+spki = { version = "=0.7.3", features = ["pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
