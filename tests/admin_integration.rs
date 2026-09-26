@@ -1830,3 +1830,556 @@ async fn share_policy_setting_governs_share_links() {
     assert!((71..=72).contains(&days), "default 3 days, got {days} h");
     h.finish().await;
 }
+
+async fn erase(h: &Harness, path: &str, user_id: Uuid, cookie: Option<&str>) -> Reply {
+    with_json(
+        &h.app,
+        "POST",
+        &format!("/api/v1/admin/users/{path}"),
+        json!({ "userId": user_id }),
+        cookie,
+    )
+    .await
+}
+
+async fn count_events(admin: &PgPool, verb: &str, target: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM fvoci.events WHERE verb = $1 AND target_id = $2")
+        .bind(verb)
+        .bind(target)
+        .fetch_one(admin)
+        .await
+        .unwrap()
+}
+
+/// Source `scheduleUserErasure` / `cancelUserErasure({ actorAdminId })` and
+/// admin-directory.test.ts: admin-only (404 otherwise), no cancel token in
+/// the response, replay keeps the deadline, owner / last-admin rules, and a
+/// cancel that clears the pending erasure without reviving credentials.
+#[tokio::test]
+async fn admin_erase_and_cancel_follow_the_source_rules() {
+    let h = harness().await;
+    let admin = h.db.admin().await;
+    let acme = h.acme_id().await;
+    let (victim_id, victim) = h.user("victim@example.com", Some("member")).await;
+    let (member_id, member) = h.user("member@example.com", Some("member")).await;
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.invitations (id, workspace_id, email, role, token_hash, invited_by, expires_at)
+        VALUES ($1, $2, 'pending@example.com', 'member', 'victim-invite', $3, now() + interval '1 day')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(acme)
+    .bind(victim_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    // Hidden from anonymous callers and non-admins; strict body.
+    assert_eq!(
+        erase(&h, "erase", victim_id, None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    for path in ["erase", "cancel-erase"] {
+        let reply = erase(&h, path, victim_id, Some(&member)).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::NOT_FOUND,
+            "{path}: {}",
+            reply.json
+        );
+    }
+    let extra = with_json(
+        &h.app,
+        "POST",
+        "/api/v1/admin/users/erase",
+        json!({ "userId": victim_id, "cancelToken": "x" }),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(extra.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        erase(&h, "erase", Uuid::now_v7(), Some(&h.admin_cookie))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        erase(&h, "cancel-erase", victim_id, Some(&h.admin_cookie))
+            .await
+            .status,
+        StatusCode::NOT_FOUND,
+        "nothing pending yet"
+    );
+    assert_eq!(count_events(&admin, "user.withdrawn", victim_id).await, 0);
+
+    // Schedule: the admin sees the deadline, never the token.
+    let before = Utc::now();
+    let scheduled = erase(&h, "erase", victim_id, Some(&h.admin_cookie)).await;
+    assert_eq!(scheduled.status, StatusCode::OK, "{}", scheduled.json);
+    assert_eq!(scheduled.json["ok"], true);
+    assert_eq!(scheduled.json["mailSent"], false);
+    assert!(scheduled.json.get("cancelToken").is_none());
+    let erase_at =
+        chrono::DateTime::parse_from_rfc3339(scheduled.json["eraseAt"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+    assert!(erase_at >= before + ChronoDuration::days(14));
+    assert!(erase_at <= Utc::now() + ChronoDuration::days(14));
+    // Credentials revoked and sent invitations removed in the same transaction.
+    assert_eq!(
+        get(&h.app, "/api/v1/auth/me", Some(&victim)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let invites: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.invitations WHERE invited_by = $1")
+            .bind(victim_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(invites, 0);
+    let (hash, deleted): (Option<String>, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
+        "SELECT withdraw_cancel_token_hash, deleted_at FROM fvoci.users WHERE id = $1",
+    )
+    .bind(victim_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(hash.is_some() && deleted.is_some());
+    let (actor, channel): (Option<Uuid>, String) = sqlx::query_as(
+        "SELECT actor_user_id, channel FROM fvoci.events WHERE verb = 'user.withdrawn' AND target_id = $1",
+    )
+    .bind(victim_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!((actor, channel.as_str()), (Some(h.admin_id), "web"));
+    let audit_actor: Option<Uuid> = sqlx::query_scalar(
+        "SELECT actor_user_id FROM fvoci.audit_log WHERE verb = 'user.withdrawn' AND target_id = $1",
+    )
+    .bind(victim_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(audit_actor, Some(h.admin_id));
+
+    // The directory shows the pending erasure with the same deadline.
+    let users = get(&h.app, "/api/v1/admin/users", Some(&h.admin_cookie)).await;
+    let row = users.json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == victim_id.to_string())
+        .expect("victim row")
+        .clone();
+    assert!(row["deletedAt"].is_string());
+    assert_eq!(row["eraseAt"], scheduled.json["eraseAt"]);
+
+    // Replay: same deadline, no new token, no second event.
+    let replay = erase(&h, "erase", victim_id, Some(&h.admin_cookie)).await;
+    assert_eq!(replay.status, StatusCode::OK, "{}", replay.json);
+    assert_eq!(replay.json["eraseAt"], scheduled.json["eraseAt"]);
+    assert_eq!(replay.json["mailSent"], false);
+    let hash_after: Option<String> =
+        sqlx::query_scalar("SELECT withdraw_cancel_token_hash FROM fvoci.users WHERE id = $1")
+            .bind(victim_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(hash_after, hash);
+    assert_eq!(count_events(&admin, "user.withdrawn", victim_id).await, 1);
+
+    // Cancel: restores the row and drops the one-time cancel hash; the old
+    // session stays revoked. A replay finds nothing pending.
+    let cancelled = erase(&h, "cancel-erase", victim_id, Some(&h.admin_cookie)).await;
+    assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.json);
+    assert_eq!(cancelled.json, json!({ "ok": true }));
+    let (hash, deleted): (Option<String>, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
+        "SELECT withdraw_cancel_token_hash, deleted_at FROM fvoci.users WHERE id = $1",
+    )
+    .bind(victim_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(hash.is_none() && deleted.is_none());
+    assert_eq!(
+        get(&h.app, "/api/v1/auth/me", Some(&victim)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let replay = erase(&h, "cancel-erase", victim_id, Some(&h.admin_cookie)).await;
+    assert_eq!(replay.status, StatusCode::NOT_FOUND);
+    let (actor,): (Option<Uuid>,) = sqlx::query_as(
+        "SELECT actor_user_id FROM fvoci.events WHERE verb = 'user.withdraw_cancelled' AND target_id = $1",
+    )
+    .bind(victim_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(actor, Some(h.admin_id));
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.audit_log WHERE verb = 'user.withdraw_cancelled' AND target_id = $1",
+    )
+    .bind(victim_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(audits, 1);
+
+    // Past the 14-day grace period the cancel is a 409 conflict.
+    let again = erase(&h, "erase", victim_id, Some(&h.admin_cookie)).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.json);
+    sqlx::query(
+        "UPDATE fvoci.users SET deleted_at = now() - interval '14 days' - interval '1 minute' WHERE id = $1",
+    )
+    .bind(victim_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let late = erase(&h, "cancel-erase", victim_id, Some(&h.admin_cookie)).await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.json);
+    assert_eq!(late.json["code"], "conflict");
+    // Anonymized rows are gone for both operations.
+    sqlx::query("UPDATE fvoci.users SET anonymized_at = now() WHERE id = $1")
+        .bind(victim_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    for path in ["erase", "cancel-erase"] {
+        let reply = erase(&h, path, victim_id, Some(&h.admin_cookie)).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
+    }
+
+    // A team owner must transfer ownership first.
+    sqlx::query("UPDATE fvoci.memberships SET role = 'owner' WHERE user_id = $1")
+        .bind(member_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let owner = erase(&h, "erase", member_id, Some(&h.admin_cookie)).await;
+    assert_eq!(owner.status, StatusCode::CONFLICT);
+    assert_eq!(owner.json["code"], "owner_transfer_required");
+
+    // The last live instance admin cannot be scheduled (here: itself, once it
+    // no longer owns the team workspace).
+    sqlx::query("UPDATE fvoci.memberships SET role = 'admin' WHERE user_id = $1")
+        .bind(h.admin_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let last = erase(&h, "erase", h.admin_id, Some(&h.admin_cookie)).await;
+    assert_eq!(last.status, StatusCode::CONFLICT, "{}", last.json);
+    assert_eq!(last.json["code"], "last_instance_admin");
+    assert_eq!(count_events(&admin, "user.withdrawn", h.admin_id).await, 0);
+    admin.close().await;
+    h.finish().await;
+}
+
+/// The admin cancel definer is its own narrow path: it refuses callers
+/// without a live admin self context and rechecks the grace period with the
+/// database clock; the user's cancel-hash definer still requires the hash.
+#[tokio::test]
+async fn admin_restore_definer_requires_a_live_admin_and_an_open_grace_period() {
+    let h = harness().await;
+    let admin = h.db.admin().await;
+    let (victim_id, _) = h.user("victim@example.com", None).await;
+    let (member_id, _) = h.user("member@example.com", None).await;
+    sqlx::query(
+        "UPDATE fvoci.users SET deleted_at = now() - interval '1 day', withdraw_cancel_token_hash = $2 WHERE id = $1",
+    )
+    .bind(victim_id)
+    .bind("a".repeat(64))
+    .execute(&admin)
+    .await
+    .unwrap();
+    let app = pool::connect_app(&h.db.app_url).await.unwrap();
+
+    let code = |err: sqlx::Error| {
+        err.as_database_error()
+            .unwrap()
+            .code()
+            .map(|c| c.to_string())
+    };
+    let mut tx = app.begin().await.unwrap();
+    let refused =
+        sqlx::query_scalar::<_, bool>("SELECT fvoci.app_admin_user_restore_withdrawn($1)")
+            .bind(victim_id)
+            .fetch_one(&mut *tx)
+            .await;
+    assert_eq!(code(refused.unwrap_err()).as_deref(), Some("42501"));
+    tx.rollback().await.unwrap();
+
+    let mut tx = app.begin().await.unwrap();
+    fvoci_server::db::context::set_self_user(&mut tx, member_id)
+        .await
+        .unwrap();
+    let refused =
+        sqlx::query_scalar::<_, bool>("SELECT fvoci.app_admin_user_restore_withdrawn($1)")
+            .bind(victim_id)
+            .fetch_one(&mut *tx)
+            .await;
+    assert_eq!(code(refused.unwrap_err()).as_deref(), Some("42501"));
+    tx.rollback().await.unwrap();
+
+    // The user's own definer still needs the matching hash.
+    let restored: bool = sqlx::query_scalar("SELECT fvoci.app_user_restore_withdrawn($1, $2)")
+        .bind(victim_id)
+        .bind("b".repeat(64))
+        .fetch_one(&app)
+        .await
+        .unwrap();
+    assert!(!restored);
+
+    // Past the deadline even an admin context restores nothing.
+    sqlx::query(
+        "UPDATE fvoci.users SET deleted_at = now() - interval '14 days 1 second' WHERE id = $1",
+    )
+    .bind(victim_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let mut tx = app.begin().await.unwrap();
+    fvoci_server::db::context::set_self_user(&mut tx, h.admin_id)
+        .await
+        .unwrap();
+    let restored: bool = sqlx::query_scalar("SELECT fvoci.app_admin_user_restore_withdrawn($1)")
+        .bind(victim_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert!(!restored);
+    tx.rollback().await.unwrap();
+
+    sqlx::query("UPDATE fvoci.users SET deleted_at = now() - interval '13 days' WHERE id = $1")
+        .bind(victim_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut tx = app.begin().await.unwrap();
+    fvoci_server::db::context::set_self_user(&mut tx, h.admin_id)
+        .await
+        .unwrap();
+    let restored: bool = sqlx::query_scalar("SELECT fvoci.app_admin_user_restore_withdrawn($1)")
+        .bind(victim_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert!(restored);
+    tx.commit().await.unwrap();
+    let (hash, deleted): (Option<String>, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
+        "SELECT withdraw_cancel_token_hash, deleted_at FROM fvoci.users WHERE id = $1",
+    )
+    .bind(victim_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(hash.is_none() && deleted.is_none());
+    app.close().await;
+    admin.close().await;
+    h.finish().await;
+}
+
+/// The user's token cancel and the admin cancel take the same locks: with
+/// the target row held, both queue; after release exactly one restores the
+/// account and the other finds nothing pending. One cancel event.
+#[tokio::test]
+async fn user_and_admin_cancel_race_restores_once() {
+    let h = harness().await;
+    let admin = h.db.admin().await;
+    let (victim_id, victim) = h.user("victim@example.com", None).await;
+    let withdrawn = with_json(
+        &h.app,
+        "POST",
+        "/api/v1/auth/withdraw",
+        json!({ "currentPassword": "supersecret1" }),
+        Some(&victim),
+    )
+    .await;
+    assert_eq!(withdrawn.status, StatusCode::OK, "{}", withdrawn.json);
+    let token = withdrawn.json["cancelToken"].as_str().unwrap().to_string();
+
+    let mut holder = admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
+        .bind(victim_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let app = h.app.clone();
+    let user_cancel = tokio::spawn(async move {
+        with_json(
+            &app,
+            "POST",
+            "/api/v1/auth/cancel-withdraw",
+            json!({ "token": token }),
+            None,
+        )
+        .await
+    });
+    wait_for_users_lock_waiter(&admin).await;
+    let app = h.app.clone();
+    let cookie = h.admin_cookie.clone();
+    let admin_cancel = tokio::spawn(async move {
+        with_json(
+            &app,
+            "POST",
+            "/api/v1/admin/users/cancel-erase",
+            json!({ "userId": victim_id }),
+            Some(&cookie),
+        )
+        .await
+    });
+    // The admin request queues behind the admission lock the user cancel holds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND state = 'active'",
+        )
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        if waiting >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "admin cancel never queued"
+        );
+        tokio::task::yield_now().await;
+    }
+    holder.commit().await.unwrap();
+    let (user_reply, admin_reply) = (user_cancel.await.unwrap(), admin_cancel.await.unwrap());
+    let statuses = [user_reply.status, admin_reply.status];
+    assert_eq!(
+        statuses.iter().filter(|s| **s == StatusCode::OK).count(),
+        1,
+        "{} / {}",
+        user_reply.json,
+        admin_reply.json
+    );
+    assert!(statuses.contains(&StatusCode::NOT_FOUND));
+    assert_eq!(
+        count_events(&admin, "user.withdraw_cancelled", victim_id).await,
+        1
+    );
+    let deleted: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("SELECT deleted_at FROM fvoci.users WHERE id = $1")
+            .bind(victim_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert!(deleted.is_none());
+    admin.close().await;
+    h.finish().await;
+}
+
+/// Two admins scheduling each other's erasure at once: the admin check runs
+/// under the locks, so the second sees its actor withdrawn and gets 404. One
+/// live admin always remains.
+#[tokio::test]
+async fn concurrent_mutual_erasure_leaves_one_live_admin() {
+    let h = harness().await;
+    let (second_id, second) = h.user("second@example.com", None).await;
+    let promote = with_json(
+        &h.app,
+        "PATCH",
+        "/api/v1/admin/users",
+        json!({"userId": second_id, "instanceAdmin": true}),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(promote.status, StatusCode::OK);
+    // The setup admin owns the team workspace; hand it to someone else so
+    // both erasures are allowed on their own.
+    h.user("owner@example.com", Some("owner")).await;
+    let admin = h.db.admin().await;
+    sqlx::query("UPDATE fvoci.memberships SET role = 'admin' WHERE user_id = $1")
+        .bind(h.admin_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        erase(&h, "erase", second_id, Some(&h.admin_cookie)),
+        erase(&h, "erase", h.admin_id, Some(&second)),
+    );
+    let statuses = [a.status, b.status];
+    assert_eq!(
+        statuses.iter().filter(|s| **s == StatusCode::OK).count(),
+        1,
+        "{} / {}",
+        a.json,
+        b.json
+    );
+    assert!(
+        statuses.contains(&StatusCode::NOT_FOUND),
+        "{} / {}",
+        a.json,
+        b.json
+    );
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.users WHERE is_instance_admin AND deleted_at IS NULL AND suspended_at IS NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(live, 1);
+    admin.close().await;
+    h.finish().await;
+}
+
+/// `fvoci-migrate --verify-storage` also covers branding assets: each one the
+/// instance settings reference must exist with its recorded SHA-256.
+#[tokio::test]
+async fn verify_storage_covers_branding_assets() {
+    let h = harness().await;
+    let storage: fvoci_server::attachments::ObjectStorage =
+        fvoci_server::attachments::LocalStorage::new(h.storage_root.clone()).into();
+    let pool = pool::connect_app(&h.db.app_url).await.unwrap();
+    let report = fvoci_server::attachments::verify_stored_objects(&pool, &storage)
+        .await
+        .unwrap();
+    assert_eq!(report.branding_checked, 0);
+    assert!(report.is_complete());
+
+    let mut keys = Vec::new();
+    for kind in ["logo", "favicon"] {
+        let reply = send(
+            &h.app,
+            "POST",
+            &format!("/api/v1/admin/branding/assets/{kind}"),
+            Some(("application/octet-stream", tiny_png())),
+            Some(&h.admin_cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.json);
+        keys.push(
+            reply.json["values"]["branding"][kind]["key"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let report = fvoci_server::attachments::verify_stored_objects(&pool, &storage)
+        .await
+        .unwrap();
+    assert_eq!(report.branding_checked, 2);
+    assert!(report.is_complete(), "{report:?}");
+    let printed = serde_json::to_value(&report).unwrap();
+    assert_eq!(printed["brandingChecked"], 2);
+    assert_eq!(printed["brandingMissing"], json!([]));
+
+    // Same length, different bytes: the digest catches it.
+    let mut other = tiny_png();
+    let last = other.len() - 1;
+    other[last] ^= 0xff;
+    storage.delete_object(&keys[0]).await.unwrap();
+    storage.put_bytes(&keys[0], other).await.unwrap();
+    storage.delete_object(&keys[1]).await.unwrap();
+    let report = fvoci_server::attachments::verify_stored_objects(&pool, &storage)
+        .await
+        .unwrap();
+    assert_eq!(report.branding_mismatch, vec!["logo"]);
+    assert_eq!(report.branding_missing, vec!["favicon"]);
+    assert!(!report.is_complete());
+    pool.close().await;
+    h.finish().await;
+}

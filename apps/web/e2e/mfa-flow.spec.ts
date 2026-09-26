@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
 import { logout } from "./helpers";
+import { qrModules } from "../src/lib/qr";
 
 const owner = {
   email: "mfa-owner@example.com",
@@ -95,7 +96,14 @@ test("TOTP MFA: setup, enable, login challenge with TOTP and single-use recovery
   await mfa.getByRole("button", { name: "설정", exact: true }).click();
   const secretText = (await mfa.getByTestId("mfa-secret").textContent())?.trim() ?? "";
   expect(secretText).toMatch(/^[A-Z2-7=\s]+$/i);
-  await expect(mfa.getByTestId("mfa-otpauth-uri")).toContainText("otpauth://totp/");
+  // The otpauth URI is only a link target and a QR code (source QrSvg), not text.
+  const otpauthLink = mfa.getByTestId("mfa-otpauth-uri");
+  await expect(otpauthLink).toHaveAttribute("href", /^otpauth:\/\/totp\//);
+  await expect(otpauthLink).not.toContainText("otpauth");
+  const otpauthUri = (await otpauthLink.getAttribute("href")) ?? "";
+  await expect(mfa.getByTestId("mfa-qr")).toBeVisible();
+  const qrPath = await mfa.getByTestId("mfa-qr").locator("path").getAttribute("d");
+  expect(qrPath).toBe(qrModules(otpauthUri).path);
 
   // A wrong code keeps MFA off.
   await mfa.locator("#settings-mfa-code").fill("abcdef");

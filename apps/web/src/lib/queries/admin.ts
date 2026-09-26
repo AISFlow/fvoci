@@ -39,6 +39,19 @@ export const publicInstanceQuery = queryOptions({
   queryFn: async () => ensureOk(await api.GET("/api/v1/instance")),
 });
 
+/**
+ * Revalidates `/instance` past the browser's 60 s HTTP cache (ETag, so a 304
+ * when nothing changed) and stores it under the shared `["instance"]` key.
+ * For screens that act on a policy an admin may just have changed.
+ */
+export function refreshPublicInstance(queryClient: QueryClient) {
+  return queryClient.fetchQuery({
+    queryKey: publicInstanceQuery.queryKey,
+    queryFn: async () => ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
+    staleTime: 0,
+  });
+}
+
 export function legalDocQuery(kind: string, version?: number) {
   return queryOptions({
     queryKey: ["legal", kind, version ?? "latest"] as const,

@@ -229,3 +229,7 @@ REVOKE EXECUTE ON FUNCTION fvoci.app_auth_ephemeral_purge_expired(timestamptz, i
 GRANT EXECUTE ON FUNCTION fvoci.app_auth_ephemeral_purge_expired(timestamptz, integer) TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_workspace_sso_id_by_slug(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_workspace_sso_id_by_slug(text) TO :"app_role";
+
+-- 032 admin user erasure cancel.
+REVOKE EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) TO :"app_role";

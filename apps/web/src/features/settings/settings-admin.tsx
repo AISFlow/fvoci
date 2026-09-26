@@ -1,6 +1,4 @@
 // Adapted from source apps/web/src/features/settings/settings-admin.tsx.
-// Account erasure (admin erase / cancel-erase) belongs to the account
-// lifecycle slice and is not wired here yet; its controls are left out.
 import { formatPersonName, t } from "@fvoci/i18n";
 import { useState } from "react";
 import { ConfirmActionButton } from "@/components/confirm-action";
@@ -8,6 +6,7 @@ import { QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import type { components } from "@/generated/api";
 import { ProblemError } from "@/lib/api";
+import { formatDateKo } from "@/lib/datetime";
 import type { BrandingAssetKind } from "./settings-catalog";
 import { InstanceSettingsView } from "./settings-instance";
 import "./settings-shell.css";
@@ -29,6 +28,11 @@ export function adminActionMessage(err: unknown): string {
   return t("error.network");
 }
 
+/** Whole days left until `iso` (source `daysUntil`); 0 once the deadline passed. */
+export function daysUntil(iso: string, now: number = Date.now()): number {
+  return Math.max(0, Math.ceil((Date.parse(iso) - now) / 86_400_000));
+}
+
 const cellClass = "border-b border-border px-2 py-2 align-top text-ui";
 const headClass = "border-b border-border px-2 py-2 text-left text-caption font-medium text-muted-foreground";
 
@@ -40,6 +44,8 @@ export function AdminSettingsView({
   error,
   pending,
   onPatchUser,
+  onEraseUser,
+  onCancelEraseUser,
   settings,
   settingsPending,
   settingsLoading = false,
@@ -55,6 +61,8 @@ export function AdminSettingsView({
   error: string | null;
   pending: boolean;
   onPatchUser: (userId: string, patch: AdminUserPatch) => Promise<void>;
+  onEraseUser: (userId: string) => Promise<void>;
+  onCancelEraseUser: (userId: string) => Promise<void>;
   settings: AdminInstanceSettings | null;
   settingsPending: boolean;
   settingsLoading?: boolean;
@@ -67,17 +75,21 @@ export function AdminSettingsView({
   const [changing, setChanging] = useState(false);
   const busy = pending || changing;
 
-  async function patchUser(userId: string, patch: AdminUserPatch): Promise<void> {
+  async function runUserAction(task: () => Promise<void>): Promise<void> {
     if (busy) return;
     setActionError(null);
     setChanging(true);
     try {
-      await onPatchUser(userId, patch);
+      await task();
     } catch (err) {
       setActionError(adminActionMessage(err));
     } finally {
       setChanging(false);
     }
+  }
+
+  function patchUser(userId: string, patch: AdminUserPatch): Promise<void> {
+    return runUserAction(() => onPatchUser(userId, patch));
   }
 
   return (
@@ -133,11 +145,20 @@ export function AdminSettingsView({
             <tbody>
               {users.map((u) => {
                 const deleted = u.deletedAt != null;
+                const pendingAt = u.eraseAt ?? null;
+                const days = pendingAt ? daysUntil(pendingAt) : null;
                 const name = formatPersonName(u);
                 return (
                   <tr key={u.id}>
                     <td className={cellClass}>
                       {name} ({u.email})
+                      {pendingAt && days !== null ? (
+                        <p className="break-keep text-ui text-muted-foreground">
+                          {days === 0
+                            ? t("admin.erase.processing")
+                            : t("admin.erase.until", { date: formatDateKo(pendingAt), days })}
+                        </p>
+                      ) : null}
                     </td>
                     <td className={cellClass}>{u.instanceAdmin ? t("admin.yes") : t("admin.no")}</td>
                     <td className={cellClass}>{u.suspendedAt ? t("admin.yes") : t("admin.no")}</td>
@@ -168,6 +189,32 @@ export function AdminSettingsView({
                         >
                           {u.suspendedAt ? t("admin.restore") : t("admin.suspend")}
                         </ConfirmActionButton>
+                        {deleted ? (
+                          <ConfirmActionButton
+                            title={t("admin.erase.cancel.confirm.title", { name })}
+                            description={
+                              u.suspendedAt
+                                ? t("admin.erase.cancel.confirm.body.suspended")
+                                : t("admin.erase.cancel.confirm.body")
+                            }
+                            actionLabel={t("admin.erase.cancel")}
+                            disabled={busy || days === null || days === 0}
+                            destructive={false}
+                            onConfirm={() => runUserAction(() => onCancelEraseUser(u.id))}
+                          >
+                            {t("admin.erase.cancel")}
+                          </ConfirmActionButton>
+                        ) : (
+                          <ConfirmActionButton
+                            title={t("admin.erase.confirm.title", { name })}
+                            description={t("admin.erase.confirm.body", { name })}
+                            actionLabel={t("admin.erase")}
+                            disabled={busy}
+                            onConfirm={() => runUserAction(() => onEraseUser(u.id))}
+                          >
+                            {t("admin.erase")}
+                          </ConfirmActionButton>
+                        )}
                       </div>
                     </td>
                   </tr>

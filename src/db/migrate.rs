@@ -48,6 +48,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/031_attachment_embeddings.sql"),
         31,
     ),
+    (
+        include_str!("../../migrations/032_admin_user_erase.sql"),
+        32,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -498,6 +502,10 @@ mod tests {
         (
             31,
             "c098b60993d173feb3c7f2f4c33a7c4df7a90c6515aa656a1e96400e871ec643",
+        ),
+        (
+            32,
+            "dbf49b5d5bf969376406208582f976bd9cc4d04a8b2d76d90fee53d2902b3687",
         ),
     ];
 

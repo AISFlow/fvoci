@@ -22,45 +22,45 @@ use crate::api::collections_dto::{
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
     ActivityActorOutput, ActivityChangeOutput, ActivityCommentParentOutput, ActivityItemOutput,
-    ActivityListResponse, AddProjectMemberBody, AdminInstanceSettingsOutput, AdminSystemOutput,
-    AdminUserItemOutput, AdminUserListResponse, AdminUserPatchBody, AdminUserPatchOutput,
-    AdminWorkspaceItemOutput, AdminWorkspaceListResponse, AncestorsResponse, ApiTokenCreateBody,
-    ApiTokenCreatedOutput, ApiTokenListResponse, ApiTokenOutput, AttachmentEditContextOutput,
-    AttachmentListOutput, AttachmentOutput, AttachmentPartUrlResponse, AttachmentPreviewHtmlOutput,
-    AttachmentUploadedPartResponse, AuditLogItemOutput, AuditLogListResponse, BodyResponse,
-    BrandingOutput, BrandingPatchSchema, CloneProjectBody, CommentListResponse, CommentOutput,
-    CommentReactionBody, CommentReactionSummary, CompleteAttachmentUploadBody, ConsentItemBody,
-    ConsentsPendingResponse, ConsentsSubmitBody, CreateAttachmentUploadBody,
-    CreateAttachmentUploadResponse, CreateCommentBody, CreateDocumentBody, CreateGroupBody,
-    CreateHolidayBody, CreateLabelBody, CreateMilestoneBody, CreateProjectBody, CreateTaskBody,
-    CreateTaskDependencyBody, CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse,
-    DocumentShareLinkCreateBody, ExpectedDatesBody, GroupListResponse, GroupMemberBody,
-    GroupMemberListResponse, GroupMemberOutput, GroupOutput, HolidaysListResponse,
-    IcsTokenResponse, ImportJobResponse, InstanceAdminBody, InstanceSettingsOutput,
-    InstanceSettingsPatchSchema, InvitationAcceptBody, InvitationConsentItem, InvitationCreateBody,
-    InvitationCreateResponse, InvitationLegalDocument, InvitationPublicResponse, LabelListResponse,
-    LabelOutput, LegalDocumentOutput, LegalPublishBody, LegalVersionMetaOutput,
-    LegalVersionsResponse, LoginBody, LoginResponse, LookupItemOutput, LookupListResponse,
-    MeApiTokenCreateBody, MemberConsentOutput, MemberResponse, MemberRoleBody, MembersResponse,
-    MilestoneListResponse, MilestoneOutput, MoveDocumentBody, MoveTaskBody, NotificationItemOutput,
-    NotificationListResponse, NotificationPatchBody, NotificationPrefsBody,
-    NotificationReadAllResponse, NotificationUnreadCountResponse, OkResponse, PasswordResetBody,
-    PasswordResetConfirmBody, PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody,
-    PatchMilestoneBody, PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse,
-    ProjectGroupGrantBody, ProjectGroupGrantListResponse, ProjectGroupGrantOutput,
-    ProjectGroupRevokeBody, ProjectListResponse, ProjectMembersResponse, ProjectOutput,
-    PublicBrandingOutput, PublicSettingsValues, PutAttachmentPartResponse, RecentItemOutput,
-    RecentListResponse, ResumeAttachmentUploadResponse, RevisionCreateResponse,
-    RevisionDetailResponse, RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody,
-    RevisionRestoreResponse, SearchItemOutput, SearchListResponse, SearchSnippetPiece,
-    SessionUserOutput, SetupBody, SetupResponse, SetupStatusResponse, ShareCreateBody,
-    ShareLinkCreatedOutput, ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput,
-    SortDocumentBody, StarCreateBody, StarItemOutput, StarListResponse, StartImportBody,
-    TaskChildOutput, TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput,
-    TaskListResponse, TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse,
-    TrashListResponse, TreeResponse, WorkflowOutput, WorkspaceConsentsResponse,
-    WorkspaceListItemResponse, WorkspaceListResponse, WorkspaceMemberConsentsOutput,
-    WorkspaceMetaResponse,
+    ActivityListResponse, AddProjectMemberBody, AdminEraseBody, AdminErasureScheduleOutput,
+    AdminInstanceSettingsOutput, AdminSystemOutput, AdminUserItemOutput, AdminUserListResponse,
+    AdminUserPatchBody, AdminUserPatchOutput, AdminWorkspaceItemOutput, AdminWorkspaceListResponse,
+    AncestorsResponse, ApiTokenCreateBody, ApiTokenCreatedOutput, ApiTokenListResponse,
+    ApiTokenOutput, AttachmentEditContextOutput, AttachmentListOutput, AttachmentOutput,
+    AttachmentPartUrlResponse, AttachmentPreviewHtmlOutput, AttachmentUploadedPartResponse,
+    AuditLogItemOutput, AuditLogListResponse, BodyResponse, BrandingOutput, BrandingPatchSchema,
+    CloneProjectBody, CommentListResponse, CommentOutput, CommentReactionBody,
+    CommentReactionSummary, CompleteAttachmentUploadBody, ConsentItemBody, ConsentsPendingResponse,
+    ConsentsSubmitBody, CreateAttachmentUploadBody, CreateAttachmentUploadResponse,
+    CreateCommentBody, CreateDocumentBody, CreateGroupBody, CreateHolidayBody, CreateLabelBody,
+    CreateMilestoneBody, CreateProjectBody, CreateTaskBody, CreateTaskDependencyBody,
+    CreateWorkspaceBody, DeleteWorkspaceBody, DocumentMetaResponse, DocumentShareLinkCreateBody,
+    ExpectedDatesBody, GroupListResponse, GroupMemberBody, GroupMemberListResponse,
+    GroupMemberOutput, GroupOutput, HolidaysListResponse, IcsTokenResponse, ImportJobResponse,
+    InstanceAdminBody, InstanceSettingsOutput, InstanceSettingsPatchSchema, InvitationAcceptBody,
+    InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
+    InvitationPublicResponse, LabelListResponse, LabelOutput, LegalDocumentOutput,
+    LegalPublishBody, LegalVersionMetaOutput, LegalVersionsResponse, LoginBody, LoginResponse,
+    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput,
+    MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse, MilestoneOutput,
+    MoveDocumentBody, MoveTaskBody, NotificationItemOutput, NotificationListResponse,
+    NotificationPatchBody, NotificationPrefsBody, NotificationReadAllResponse,
+    NotificationUnreadCountResponse, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
+    PatchCommentBody, PatchDocumentBody, PatchLabelBody, PatchMeBody, PatchMilestoneBody,
+    PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
+    ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
+    ProjectListResponse, ProjectMembersResponse, ProjectOutput, PublicBrandingOutput,
+    PublicSettingsValues, PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
+    ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
+    RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
+    SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
+    SetupResponse, SetupStatusResponse, ShareCreateBody, ShareLinkCreatedOutput,
+    ShareLinkListResponse, ShareLinkOutput, SharePublicMetaOutput, SortDocumentBody,
+    StarCreateBody, StarItemOutput, StarListResponse, StartImportBody, TaskChildOutput,
+    TaskChildProgressOutput, TaskDependencyListResponse, TaskDependencyOutput, TaskListResponse,
+    TaskMetaOutput, TaskOutput, TaskParentOutput, TrashItemResponse, TrashListResponse,
+    TreeResponse, WorkflowOutput, WorkspaceConsentsResponse, WorkspaceListItemResponse,
+    WorkspaceListResponse, WorkspaceMemberConsentsOutput, WorkspaceMetaResponse,
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
@@ -299,6 +299,8 @@ impl Modify for CookieSecurityAddon {
         admin_system,
         admin_users,
         admin_update_users,
+        admin_erase_user,
+        admin_cancel_erase_user,
         admin_workspaces,
         admin_instance_settings,
         admin_update_instance_settings,
@@ -481,6 +483,8 @@ impl Modify for CookieSecurityAddon {
             AdminUserListResponse,
             AdminUserPatchBody,
             AdminUserPatchOutput,
+            AdminEraseBody,
+            AdminErasureScheduleOutput,
             AdminWorkspaceItemOutput,
             AdminWorkspaceListResponse,
             InstanceAdminBody,
@@ -3851,6 +3855,42 @@ fn admin_users() {}
     )
 )]
 fn admin_update_users() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/users/erase",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    request_body = AdminEraseBody,
+    responses(
+        (status = 200, description = "Erasure scheduled (or already pending); the cancel link is mailed to the user", body = AdminErasureScheduleOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin or user not found", body = ProblemResponse),
+        (status = 409, description = "owner_transfer_required or last_instance_admin", body = ProblemResponse),
+    )
+)]
+fn admin_erase_user() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/users/cancel-erase",
+    tag = "admin",
+    security(("fvoci_session" = [])),
+    request_body = AdminEraseBody,
+    responses(
+        (status = 200, description = "Erasure cancelled", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Origin mismatch", body = ProblemResponse),
+        (status = 404, description = "Not an instance admin or no pending erasure", body = ProblemResponse),
+        (status = 409, description = "Grace period over (conflict)", body = ProblemResponse),
+    )
+)]
+fn admin_cancel_erase_user() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
