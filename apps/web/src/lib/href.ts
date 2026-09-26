@@ -111,6 +111,11 @@ export function projectsPath(slug: string): string {
   return `/w/${slug.toLowerCase()}/projects`;
 }
 
+/** Source `href.myTasks`. */
+export function myTasksPath(slug: string): string {
+  return `/w/${slug.toLowerCase()}/my-tasks`;
+}
+
 export function notificationsPath(slug: string): string {
   return `/w/${slug.toLowerCase()}/notifications`;
 }
@@ -143,6 +148,11 @@ export function projectCollectionPath(
   type: "table" | "board" | "calendar",
 ): string {
   return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}/${type}`;
+}
+
+/** Source `href.projectWorkflow`: project workflow status settings. */
+export function projectWorkflowPath(slug: string, key: string): string {
+  return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}/settings/workflow`;
 }
 
 /** Source `href.projectFields`: project collection field settings. */

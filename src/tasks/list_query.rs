@@ -432,9 +432,10 @@ fn reject_unknown_keys(
     Ok(())
 }
 
+/// `project_id` is `None` for the workspace-wide list.
 pub fn filter_fingerprint(
     workspace_id: Uuid,
-    project_id: Uuid,
+    project_id: Option<Uuid>,
     query: &ParsedTaskListQuery,
 ) -> String {
     let assignee_id = match &query.view.filters.assignee_id {
@@ -444,7 +445,7 @@ pub fn filter_fingerprint(
     };
     let payload = serde_json::json!({
         "workspaceId": workspace_id.to_string(),
-        "projectId": project_id.to_string(),
+        "projectId": project_id.map(|id| id.to_string()),
         "query": {
             "filters": {
                 "type": query.view.filters.task_type,
@@ -842,8 +843,8 @@ mod tests {
         )
         .unwrap();
         assert_ne!(
-            filter_fingerprint(workspace, project, &base),
-            filter_fingerprint(workspace, project, &filtered)
+            filter_fingerprint(workspace, Some(project), &base),
+            filter_fingerprint(workspace, Some(project), &filtered)
         );
         let with_milestone = parse_task_list_query(
             Some(r#"{"filters":{"milestoneId":"550e8400-e29b-41d4-a716-446655440000"}}"#),
@@ -855,8 +856,8 @@ mod tests {
         )
         .unwrap();
         assert_ne!(
-            filter_fingerprint(workspace, project, &base),
-            filter_fingerprint(workspace, project, &with_milestone)
+            filter_fingerprint(workspace, Some(project), &base),
+            filter_fingerprint(workspace, Some(project), &with_milestone)
         );
     }
 

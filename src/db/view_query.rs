@@ -37,8 +37,9 @@ impl RootKind {
     }
 }
 
-/// Where the query runs. A task query always has a project; a collection
-/// query pins its collection so catalog lookups never leave it.
+/// Where the query runs. A task query has a project, or neither a project nor
+/// a collection for the workspace-wide list; a collection query pins its
+/// collection so catalog lookups never leave it.
 #[derive(Debug, Clone, Copy)]
 pub struct ViewScope {
     pub workspace_id: Uuid,
@@ -220,7 +221,12 @@ pub async fn compile_view_query(
             return Ok(Err(InvalidViewQuery));
         }
     }
-    if scope.project_id.is_none() && scope.collection_id.is_none() {
+    // A task query without a project is the workspace-wide list (source
+    // `listTasks(projectId = null)`): its field catalog spans the workspace.
+    if scope.kind == RootKind::Document
+        && scope.project_id.is_none()
+        && scope.collection_id.is_none()
+    {
         return Ok(Err(InvalidViewQuery));
     }
 

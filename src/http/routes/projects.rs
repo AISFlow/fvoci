@@ -800,6 +800,9 @@ pub fn map_project_error(err: ProjectDbError) -> AppError {
         | ProjectDbError::DependencyContradiction
         | ProjectDbError::TaskCannotBlockItself => AppError::from_code(ProblemCode::InvalidInput),
         ProjectDbError::InvalidInput => AppError::from_code(ProblemCode::InvalidInput),
+        ProjectDbError::OpenTimeEntryExists
+        | ProjectDbError::StatusHasTasks
+        | ProjectDbError::WorkflowStatusLimit => AppError::from_code(ProblemCode::Conflict),
         ProjectDbError::InvalidCursor => AppError {
             status: StatusCode::BAD_REQUEST,
             code: ProblemCode::InvalidInput,
