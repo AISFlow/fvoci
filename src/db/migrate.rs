@@ -44,6 +44,11 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/030_attachments_complete.sql"),
         30,
     ),
+    // 031-033 are reserved by open branches.
+    (
+        include_str!("../../migrations/034_task_time_entries.sql"),
+        34,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -490,6 +495,11 @@ mod tests {
         (
             30,
             "c5fb3f817fb536b10dd9ab68b626b9cd598c2a4198eded19b2dd8d58c385d1e8",
+        ),
+        // 031-033 are reserved by open branches.
+        (
+            34,
+            "a15a3adb05357c2ac6e8cb70265b7b8319d18c3a934f1ef4658bb0cbe4cee7a4",
         ),
     ];
 

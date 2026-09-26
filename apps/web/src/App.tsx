@@ -14,6 +14,8 @@ import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
 import { ProjectCollectionPage } from "@/pages/ProjectCollectionPage";
+import { MyTasksPage } from "@/pages/MyTasksPage";
+import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
 import { NotificationsPage } from "@/pages/NotificationsPage";
 import { InvitePage } from "@/pages/InvitePage";
@@ -148,6 +150,7 @@ export function App() {
           >
             <Route index element={<WorkspaceHomePage />} />
             <Route path="projects" element={<ProjectsPage />} />
+            <Route path="my-tasks" element={<MyTasksPage />} />
             <Route path="wiki" element={<WikiPage />} />
             <Route path="search" element={<SearchPage />} />
             <Route path="trash" element={<TrashPage />} />
@@ -160,6 +163,7 @@ export function App() {
             <Route path=":ref/board" element={<ProjectCollectionPage type="board" />} />
             <Route path=":ref/calendar" element={<ProjectCollectionPage type="calendar" />} />
             <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
+            <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
             <Route path=":ref" element={<WorkspaceRefPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

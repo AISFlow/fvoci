@@ -1,10 +1,15 @@
 // Source `ProjectViewChrome` tabs: task list, collection views and field settings.
 import { t } from "@fvoci/i18n";
 import { Link } from "react-router-dom";
-import { projectCollectionPath, projectFieldsPath, projectTasksPath } from "@/lib/href";
+import {
+  projectCollectionPath,
+  projectFieldsPath,
+  projectTasksPath,
+  projectWorkflowPath,
+} from "@/lib/href";
 import "./collections.css";
 
-export type ProjectViewTab = "tasks" | "table" | "board" | "calendar" | "fields";
+export type ProjectViewTab = "tasks" | "table" | "board" | "calendar" | "fields" | "workflow";
 
 export function ProjectViewNav({
   slug,
@@ -25,6 +30,11 @@ export function ProjectViewNav({
       label: t("collection.calendar"),
     },
     { id: "fields", to: projectFieldsPath(slug, projectKey), label: t("collection.fieldSettings") },
+    {
+      id: "workflow",
+      to: projectWorkflowPath(slug, projectKey),
+      label: t("project.settings.workflow"),
+    },
   ];
   return (
     <nav className="project-view-nav" aria-label={t("project.settings.navigation")}>

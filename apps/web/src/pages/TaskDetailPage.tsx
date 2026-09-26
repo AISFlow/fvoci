@@ -20,7 +20,7 @@ import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
-import { parseRef, projectsPath, projectTasksPath } from "@/lib/href";
+import { itemPath, parseRef, projectsPath, projectTasksPath } from "@/lib/href";
 import { CollabRoom } from "@/features/documents/collab-session";
 import { DocumentView } from "@/features/documents/document-view";
 import "@/features/projects/projects.css";
@@ -130,8 +130,50 @@ export function TaskDetailPage() {
     },
   });
 
+  const cloneTask = useMutation({
+    mutationFn: async () =>
+      ensureOk(
+        await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/clone", {
+          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+        }),
+      ),
+    onSuccess: async (created) => {
+      setActionError(null);
+      await invalidateTaskCaches(queryClient, workspaceId, projectId, taskId);
+      await navigate(itemPath(slug, created.displayId));
+    },
+    onError: (err) => {
+      setActionError(taskMutationErrorMessage(err, "task.clone.failed"));
+    },
+  });
+
+  /* Source `tasks.remove`: permanent delete, session only. */
+  const deleteTask = useMutation({
+    mutationFn: async () =>
+      ensureOk(
+        await api.DELETE("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
+          params: { path: { workspace_id: workspaceId, task_id: taskId } },
+        }),
+      ),
+    onSuccess: async () => {
+      setActionError(null);
+      await invalidateTaskCaches(queryClient, workspaceId, projectId, taskId);
+      const projectKey = project?.key ?? item?.prefix ?? "";
+      if (projectKey) {
+        await navigate(projectTasksPath(slug, projectKey));
+      }
+    },
+    onError: (err) => {
+      setActionError(taskMutationErrorMessage(err, "task.delete.failed"));
+    },
+  });
+
   const pending =
-    patchTask.isPending || moveTask.isPending || trashTask.isPending;
+    patchTask.isPending ||
+    moveTask.isPending ||
+    trashTask.isPending ||
+    cloneTask.isPending ||
+    deleteTask.isPending;
 
   const refetchAfterConflict = async (err: unknown) => {
     if (err instanceof ProblemError && err.status === 409) {
@@ -352,6 +394,22 @@ export function TaskDetailPage() {
           }}
           onArchiveToggle={async (archived) => {
             await runPatch({ archived });
+          }}
+          clonePending={cloneTask.isPending}
+          deletePending={deleteTask.isPending}
+          onClone={async () => {
+            try {
+              await cloneTask.mutateAsync();
+            } catch {
+              /* cloneTask.onError already mapped the failure. */
+            }
+          }}
+          onDelete={async () => {
+            try {
+              await deleteTask.mutateAsync();
+            } catch {
+              /* deleteTask.onError already mapped the failure. */
+            }
           }}
           onTrash={async () => {
             if (!window.confirm(`${t("task.trash.confirm.title")}\n${t("task.trash.confirm.body")}`)) {
