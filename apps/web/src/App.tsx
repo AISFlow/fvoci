@@ -13,6 +13,7 @@ import { WorkspaceLayout } from "@/pages/WorkspaceLayout";
 import { WorkspaceRefPage } from "@/pages/WorkspaceRefPage";
 import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
+import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
 import { ProjectCollectionPage } from "@/pages/ProjectCollectionPage";
 import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
@@ -156,6 +157,7 @@ export function App() {
             <Route path="trash" element={<TrashPage />} />
             <Route path="settings" element={<WorkspaceSettingsPage />} />
             <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
+            <Route path="settings/templates" element={<TemplatesSettingsPage />} />
             <Route path="notifications" element={<NotificationsPage />} />
             <Route path="a/:attachmentId/view" element={<AttachmentViewPage />} />
             <Route path=":ref/tasks" element={<ProjectTasksPage />} />

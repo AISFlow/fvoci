@@ -7,6 +7,7 @@ pub mod collections;
 pub mod comments;
 pub mod document_body;
 pub mod document_tags;
+pub mod templates;
 pub mod documents;
 pub mod groups;
 pub mod ics;
