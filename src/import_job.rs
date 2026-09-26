@@ -39,7 +39,6 @@ use crate::db::import_jobs::{
 use crate::db::quota::StorageQuota;
 use crate::db::tasks::{create_import_task, project_status_names, CreateTaskInput};
 use crate::db::workspace::list_members;
-use crate::documents::convert::ConvertClient;
 use crate::documents::import_body::{
     apply_imported_markdown, create_fenced_wiki_document, create_imported_wiki_document,
     ImportBodyError,
@@ -54,7 +53,6 @@ const DEFAULT_POLL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct ImportJobSettings {
-    pub convert: ConvertClient,
     pub extractor_bin: Option<PathBuf>,
     pub extract_limits: Limits,
     /// This binary, run as the `--internal-office-extract` child.
@@ -83,7 +81,7 @@ impl ImportJobSettings {
             .ok_or_else(|| RunError::Failed("markdown helper unavailable".into()))
     }
 
-    pub fn from_env(convert: ConvertClient) -> Self {
+    pub fn from_env() -> Self {
         let extractor_bin = std::env::var("FVOCI_EXTRACTOR_BIN")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -95,7 +93,6 @@ impl ImportJobSettings {
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_POLL);
         Self {
-            convert,
             extractor_bin,
             extract_limits: default_extract_limits(),
             office_helper: std::env::current_exe().ok(),

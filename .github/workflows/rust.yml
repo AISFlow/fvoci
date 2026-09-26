@@ -60,19 +60,19 @@ jobs:
           - runner: ubuntu-24.04
             check: postgres
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test document_import_export_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili
           - runner: ubuntu-24.04
             check: postgres-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test search_semantic --test document_import_formats_integration --test mcp_integration --test doctor_integration
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test search_semantic --test mcp_integration --test doctor_integration
           - runner: ubuntu-24.04-arm
             check: postgres-arm64
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test document_import_export_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili
           - runner: ubuntu-24.04-arm
             check: postgres-arm64-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test search_semantic --test document_import_formats_integration --test mcp_integration --test doctor_integration
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test search_semantic --test mcp_integration --test doctor_integration
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     services:
@@ -209,4 +209,4 @@ jobs:
           set -o pipefail
           cargo test --locked --offline --features db-tests --test collab_product collab_primary_huge_varint_memory_rejected_1008 -- --exact | tee "$RUNNER_TEMP/native-admission-test.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/native-admission-test.log"
-          cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration --test document_api_integration
+          cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration --test document_api_integration --test document_import_export_integration --test document_import_formats_integration

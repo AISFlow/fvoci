@@ -370,7 +370,18 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             None
         }
     };
-    let import_settings = document_convert.clone().map(ImportJobSettings::from_env);
+    // Imports no longer need the Node helper: parsing runs in the markdown
+    // child and the Yjs seed in the collab-engine child. The worker starts
+    // whenever the seed engine is configured.
+    let import_settings = {
+        let settings = ImportJobSettings::from_env();
+        if settings.seed.is_some() {
+            Some(settings)
+        } else {
+            tracing::info!("import worker disabled (no collab engine for the Yjs seed)");
+            None
+        }
+    };
     let import_extractor_available = import_settings
         .as_ref()
         .is_some_and(|settings| settings.extractor_bin.is_some());
