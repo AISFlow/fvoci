@@ -2,8 +2,7 @@
 //! Instance administration against a real PostgreSQL with the non-superuser
 //! app role: admin-only routes, last-admin protection, the 428 consent gate,
 //! consent records, typed instance settings, branding assets and audit paging.
-//! Legal publishing renders markdown through the document convert helper
-//! (FVOCI_DOCUMENT_CONVERT_BIN, see scripts/prepare-document-convert.sh).
+//! Legal publishing renders markdown through the `--internal-markdown` child.
 
 use std::sync::Arc;
 
@@ -13,7 +12,6 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
 use fvoci_server::db::{migrate, pool, Db};
-use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
 use rand::RngCore;
@@ -131,12 +129,6 @@ fn join_db_url(server_url: &str, db_name: &str) -> String {
     parsed.to_string()
 }
 
-fn convert_client() -> ConvertClient {
-    ConvertClient::from_env().expect(
-        "FVOCI_DOCUMENT_CONVERT_BIN is required; run scripts/prepare-document-convert.sh first",
-    )
-}
-
 struct Harness {
     db: TestDb,
     app: axum::Router,
@@ -168,7 +160,6 @@ async fn app_state(app_url: &str, storage_root: &std::path::Path) -> AppState {
         collab: None,
         meili: None,
         search_embedder: None,
-        document_convert: Some(convert_client()),
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"

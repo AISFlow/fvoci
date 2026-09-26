@@ -171,7 +171,6 @@ pub async fn run_doctor() -> DoctorReport {
             Err(err) => Err(err),
         },
     );
-    checks.result("document_convert", convert_check().await);
     if let Some(collab) = &collab {
         checks.result("collab_engine", collab_engine_check(collab).await);
     }
@@ -321,18 +320,6 @@ async fn storage_check() -> Result<Option<String>, String> {
         }
         .to_string(),
     ))
-}
-
-async fn convert_check() -> Result<Option<String>, String> {
-    let Some(client) = crate::documents::convert::ConvertClient::from_env() else {
-        return disabled("FVOCI_DOCUMENT_CONVERT_BIN");
-    };
-    match tokio::time::timeout(HELPER_TIMEOUT, client.md_to_tiptap("# ok")).await {
-        Ok(Ok(doc)) if doc.get("type").and_then(|t| t.as_str()) == Some("doc") => Ok(None),
-        Ok(Ok(_)) => Err("convert helper returned an unexpected document".into()),
-        Ok(Err(err)) => Err(format!("convert helper failed: {err}")),
-        Err(_) => Err("convert helper timed out".into()),
-    }
 }
 
 async fn collab_engine_check(collab: &CollabConfig) -> Result<Option<String>, String> {
