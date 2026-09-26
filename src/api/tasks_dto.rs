@@ -209,3 +209,21 @@ pub struct TaskOriginListResponse {
     pub count: usize,
     pub next_cursor: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskProjectOutput {
+    pub id: String,
+    pub name: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskProjectPickerResponse {
+    pub items: Vec<TaskProjectOutput>,
+    pub suggested_id: Option<String>,
+    pub can_create_project: bool,
+}

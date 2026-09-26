@@ -200,16 +200,108 @@ async fn insert_pat(
 }
 
 async fn create_project(addr: SocketAddr, owner: &SessionFixture, key: &str) -> Uuid {
+    create_named_project(addr, owner, key, "private").await
+}
+
+async fn create_named_project(
+    addr: SocketAddr,
+    owner: &SessionFixture,
+    key: &str,
+    visibility: &str,
+) -> Uuid {
     let (status, body) = session_call(
         addr,
         Method::POST,
         &format!("/api/v1/workspaces/{}/projects", owner.workspace_id),
         &owner.session_token,
-        Some(json!({"key": key, "name": key, "visibility": "private"})),
+        Some(json!({"key": key, "name": key, "visibility": visibility})),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     Uuid::parse_str(body["id"].as_str().expect("project id")).unwrap()
+}
+
+fn document_api(workspace_id: Uuid, document_id: Uuid, suffix: &str) -> String {
+    format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}{suffix}")
+}
+
+async fn create_wiki(owner: &SessionFixture, title: &str) -> Uuid {
+    fvoci_server::db::documents::create_wiki_document(
+        &owner.pool,
+        owner.workspace_id,
+        owner.user_id,
+        owner.session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title,
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .id
+}
+
+async fn create_origin_task(
+    addr: SocketAddr,
+    token: &str,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    project_id: Uuid,
+    title: &str,
+) -> Uuid {
+    let (status, body) = session_call(
+        addr,
+        Method::POST,
+        &document_api(workspace_id, document_id, "/tasks"),
+        token,
+        Some(json!({
+            "projectId": project_id,
+            "requestId": Uuid::now_v7(),
+            "task": {"title": title}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    Uuid::parse_str(body["taskId"].as_str().expect("task id")).unwrap()
+}
+
+async fn grant_wiki_group_view(
+    harness: &TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    user_id: Uuid,
+) {
+    let admin = admin_pool(harness).await;
+    let group_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.groups (id, workspace_id, name) VALUES ($1, $2, 'origin-view')")
+        .bind(group_id)
+        .bind(workspace_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.group_members (workspace_id, group_id, user_id) VALUES ($1, $2, $3)",
+    )
+    .bind(workspace_id)
+    .bind(group_id)
+    .bind(user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.document_members (id, workspace_id, document_id, group_id, role) VALUES ($1, $2, $3, $4, 'viewer')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(group_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
 }
 
 async fn create_task(addr: SocketAddr, owner: &SessionFixture, project_id: Uuid) -> Uuid {
@@ -1087,4 +1179,357 @@ async fn task_origin_replay_rechecks_edit_and_concurrent_request_is_single_creat
         admin.close().await;
         run.finish().await.expect("cleanup");
     }).await;
+}
+
+#[tokio::test]
+async fn document_origin_picker_filters_edit_archive_guest_and_pat_scope() {
+    run_test(
+        "document_origin_picker_filters_edit_archive_guest_and_pat_scope",
+        async {
+            let mut run = TestRun::new(TestDb::bootstrap().await);
+            let (addr, f) = setup_task(&mut run, 5_000).await;
+            let ws_id = f.owner.workspace_id;
+            let s = &f.owner;
+            let wiki = create_wiki(s, "피커 문서").await;
+            let admin = admin_pool(&run.harness).await;
+            let root: Uuid =
+                sqlx::query_scalar("SELECT root_document_id FROM fvoci.projects WHERE id = $1")
+                    .bind(f.project_id)
+                    .fetch_one(&admin)
+                    .await
+                    .unwrap();
+            let project_doc = fvoci_server::db::project_documents::create_project_document(
+                &s.pool,
+                ws_id,
+                f.project_id,
+                s.user_id,
+                s.session_id,
+                CreateDocumentInput {
+                    parent_id: Some(root),
+                    title: "프로젝트 출처",
+                    icon: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+            let visible = create_named_project(addr, s, "VIS", "workspace").await;
+            let archived = create_named_project(addr, s, "ARC", "workspace").await;
+            sqlx::query("UPDATE fvoci.projects SET status = 'archived' WHERE id = $1")
+                .bind(archived)
+                .execute(&admin)
+                .await
+                .unwrap();
+
+            let picker_path = document_api(ws_id, wiki, "/task-projects");
+            let (status, picker) =
+                session_call(addr, Method::GET, &picker_path, &s.session_token, None).await;
+            assert_eq!(status, StatusCode::OK, "{picker}");
+            let ids: Vec<String> = picker["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_string())
+                .collect();
+            assert!(ids.contains(&f.project_id.to_string()), "{picker}");
+            assert!(ids.contains(&visible.to_string()), "{picker}");
+            assert!(
+                !ids.contains(&archived.to_string()),
+                "archived omitted: {picker}"
+            );
+            assert_eq!(picker["canCreateProject"], true);
+            assert_eq!(picker["suggestedId"].as_str(), Some(ids[0].as_str()));
+
+            let (status, from_project) = session_call(
+                addr,
+                Method::GET,
+                &document_api(ws_id, project_doc, "/task-projects"),
+                &s.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{from_project}");
+            assert_eq!(from_project["suggestedId"], f.project_id.to_string());
+
+            let viewer = create_user_session(&run.harness, ws_id, WorkspaceRole::Member).await;
+            add_project_member(&run.harness, ws_id, f.project_id, viewer.user_id, "viewer").await;
+            let (status, viewer_picker) =
+                session_call(addr, Method::GET, &picker_path, &viewer.session_token, None).await;
+            assert_eq!(status, StatusCode::OK, "{viewer_picker}");
+            let viewer_ids: Vec<String> = viewer_picker["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_string())
+                .collect();
+            assert!(
+                !viewer_ids.contains(&f.project_id.to_string()),
+                "private viewer is not Edit: {viewer_picker}"
+            );
+            assert!(viewer_ids.contains(&visible.to_string()), "{viewer_picker}");
+            assert_eq!(viewer_picker["canCreateProject"], true);
+
+            let guest = create_user_session(&run.harness, ws_id, WorkspaceRole::Guest).await;
+            let (status, _) =
+                session_call(addr, Method::GET, &picker_path, &guest.session_token, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            grant_wiki_group_view(&run.harness, ws_id, wiki, guest.user_id).await;
+            let (status, guest_picker) =
+                session_call(addr, Method::GET, &picker_path, &guest.session_token, None).await;
+            assert_eq!(status, StatusCode::OK, "{guest_picker}");
+            assert_eq!(guest_picker["canCreateProject"], false);
+            assert_eq!(guest_picker["items"].as_array().unwrap().len(), 0);
+
+            let docs_only = insert_pat(&run.harness, ws_id, s.user_id, &["documents.read"]).await;
+            let tasks_only = insert_pat(&run.harness, ws_id, s.user_id, &["tasks.read"]).await;
+            let (status, pat_picker) = call(
+                addr,
+                Method::GET,
+                &picker_path,
+                Cred::Bearer(&docs_only),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{pat_picker}");
+            assert!(!pat_picker["items"].as_array().unwrap().is_empty());
+            let (status, _) = call(
+                addr,
+                Method::GET,
+                &picker_path,
+                Cred::Bearer(&tasks_only),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            let (status, _) = session_call(
+                addr,
+                Method::GET,
+                &document_api(ws_id, Uuid::now_v7(), "/task-projects"),
+                &s.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            admin.close().await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn document_origin_list_pages_authorized_count_and_current_authz() {
+    run_test("document_origin_list_pages_authorized_count_and_current_authz", async {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let (addr, f) = setup_task(&mut run, 5_000).await;
+        let ws_id = f.owner.workspace_id;
+        let s = &f.owner;
+        let wiki = create_wiki(s, "목록 문서").await;
+        let visible = create_named_project(addr, s, "VISL", "workspace").await;
+        let extra = create_named_project(addr, s, "VIS2", "workspace").await;
+        let hidden_task = create_origin_task(
+            addr,
+            &s.session_token,
+            ws_id,
+            wiki,
+            f.project_id,
+            "비공개 연결",
+        )
+        .await;
+        let first_visible = create_origin_task(
+            addr,
+            &s.session_token,
+            ws_id,
+            wiki,
+            visible,
+            "공개 연결 1",
+        )
+        .await;
+        let second_visible = create_origin_task(
+            addr,
+            &s.session_token,
+            ws_id,
+            wiki,
+            extra,
+            "공개 연결 2",
+        )
+        .await;
+
+        let list_path = document_api(ws_id, wiki, "/task-origins");
+        let (status, all) = session_call(addr, Method::GET, &list_path, &s.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{all}");
+        assert_eq!(all["count"], 3);
+        assert_eq!(all["items"].as_array().unwrap().len(), 3);
+        assert!(all["nextCursor"].is_null());
+
+        let (status, page) = session_call(
+            addr,
+            Method::GET,
+            &format!("{list_path}?limit=1"),
+            &s.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["count"], 3, "count is authorized total, not page length");
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        let cursor = page["nextCursor"].as_str().expect("next cursor");
+        let (status, rest) = session_call(
+            addr,
+            Method::GET,
+            &format!("{list_path}?limit=1&after={cursor}"),
+            &s.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rest}");
+        assert_eq!(rest["count"], 3);
+        assert_eq!(rest["items"].as_array().unwrap().len(), 1);
+        assert_ne!(rest["items"][0]["taskId"], page["items"][0]["taskId"]);
+
+        let member = create_user_session(&run.harness, ws_id, WorkspaceRole::Member).await;
+        let (status, member_list) =
+            session_call(addr, Method::GET, &list_path, &member.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{member_list}");
+        assert_eq!(member_list["count"], 2, "private origin omitted from count");
+        let member_ids: Vec<String> = member_list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["taskId"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!member_ids.contains(&hidden_task.to_string()), "{member_list}");
+        assert!(member_ids.contains(&first_visible.to_string()), "{member_list}");
+        assert!(member_ids.contains(&second_visible.to_string()), "{member_list}");
+
+        let (status, _) = session_call(
+            addr,
+            Method::GET,
+            &format!("{list_path}?limit=0"),
+            &s.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = session_call(
+            addr,
+            Method::GET,
+            &format!("{list_path}?limit=101"),
+            &s.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let docs_only = insert_pat(&run.harness, ws_id, s.user_id, &["documents.read"]).await;
+        let tasks_only = insert_pat(&run.harness, ws_id, s.user_id, &["tasks.read"]).await;
+        let both = insert_pat(
+            &run.harness,
+            ws_id,
+            s.user_id,
+            &["documents.read", "tasks.read"],
+        )
+        .await;
+        let (status, _) = call(addr, Method::GET, &list_path, Cred::Bearer(&docs_only), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(addr, Method::GET, &list_path, Cred::Bearer(&tasks_only), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, pat_list) = call(addr, Method::GET, &list_path, Cred::Bearer(&both), None).await;
+        assert_eq!(status, StatusCode::OK, "{pat_list}");
+        assert_eq!(pat_list["count"], 3);
+
+        let admin = admin_pool(&run.harness).await;
+        let token_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM fvoci.api_tokens WHERE user_id = $1 AND 'tasks.read' = ANY(scopes) AND 'documents.read' = ANY(scopes)",
+        )
+        .bind(s.user_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+        fvoci_server::db::api_tokens::revoke_api_token(
+            &s.pool,
+            ws_id,
+            s.user_id,
+            s.session_id,
+            token_id,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (status, _) = call(addr, Method::GET, &list_path, Cred::Bearer(&both), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = session_call(
+            addr,
+            Method::POST,
+            &document_api(ws_id, wiki, "/trash"),
+            &s.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = session_call(addr, Method::GET, &list_path, &s.session_token, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = session_call(
+            addr,
+            Method::POST,
+            &document_api(ws_id, wiki, "/restore"),
+            &s.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, restored_doc) =
+            session_call(addr, Method::GET, &list_path, &s.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{restored_doc}");
+        assert_eq!(restored_doc["count"], 3);
+
+        let (status, _) = session_call(
+            addr,
+            Method::POST,
+            &task_path(s, first_visible, "/trash"),
+            &s.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, after_trash) =
+            session_call(addr, Method::GET, &list_path, &s.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{after_trash}");
+        assert_eq!(after_trash["count"], 2);
+        let (status, _) = session_call(
+            addr,
+            Method::POST,
+            &task_path(s, first_visible, "/restore"),
+            &s.session_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, after_restore) =
+            session_call(addr, Method::GET, &list_path, &s.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{after_restore}");
+        assert_eq!(after_restore["count"], 3);
+
+        let admin = admin_pool(&run.harness).await;
+        sqlx::query("UPDATE fvoci.projects SET visibility = 'private' WHERE id = $1")
+            .bind(visible)
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+        let (status, revoked) =
+            session_call(addr, Method::GET, &list_path, &member.session_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{revoked}");
+        assert_eq!(revoked["count"], 1, "revoked project View drops the origin");
+
+        run.finish().await.expect("cleanup");
+    })
+    .await;
 }
