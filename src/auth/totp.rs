@@ -1,10 +1,11 @@
 //! RFC 6238 TOTP (SHA-1, 6 digits, 30 s) and recovery codes.
 //!
-//! Source `packages/core/src/mfa.ts`. Codes are compared in constant time and
-//! the matching step is returned so the caller can claim it (replay block).
+//! Source `packages/core/src/mfa.ts`. HMAC, truncation, the constant-time
+//! token compare and RFC 4648 base32 come from `totp-rs`; the matching step is
+//! returned so the caller can claim it (replay block, `db::mfa::claim_step`).
 
 use rand::RngCore;
-use ring::hmac;
+use totp_rs::{Algorithm, Builder, Secret, Totp};
 
 pub const TOTP_STEP_SECONDS: i64 = 30;
 pub const TOTP_DIGITS: usize = 6;
@@ -14,73 +15,46 @@ pub const RECOVERY_CODE_COUNT: usize = 10;
 pub const RECOVERY_CODE_LENGTH: usize = 12;
 pub const SECRET_BYTES: usize = 20;
 
-const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
+/// RFC 4648 base32 without padding.
 pub fn base32_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
-    let mut bits = 0u32;
-    let mut value = 0u32;
-    for &byte in bytes {
-        value = (value << 8) | u32::from(byte);
-        bits += 8;
-        while bits >= 5 {
-            out.push(BASE32[((value >> (bits - 5)) & 31) as usize] as char);
-            bits -= 5;
-        }
-        value &= (1 << bits) - 1;
-    }
-    if bits > 0 {
-        out.push(BASE32[((value << (5 - bits)) & 31) as usize] as char);
-    }
-    out
+    Secret::from(bytes).to_base32()
+}
+
+/// SHA-1 / 6 digits / skew ±1 / 30 s. None for a secret under 128 bits.
+fn engine(secret: &[u8]) -> Option<Totp> {
+    Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(TOTP_DIGITS as u8)
+        .with_skew(1)
+        .with_step_duration(TOTP_STEP_SECONDS as u64)
+        .with_secret(secret)
+        .build()
+        .ok()
 }
 
 pub fn totp_step(now_ms: i64) -> i64 {
     now_ms.div_euclid(1000).div_euclid(TOTP_STEP_SECONDS)
 }
 
+/// Code for `step`; empty (never matches) for an invalid secret or step.
 pub fn totp_code(secret: &[u8], step: i64) -> String {
-    let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret);
-    let mac = hmac::sign(&key, &(step as u64).to_be_bytes());
-    let mac = mac.as_ref();
-    let offset = (mac[19] & 0x0f) as usize;
-    let bin = (u32::from(mac[offset] & 0x7f) << 24)
-        | (u32::from(mac[offset + 1]) << 16)
-        | (u32::from(mac[offset + 2]) << 8)
-        | u32::from(mac[offset + 3]);
-    format!("{:06}", bin % 1_000_000)
+    match (engine(secret), u64::try_from(step)) {
+        (Some(totp), Ok(step)) => totp.generate(step * TOTP_STEP_SECONDS as u64).to_string(),
+        _ => String::new(),
+    }
 }
 
 pub fn is_totp_shape(code: &str) -> bool {
     code.len() == TOTP_DIGITS && code.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Constant-time equality for equal-length ASCII codes.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-/// The step (now, now-1, now+1) whose code matches, or None. Every candidate
-/// is computed and compared so timing does not reveal which step matched.
+/// The step in now±1 whose code matches, or None. When two steps share a
+/// code the oldest wins (`totp-rs` scans ascending); claiming the older step
+/// is the stricter replay bound.
 pub fn match_totp(secret: &[u8], code: &str, now_ms: i64) -> Option<i64> {
-    if !is_totp_shape(code) {
-        return None;
-    }
-    let now = totp_step(now_ms);
-    let mut found = None;
-    for step in [now, now - 1, now + 1] {
-        if ct_eq(totp_code(secret, step).as_bytes(), code.as_bytes()) && found.is_none() {
-            found = Some(step);
-        }
-    }
-    found
+    let time = u64::try_from(now_ms.div_euclid(1000)).ok()?;
+    let step = engine(secret)?.check(code, time)?;
+    i64::try_from(step).ok()
 }
 
 pub fn new_secret() -> [u8; SECRET_BYTES] {
@@ -178,6 +152,18 @@ mod tests {
         assert_eq!(match_totp(RFC_SECRET, "12345", now_ms), None);
         assert_eq!(match_totp(RFC_SECRET, "12345a", now_ms), None);
         assert_eq!(match_totp(RFC_SECRET, " 287082", now_ms), None);
+    }
+
+    #[test]
+    fn match_prefers_oldest_step_on_shared_code() {
+        // Steps 910737 and 910738 share a code for the RFC secret; the crate
+        // scans now-1..=now+1 ascending, so the older step is claimed.
+        let now_ms = 910_738 * TOTP_STEP_SECONDS * 1000;
+        let code = totp_code(RFC_SECRET, 910_738);
+        assert_eq!(code, totp_code(RFC_SECRET, 910_737));
+        assert_eq!(match_totp(RFC_SECRET, &code, now_ms), Some(910_737));
+        assert_eq!(match_totp(RFC_SECRET, &code, -1), None);
+        assert_eq!(match_totp(b"short", &code, now_ms), None);
     }
 
     #[test]
