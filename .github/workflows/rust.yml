@@ -6,12 +6,6 @@ on:
     branches: [main]
   merge_group:
   workflow_dispatch:
-    inputs:
-      ci_mode:
-        description: auto runs selection on pull_request shapes; otherwise full
-        type: choice
-        options: [full, auto]
-        default: full
 
 # Only obsolete runs of this workflow on the same PR are cancelled.
 concurrency:
@@ -33,6 +27,9 @@ jobs:
     timeout-minutes: 10
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
+      reason_code: ${{ steps.plan.outputs.reason_code }}
+      plan_ok: ${{ steps.plan.outputs.plan_ok }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
       select_fast: ${{ steps.plan.outputs.select_fast }}
       select_postgres: ${{ steps.plan.outputs.select_postgres }}
       select_collaboration: ${{ steps.plan.outputs.select_collaboration }}
@@ -40,7 +37,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
       - id: plan
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
@@ -50,10 +46,6 @@ jobs:
             --event-json "$GITHUB_EVENT_PATH" \
             --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
             --github-output "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ci-selection-plan-rust
-          path: ${{ runner.temp }}/ci-selection-plan.json
 
   fast:
     needs: ci-plan
@@ -251,32 +243,31 @@ jobs:
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/native-admission-test.log"
           cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration --test document_api_integration --test document_import_export_integration --test document_import_formats_integration
 
-  ci-gate:
-    name: ci-gate
+  rust-ci-gate:
+    name: rust-ci-gate
     needs: [ci-plan, fast, postgres, collaboration]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ci-selection-plan-rust
-          path: ${{ runner.temp }}/ci-plan
       - name: Fail closed on selection results
         env:
           PLAN_READY: ${{ needs.ci-plan.result }}
+          PLAN_JSON: ${{ needs.ci-plan.outputs.plan_json }}
+          TESTED_SHA: ${{ github.sha }}
           JOB_FAST: ${{ needs.fast.result }}
           JOB_POSTGRES: ${{ needs.postgres.result }}
           JOB_COLLABORATION: ${{ needs.collaboration.result }}
         run: |
           set -euo pipefail
           if [[ "$PLAN_READY" != success ]]; then
-            echo "ci-plan did not succeed ($PLAN_READY)"
+            echo "ci-plan did not succeed"
             exit 1
           fi
           python3 scripts/ci_selection.py gate --workflow rust \
-            --plan "$RUNNER_TEMP/ci-plan/ci-selection-plan.json" \
+            --plan-json "$PLAN_JSON" \
+            --tested-sha "$TESTED_SHA" \
             --job-result fast="$JOB_FAST" \
             --job-result postgres="$JOB_POSTGRES" \
             --job-result collaboration="$JOB_COLLABORATION"

@@ -11,16 +11,15 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Literal
 
 ROOT = Path(__file__).resolve().parent.parent
 
 Mode = Literal["full", "narrow"]
-NarrowFamily = Literal["docs", "frontend", "native_documents", "native_collab"]
+NarrowFamily = Literal["docs", "frontend_web_install"]
 
-PLAN_VERSION = 1
+PLAN_VERSION = 2
 
-# Product jobs per workflow (stable ids; matrix jobs are one logical job each).
 WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
     "web": ("web-checks", "workspace-browser-shard", "collaboration-flow"),
     "rust": ("fast", "postgres", "collaboration"),
@@ -29,9 +28,23 @@ WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
     "install": ("install-smoke", "backup-restore-smoke"),
 }
 
-WORKFLOW_FILE = ROOT / ".github" / "workflows"
+WORKFLOW_YAML: dict[str, str] = {
+    "web": "web.yml",
+    "rust": "rust.yml",
+    "documents": "documents.yml",
+    "collab-engine": "collab-engine.yml",
+    "install": "install.yml",
+}
 
-# Paths that always require the full CI battery (shared build, auth, DB, harness, toolchain).
+PLAN_JOB_ID = "ci-plan"
+GATE_JOB_SUFFIX = "-ci-gate"
+
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+REASON_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+KNOWN_EVENTS = frozenset({"pull_request", "push", "merge_group", "workflow_dispatch"})
+
+# Shared build, auth, DB, harness, toolchain, native crates (conservative full).
 _BROADEN_PREFIXES: tuple[str, ...] = (
     ".github/",
     "migrations/",
@@ -42,6 +55,8 @@ _BROADEN_PREFIXES: tuple[str, ...] = (
     "compat/",
     "infra/",
     ".agents/",
+    "packages/",
+    "crates/",
 )
 
 _BROADEN_EXACT: frozenset[str] = frozenset(
@@ -54,26 +69,50 @@ _BROADEN_EXACT: frozenset[str] = frozenset(
     }
 )
 
-_DOCS_PREFIXES: tuple[str, ...] = ("docs/",)
-_DOCS_EXACT: frozenset[str] = frozenset({"README.md", "RUNNING.md", "CONTRIBUTING.md"})
-_DOCS_SUFFIX_PATHS: tuple[str, ...] = (
-    "crates/document-extract/VERIFY.md",
-    "crates/collab-engine/README.md",
+_MANIFEST_MARKERS: tuple[str, ...] = (
+    "/package.json",
+    "/package-lock.json",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/pnpm-lock.yaml",
+    "/yarn.lock",
 )
 
-_FRONTEND_PREFIXES: tuple[str, ...] = ("apps/web/", "packages/")
-
-_NATIVE_DOCUMENTS_PREFIXES: tuple[str, ...] = (
-    "crates/document-extract/",
-    "crates/document-extract-client/",
+# Explicit explanatory docs only (not build inputs).
+_EXPLICIT_DOCS: frozenset[str] = frozenset(
+    {
+        "README.md",
+        "RUNNING.md",
+        "docs/rewrite.md",
+    }
 )
-_NATIVE_COLLAB_PREFIXES: tuple[str, ...] = ("crates/collab-engine/",)
 
-_CRATE_README_RE = re.compile(r"^crates/[^/]+/README\.md$")
+# Generated / contract / config under apps/web (never narrow).
+_WEB_BROADEN_PREFIXES: tuple[str, ...] = (
+    "apps/web/openapi.json",
+    "apps/web/src/generated/",
+    "apps/web/package.json",
+    "apps/web/package-lock.json",
+    "apps/web/playwright.config.ts",
+    "apps/web/e2e/",
+    "apps/web/e2e-pending/",
+)
+
+_FRONTEND_NARROW_PREFIX = "apps/web/src/"
 
 
 def _starts_with(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix)
+
+
+def validate_sha(ref: str) -> bool:
+    return bool(SHA_RE.match(ref))
+
+
+def sanitize_reason_code(code: str) -> str:
+    if not REASON_CODE_RE.match(code):
+        raise ValueError(f"unsafe reason code: {code!r}")
+    return code
 
 
 def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unknown"]:
@@ -82,133 +121,169 @@ def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unk
     for prefix in _BROADEN_PREFIXES:
         if _starts_with(path, prefix):
             return "broaden"
-    if path in _DOCS_EXACT or _CRATE_README_RE.match(path):
+    for marker in _MANIFEST_MARKERS:
+        if marker in path:
+            return "broaden"
+    if path in _EXPLICIT_DOCS:
         return "docs"
-    for prefix in _DOCS_PREFIXES:
+    if _starts_with(path, "docs/"):
+        return "broaden"
+    for prefix in _WEB_BROADEN_PREFIXES:
         if _starts_with(path, prefix):
-            return "docs"
-    if path in _DOCS_SUFFIX_PATHS:
-        return "docs"
-    for prefix in _FRONTEND_PREFIXES:
-        if _starts_with(path, prefix):
-            return "frontend"
-    for prefix in _NATIVE_DOCUMENTS_PREFIXES:
-        if _starts_with(path, prefix):
-            return "native_documents"
-    for prefix in _NATIVE_COLLAB_PREFIXES:
-        if _starts_with(path, prefix):
-            return "native_collab"
+            return "broaden"
+    if _starts_with(path, _FRONTEND_NARROW_PREFIX):
+        return "frontend_web_install"
+    if _starts_with(path, "apps/web/"):
+        return "broaden"
     return "unknown"
 
 
-def parse_name_status_z(data: bytes) -> list[str]:
-    """Return every path touched in a cumulative diff (including rename source/dest)."""
-    fields = [
-        part.decode("utf-8", errors="surrogateescape")
-        for part in data.split(b"\0")
-        if part
-    ]
+def parse_name_status_z(data: bytes) -> tuple[list[str], str | None]:
+    """Strict git diff --name-status -z parser; rejects truncated records."""
+    if data:
+        if not data.endswith(b"\0"):
+            return [], "DIFF_TRUNCATED"
+    fields = data.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields = fields[:-1]
     paths: list[str] = []
     i = 0
     while i < len(fields):
-        status = fields[i]
+        status = fields[i].decode("utf-8", errors="strict")
         i += 1
         if not status:
-            continue
+            return [], "DIFF_EMPTY_STATUS"
+        if not re.match(r"^[ACDMRTU][0-9]*$", status):
+            return [], "DIFF_BAD_STATUS"
         kind = status[0]
         if kind in ("R", "C"):
             if i + 1 >= len(fields):
-                break
-            paths.append(fields[i])
-            paths.append(fields[i + 1])
+                return [], "DIFF_TRUNCATED_RENAME"
+            old = fields[i].decode("utf-8", errors="strict")
+            new = fields[i + 1].decode("utf-8", errors="strict")
             i += 2
+            paths.extend([old, new])
         elif kind == "D":
             if i >= len(fields):
-                break
-            paths.append(fields[i])
+                return [], "DIFF_TRUNCATED_DELETE"
+            paths.append(fields[i].decode("utf-8", errors="strict"))
             i += 1
         else:
             if i >= len(fields):
-                break
-            paths.append(fields[i])
+                return [], "DIFF_TRUNCATED_PATH"
+            paths.append(fields[i].decode("utf-8", errors="strict"))
             i += 1
-    return paths
-
-
-def git_diff_paths(repo: Path, base: str, head: str) -> tuple[list[str], str | None]:
-    try:
-        proc = subprocess.run(
-            ["git", "diff", "--name-status", "-z", "-M", base, head],
-            cwd=repo,
-            check=False,
-            capture_output=True,
-        )
-    except OSError as exc:
-        return [], f"git diff failed to start: {exc}"
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace").strip()
-        return [], f"git diff exit {proc.returncode}: {err}"
-    paths = parse_name_status_z(proc.stdout)
+    if i != len(fields):
+        return [], "DIFF_EXTRA_FIELDS"
     return paths, None
 
 
-def git_rev_parse(repo: Path, ref: str) -> tuple[str | None, str | None]:
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", ref],
-            cwd=repo,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as exc:
-        return None, str(exc)
+def _git(
+    repo: Path, *args: str, text: bool = True
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=text,
+    )
+
+
+def git_rev_parse(repo: Path, ref: str, *, require_sha_ref: bool = True) -> tuple[str | None, str | None]:
+    if require_sha_ref and not validate_sha(ref):
+        return None, "SHA_INVALID"
+    proc = _git(repo, "rev-parse", ref)
     if proc.returncode != 0:
-        return None, proc.stderr.strip() or f"rev-parse exit {proc.returncode}"
-    return proc.stdout.strip(), None
+        return None, "REV_PARSE_FAILED"
+    sha = proc.stdout.strip()
+    if not validate_sha(sha):
+        return None, "SHA_INVALID"
+    return sha, None
+
+
+def git_merge_base(repo: Path, a: str, b: str) -> tuple[str | None, str | None]:
+    proc = _git(repo, "merge-base", a, b)
+    if proc.returncode != 0:
+        return None, "MERGE_BASE_FAILED"
+    sha = proc.stdout.strip()
+    if not validate_sha(sha):
+        return None, "SHA_INVALID"
+    return sha, None
+
+
+def git_diff_paths(repo: Path, base: str, head: str) -> tuple[list[str], str | None]:
+    proc = _git(repo, "diff", "--name-status", "-z", "-M", base, head, text=False)
+    if proc.returncode != 0:
+        return [], "GIT_DIFF_FAILED"
+    return parse_name_status_z(proc.stdout)
+
+
+def diff_paths_for_pr(
+    repo: Path, base_sha: str, head_sha: str
+) -> tuple[list[str] | None, str | None, str | None]:
+    resolved_base, err = git_rev_parse(repo, base_sha)
+    if err:
+        return None, err, None
+    resolved_head, err = git_rev_parse(repo, head_sha)
+    if err:
+        return None, err, None
+    merge_base, err = git_merge_base(repo, resolved_base, resolved_head)
+    if err:
+        return None, err, None
+    paths, parse_err = git_diff_paths(repo, merge_base, resolved_head)
+    if parse_err:
+        return None, parse_err, merge_base
+    return paths, None, merge_base
+
+
+def git_fetch_origin(repo: Path, *refs: str) -> str | None:
+    validated: list[str] = []
+    for ref in refs:
+        if not validate_sha(ref):
+            return "SHA_INVALID"
+        validated.append(ref)
+    proc = _git(repo, "fetch", "--no-tags", "origin", *validated)
+    if proc.returncode != 0:
+        return "FETCH_FAILED"
+    return None
 
 
 @dataclass(frozen=True)
 class SelectionDecision:
     mode: Mode
-    reason: str
+    reason_code: str
     families: frozenset[NarrowFamily]
 
 
 def decide_from_paths(paths: list[str]) -> SelectionDecision:
     if not paths:
-        return SelectionDecision("full", "empty_diff_not_allowed", frozenset())
+        return SelectionDecision("full", "FULL_EMPTY_DIFF", frozenset())
     families: set[NarrowFamily] = set()
     for path in paths:
         kind = classify_path(path)
-        if kind == "broaden" or kind == "unknown":
-            return SelectionDecision(
-                "full",
-                f"path_requires_full:{path}",
-                frozenset(),
-            )
+        if kind == "broaden":
+            return SelectionDecision("full", "FULL_PATH_BROADEN", frozenset())
+        if kind == "unknown":
+            return SelectionDecision("full", "FULL_UNKNOWN_PATH", frozenset())
         families.add(kind)
     if len(families) != 1:
-        return SelectionDecision(
-            "full",
-            f"mixed_narrow_families:{','.join(sorted(families))}",
-            frozenset(),
-        )
+        return SelectionDecision("full", "FULL_MIXED_NARROW", frozenset())
     family = next(iter(families))
-    return SelectionDecision("narrow", f"narrow_{family}", frozenset({family}))
+    if family == "docs":
+        return SelectionDecision("narrow", "NARROW_DOCS", frozenset({family}))
+    return SelectionDecision("narrow", "NARROW_FRONTEND_WEB_INSTALL", frozenset({family}))
 
 
 def workflow_job_selected(workflow: str, job: str, decision: SelectionDecision) -> bool:
     if decision.mode == "full":
         return True
     family = next(iter(decision.families))
-    if workflow == "web" and family == "frontend":
-        return job in WORKFLOW_JOBS["web"]
-    if workflow == "documents" and family == "native_documents":
-        return job == "native-extraction"
-    if workflow == "collab-engine" and family == "native_collab":
-        return job == "native-collab-engine"
     if family == "docs":
+        return False
+    if family == "frontend_web_install":
+        if workflow in ("web", "install"):
+            return job in WORKFLOW_JOBS[workflow]
         return False
     return False
 
@@ -219,8 +294,8 @@ def build_plan(
     event_name: str,
     base_sha: str | None,
     head_sha: str | None,
+    merge_base_sha: str | None,
     tested_sha: str | None,
-    repo: Path,
     paths: list[str] | None,
     diff_error: str | None,
     force_full: bool,
@@ -230,312 +305,306 @@ def build_plan(
 
     full_reasons: list[str] = []
     if force_full:
-        full_reasons.append("forced_full")
-    if event_name in ("push", "merge_group"):
-        full_reasons.append(f"event_{event_name}")
+        full_reasons.append("FULL_FORCED")
+    if event_name in ("push", "merge_group", "workflow_dispatch"):
+        full_reasons.append(f"FULL_EVENT_{event_name.upper()}")
+    if event_name not in KNOWN_EVENTS:
+        full_reasons.append("FULL_EVENT_UNKNOWN")
     if diff_error:
-        full_reasons.append(f"diff_error:{diff_error}")
+        full_reasons.append("FULL_DIFF_ERROR")
 
-    decision = SelectionDecision("full", "initial", frozenset())
+    decision = SelectionDecision("full", "FULL_INITIAL", frozenset())
     if not full_reasons:
         if paths is None:
-            full_reasons.append("missing_paths")
+            full_reasons.append("FULL_MISSING_PATHS")
         else:
             decision = decide_from_paths(paths)
-            if decision.mode == "narrow":
-                pass
-            else:
-                full_reasons.append(decision.reason)
+            if decision.mode != "narrow":
+                full_reasons.append(decision.reason_code)
 
     if full_reasons:
-        decision = SelectionDecision("full", ";".join(full_reasons), frozenset())
+        reason_code = full_reasons[0]
+        if len(full_reasons) > 1:
+            reason_code = "FULL_COMBINED"
+        decision = SelectionDecision("full", reason_code, frozenset())
         mode: Mode = "full"
-        reason = decision.reason
     else:
         mode = decision.mode
-        reason = decision.reason
+        reason_code = decision.reason_code
+
+    sanitize_reason_code(reason_code)
 
     jobs: dict[str, dict] = {}
     for job in WORKFLOW_JOBS[workflow]:
         selected = workflow_job_selected(workflow, job, decision)
         jobs[job] = {
             "selected": selected,
-            "reason": reason if selected else "not_applicable",
+            "reason_code": reason_code if selected else "NOT_APPLICABLE",
         }
+
+    plan_ok = diff_error is None and event_name in KNOWN_EVENTS
 
     return {
         "version": PLAN_VERSION,
         "workflow": workflow,
         "mode": mode,
-        "reason": reason,
+        "reason_code": reason_code,
+        "plan_ok": plan_ok,
         "base_sha": base_sha,
         "head_sha": head_sha,
+        "merge_base_sha": merge_base_sha,
         "tested_sha": tested_sha,
-        "diff_error": diff_error,
-        "paths": paths or [],
+        "path_count": len(paths) if paths is not None else 0,
         "jobs": jobs,
     }
 
 
-def event_shas(event: dict, event_name: str) -> tuple[str | None, str | None, str | None]:
+def event_shas(event: dict, event_name: str) -> tuple[str | None, str | None]:
     if event_name == "pull_request":
         pr = event.get("pull_request") or {}
-        return pr.get("base", {}).get("sha"), pr.get("head", {}).get("sha"), pr.get("head", {}).get("sha")
+        return pr.get("base", {}).get("sha"), pr.get("head", {}).get("sha")
     if event_name == "merge_group":
         mg = event.get("merge_group") or {}
-        return mg.get("base_sha"), mg.get("head_sha"), mg.get("head_sha")
+        return mg.get("base_sha"), mg.get("head_sha")
     if event_name == "push":
-        return event.get("before"), event.get("after"), event.get("after")
-    if event_name == "workflow_dispatch":
-        return None, None, None
-    return None, None, None
+        return event.get("before"), event.get("after")
+    return None, None
 
 
-def load_event(path: Path | None) -> tuple[dict, str]:
-    if path is None:
-        return {}, os.environ.get("GITHUB_EVENT_NAME", "workflow_dispatch")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    name = os.environ.get("GITHUB_EVENT_NAME") or path.stem.replace(".", "_")
-    if name.endswith("_json"):
-        name = os.environ.get("GITHUB_EVENT_NAME", "pull_request")
-    return data, os.environ.get("GITHUB_EVENT_NAME", "pull_request")
+def load_event(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def resolve_paths_for_event(
+def resolve_selection_inputs(
     repo: Path,
     event: dict,
     event_name: str,
-    base_sha: str | None,
-    head_sha: str | None,
-    tested_sha: str | None,
-    paths_override: list[str] | None,
-    skip_fetch: bool,
-) -> tuple[list[str] | None, str | None, str | None]:
-    diff_error: str | None = None
-    if paths_override is not None:
-        return paths_override, diff_error, tested_sha
+) -> tuple[list[str] | None, str | None, str | None, str | None, str | None, str | None]:
+    """Return paths, diff_error, base, head, merge_base, tested_sha."""
+    tested_sha = os.environ.get("GITHUB_SHA", "").strip()
+    if not validate_sha(tested_sha):
+        return None, "TESTED_SHA_INVALID", None, None, None, None
+
+    head_now, err = git_rev_parse(repo, "HEAD", require_sha_ref=False)
+    if err:
+        return None, "HEAD_REV_PARSE_FAILED", None, None, None, tested_sha
+    if head_now != tested_sha:
+        return None, "TESTED_SHA_MISMATCH", None, None, None, tested_sha
 
     if event_name == "workflow_dispatch":
-        return None, None, tested_sha
+        return None, None, None, None, None, tested_sha
 
+    if event_name not in KNOWN_EVENTS:
+        return None, "EVENT_UNKNOWN", None, None, None, tested_sha
+
+    if event_name in ("push", "merge_group"):
+        return None, None, *event_shas(event, event_name), None, tested_sha
+
+    base_sha, head_sha = event_shas(event, event_name)
     if not base_sha or not head_sha:
-        return None, "missing_base_or_head_sha", tested_sha
+        return None, "MISSING_BASE_OR_HEAD", base_sha, head_sha, None, tested_sha
+    if not validate_sha(base_sha) or not validate_sha(head_sha):
+        return None, "SHA_INVALID", base_sha, head_sha, None, tested_sha
 
-    if not skip_fetch:
-        fetch = subprocess.run(
-            ["git", "fetch", "--no-tags", "origin", base_sha, head_sha],
-            cwd=repo,
-            capture_output=True,
-        )
-        if fetch.returncode != 0:
-            err = fetch.stderr.decode("utf-8", errors="replace").strip()
-            return None, f"fetch_failed:{err}", tested_sha
+    fetch_err = git_fetch_origin(repo, base_sha, head_sha)
+    if fetch_err:
+        return None, fetch_err, base_sha, head_sha, None, tested_sha
 
-    resolved_base, err = git_rev_parse(repo, base_sha)
-    if err:
-        return None, f"base_sha_invalid:{err}", tested_sha
-    resolved_head, err = git_rev_parse(repo, head_sha)
-    if err:
-        return None, f"head_sha_invalid:{err}", tested_sha
-
-    paths, diff_err = git_diff_paths(repo, resolved_base, resolved_head)
+    paths, diff_err, merge_base = diff_paths_for_pr(repo, base_sha, head_sha)
     if diff_err:
-        return None, diff_err, tested_sha
+        return None, diff_err, base_sha, head_sha, merge_base, tested_sha
 
-    if tested_sha:
-        head_now, err = git_rev_parse(repo, "HEAD")
-        if err:
-            return None, f"tested_sha_check:{err}", tested_sha
-        tested_resolved, err = git_rev_parse(repo, tested_sha)
-        if err:
-            return None, f"tested_sha_invalid:{err}", tested_sha
-        if head_now != tested_resolved:
-            return None, f"tested_sha_mismatch:expected {tested_resolved} got {head_now}", tested_sha
-
-    return paths, diff_error, tested_sha
+    return paths, None, base_sha, head_sha, merge_base, tested_sha
 
 
 def write_github_outputs(plan: dict, output_path: Path | None) -> None:
     if output_path is None:
         return
-    lines: list[str] = []
-    lines.append(f"mode={plan['mode']}")
-    lines.append(f"reason={plan['reason']}")
+    reason_code = plan["reason_code"]
+    sanitize_reason_code(reason_code)
+    lines = [
+        f"mode={plan['mode']}",
+        f"reason_code={reason_code}",
+        f"plan_ok={'true' if plan['plan_ok'] else 'false'}",
+    ]
     for job, meta in plan["jobs"].items():
         key = job.replace("-", "_")
-        lines.append(f"select_{key}={'true' if meta['selected'] else 'false'}")
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        selected = meta["selected"]
+        if not isinstance(selected, bool):
+            raise ValueError("job.selected must be bool")
+        lines.append(f"select_{key}={'true' if selected else 'false'}")
+    payload = json.dumps(plan, separators=(",", ":"), sort_keys=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+        handle.write("plan_json<<PLAN_EOF\n")
+        handle.write(payload + "\n")
+        handle.write("PLAN_EOF\n")
 
 
 def cmd_plan(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compute CI selection plan for one workflow.")
     parser.add_argument("--workflow", required=True, choices=sorted(WORKFLOW_JOBS))
     parser.add_argument("--repo-root", type=Path, default=ROOT)
-    parser.add_argument("--event-json", type=Path, default=None)
-    parser.add_argument("--paths-file", type=Path, default=None, help="NUL-separated paths (test hook)")
-    parser.add_argument("--force-full", action="store_true")
-    parser.add_argument("--skip-fetch", action="store_true")
+    parser.add_argument("--event-json", type=Path, required=True)
     parser.add_argument("--output-plan", type=Path, required=True)
     parser.add_argument("--github-output", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    event, event_name = load_event(args.event_json)
-    if args.event_json:
-        event_name = os.environ.get("GITHUB_EVENT_NAME", "pull_request")
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip()
+    if not event_name:
+        print("plan: GITHUB_EVENT_NAME required", file=sys.stderr)
+        return 1
 
-    base_sha, head_sha, tested_sha = event_shas(event, event_name)
-    paths_override: list[str] | None = None
-    if args.paths_file:
-        raw = args.paths_file.read_bytes()
-        paths_override = [p.decode("utf-8") for p in raw.split(b"\0") if p]
-
-    wd_input = os.environ.get("CI_SELECTION_WORKFLOW_DISPATCH_FULL", "").strip().lower()
-    force_full = args.force_full or wd_input in ("1", "true", "full", "yes")
-    if event_name == "workflow_dispatch" and not force_full:
-        inputs = event.get("inputs") or {}
-        if str(inputs.get("ci_mode", "full")).lower() != "auto":
-            force_full = True
-
-    paths, diff_error, tested_sha = resolve_paths_for_event(
-        args.repo_root,
-        event,
-        event_name,
-        base_sha,
-        head_sha,
-        tested_sha,
-        paths_override,
-        args.skip_fetch,
+    event = load_event(args.event_json)
+    paths, diff_error, base_sha, head_sha, merge_base_sha, tested_sha = resolve_selection_inputs(
+        args.repo_root, event, event_name
     )
+
+    force_full = event_name in ("push", "merge_group", "workflow_dispatch") or bool(diff_error)
 
     plan = build_plan(
         workflow=args.workflow,
         event_name=event_name,
         base_sha=base_sha,
         head_sha=head_sha,
+        merge_base_sha=merge_base_sha,
         tested_sha=tested_sha,
-        repo=args.repo_root,
         paths=paths,
         diff_error=diff_error,
         force_full=force_full,
     )
     args.output_plan.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     write_github_outputs(plan, args.github_output)
-    print(json.dumps({"mode": plan["mode"], "reason": plan["reason"]}))
+    print(json.dumps({"mode": plan["mode"], "reason_code": plan["reason_code"]}))
     return 0
 
 
-_VALID_RESULTS = frozenset({"success", "failure", "cancelled", "skipped", "missing"})
+_VALID_RESULTS = frozenset({"success", "failure", "cancelled", "skipped"})
+
+
+def _validate_plan_schema(plan: dict, workflow: str) -> str | None:
+    if plan.get("version") != PLAN_VERSION:
+        return "PLAN_VERSION"
+    if plan.get("workflow") != workflow:
+        return "PLAN_WORKFLOW"
+    if plan.get("mode") not in ("full", "narrow"):
+        return "PLAN_MODE"
+    reason = plan.get("reason_code")
+    if not isinstance(reason, str) or not REASON_CODE_RE.match(reason):
+        return "PLAN_REASON_CODE"
+    if not isinstance(plan.get("plan_ok"), bool):
+        return "PLAN_OK_TYPE"
+    if not plan.get("plan_ok"):
+        return "PLAN_NOT_OK"
+    tested = plan.get("tested_sha")
+    if not isinstance(tested, str) or not validate_sha(tested):
+        return "PLAN_TESTED_SHA"
+    jobs = plan.get("jobs")
+    if not isinstance(jobs, dict):
+        return "PLAN_JOBS"
+    for job in WORKFLOW_JOBS[workflow]:
+        entry = jobs.get(job)
+        if not isinstance(entry, dict):
+            return "PLAN_JOB_MISSING"
+        if not isinstance(entry.get("selected"), bool):
+            return "PLAN_SELECTED_TYPE"
+        rc = entry.get("reason_code")
+        if not isinstance(rc, str) or not REASON_CODE_RE.match(rc):
+            return "PLAN_JOB_REASON"
+    return None
 
 
 def cmd_gate(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fail-closed gate for one workflow.")
     parser.add_argument("--workflow", required=True, choices=sorted(WORKFLOW_JOBS))
-    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--plan", type=Path, default=None)
+    parser.add_argument("--plan-json", type=str, default=None)
+    parser.add_argument("--tested-sha", required=True)
     parser.add_argument(
         "--job-result",
         action="append",
         default=[],
         metavar="JOB=RESULT",
-        help="Repeat per product job (e.g. web-checks=success)",
     )
     args = parser.parse_args(argv)
 
-    if not args.plan.is_file():
-        print(f"gate: missing plan file {args.plan}", file=sys.stderr)
+    if not validate_sha(args.tested_sha):
+        print("gate: tested-sha invalid", file=sys.stderr)
         return 1
 
-    try:
-        plan = json.loads(args.plan.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        print(f"gate: malformed plan json: {exc}", file=sys.stderr)
+    if args.plan_json:
+        try:
+            plan = json.loads(args.plan_json)
+        except json.JSONDecodeError:
+            print("gate: malformed plan json", file=sys.stderr)
+            return 1
+    elif args.plan and args.plan.is_file():
+        try:
+            plan = json.loads(args.plan.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            print("gate: malformed plan json", file=sys.stderr)
+            return 1
+    else:
+        print("gate: missing plan", file=sys.stderr)
         return 1
 
-    if plan.get("version") != PLAN_VERSION:
-        print(f"gate: unsupported plan version {plan.get('version')}", file=sys.stderr)
-        return 1
-    if plan.get("workflow") != args.workflow:
-        print("gate: plan workflow mismatch", file=sys.stderr)
-        return 1
-    if "jobs" not in plan or not isinstance(plan["jobs"], dict):
-        print("gate: plan missing jobs", file=sys.stderr)
+    schema_err = _validate_plan_schema(plan, args.workflow)
+    if schema_err:
+        print(f"gate: plan schema error {schema_err}", file=sys.stderr)
         return 1
 
-    if plan.get("diff_error"):
-        print(f"gate: plan recorded diff_error: {plan['diff_error']}", file=sys.stderr)
+    if plan.get("tested_sha") != args.tested_sha:
+        print("gate: tested_sha mismatch", file=sys.stderr)
         return 1
 
     results: dict[str, str] = {}
     for item in args.job_result:
         if "=" not in item:
-            print(f"gate: bad job-result {item!r}", file=sys.stderr)
+            print("gate: bad job-result", file=sys.stderr)
             return 1
         job, result = item.split("=", 1)
+        if job in results:
+            print("gate: duplicate job-result", file=sys.stderr)
+            return 1
         results[job] = result
 
     expected_jobs = WORKFLOW_JOBS[args.workflow]
-    for job in expected_jobs:
-        if job not in plan["jobs"]:
-            print(f"gate: plan missing job {job}", file=sys.stderr)
-            return 1
+    if set(results.keys()) != set(expected_jobs):
+        print("gate: job-result set mismatch", file=sys.stderr)
+        return 1
 
     for job in expected_jobs:
-        selected = bool(plan["jobs"][job].get("selected"))
-        result = results.get(job, "missing")
+        selected = plan["jobs"][job]["selected"]
+        result = results[job]
         if result not in _VALID_RESULTS:
-            print(f"gate: invalid result for {job}: {result!r}", file=sys.stderr)
+            print(f"gate: invalid result for {job}", file=sys.stderr)
+            return 1
+        if result == "missing":
+            print(f"gate: missing result for {job}", file=sys.stderr)
             return 1
         if selected:
             if result != "success":
-                print(
-                    f"gate: selected job {job} must succeed, got {result}",
-                    file=sys.stderr,
-                )
+                print(f"gate: selected job {job} must succeed", file=sys.stderr)
                 return 1
-        else:
-            if result == "failure":
-                print(f"gate: unselected job {job} failed unexpectedly", file=sys.stderr)
-                return 1
-            if result == "cancelled":
-                print(f"gate: unselected job {job} cancelled unexpectedly", file=sys.stderr)
-                return 1
-            if result == "success":
-                print(
-                    f"gate: unselected job {job} ran successfully (expected skip/not run)",
-                    file=sys.stderr,
-                )
-                return 1
-            # skipped or missing are acceptable as not_applicable
+        elif result != "skipped":
+            print(f"gate: unselected job {job} must be skipped", file=sys.stderr)
+            return 1
+
     print("gate: ok")
     return 0
 
 
 def discover_workflow_job_ids() -> dict[str, set[str]]:
-    """Conservative static check: every product job id appears in its workflow file."""
+    import yaml
+
     discovered: dict[str, set[str]] = {}
-    mapping = {
-        "web.yml": "web",
-        "rust.yml": "rust",
-        "documents.yml": "documents",
-        "collab-engine.yml": "collab-engine",
-        "install.yml": "install",
-    }
-    job_line = re.compile(r"^  ([a-z0-9][a-z0-9-]*):\s*$")
-    for filename, workflow in mapping.items():
-        path = WORKFLOW_FILE / filename
-        jobs: set[str] = set()
-        in_jobs = False
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("jobs:"):
-                in_jobs = True
-                continue
-            if not in_jobs:
-                continue
-            if line and not line.startswith(" "):
-                break
-            match = job_line.match(line)
-            if match:
-                jobs.add(match.group(1))
-        jobs -= {"ci-plan", "ci-gate"}
+    workflows_dir = ROOT / ".github" / "workflows"
+    for workflow, filename in WORKFLOW_YAML.items():
+        path = workflows_dir / filename
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        jobs = set((data.get("jobs") or {}).keys())
+        jobs.discard(PLAN_JOB_ID)
+        jobs = {j for j in jobs if not j.endswith(GATE_JOB_SUFFIX) and j != "ci-gate"}
         discovered[workflow] = jobs
     return discovered
 
@@ -550,12 +619,16 @@ def verify_workflow_registry() -> list[str]:
         found = discovered.get(workflow, set())
         for job in expected:
             if job not in found:
-                errors.append(f"{workflow}: expected job id {job} missing from workflow yaml")
-        extra = found - set(expected)
-        for job in sorted(extra):
-            errors.append(
-                f"{workflow}: job {job} not registered in ci_selection WORKFLOW_JOBS"
-            )
+                errors.append(f"{workflow}: missing job id {job}")
+        for job in sorted(found - set(expected)):
+            errors.append(f"{workflow}: unregistered job id {job}")
+        yaml_name = WORKFLOW_YAML[workflow]
+        text = (ROOT / ".github" / "workflows" / yaml_name).read_text(encoding="utf-8")
+        gate_name = f"{workflow}{GATE_JOB_SUFFIX}"
+        if f"name: {gate_name}" not in text and f"{gate_name}:" not in text:
+            errors.append(f"{workflow}: missing gate job {gate_name}")
+        if f"--workflow {workflow}" not in text:
+            errors.append(f"{workflow}: planner not wired in workflow yaml")
     return errors
 
 
