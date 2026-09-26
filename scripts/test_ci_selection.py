@@ -881,6 +881,27 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "canonical gate invocation")
 
+    def test_rust_plan_missing_selector_wrapper_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        rust = root / ".github" / "workflows" / "rust.yml"
+        text = rust.read_text(encoding="utf-8")
+        wrapper = "          bash scripts/test-ci-selection.sh\n"
+        self.assertIn(wrapper, text)
+        rust.write_text(text.replace(wrapper, "", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "must run scripts/test-ci-selection.sh")
+
+    def test_web_plan_duplicate_selector_wrapper_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        web = root / ".github" / "workflows" / "web.yml"
+        text = web.read_text(encoding="utf-8")
+        injected = "          bash scripts/test-ci-selection.sh\n"
+        marker = "          python3 scripts/ci_selection.py plan \\\n"
+        self.assertIn(marker, text)
+        web.write_text(text.replace(marker, injected + marker, 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "must not duplicate scripts/test-ci-selection.sh")
+
 
 if __name__ == "__main__":
     unittest.main()

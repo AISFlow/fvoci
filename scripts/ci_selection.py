@@ -40,6 +40,7 @@ PLAN_JOB_ID = "ci-plan"
 PLAN_OUTPUT_KEYS = ("mode", "reason_code", "plan_ok", "plan_json")
 PYYAML_PIN = "PyYAML==6.0.3"
 REQUIREMENTS_FILE = "scripts/ci_selection_requirements.txt"
+SELECTOR_REGRESSION_WRAPPER = "scripts/test-ci-selection.sh"
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REASON_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -162,6 +163,10 @@ def canonical_gate_run(workflow: str) -> str:
 
 def _normalize_run_script(text: str) -> str:
     return text.replace("\r\n", "\n").strip() + "\n"
+
+
+def _script_lines(text: str) -> list[str]:
+    return [row.strip() for row in text.replace("\r\n", "\n").split("\n") if row.strip()]
 
 
 def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unknown"]:
@@ -674,6 +679,34 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                 errors.append(f"{workflow}: {PLAN_JOB_ID} must invoke ci_selection.py plan")
             if f"--workflow {workflow}" not in plan_runs and f"--workflow={workflow}" not in plan_runs:
                 errors.append(f"{workflow}: {PLAN_JOB_ID} must pass --workflow {workflow}")
+            wrapper_line = f"bash {SELECTOR_REGRESSION_WRAPPER}"
+            plan_lines = _script_lines(plan_runs)
+            if workflow == "rust":
+                try:
+                    wrapper_at = plan_lines.index(wrapper_line)
+                except ValueError:
+                    errors.append(
+                        f"{workflow}: {PLAN_JOB_ID} must run {SELECTOR_REGRESSION_WRAPPER} "
+                        "before plan output"
+                    )
+                else:
+                    plan_at = next(
+                        (
+                            index
+                            for index, row in enumerate(plan_lines)
+                            if "scripts/ci_selection.py plan" in row
+                        ),
+                        None,
+                    )
+                    if plan_at is None or wrapper_at > plan_at:
+                        errors.append(
+                            f"{workflow}: {PLAN_JOB_ID} must run {SELECTOR_REGRESSION_WRAPPER} "
+                            "before plan output"
+                        )
+            elif SELECTOR_REGRESSION_WRAPPER in plan_runs:
+                errors.append(
+                    f"{workflow}: {PLAN_JOB_ID} must not duplicate {SELECTOR_REGRESSION_WRAPPER}"
+                )
         elif PLAN_JOB_ID in jobs:
             errors.append(f"{workflow}: {PLAN_JOB_ID} must be a mapping")
 
