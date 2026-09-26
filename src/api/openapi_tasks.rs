@@ -20,6 +20,7 @@ use crate::api::tasks_dto::{
 };
 use crate::api::tasks_dto::{
     DocumentTaskCreateBody, DocumentTaskCreateOutput, TaskOriginItemOutput, TaskOriginListResponse,
+    TaskProjectOutput, TaskProjectPickerResponse,
 };
 
 #[derive(OpenApi)]
@@ -47,6 +48,8 @@ use crate::api::tasks_dto::{
         patch_task_block,
         get_task_origin,
         create_document_task,
+        list_document_task_projects,
+        list_document_task_origins,
     ),
     components(schemas(
         StatusCreateBody,
@@ -64,6 +67,8 @@ use crate::api::tasks_dto::{
         DocumentTaskCreateOutput,
         TaskOriginItemOutput,
         TaskOriginListResponse,
+        TaskProjectOutput,
+        TaskProjectPickerResponse,
     ))
 )]
 pub struct TasksApiDoc;
@@ -463,6 +468,43 @@ fn patch_task_block() {}
     )
 )]
 fn get_task_origin() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-projects",
+    tag = "tasks",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Source document id"),
+    ),
+    responses(
+        (status = 200, description = "Editable target projects", body = TaskProjectPickerResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Document not visible", body = ProblemResponse),
+    )
+)]
+fn list_document_task_projects() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins",
+    tag = "tasks",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("document_id" = String, description = "Source document id"),
+        ("after" = Option<String>, Query, description = "Cursor: last task id"),
+        ("limit" = Option<i64>, Query, description = "Page size 1..=100, default 50"),
+    ),
+    responses(
+        (status = 200, description = "Visible linked tasks with authorized total count", body = TaskOriginListResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Document not visible", body = ProblemResponse),
+    )
+)]
+fn list_document_task_origins() {}
 
 #[utoipa::path(
     post,

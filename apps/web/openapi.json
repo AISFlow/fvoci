@@ -10860,6 +10860,171 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "list_document_task_origins",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Source document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Cursor: last task id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size 1..=100, default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Visible linked tasks with authorized total count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskOriginListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Document not visible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-projects": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "operationId": "list_document_task_projects",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "document_id",
+            "in": "path",
+            "description": "Source document id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Editable target projects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskProjectPickerResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Document not visible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/documents/{document_id}/tasks": {
       "post": {
         "tags": [
@@ -28674,6 +28839,49 @@
           },
           "type": {
             "type": "string"
+          }
+        }
+      },
+      "TaskProjectOutput": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "key"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "TaskProjectPickerResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "canCreateProject"
+        ],
+        "properties": {
+          "canCreateProject": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskProjectOutput"
+            }
+          },
+          "suggestedId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
