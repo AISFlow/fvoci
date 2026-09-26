@@ -18,6 +18,8 @@ COPY crates/document-extract ./crates/document-extract
 COPY crates/document-extract-client ./crates/document-extract-client
 # markdown-rs with one local fix, wired by `[patch.crates-io]` (vendor/markdown/PATCHES.md).
 COPY vendor/markdown ./vendor/markdown
+# PDF export fonts, compiled into fvoci-server (`include_bytes!`, src/documents/pdf.rs).
+COPY packages/editor/src/fonts ./packages/editor/src/fonts
 
 FROM rust-sources AS rust-deps
 RUN cargo fetch --locked \
@@ -68,6 +70,8 @@ WORKDIR /opt/fvoci
 COPY --from=rust-build --chown=root:root /src/target/release/fvoci-server /src/target/release/fvoci-migrate ./bin/
 COPY --from=rust-build --chown=root:root /src/target/release/collab-engine ./bin/
 COPY --from=rust-build --chown=root:root /src/target/release/document-extract ./bin/
+# SIL OFL 1.1 texts of the fonts embedded in fvoci-server for PDF export.
+COPY --from=rust-sources --chown=root:root /src/packages/editor/src/fonts/*-OFL.txt ./share/licenses/fonts/
 COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --from=convert-build --chown=root:root /usr/local/bin/node ./node/bin/node
 COPY --from=convert-build --chown=root:root /opt/fvoci/convert ./convert/

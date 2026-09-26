@@ -350,8 +350,23 @@ pub async fn setup_session_with_convert(
     harness: &TestDb,
     document_convert: Option<fvoci_server::documents::convert::ConvertClient>,
 ) -> (axum::Router, String, Uuid, Uuid) {
+    setup_session_with(harness, |state| state.document_convert = document_convert).await
+}
+
+/// `setup_session` with another `--internal-markdown` child (`None`: unavailable).
+pub async fn setup_session_with_markdown(
+    harness: &TestDb,
+    markdown: Option<fvoci_server::documents::markdown_helper::MarkdownHelper>,
+) -> (axum::Router, String, Uuid, Uuid) {
+    setup_session_with(harness, |state| state.markdown = markdown).await
+}
+
+async fn setup_session_with(
+    harness: &TestDb,
+    configure: impl FnOnce(&mut AppState),
+) -> (axum::Router, String, Uuid, Uuid) {
     let mut state = app_state(&harness.app_url).await;
-    state.document_convert = document_convert;
+    configure(&mut state);
     let app = app_router(state);
     let response = app
         .clone()

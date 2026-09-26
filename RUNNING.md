@@ -385,9 +385,10 @@ or configure; the server re-executes itself (`current_exe`). The public share pa
 Markdown/HTML in-process without the parser (its Markdown keeps the first pass of the `$`
 self-check). Tiptap -> Yjs seeding (body `PUT`, duplicate, imports) runs in the `collab-engine`
 child (`FVOCI_COLLAB_ENGINE`, op `seed_from_tiptap`, same limits as the room child). The Node
-helper (`FVOCI_DOCUMENT_CONVERT_BIN`) is still used for PDF/PPTX/Markdown exports. DOCX export
-(`GET …/documents/{id}/docx`, wiki and project) runs in the same child as the Markdown
-conversions (`--op tiptap-to-docx`), see "DOCX export" below.
+helper (`FVOCI_DOCUMENT_CONVERT_BIN`) is still used for PPTX/Markdown exports. DOCX and PDF
+exports (`GET …/documents/{id}/docx|pdf`, wiki and project) and the public share PDF run in the
+same child as the Markdown conversions (`--op tiptap-to-docx|tiptap-to-pdf`), see "DOCX export"
+and "PDF export" below.
 
 The child is chosen before any runtime, config or credential is loaded, gets a cleared
 environment, RLIMIT_AS 2 GiB and RLIMIT_CPU 30 s, reads one input from stdin (4 MiB cap; the
@@ -435,6 +436,44 @@ highlight are kept.
 Measured (release, 1 MiB stored bodies, one child each): mixed corpus 0.15 s / 83 MB RSS / 85 KB
 file; Korean text 0.03 s / 26 MB / 19 KB; 67 tables of 20×8 cells 0.16 s / 97 MB / 42 KB; tiny marked
 runs with links 0.11 s / 71 MB / 45 KB (the Node helper: 1.3–3.9 s, 0.37–0.73 GB RSS).
+
+## PDF export
+
+`GET …/documents/{id}/pdf` (wiki and project routes) and the public `GET /api/v1/share/{token}/pdf`
+are written in Rust by the same child (`--op tiptap-to-pdf`, same rlimits, 30 s watchdog) from the
+same export model: krilla 0.8.2 writes the PDF and subsets the fonts, rustybuzz 0.20.1 shapes the
+text, unicode-linebreak 0.1.5 gives the line-break opportunities, and `src/documents/pdf.rs` does
+the flow (A4, 35/65/35 pt paddings, 12 pt text at line height 1.5, the TS heading sizes and block
+margins, pages broken between lines and table rows). Neither route needs
+`FVOCI_DOCUMENT_CONVERT_BIN` any more. The fonts are the files the Node export embeds
+(`packages/editor/src/fonts`: Noto Sans KR, Noto Sans Mono CJK KR, Noto Emoji; SIL OFL 1.1),
+compiled into the server binary (about 33 MB) so the child needs no path; each character uses the
+first of them that has a glyph, pictographs Noto Emoji first. Only the glyphs used are embedded.
+Attachment bytes are never read and nothing is fetched.
+
+Contract as before: `application/pdf`, `Content-Disposition` with an RFC 5987 `filename*`,
+`private, no-store`, `nosniff` (share: also `CSP: sandbox` and `Referrer-Policy: no-referrer`);
+authorization and share scope checks run before the child; a stored body over 1 MiB or a file over
+20,000,000 bytes is `413`, a body that is not a Tiptap doc `400`, a killed child or writer failure
+`500`. Member exports wait for one of the two per-process conversion slots; public share PDFs use
+their own pool of one and never wait (`503 share_pdf_busy`, `Retry-After: 5`). The same body gives
+the same bytes on both routes.
+
+Differences a user can notice against the Node export: regular (400) and bold (700) weights of
+Noto Sans KR instead of its Thin default instance for all text; marks are drawn (bold, slanted
+italic, underline, strike, highlight, code font); `http`/`https`/`mailto` links are clickable;
+task items have a checkbox, code blocks a grey background, callouts a coloured bar and background,
+details their summary line, embeds a `[[doc:ref]]` placeholder; flags, skin tones and CJK
+Extension B text render instead of garbage; long URLs wrap without an inserted hyphen. Characters
+none of the three fonts has (for example mathematical alphanumerics) still show as boxes. Text is
+left-to-right only.
+
+Measured (release, 1 MiB stored bodies, one child each): mixed corpus 0.11 s / 54 MB RSS / 149
+pages / 0.55 MB; Korean text 0.12 s / 35 MB / 181 pages / 0.17 MB; 55 tables of 20×8 cells
+0.09 s / 50 MB / 53 pages; tiny marked runs with 4,520 links 0.09 s / 48 MB / 1.0 MB; emoji
+0.10 s / 30 MB; every Hangul syllable and 20,000 ideographs (the largest font subsets) 1.10 s /
+95 MB / 204 pages / 8.7 MB. The 30 s watchdog is about 27x the slowest. The Node helper took
+4–273 s and 0.7–3.4 GB RSS on the same bodies.
 
 ## Container install
 
