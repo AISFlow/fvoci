@@ -237,17 +237,19 @@ pub(crate) async fn event_visible_to(
             (Some("task"), Some(id)) => task_scope(tx, workspace_id, id).await?,
             (Some("document"), Some(id)) => document_scope(tx, workspace_id, id).await?,
             (Some("attachment"), Some(id)) => {
-                // Attachments here always hang off a document.
-                let parent: Option<Uuid> = sqlx::query_scalar(
-                    "SELECT document_id FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2",
+                let parent: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+                    "SELECT document_id, task_id FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2",
                 )
                 .bind(workspace_id)
                 .bind(id)
                 .fetch_optional(&mut **tx)
                 .await?;
                 match parent {
-                    Some(document_id) => document_scope(tx, workspace_id, document_id).await?,
-                    None => Scope::Open,
+                    Some((Some(document_id), _)) => {
+                        document_scope(tx, workspace_id, document_id).await?
+                    }
+                    Some((None, Some(task_id))) => task_scope(tx, workspace_id, task_id).await?,
+                    _ => Scope::Open,
                 }
             }
             (Some("comment"), Some(id)) => {

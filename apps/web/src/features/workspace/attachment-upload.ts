@@ -356,3 +356,88 @@ export function createAttachmentBridge(
     pipelineDeps,
   );
 }
+
+function uploadBody(file: File): components["schemas"]["CreateAttachmentUploadBody"] {
+  return {
+    name: file.name,
+    sizeBytes: file.size,
+    ...(file.type ? { declaredMime: file.type } : {}),
+  };
+}
+
+export function createProjectDocumentAttachmentBridge(
+  workspaceId: string,
+  projectId: string,
+  documentId: string,
+  pipelineDeps: UploadPipelineDeps = {},
+): AttachmentBlockBridge {
+  return uploadsBridge(
+    workspaceId,
+    async (file, signal) => {
+      const result = await api.POST(
+        "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/uploads",
+        {
+          params: {
+            path: { workspace_id: workspaceId, project_id: projectId, document_id: documentId },
+          },
+          body: uploadBody(file),
+          signal,
+        },
+      );
+      if (result.response.status === 201 && result.data) return result.data;
+      return ensureOk(result);
+    },
+    pipelineDeps,
+  );
+}
+
+export function createTaskAttachmentBridge(
+  workspaceId: string,
+  taskId: string,
+  pipelineDeps: UploadPipelineDeps = {},
+): AttachmentBlockBridge {
+  return uploadsBridge(
+    workspaceId,
+    async (file, signal) => {
+      const result = await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/uploads", {
+        params: { path: { workspace_id: workspaceId, task_id: taskId } },
+        body: uploadBody(file),
+        signal,
+      });
+      if (result.response.status === 201 && result.data) return result.data;
+      return ensureOk(result);
+    },
+    pipelineDeps,
+  );
+}
+
+/** Source `editedCopyName`: `name (edited).ext`. */
+export function editedCopyName(originalName: string): string {
+  const dot = originalName.lastIndexOf(".");
+  if (dot <= 0) return `${originalName} (edited)`;
+  return `${originalName.slice(0, dot)} (edited)${originalName.slice(dot)}`;
+}
+
+/** Source `createEditedAttachmentBridge`: saves an edited HWP/HWPX copy beside the source. */
+export function createEditedAttachmentBridge(
+  workspaceId: string,
+  sourceAttachmentId: string,
+  pipelineDeps: UploadPipelineDeps = {},
+): AttachmentBlockBridge {
+  return uploadsBridge(
+    workspaceId,
+    async (file, signal) => {
+      const result = await api.POST(
+        "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/edit-copy",
+        {
+          params: { path: { workspace_id: workspaceId, attachment_id: sourceAttachmentId } },
+          body: uploadBody(file),
+          signal,
+        },
+      );
+      if (result.response.status === 201 && result.data) return result.data;
+      return ensureOk(result);
+    },
+    pipelineDeps,
+  );
+}

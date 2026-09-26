@@ -169,6 +169,7 @@ async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixture {
         document_convert: Some(convert),
         import_wake: Some(wake),
         import_extractor_available: false,
+        quota: Default::default(),
     };
     let app = fvoci_server::http::router(state, None);
     let response = app

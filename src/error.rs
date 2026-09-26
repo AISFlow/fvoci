@@ -33,6 +33,8 @@ pub enum ProblemCode {
     ConsentRequired,
     LimitSeats,
     LimitGuests,
+    LimitStorage,
+    LimitUpload,
     RateLimitExceeded,
     UploadIsNotInTheRequiredState,
     OnlyTheUploaderMayContinueThisUpload,
@@ -43,6 +45,8 @@ pub enum ProblemCode {
     RangeNotSatisfiable,
     Conflict,
     ProjectArchived,
+    TaskArchived,
+    PreviewNotAvailable,
     RestoreRejected,
     CollabTimeoutRetry,
     ImportFailed,
@@ -98,6 +102,8 @@ impl ProblemCode {
             Self::ConsentRequired => "consent_required",
             Self::LimitSeats => "limit.seats",
             Self::LimitGuests => "limit.guests",
+            Self::LimitStorage => "limit.storage",
+            Self::LimitUpload => "limit.upload",
             Self::RateLimitExceeded => "rate_limit_exceeded",
             Self::UploadIsNotInTheRequiredState => "upload_is_not_in_the_required_state",
             Self::OnlyTheUploaderMayContinueThisUpload => {
@@ -112,6 +118,8 @@ impl ProblemCode {
             Self::RangeNotSatisfiable => "range_not_satisfiable",
             Self::Conflict => "conflict",
             Self::ProjectArchived => "project_archived",
+            Self::TaskArchived => "task_archived",
+            Self::PreviewNotAvailable => "preview_not_available",
             Self::RestoreRejected => "restore_rejected",
             Self::CollabTimeoutRetry => "collab_timeout_retry",
             Self::ImportFailed => "import_failed",
@@ -171,6 +179,8 @@ impl ProblemCode {
             Self::ConsentRequired => "consent_required",
             Self::LimitSeats => "seat limit reached",
             Self::LimitGuests => "guest limit reached",
+            Self::LimitStorage => "workspace storage limit reached",
+            Self::LimitUpload => "upload size limit reached",
             Self::RateLimitExceeded => "rate limit exceeded",
             Self::UploadIsNotInTheRequiredState => "upload is not in the required state",
             Self::OnlyTheUploaderMayContinueThisUpload => {
@@ -185,6 +195,8 @@ impl ProblemCode {
             Self::RangeNotSatisfiable => "range not satisfiable",
             Self::Conflict => "conflict",
             Self::ProjectArchived => "project archived",
+            Self::TaskArchived => "task is archived — read-only",
+            Self::PreviewNotAvailable => "preview not available",
             Self::RestoreRejected => "restore rejected",
             Self::CollabTimeoutRetry => "collab timeout — retry",
             Self::ImportFailed => "import failed",
@@ -230,10 +242,13 @@ impl ProblemCode {
             | Self::AssigneeIsNotAMember => StatusCode::BAD_REQUEST,
             Self::InstanceSetupAlreadyCompleted
             | Self::NotFound
+            | Self::PreviewNotAvailable
             | Self::InvitationNotFoundOrExpired => StatusCode::NOT_FOUND,
             Self::Expired | Self::AlreadyAccepted => StatusCode::GONE,
             Self::ConsentRequired => StatusCode::PRECONDITION_REQUIRED,
-            Self::LimitSeats | Self::LimitGuests => StatusCode::PAYMENT_REQUIRED,
+            Self::LimitSeats | Self::LimitGuests | Self::LimitStorage | Self::LimitUpload => {
+                StatusCode::PAYMENT_REQUIRED
+            }
             Self::SlugTaken
             | Self::PersonalWorkspaceImmutable
             | Self::WorkspaceLastOwnerRequired
@@ -251,6 +266,7 @@ impl ProblemCode {
             Self::UploadIsNotInTheRequiredState => StatusCode::CONFLICT,
             Self::Conflict
             | Self::ProjectArchived
+            | Self::TaskArchived
             | Self::RestoreRejected
             | Self::OwnerTransferRequired
             | Self::LastInstanceAdmin

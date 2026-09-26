@@ -59,6 +59,9 @@ url = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 bytes = "1"
 infer = "0.19"
+# Image previews (source magick-wasm preview set: PNG/APNG, JPEG, GIF, TIFF,
+# BMP, WebP), decoded only in the rlimited `--internal-image-preview` child.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "bmp", "webp"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
 rusty-s3 = "0.8"
@@ -138,6 +141,16 @@ required-features = ["db-tests"]
 [[test]]
 name = "attachment_integration"
 path = "tests/attachment_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "attachment_parents_integration"
+path = "tests/attachment_parents_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "attachment_preview_integration"
+path = "tests/attachment_preview_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
