@@ -1458,18 +1458,27 @@ pub async fn load_collab_readonly(
     Ok(Ok(load))
 }
 
+/// Documents whose persisted-bytes estimate fails while armed. Keyed by document so a
+/// test arming it cannot fail room starts of other tests running in the same
+/// process (libtest runs tests in parallel threads).
 #[cfg(feature = "db-tests")]
-static FORCE_ESTIMATE_FAIL: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static FORCE_ESTIMATE_FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Uuid>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 #[cfg(feature = "db-tests")]
-pub fn arm_force_estimate_fail() {
-    FORCE_ESTIMATE_FAIL.store(true, std::sync::atomic::Ordering::Release);
+pub fn arm_force_estimate_fail(document_id: Uuid) {
+    FORCE_ESTIMATE_FAIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(document_id);
 }
 
 #[cfg(feature = "db-tests")]
-pub fn disarm_force_estimate_fail() {
-    FORCE_ESTIMATE_FAIL.store(false, std::sync::atomic::Ordering::Release);
+pub fn disarm_force_estimate_fail(document_id: Uuid) {
+    FORCE_ESTIMATE_FAIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&document_id);
 }
 
 /// Best-effort persisted collab bytes for memory admission (snapshot + tail payloads).
@@ -1480,7 +1489,11 @@ pub async fn estimate_persisted_collab_bytes(
     document_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
     #[cfg(feature = "db-tests")]
-    if FORCE_ESTIMATE_FAIL.load(std::sync::atomic::Ordering::Acquire) {
+    if FORCE_ESTIMATE_FAIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&document_id)
+    {
         return Err(sqlx::Error::Protocol("forced estimate fail".into()));
     }
     let mut tx = conn.begin().await?;
