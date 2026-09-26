@@ -1,0 +1,14 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "@[user:u1|Alice",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

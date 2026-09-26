@@ -1,0 +1,52 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "문단 안 ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "document",
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "label": "한글문서"
+          },
+          "type": "mention"
+        },
+        {
+          "text": " 와 ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "entity": "user",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "label": "김철수"
+          },
+          "type": "mention"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "entity": "document",
+        "ref": "550e8400-e29b-41d4-a716-446655440000"
+      },
+      "type": "embed"
+    },
+    {
+      "attrs": {
+        "entity": "task",
+        "ref": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      },
+      "type": "embed"
+    }
+  ],
+  "type": "doc"
+}

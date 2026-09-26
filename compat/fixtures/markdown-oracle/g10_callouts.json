@@ -1,0 +1,62 @@
+{
+  "content": [
+    {
+      "attrs": {
+        "kind": "note"
+      },
+      "content": [
+        {
+          "content": [
+            {
+              "text": "메모 본문",
+              "type": "text"
+            }
+          ],
+          "type": "paragraph"
+        }
+      ],
+      "type": "callout"
+    },
+    {
+      "attrs": {
+        "kind": "warning"
+      },
+      "content": [
+        {
+          "content": [
+            {
+              "text": "경고와 ",
+              "type": "text"
+            },
+            {
+              "marks": [
+                {
+                  "type": "bold"
+                }
+              ],
+              "text": "강조",
+              "type": "text"
+            }
+          ],
+          "type": "paragraph"
+        }
+      ],
+      "type": "callout"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "일반 인용",
+              "type": "text"
+            }
+          ],
+          "type": "paragraph"
+        }
+      ],
+      "type": "blockquote"
+    }
+  ],
+  "type": "doc"
+}

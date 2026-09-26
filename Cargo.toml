@@ -76,6 +76,9 @@ quick-xml = { version = "0.38", features = ["serialize"] }
 # Office import / attachment text: PDF text, parsed only in the rlimited
 # `--internal-office-extract` child (OOXML/ODF use zip + quick-xml above).
 pdf-extract = "0.12"
+# Markdown -> Tiptap (source remark-parse + remark-gfm + remark-math): the
+# Rust port of the same micromark/mdast pipeline. MIT, no default features.
+markdown = { version = "=1.0.0", default-features = false }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
@@ -287,3 +290,9 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# markdown-rs 1.0.0 with one quadratic-time fix (EditMap::add); see
+# vendor/markdown/PATCHES.md. Replace with the crates.io release once upstream
+# ships the fix.
+[patch.crates-io]
+markdown = { path = "vendor/markdown" }

@@ -43,6 +43,7 @@ use crate::db::documents::{list_wiki_tree, DocumentDbError, TreeNode};
 use crate::db::project_documents::list_project_document_tree;
 use crate::documents::blocks::{replace_node_by_id, BlockNode};
 use crate::documents::convert::{ConvertClient, ConvertError};
+use crate::documents::markdown_helper::{MarkdownError, MarkdownHelper};
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access, RequestAuth};
 use crate::http::guard::check_origin;
@@ -179,6 +180,27 @@ fn convert_client(state: &AppState) -> Result<&ConvertClient, DocumentApiError> 
     })
 }
 
+fn markdown_helper(state: &AppState) -> Result<&MarkdownHelper, DocumentApiError> {
+    state.markdown.as_ref().ok_or_else(|| {
+        tracing::error!("document body markdown requested but the markdown helper is unavailable");
+        AppError::internal().into()
+    })
+}
+
+fn map_markdown(err: MarkdownError) -> DocumentApiError {
+    match err {
+        MarkdownError::InvalidInput(detail) => {
+            tracing::info!(%detail, "document body markdown refused");
+            invalid_body()
+        }
+        MarkdownError::TooLarge => too_large(),
+        MarkdownError::Failed(detail) => {
+            tracing::error!(error = %detail, "markdown helper failed");
+            AppError::internal().into()
+        }
+    }
+}
+
 fn map_convert(err: ConvertError) -> DocumentApiError {
     match err {
         ConvertError::InvalidInput => invalid_body(),
@@ -258,10 +280,10 @@ pub(crate) async fn read_body(
             version: meta.version,
         })));
     }
-    let content_md = convert_client(state)?
+    let content_md = markdown_helper(state)?
         .tiptap_to_md(&meta.content_json)
         .await
-        .map_err(map_convert)?;
+        .map_err(map_markdown)?;
     Ok(Json(DocumentBodyResponse::Markdown(BodyMdResponse {
         content_md,
         version: meta.version,
@@ -303,10 +325,10 @@ async fn resolve_body_json(state: &AppState, input: BodyInput) -> Result<Value, 
             if md.len() > DOCUMENT_MAX_BODY_BYTES {
                 return Err(too_large());
             }
-            let json = convert_client(state)?
+            let json = markdown_helper(state)?
                 .md_to_tiptap(&md)
                 .await
-                .map_err(map_convert)?;
+                .map_err(map_markdown)?;
             prepare_derived_body(json.clone()).map_err(map_derived)?;
             Ok(json)
         }

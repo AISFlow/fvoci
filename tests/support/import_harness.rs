@@ -136,6 +136,11 @@ pub async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixtur
         poll_interval: Duration::from_millis(200),
         // The office child is the server binary, not this test binary.
         office_helper: Some(std::path::PathBuf::from(env!("CARGO_BIN_EXE_fvoci-server"))),
+        markdown: Some(
+            fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
+                "CARGO_BIN_EXE_fvoci-server"
+            )),
+        ),
         ..ImportJobSettings::from_env(convert.clone())
     };
     let pool = pool::connect_app(&harness.app_url).await.expect("app pool");
@@ -171,6 +176,11 @@ pub async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixtur
         search_embedder: None,
         mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
         document_convert: Some(convert),
+        markdown: Some(
+            fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
+                "CARGO_BIN_EXE_fvoci-server"
+            )),
+        ),
         import_wake: Some(wake),
         import_extractor_available: false,
         quota: Default::default(),

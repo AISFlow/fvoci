@@ -97,12 +97,15 @@ struct DrainOutcome {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // The image preview and office children are this binary in hidden modes: decide before
+    // The image preview, office and Markdown children are this binary in hidden modes: decide before
     // a runtime, logger or config exists, so the child holds nothing else.
     if let Some(code) = fvoci_server::attachments::preview::maybe_run_helper() {
         std::process::exit(code);
     }
     if let Some(code) = fvoci_server::documents::office::maybe_run_helper() {
+        std::process::exit(code);
+    }
+    if let Some(code) = fvoci_server::documents::markdown_helper::maybe_run_helper() {
         std::process::exit(code);
     }
     server_main()
@@ -360,6 +363,13 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("document convert helper disabled (FVOCI_DOCUMENT_CONVERT_BIN unset)");
     }
+    let markdown = match fvoci_server::documents::markdown_helper::MarkdownHelper::current_exe() {
+        Ok(helper) => Some(helper),
+        Err(error) => {
+            tracing::error!(%error, "markdown helper unavailable (current_exe)");
+            None
+        }
+    };
     let import_settings = document_convert.clone().map(ImportJobSettings::from_env);
     let import_extractor_available = import_settings
         .as_ref()
@@ -389,6 +399,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         search_embedder,
         mailer,
         document_convert,
+        markdown,
         import_wake,
         import_extractor_available,
         // Source self-host policy: storage/upload limits come only from the

@@ -1,0 +1,86 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "a",
+          "type": "text"
+        },
+        {
+          "text": "b",
+          "type": "text"
+        },
+        {
+          "text": "c",
+          "type": "text"
+        },
+        {
+          "text": "d",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "x",
+          "type": "text"
+        },
+        {
+          "type": "hardBreak"
+        },
+        {
+          "text": "y",
+          "type": "text"
+        },
+        {
+          "type": "hardBreak"
+        },
+        {
+          "text": "z",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "Inline <b>html</b> summary",
+              "type": "text"
+            }
+          ],
+          "type": "detailsSummary"
+        },
+        {
+          "content": [
+            {
+              "content": [
+                {
+                  "text": "inner",
+                  "type": "text"
+                }
+              ],
+              "type": "paragraph"
+            }
+          ],
+          "type": "detailsContent"
+        }
+      ],
+      "type": "details"
+    },
+    {
+      "content": [
+        {
+          "text": "x",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

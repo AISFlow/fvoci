@@ -1,0 +1,31 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "Text with footnote",
+          "type": "text"
+        },
+        {
+          "text": " and another",
+          "type": "text"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "After.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

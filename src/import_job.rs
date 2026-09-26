@@ -44,6 +44,7 @@ use crate::documents::import_body::{
     ImportBodyError,
 };
 use crate::documents::import_zip::{title_from_file_name, unzip_bounded, zip_safe_name, ZipEntry};
+use crate::documents::markdown_helper::MarkdownHelper;
 use crate::documents::office::{
     run_office_helper, OfficeCancelled, OfficeKind, OfficeLimits, OfficeMode, OfficeOutcome,
 };
@@ -57,6 +58,8 @@ pub struct ImportJobSettings {
     pub extract_limits: Limits,
     /// This binary, run as the `--internal-office-extract` child.
     pub office_helper: Option<PathBuf>,
+    /// This binary, run as the `--internal-markdown` child.
+    pub markdown: Option<MarkdownHelper>,
     pub office_limits: OfficeLimits,
     /// Storage quota imported Notion assets reserve against (source
     /// `requireStorageReservation`; unlimited until the license port).
@@ -65,6 +68,12 @@ pub struct ImportJobSettings {
 }
 
 impl ImportJobSettings {
+    fn markdown_helper(&self) -> Result<&MarkdownHelper, RunError> {
+        self.markdown
+            .as_ref()
+            .ok_or_else(|| RunError::Failed("markdown helper unavailable".into()))
+    }
+
     pub fn from_env(convert: ConvertClient) -> Self {
         let extractor_bin = std::env::var("FVOCI_EXTRACTOR_BIN")
             .ok()
@@ -81,6 +90,7 @@ impl ImportJobSettings {
             extractor_bin,
             extract_limits: default_extract_limits(),
             office_helper: std::env::current_exe().ok(),
+            markdown: MarkdownHelper::current_exe().ok(),
             office_limits: OfficeLimits::import(),
             quota: StorageQuota::default(),
             poll_interval,
@@ -366,6 +376,7 @@ async fn run_office_import(
     apply_imported_markdown(
         pool,
         &settings.convert,
+        settings.markdown_helper()?,
         claim.workspace_id,
         claim.created_by,
         claim.session_id,
@@ -492,6 +503,7 @@ async fn run_notion_import(
             apply_imported_markdown(
                 pool,
                 &settings.convert,
+                settings.markdown_helper()?,
                 claim.workspace_id,
                 claim.created_by,
                 claim.session_id,
@@ -1032,9 +1044,11 @@ pub enum SyncImportError {
 /// Source `importMarkdownZip` after the job row exists: every `.md` entry
 /// becomes a root document. On failure the row is marked failed; documents
 /// already created stay (the source does not compensate this path).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_markdown_zip_import(
     pool: &PgPool,
     convert: &ConvertClient,
+    markdown_helper: &MarkdownHelper,
     workspace_id: Uuid,
     job_id: Uuid,
     actor_user_id: Uuid,
@@ -1044,6 +1058,7 @@ pub async fn run_markdown_zip_import(
     let result = markdown_zip_documents(
         pool,
         convert,
+        markdown_helper,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1069,6 +1084,7 @@ pub async fn run_markdown_zip_import(
 async fn markdown_zip_documents(
     pool: &PgPool,
     convert: &ConvertClient,
+    markdown_helper: &MarkdownHelper,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -1103,6 +1119,7 @@ async fn markdown_zip_documents(
         apply_imported_markdown(
             pool,
             convert,
+            markdown_helper,
             workspace_id,
             actor_user_id,
             session_id,

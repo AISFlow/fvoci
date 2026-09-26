@@ -1,0 +1,23 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "nul�char and \u0001 ctrl",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "zero​width and bom﻿ mid",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

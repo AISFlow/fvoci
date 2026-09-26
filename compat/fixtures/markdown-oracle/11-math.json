@@ -1,0 +1,212 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "Inline ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "x^2"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " and ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "y_1"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " display-inline.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "latex": "\\int_0^1 f(x)\\,dx"
+      },
+      "type": "math"
+    },
+    {
+      "content": [
+        {
+          "text": "Currency ",
+          "type": "text"
+        },
+        {
+          "text": "$5 and $10 should stay text.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Pay ",
+          "type": "text"
+        },
+        {
+          "text": "$5 for ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "x"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " now.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Escaped $not math$ here.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Spaces ",
+          "type": "text"
+        },
+        {
+          "text": "$ x $ and ",
+          "type": "text"
+        },
+        {
+          "text": "$x $ and ",
+          "type": "text"
+        },
+        {
+          "text": "$ x$.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Template ",
+          "type": "text"
+        },
+        {
+          "text": "${var}$ literal.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Price ",
+          "type": "text"
+        },
+        {
+          "text": "$5-$10 range.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "attrs": {
+            "latex": "a$$b"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " adjacent.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "attrs": {
+            "latex": "inline double"
+          },
+          "type": "mathInline"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Mixed ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "\\alpha"
+          },
+          "marks": [
+            {
+              "type": "bold"
+            }
+          ],
+          "type": "mathInline"
+        },
+        {
+          "text": " bold math.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "Line",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "latex": "a\\\\b"
+      },
+      "type": "math"
+    },
+    {
+      "content": [
+        {
+          "text": "after.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "latex": "fence of three $$ inside"
+      },
+      "type": "math"
+    }
+  ],
+  "type": "doc"
+}

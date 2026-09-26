@@ -1,0 +1,34 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "텍스트 ",
+          "type": "text"
+        },
+        {
+          "text": "$$ 다음. 그리고 ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "a"
+          },
+          "type": "mathInline"
+        },
+        {
+          "attrs": {
+            "latex": "b"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " 인접 수식.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}
