@@ -281,8 +281,7 @@ async fn run_claimed(
             if matches!(err, RunError::Transient(_) | RunError::CleanupIncomplete)
                 && claim.attempt < IMPORT_MAX_ATTEMPTS
             {
-                let clear_refs =
-                    undo.failed == 0 && !matches!(err, RunError::CleanupIncomplete);
+                let clear_refs = undo.failed == 0 && !matches!(err, RunError::CleanupIncomplete);
                 match release_import_job_for_retry(pool, claim, clear_refs).await {
                     Ok(true) => warn!(
                         workspace_id = %claim.workspace_id,
@@ -990,7 +989,7 @@ pub struct CompensateOutcome {
 }
 
 /// Source `compensateImport`: tasks, then documents newest first (children
-/// reference parents), then stored objects.
+/// reference parents), then stored objects when every row purge succeeded.
 /// A row that is already gone counts as skipped, not failed.
 pub async fn compensate_import(
     pool: &PgPool,
@@ -1030,12 +1029,14 @@ pub async fn compensate_import(
             }
         }
     }
-    for key in keys {
-        // Also aborts an open multipart upload, which could otherwise
-        // publish an object after its row is gone.
-        if let Err(err) = storage.purge_key(&key).await {
-            out.failed += 1;
-            warn!(error = %err, "import.compensate_object_failed");
+    if out.failed == 0 {
+        for key in keys {
+            // Also aborts an open multipart upload, which could otherwise
+            // publish an object after its row is gone.
+            if let Err(err) = storage.purge_key(&key).await {
+                out.failed += 1;
+                warn!(error = %err, "import.compensate_object_failed");
+            }
         }
     }
     out
