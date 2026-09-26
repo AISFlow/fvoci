@@ -4,3 +4,6 @@
 .DS_Store
 /.cargo-target/
 /scripts/document-convert/node_modules/
+
+# CodeGraph dev-tool index (local exploration aid, never a build input)
+.codegraph/
