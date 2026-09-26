@@ -48,6 +48,9 @@ pub const CLOCK_SKEW_SECS: i64 = 60;
 /// An id_token issued further in the future than this is refused.
 const MAX_FUTURE_IAT_SECS: i64 = 300;
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
+/// Token endpoint response cap applied before the OIDC crate parses it
+/// (access/refresh/id tokens together; fetch.rs caps every body at 256 KiB).
+const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 /// RSA keys shorter than this are dropped from a JWKS (the `rsa` backend has
 /// no lower bound of its own).
 const MIN_RSA_MODULUS_BYTES: usize = 256;
@@ -551,7 +554,16 @@ pub async fn oidc_exchange(
     {
         return Err(ExchangeError::Response("iss parameter missing"));
     }
-    let http = move |request| async move { policy.send(request).await };
+    // Bound what the crate parses: the token response (and the id_token inside
+    // it) is capped here, before `request_async` deserialises it. The 16 KiB
+    // id_token check below stays as the documented token contract.
+    let http = move |request| async move {
+        let response = policy.send(request).await?;
+        if response.body().len() > MAX_TOKEN_RESPONSE_BYTES {
+            return Err(FetchError::TooLarge);
+        }
+        Ok(response)
+    };
     let tokens = oidc_client(&discovery, provider, input.redirect_uri)?
         .exchange_code(AuthorizationCode::new(input.code.to_string()))
         .set_pkce_verifier(PkceCodeVerifier::new(input.pkce_verifier.to_string()))
