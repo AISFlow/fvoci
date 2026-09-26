@@ -6,6 +6,7 @@
 //! writes and removes one probe file). Details never carry secrets; database
 //! URLs in driver messages are masked.
 
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -16,6 +17,8 @@ use crate::auth::password::Keyring;
 use crate::collab::config::CollabConfig;
 use crate::config::Config;
 use crate::db::{migrate, pool};
+use crate::documents::export::{render_document_export, ExportFormat};
+use crate::documents::markdown_helper::MarkdownHelper;
 
 const DB_TIMEOUT: Duration = Duration::from_secs(10);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -171,7 +174,6 @@ pub async fn run_doctor() -> DoctorReport {
             Err(err) => Err(err),
         },
     );
-    checks.result("document_convert", convert_check().await);
     if let Some(collab) = &collab {
         checks.result("collab_engine", collab_engine_check(collab).await);
     }
@@ -184,12 +186,111 @@ pub async fn run_doctor() -> DoctorReport {
             None => disabled("FVOCI_EXTRACTOR_BIN"),
         },
     );
+    checks.result("document_convert", document_convert_check().await);
 
     let ok = checks.0.iter().all(|c| c.ok);
     DoctorReport {
         ok,
         checks: checks.0,
     }
+}
+
+/// `fvoci-migrate` has no internal Markdown mode. The server beside it owns
+/// that mode in the installed image; this also works for local Cargo builds.
+fn sibling_server() -> Result<PathBuf, String> {
+    let migrate = std::env::current_exe()
+        .map_err(|_| "cannot locate fvoci-migrate executable".to_string())?;
+    let server = migrate.with_file_name(format!("fvoci-server{}", std::env::consts::EXE_SUFFIX));
+    let meta = std::fs::metadata(&server)
+        .map_err(|_| "sibling fvoci-server binary is missing".to_string())?;
+    if !meta.is_file() {
+        return Err("sibling fvoci-server is not a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return Err("sibling fvoci-server is not executable".into());
+        }
+    }
+    Ok(server)
+}
+
+async fn document_convert_check() -> Result<Option<String>, String> {
+    let server = sibling_server()?;
+    let helper = MarkdownHelper::new(server);
+    const MARKDOWN: &str = "# Doctor readiness\n\nHello **world**.";
+    const TITLE: &str = "Doctor export";
+
+    let body = helper
+        .md_to_tiptap(MARKDOWN)
+        .await
+        .map_err(|err| format!("Markdown to Tiptap failed: {err}"))?;
+    if body.get("type").and_then(|v| v.as_str()) != Some("doc")
+        || !body
+            .get("content")
+            .and_then(|v| v.as_array())
+            .is_some_and(|v| !v.is_empty())
+        || !body.to_string().contains("Hello")
+    {
+        return Err("Markdown to Tiptap returned an incomplete document".into());
+    }
+    let html = helper
+        .md_to_safe_html(MARKDOWN)
+        .await
+        .map_err(|err| format!("safe HTML conversion failed: {err}"))?;
+    if !html.contains("<h1") || !html.contains("Hello") || !html.contains("<strong>") {
+        return Err("safe HTML conversion returned incomplete markup".into());
+    }
+
+    for (format, name) in [
+        (ExportFormat::Markdown, "Markdown"),
+        (ExportFormat::Docx, "DOCX"),
+        (ExportFormat::Pdf, "PDF"),
+        (ExportFormat::Pptx, "PPTX"),
+    ] {
+        let rendered = render_document_export(&helper, format, TITLE, &body)
+            .await
+            .map_err(|err| format!("{name} export failed: {err}"))?;
+        match format {
+            ExportFormat::Markdown => {
+                let md = std::str::from_utf8(&rendered.bytes)
+                    .map_err(|_| "Markdown export is not UTF-8")?;
+                if !md.starts_with("# Doctor export") || !md.contains("Hello") {
+                    return Err("Markdown export lacks representative content".into());
+                }
+            }
+            ExportFormat::Docx => check_ooxml(&rendered.bytes, &["word/document.xml"], name)?,
+            ExportFormat::Pdf => {
+                if !rendered.bytes.starts_with(b"%PDF-") || rendered.bytes.len() < 100 {
+                    return Err("PDF export lacks a PDF signature/body".into());
+                }
+            }
+            ExportFormat::Pptx => check_ooxml(
+                &rendered.bytes,
+                &["ppt/presentation.xml", "ppt/slides/slide1.xml"],
+                name,
+            )?,
+        }
+    }
+    Ok(None)
+}
+
+fn check_ooxml(bytes: &[u8], parts: &[&str], name: &str) -> Result<(), String> {
+    if !bytes.starts_with(b"PK\x03\x04") {
+        return Err(format!("{name} export lacks a ZIP signature"));
+    }
+    let mut archive = docx_zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|_| format!("{name} export is not a ZIP archive"))?;
+    for part in parts {
+        let entry = archive
+            .by_name(part)
+            .map_err(|_| format!("{name} export lacks {part}"))?;
+        if entry.size() == 0 {
+            return Err(format!("{name} export has empty {part}"));
+        }
+    }
+    Ok(())
 }
 
 fn public_origin_check(origin: &str, cookie_secure: bool) -> Result<Option<String>, String> {
@@ -321,18 +422,6 @@ async fn storage_check() -> Result<Option<String>, String> {
         }
         .to_string(),
     ))
-}
-
-async fn convert_check() -> Result<Option<String>, String> {
-    let Some(client) = crate::documents::convert::ConvertClient::from_env() else {
-        return disabled("FVOCI_DOCUMENT_CONVERT_BIN");
-    };
-    match tokio::time::timeout(HELPER_TIMEOUT, client.md_to_tiptap("# ok")).await {
-        Ok(Ok(doc)) if doc.get("type").and_then(|t| t.as_str()) == Some("doc") => Ok(None),
-        Ok(Ok(_)) => Err("convert helper returned an unexpected document".into()),
-        Ok(Err(err)) => Err(format!("convert helper failed: {err}")),
-        Err(_) => Err("convert helper timed out".into()),
-    }
 }
 
 async fn collab_engine_check(collab: &CollabConfig) -> Result<Option<String>, String> {

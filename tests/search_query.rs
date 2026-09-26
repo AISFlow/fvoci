@@ -60,7 +60,6 @@ async fn search_state(app_url: &str, meili: Option<MeiliConfig>) -> AppState {
         collab: None,
         meili,
         search_embedder: None,
-        document_convert: None,
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"

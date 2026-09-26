@@ -346,7 +346,6 @@ async fn app_state(app_url: &str, mailer: Arc<Mailer>) -> AppState {
         meili: None,
         search_embedder: None,
         mailer,
-        document_convert: None,
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"

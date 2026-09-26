@@ -26,6 +26,9 @@ description: FVOCI 변경의 검사를 고르거나 CI 실패·느린 테스트�
 보안 설정·오류 의미, 실제 client/DB/UI 연결을 검증한다. SDK 내부 테스트 전체를 다시 복제하거나
 SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 않는다. 기존 버그와 명세가 다르면
 원본 출력을 무조건 정답으로 고정하지 않는다. 바이너리·배포 입력이 바뀌면 설치 경계도 확인한다.
+차등 검사는 차이 발견 수단이다. 바이트 일치는 암호학적 입력·원본 파일·실제 프로토콜/소비자 또는
+명시된 계약에만 요구하고, 나머지는 내용·구조·서식·권한 의미를 비교한다. 원본 결함 snapshot은 올바른
+기대 동작의 회귀로 바꾸되, 정규화로 누락을 숨기거나 현재 Rust 출력에 기대값을 그대로 맞추지 않는다.
 
 동일 코드·동등 조건/범위의 원격 성공은 재사용하고, 통합 후 바뀐 부분과 환경 차이만 필요한 만큼
 추가 확인한다. HEAD/base/합성 SHA·feature/target·실제 테스트 실행을 대조한다. 필수 검사 누락을
@@ -34,3 +37,10 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 ## 결과
 
 검사명, 정확한 명령/cwd/SHA, 실행 범위/개수, 결과와 exit code, 소요 시간·조건, 생략 이유와 남은 위험을 반환한다. 누락된 DB나 브라우저 환경이 필요한 검사는 미실행/실패로 분명히 표시한다.
+
+## Web Playwright CI shard (browser job only)
+
+1. 정책·플래너: `python3 scripts/web-e2e-groups.py verify --shards 8` 와 `python3 -m unittest scripts.test_web_e2e_groups` 는 DB·브라우저 없이 실행한다. `apps/web/e2e/*.spec.ts` 만 정상 범위이며, 중첩·`.test.ts` 등 미지원 패턴은 플래너가 실패로 막는다.
+2. 샤드 래퍼 고정 검사: `bash scripts/fixtures/web-e2e/run-ci-shard-fixture-test.sh` 가 stub 빌드·run-group으로 `--ci-shard` 플로우(플랜 선검증, 샤드당 빌드 1회, 그룹 실패 전파, 샤드 수 override 거부)를 검증한다. 프로덕션 래퍼에는 dry-run·디렉터리 override가 없다.
+3. 통합 스크립트: `bash scripts/test-web-e2e-groups.sh` 가 위를 묶는다. CI `web-checks` 와 동일 명령을 로컬에서 먼저 돌린다.
+4. 대표 브라우저 샤드( PostgreSQL·Chromium )는 코디네이터 배정 후 `bash scripts/run-web-e2e.sh --ci-shard N` 으로만 실행한다. 전체 8 샤드·원격 `web.yml` 은 통합 수락 경로에서 확인한다.

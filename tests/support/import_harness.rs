@@ -13,7 +13,6 @@ use fvoci_server::attachments::ObjectStorage;
 use fvoci_server::auth::password::Keyring;
 use fvoci_server::auth::AuthService;
 use fvoci_server::db::{pool, Db};
-use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
 use fvoci_server::import_job::{
@@ -31,12 +30,6 @@ use crate::project_harness::{self, admin_pool, json_request, TestDb};
 
 pub const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
-
-pub fn convert_client() -> ConvertClient {
-    ConvertClient::from_env().expect(
-        "FVOCI_DOCUMENT_CONVERT_BIN is required; run scripts/prepare-document-convert.sh first",
-    )
-}
 
 pub fn zip_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -131,7 +124,6 @@ pub async fn fixture(harness: &TestDb) -> Fixture {
 }
 
 pub async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixture {
-    let convert = convert_client();
     let settings = ImportJobSettings {
         poll_interval: Duration::from_millis(200),
         // The office child is the server binary, not this test binary.
@@ -175,7 +167,6 @@ pub async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixtur
         meili: None,
         search_embedder: None,
         mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
-        document_convert: Some(convert),
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"
