@@ -11,23 +11,25 @@ pub const ADMISSION_LOCK_KEY: i64 = 1_907_008_552;
 pub const INSTANCE_SEAT_LIMIT: i32 = 10;
 
 /// Source `QuotaLimit`: a byte ceiling or `"unlimited"`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QuotaLimit {
     #[default]
     Unlimited,
     Bytes(i64),
-    SignedStorage(Arc<crate::license::Entitlements>),
-    SignedUpload(Arc<crate::license::Entitlements>),
 }
 
 /// The storage half of source `QuotaPolicy` (`storageBytes`, `uploadBytes`).
-/// The self-host provider (`selfhostQuotaProvider`) takes both from the
-/// signed license and defaults to unlimited; seats stay instance-scoped at
-/// [`INSTANCE_SEAT_LIMIT`] and guests unlimited, exactly as that provider.
+/// Both signed limits are resolved from one entitlement at reservation time.
+/// The fixed variant is used by explicit quota tests and offline callers.
 #[derive(Debug, Clone, Default)]
-pub struct StorageQuota {
-    pub storage_bytes: QuotaLimit,
-    pub upload_bytes: QuotaLimit,
+pub enum StorageQuota {
+    #[default]
+    Unlimited,
+    Signed(Arc<crate::license::Entitlements>),
+    Fixed {
+        storage_bytes: QuotaLimit,
+        upload_bytes: QuotaLimit,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,9 +42,13 @@ pub enum StorageQuotaError {
 
 impl StorageQuota {
     pub fn from_license(license: Arc<crate::license::Entitlements>) -> Self {
-        Self {
-            storage_bytes: QuotaLimit::SignedStorage(license.clone()),
-            upload_bytes: QuotaLimit::SignedUpload(license),
+        Self::Signed(license)
+    }
+
+    pub fn fixed(storage_bytes: QuotaLimit, upload_bytes: QuotaLimit) -> Self {
+        Self::Fixed {
+            storage_bytes,
+            upload_bytes,
         }
     }
 
@@ -51,43 +57,36 @@ impl StorageQuota {
     /// (uploading, assembling and stored), read under the workspace storage
     /// lock so concurrent reservations cannot both pass.
     pub fn check(&self, reserved_bytes: i64, size_bytes: i64) -> Result<(), StorageQuotaError> {
-        let limits = match (&self.storage_bytes, &self.upload_bytes) {
-            (QuotaLimit::SignedStorage(license), _) | (_, QuotaLimit::SignedUpload(license)) => {
-                license.limits()
+        let (storage_bytes, upload_bytes) = match self {
+            Self::Unlimited => (QuotaLimit::Unlimited, QuotaLimit::Unlimited),
+            Self::Fixed {
+                storage_bytes,
+                upload_bytes,
+            } => (*storage_bytes, *upload_bytes),
+            Self::Signed(license) => {
+                let limits = license.limits();
+                let convert = |limit| match limit {
+                    crate::license::Limit::Value(n) => QuotaLimit::Bytes(n as i64),
+                    crate::license::Limit::Unlimited => QuotaLimit::Unlimited,
+                };
+                (convert(limits.storage_bytes), convert(limits.upload_bytes))
             }
-            _ => crate::license::Limits::default(),
         };
-        self.check_with_limits(reserved_bytes, size_bytes, limits)
+        Self::check_resolved(reserved_bytes, size_bytes, storage_bytes, upload_bytes)
     }
 
-    fn check_with_limits(
-        &self,
+    fn check_resolved(
         reserved_bytes: i64,
         size_bytes: i64,
-        limits: crate::license::Limits,
+        storage_bytes: QuotaLimit,
+        upload_bytes: QuotaLimit,
     ) -> Result<(), StorageQuotaError> {
-        let upload = match &self.upload_bytes {
-            QuotaLimit::SignedUpload(_) => match limits.upload_bytes {
-                crate::license::Limit::Value(n) => Some(n as i64),
-                crate::license::Limit::Unlimited => None,
-            },
-            QuotaLimit::Bytes(n) => Some(*n),
-            _ => None,
-        };
-        if let Some(limit) = upload {
+        if let QuotaLimit::Bytes(limit) = upload_bytes {
             if size_bytes > limit {
                 return Err(StorageQuotaError::Upload);
             }
         }
-        let storage = match &self.storage_bytes {
-            QuotaLimit::SignedStorage(_) => match limits.storage_bytes {
-                crate::license::Limit::Value(n) => Some(n as i64),
-                crate::license::Limit::Unlimited => None,
-            },
-            QuotaLimit::Bytes(n) => Some(*n),
-            _ => None,
-        };
-        if let Some(limit) = storage {
+        if let QuotaLimit::Bytes(limit) = storage_bytes {
             if reserved_bytes.saturating_add(size_bytes) > limit {
                 return Err(StorageQuotaError::Storage);
             }
@@ -192,10 +191,7 @@ mod tests {
             StorageQuota::default().check(i64::MAX - 1, i64::MAX),
             Ok(())
         );
-        let quota = StorageQuota {
-            storage_bytes: QuotaLimit::Bytes(100),
-            upload_bytes: QuotaLimit::Bytes(40),
-        };
+        let quota = StorageQuota::fixed(QuotaLimit::Bytes(100), QuotaLimit::Bytes(40));
         assert_eq!(quota.check(0, 40), Ok(()));
         assert_eq!(quota.check(0, 41), Err(StorageQuotaError::Upload));
         assert_eq!(quota.check(60, 40), Ok(()), "exactly at the limit");
@@ -205,26 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_limits_apply_at_the_existing_reservation_boundary() {
-        let quota = StorageQuota::from_license(Arc::new(crate::license::load(
-            None,
-            r#"{"version":1,"keys":[]}"#,
-        )));
-        let limits = crate::license::Limits {
-            seats: crate::license::Limit::Value(2),
-            storage_bytes: crate::license::Limit::Value(100),
-            upload_bytes: crate::license::Limit::Value(40),
-            ai_credits: crate::license::Limit::Unlimited,
-        };
-        assert_eq!(quota.check_with_limits(60, 40, limits), Ok(()));
-        assert_eq!(
-            quota.check_with_limits(60, 41, limits),
-            Err(StorageQuotaError::Upload)
-        );
-        assert_eq!(
-            quota.check_with_limits(61, 40, limits),
-            Err(StorageQuotaError::Storage)
-        );
+    fn signed_seat_admission_limit_and_unlimited() {
         assert!(!seat_exceeded(1, Some(2)));
         assert!(seat_exceeded(2, Some(2)));
         assert!(!seat_exceeded(100, None));

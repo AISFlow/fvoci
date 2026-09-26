@@ -64,7 +64,7 @@ pub struct ImportJobSettings {
     pub seed: Option<SeedEngine>,
     pub office_limits: OfficeLimits,
     /// Storage quota imported Notion assets reserve against (source
-    /// `requireStorageReservation`; unlimited until the license port).
+    /// `requireStorageReservation`; reads the live signed limit).
     pub quota: StorageQuota,
     pub poll_interval: Duration,
 }

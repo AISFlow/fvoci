@@ -10,6 +10,9 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+#[path = "support/license.rs"]
+mod license_fixture;
+
 use axum::http::StatusCode;
 use project_harness::{
     add_workspace_user, admin_pool, app_state, create_project, http_request, json_request,
@@ -1080,10 +1083,10 @@ fn quota_app(
     upload: i64,
 ) -> axum::Router {
     let mut state = state;
-    state.quota = fvoci_server::db::quota::StorageQuota {
-        storage_bytes: fvoci_server::db::quota::QuotaLimit::Bytes(storage),
-        upload_bytes: fvoci_server::db::quota::QuotaLimit::Bytes(upload),
-    };
+    state.quota = fvoci_server::db::quota::StorageQuota::fixed(
+        fvoci_server::db::quota::QuotaLimit::Bytes(storage),
+        fvoci_server::db::quota::QuotaLimit::Bytes(upload),
+    );
     let _ = c;
     fvoci_server::http::router(state, None)
 }
@@ -1156,6 +1159,36 @@ async fn upload_and_storage_limits_count_every_row_of_the_workspace() {
     let outsider = add_workspace_user(&c.admin, c.ws, "guest", "outsider").await;
     let (status, _) = create_only(&app, &outsider.cookie, &doc_path, 1).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    c.done().await;
+}
+
+#[tokio::test]
+async fn signed_license_upload_and_storage_limits_reach_reservation() {
+    let c = ctx().await;
+    let mut state = app_state(&c.harness.app_url).await;
+    let license =
+        license_fixture::signed_license_with_limits(json!({"storageBytes": 30, "uploadBytes": 12}));
+    state.auth = std::sync::Arc::new(fvoci_server::auth::AuthService {
+        db: fvoci_server::db::Db::with_license(state.auth.db.pool.clone(), license.clone()),
+        password_keys: state.auth.password_keys.clone(),
+    });
+    state.quota = fvoci_server::db::quota::StorageQuota::from_license(license);
+    let app = fvoci_server::http::router(state, None);
+    let doc_id = create_wiki_document(&c.app, &c.cookie, c.ws).await;
+    let path = format!("/api/v1/workspaces/{}/documents/{doc_id}/uploads", c.ws);
+
+    let (status, body) = create_only(&app, &c.cookie, &path, 13).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{body}");
+    assert_eq!(body["code"], "limit.upload");
+    for _ in 0..2 {
+        let (status, body) = create_only(&app, &c.cookie, &path, 12).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, body) = create_only(&app, &c.cookie, &path, 7).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{body}");
+    assert_eq!(body["code"], "limit.storage");
+    let (status, body) = create_only(&app, &c.cookie, &path, 6).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     c.done().await;
 }
 
