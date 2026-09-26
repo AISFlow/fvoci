@@ -8,7 +8,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use project_harness::{
     add_workspace_user, admin_pool, count_rows, create_project, drop_insert_fail_trigger,
-    http_request, install_insert_fail_trigger, json_request, setup_session, test_peer, TestDb,
+    http_request, install_insert_fail_trigger, json_request, setup_session, test_peer,
+    wait_for_query_blocked_by, TestDb,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -799,6 +800,72 @@ async fn project_document_comments_use_project_permission() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{viewer_create:?}");
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// A wiki comment create whose unlocked reads saw a wiki document, but whose
+/// document row lock returns it already moved into a project, is refused
+/// instead of locking the project after the document (collab and project
+/// writes lock project -> document; the inverse order could deadlock).
+#[tokio::test]
+async fn wiki_comment_refuses_document_moved_into_project_meanwhile() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (status, doc) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"parentId": null, "title": "이동 중 문서"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{doc:?}");
+    let document_id = Uuid::parse_str(doc["id"].as_str().unwrap()).unwrap();
+    let lab = create_project(app.clone(), &cookie, workspace_id, "MOV", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+
+    // The mover holds the document row with the project affiliation uncommitted.
+    let mut mover = admin.begin().await.unwrap();
+    let mover_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *mover)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.documents SET project_id = $2, number = 99999 WHERE id = $1")
+        .bind(document_id)
+        .bind(project_id)
+        .execute(&mut *mover)
+        .await
+        .unwrap();
+
+    let create = tokio::spawn({
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments"),
+                Some(json!({"body": "경합 댓글"})),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    wait_for_query_blocked_by(&admin, mover_pid, "%fvoci.documents%").await;
+    mover.commit().await.unwrap();
+
+    let (status, body) = create.await.unwrap();
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    let comments: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.comments WHERE document_id = $1")
+            .bind(document_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(comments, 0);
 
     admin.close().await;
     harness.cleanup().await;

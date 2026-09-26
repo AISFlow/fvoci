@@ -6,7 +6,8 @@
 //!
 //! ## Snapshot point
 //! `check_delivery_admission` runs one READ COMMITTED `SELECT` that joins the
-//! current user, session, workspace, membership, and wiki document in a tenant
+//! current user, session, workspace, membership, document, and (for project
+//! documents) the owning project and its direct/group grants in a tenant
 //! transaction. `set_tenant` is SET LOCAL; the snapshot is the SELECT's, not
 //! sequential statements. There are no row or advisory locks, so a writer
 //! holding `FOR UPDATE` does not block this read (R2).
@@ -43,7 +44,9 @@ use uuid::Uuid;
 
 use crate::db::context::set_tenant;
 use crate::db::workspace::WorkspaceRole;
-use crate::projects::{workspace_base_permission, ProjectPermission};
+use crate::projects::{
+    effective_permission, workspace_base_permission, ProjectMemberRole, ProjectPermission,
+};
 
 /// Result of the single-statement delivery read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,7 +191,12 @@ type DeliveryRow = (
     Option<String>,
     Option<DateTime<Utc>>,
     Option<i32>,
+    Option<bool>,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
 );
+
 pub async fn check_delivery_admission(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -259,7 +267,33 @@ async fn check_delivery_admission_inner(
                   AND dm.document_id = $4
                   AND gm.user_id = u.id
                   AND dm.group_id IS NOT NULL
-            ) AS grant_rank
+            ) AS grant_rank,
+            (p.deleted_at IS NULL) AS project_live,
+            p.visibility AS project_visibility,
+            p.status AS project_status,
+            (
+                SELECT max(
+                    CASE pm.role
+                        WHEN 'lead' THEN 3
+                        WHEN 'member' THEN 2
+                        WHEN 'viewer' THEN 1
+                        ELSE 0
+                    END
+                )
+                FROM fvoci.project_members pm
+                WHERE pm.workspace_id = $3
+                  AND pm.project_id = d.project_id
+                  AND (
+                    pm.user_id = u.id
+                    OR EXISTS (
+                        SELECT 1
+                        FROM fvoci.group_members gm
+                        WHERE gm.workspace_id = pm.workspace_id
+                          AND gm.group_id = pm.group_id
+                          AND gm.user_id = u.id
+                    )
+                  )
+            ) AS project_rank
         FROM fvoci.users u
         INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
         INNER JOIN fvoci.workspaces w ON w.id = $3
@@ -267,6 +301,8 @@ async fn check_delivery_admission_inner(
             ON m.workspace_id = $3 AND m.user_id = u.id
         LEFT JOIN fvoci.documents d
             ON d.workspace_id = $3 AND d.id = $4
+        LEFT JOIN fvoci.projects p
+            ON p.workspace_id = $3 AND p.id = d.project_id
         WHERE u.id = $1
         "#,
     )
@@ -278,8 +314,19 @@ async fn check_delivery_admission_inner(
     .await?;
     tx.commit().await?;
 
-    let Some((session_live, workspace_live, role, project_id, status, deleted_at, grant_rank)) =
-        row
+    let Some((
+        session_live,
+        workspace_live,
+        role,
+        project_id,
+        status,
+        deleted_at,
+        grant_rank,
+        project_live,
+        project_visibility,
+        project_status,
+        project_rank,
+    )) = row
     else {
         return Ok(DeliveryAdmission::Denied);
     };
@@ -290,25 +337,47 @@ async fn check_delivery_admission_inner(
     let Some(role) = role else {
         return Ok(DeliveryAdmission::Denied);
     };
-    let granted = match grant_rank {
-        Some(3) => ProjectPermission::Manage,
-        Some(2) => ProjectPermission::Edit,
-        Some(1) => ProjectPermission::View,
-        _ => ProjectPermission::None,
-    };
-    // Same rule as `document_permission`, evaluated in this snapshot SELECT.
-    let permission = workspace_base_permission(role).max(granted);
-    if !permission.at_least(ProjectPermission::View) {
-        return Ok(DeliveryAdmission::Denied);
-    }
     let Some(status) = status else {
         return Ok(DeliveryAdmission::Denied);
     };
-    if deleted_at.is_some() || project_id.is_some() {
+    if deleted_at.is_some() {
+        return Ok(DeliveryAdmission::Denied);
+    }
+    let (permission, project_archived) = if project_id.is_some() {
+        // Same rule as `project_permission` (`effective_permission`), evaluated in this
+        // snapshot SELECT: a trashed project denies like a trashed document.
+        let (Some(true), Some(visibility), Some(project_status)) =
+            (project_live, project_visibility, project_status)
+        else {
+            return Ok(DeliveryAdmission::Denied);
+        };
+        let member_role = match project_rank {
+            Some(3) => Some(ProjectMemberRole::Lead),
+            Some(2) => Some(ProjectMemberRole::Member),
+            Some(1) => Some(ProjectMemberRole::Viewer),
+            _ => None,
+        };
+        (
+            effective_permission(role, &visibility, member_role),
+            project_status == "archived",
+        )
+    } else {
+        // Same rule as `document_permission`, evaluated in this snapshot SELECT.
+        let granted = match grant_rank {
+            Some(3) => ProjectPermission::Manage,
+            Some(2) => ProjectPermission::Edit,
+            Some(1) => ProjectPermission::View,
+            _ => ProjectPermission::None,
+        };
+        (workspace_base_permission(role).max(granted), false)
+    };
+    if !permission.at_least(ProjectPermission::View) {
         return Ok(DeliveryAdmission::Denied);
     }
     Ok(DeliveryAdmission::Allowed {
-        read_only: status == "archived" || !permission.at_least(ProjectPermission::Edit),
+        read_only: status == "archived"
+            || project_archived
+            || !permission.at_least(ProjectPermission::Edit),
     })
 }
 

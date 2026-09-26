@@ -12,11 +12,13 @@ export function DocumentExportMenu({
   workspaceId,
   documentId,
   title,
+  projectId = null,
   persistNow,
 }: {
   workspaceId: string;
   documentId: string;
   title: string;
+  projectId?: string | null;
   persistNow?: () => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
@@ -49,7 +51,7 @@ export function DocumentExportMenu({
         disabled={pending}
         onClick={() =>
           runExport(
-            () => downloadDocumentMarkdown(workspaceId, documentId, title),
+            () => downloadDocumentMarkdown(workspaceId, documentId, title, projectId),
             "export.md.failed",
           )
         }
@@ -63,7 +65,7 @@ export function DocumentExportMenu({
         disabled={pending}
         onClick={() =>
           runExport(
-            () => downloadDocumentPdf(workspaceId, documentId, title),
+            () => downloadDocumentPdf(workspaceId, documentId, title, projectId),
             "export.pdf.failed",
           )
         }
@@ -77,7 +79,7 @@ export function DocumentExportMenu({
         disabled={pending}
         onClick={() =>
           runExport(
-            () => downloadDocumentDocx(workspaceId, documentId, title),
+            () => downloadDocumentDocx(workspaceId, documentId, title, projectId),
             "export.docx.failed",
           )
         }
@@ -91,7 +93,7 @@ export function DocumentExportMenu({
         disabled={pending}
         onClick={() =>
           runExport(
-            () => downloadDocumentPptx(workspaceId, documentId, title),
+            () => downloadDocumentPptx(workspaceId, documentId, title, projectId),
             "export.pptx.failed",
           )
         }

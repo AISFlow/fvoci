@@ -34,6 +34,32 @@ export function documentMetaQuery(workspaceId: string, documentId: string) {
   });
 }
 
+export function projectDocumentMetaQuery(
+  workspaceId: string,
+  projectId: string,
+  documentId: string,
+) {
+  return queryOptions({
+    queryKey: ["project-document", workspaceId, projectId, documentId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET(
+          "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}",
+          {
+            params: {
+              path: {
+                workspace_id: workspaceId,
+                project_id: projectId,
+                document_id: documentId,
+              },
+            },
+          },
+        ),
+      ),
+    enabled: Boolean(workspaceId) && Boolean(projectId) && Boolean(documentId),
+  });
+}
+
 export function documentBodyQuery(workspaceId: string, documentId: string) {
   return queryOptions({
     queryKey: ["document-body", workspaceId, documentId] as const,
