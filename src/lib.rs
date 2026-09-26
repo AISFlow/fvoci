@@ -2,6 +2,7 @@ pub mod alloc_guard;
 pub mod api;
 pub mod attachments;
 pub mod auth;
+pub mod backup_manifest;
 pub mod collab;
 pub mod collections;
 pub mod config;
