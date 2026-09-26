@@ -3,14 +3,14 @@
 # matches compat/fixtures/yjs-seed/schema.json, the table the Rust seed writer
 # (crates/collab-engine/src/seed.rs) is checked against. Fix by updating the
 # Rust schema table and running scripts/regen-yjs-seed-oracle.sh.
-# Needs the Node deps from scripts/prepare-document-convert.sh (dev/CI only).
+# Needs editor and scripts/document-convert npm dependencies (dev/CI only).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE="$ROOT/compat/fixtures/yjs-seed/schema.json"
 LOADER="$ROOT/scripts/document-convert/node_modules/tsx/dist/loader.mjs"
 [[ -f "$LOADER" ]] || {
-  echo "missing $LOADER; run scripts/prepare-document-convert.sh" >&2
+  echo "missing $LOADER; run npm ci --prefix packages/editor and npm ci --prefix scripts/document-convert" >&2
   exit 2
 }
 

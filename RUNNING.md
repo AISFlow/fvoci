@@ -389,7 +389,9 @@ document export (`GET …/documents/{id}/md|docx|pdf|pptx`, wiki and project) an
 PDF run in the same child as the Markdown conversions
 (`--op tiptap-to-md-export|tiptap-to-docx|tiptap-to-pdf|tiptap-to-pptx`), see "DOCX export",
 "PDF export" and "PPTX and Markdown export" below. The server no longer runs the Node document
-convert helper and ignores `FVOCI_DOCUMENT_CONVERT_BIN`; `scripts/document-convert` remains only
+convert helper; the final image contains no Node/Bun/Deno or bundled JavaScript engine.
+Node is used only to build the web assets and run development oracles/tests.
+`scripts/document-convert` remains only
 as the development oracle for the fixture regeneration scripts (`scripts/regen-*-oracle.sh`).
 
 The child is chosen before any runtime, config or credential is loaded, gets a cleared

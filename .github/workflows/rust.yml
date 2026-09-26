@@ -116,15 +116,6 @@ jobs:
           key: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}
           restore-keys: v2-server-${{ runner.os }}-${{ runner.arch }}-1.98.1-db-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-
       - run: cargo fetch --locked
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24.21.0'
-          cache: npm
-          cache-dependency-path: |
-            packages/editor/package-lock.json
-            scripts/document-convert/package-lock.json
-      - name: Prepare the document convert helper (npm ci)
-        run: bash scripts/prepare-document-convert.sh >> "$GITHUB_ENV"
       - name: Native server build and policy tests (ARM64)
         if: runner.arch == 'ARM64' && matrix.shard == 'a'
         run: |
@@ -202,8 +193,10 @@ jobs:
           cache-dependency-path: |
             packages/editor/package-lock.json
             scripts/document-convert/package-lock.json
-      - name: Prepare the document convert helper (npm ci)
-        run: bash scripts/prepare-document-convert.sh >> "$GITHUB_ENV"
+      - name: Install editor schema oracle dependencies (development only)
+        run: |
+          npm ci --prefix packages/editor --ignore-scripts --no-audit --no-fund
+          npm ci --prefix scripts/document-convert --ignore-scripts --no-audit --no-fund
       - name: Editor schema matches the Yjs seed fixture
         run: bash scripts/check-yjs-seed-schema.sh
       - name: WebSocket, PostgreSQL and native helper integration tests
