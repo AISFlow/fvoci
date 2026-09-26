@@ -192,7 +192,6 @@ async fn app_state_with_part_size(
         meili: None,
         search_embedder: None,
         mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
-        document_convert: None,
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"

@@ -9,9 +9,10 @@
 //! `main` before any runtime, logger, config or credential exists; it sets
 //! RLIMIT_AS/RLIMIT_CPU before reading its input from stdin, runs one
 //! operation on a thread with a stack sized for the parser's recursion, and
-//! writes the result to stdout. The DOCX writer (`documents::docx`) runs here
-//! for the same reasons: CPU/memory proportional to a stored body, panics and
-//! its 20 MB output cap stay out of the server. The parent bounds input, output, wall time and
+//! writes the result to stdout. The document exports (Markdown, DOCX, PDF and
+//! PPTX: `documents::{docx, pdf, pptx}`) run here for the same reasons:
+//! CPU/memory proportional to a stored body, panics and their 20 MB output
+//! cap stay out of the server. The parent bounds input, output, wall time and
 //! concurrency, kills the child on timeout or drop, clears its environment and
 //! sets dies-with-parent on Linux. This is an isolation boundary for CPU,
 //! memory and crashes, not a filesystem or network sandbox.
@@ -29,9 +30,10 @@ use tokio::sync::Semaphore;
 use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
 use crate::documents::docx::{write_docx, DocxError, DOCX_MAX_OUTPUT_BYTES};
 use crate::documents::export::ExportRenderError;
-use crate::documents::export_model::export_doc;
+use crate::documents::export_model::{export_doc, visible_title};
 use crate::documents::markdown::{md_to_safe_html, md_to_tiptap};
 use crate::documents::pdf::{write_pdf, PdfError, PDF_MAX_OUTPUT_BYTES};
+use crate::documents::pptx::{write_pptx, PptxError, PPTX_MAX_OUTPUT_BYTES};
 use crate::share_render::{is_tiptap_doc, tiptap_doc_to_md};
 
 /// Hidden argv[1] that turns this binary into the Markdown child.
@@ -43,6 +45,9 @@ static PERMITS: Semaphore = Semaphore::const_new(2);
 /// Parser worker stack: `MAX_MDAST_DEPTH` levels of walker recursion.
 const WORKER_STACK_BYTES: usize = 256 * 1024 * 1024;
 const MAX_STDERR_BYTES: u64 = 4096;
+
+/// Source `convert.mjs` `MAX_OUTPUT_BYTES`: every export, Markdown included.
+pub const MD_EXPORT_MAX_OUTPUT_BYTES: usize = 20_000_000;
 
 /// Child exit codes (0 = result on stdout).
 const EXIT_FAILURE: i32 = 2;
@@ -61,6 +66,11 @@ pub enum MarkdownOp {
     TiptapToDocx,
     /// Source `export_pdf`: `{"title", "contentJson"}` -> PDF bytes.
     TiptapToPdf,
+    /// Source `export_pptx`: `{"title", "contentJson"}` -> PPTX bytes.
+    TiptapToPptx,
+    /// Source `export_md` (`documentMarkdown`): `{"title", "contentJson"}` ->
+    /// the escaped `# title` line and `tiptapDocToMd` of the body.
+    TiptapToMdExport,
 }
 
 impl MarkdownOp {
@@ -71,6 +81,8 @@ impl MarkdownOp {
             Self::TiptapToMd => "tiptap-to-md",
             Self::TiptapToDocx => "tiptap-to-docx",
             Self::TiptapToPdf => "tiptap-to-pdf",
+            Self::TiptapToPptx => "tiptap-to-pptx",
+            Self::TiptapToMdExport => "tiptap-to-md-export",
         }
     }
 
@@ -81,6 +93,8 @@ impl MarkdownOp {
             Self::TiptapToMd,
             Self::TiptapToDocx,
             Self::TiptapToPdf,
+            Self::TiptapToPptx,
+            Self::TiptapToMdExport,
         ]
         .into_iter()
         .find(|op| op.as_str() == value)
@@ -264,6 +278,47 @@ impl MarkdownHelper {
         content_json: &Value,
         pool: Pool,
     ) -> Result<Vec<u8>, ExportRenderError> {
+        self.export(MarkdownOp::TiptapToPdf, title, content_json, pool)
+            .await
+    }
+
+    /// Source `export_pptx` (`tiptapDocToPptx(titledDocument(title, doc))`):
+    /// PPTX bytes of at most [`PPTX_MAX_OUTPUT_BYTES`], errors as for PDF.
+    pub async fn tiptap_to_pptx(
+        &self,
+        title: &str,
+        content_json: &Value,
+    ) -> Result<Vec<u8>, ExportRenderError> {
+        self.export(MarkdownOp::TiptapToPptx, title, content_json, Pool::Shared)
+            .await
+    }
+
+    /// Source `export_md` (`documentMarkdown(title, doc)`): the UTF-8
+    /// Markdown file, errors as for PDF (the Node helper's timeout was a 500).
+    pub async fn tiptap_to_md_export(
+        &self,
+        title: &str,
+        content_json: &Value,
+    ) -> Result<Vec<u8>, ExportRenderError> {
+        self.export(
+            MarkdownOp::TiptapToMdExport,
+            title,
+            content_json,
+            Pool::Shared,
+        )
+        .await
+    }
+
+    /// One export op: a body that is not a Tiptap doc is `InvalidInput`
+    /// without a child; a writer failure, panic or a child killed by the
+    /// watchdog or a resource limit is `Failed` (logged).
+    async fn export(
+        &self,
+        op: MarkdownOp,
+        title: &str,
+        content_json: &Value,
+        pool: Pool,
+    ) -> Result<Vec<u8>, ExportRenderError> {
         if !is_tiptap_doc(content_json) {
             return Err(ExportRenderError::InvalidInput);
         }
@@ -272,13 +327,13 @@ impl MarkdownHelper {
             "contentJson": content_json,
         }))
         .map_err(|_| ExportRenderError::InvalidInput)?;
-        match self.run_child(MarkdownOp::TiptapToPdf, input, pool).await {
+        match self.run_child(op, input, pool).await {
             Ok(out) => Ok(out),
             Err(RunError::InvalidInput(_)) => Err(ExportRenderError::InvalidInput),
             Err(RunError::TooLarge) => Err(ExportRenderError::TooLarge),
             Err(RunError::Busy) => Err(ExportRenderError::Busy),
             Err(RunError::Failed(detail) | RunError::Killed(detail)) => {
-                tracing::error!(%detail, "pdf export child failed");
+                tracing::error!(%detail, op = op.as_str(), "export child failed");
                 Err(ExportRenderError::Failed)
             }
         }
@@ -303,6 +358,12 @@ impl MarkdownHelper {
             }
             MarkdownOp::TiptapToPdf => {
                 limits.max_output_bytes = limits.max_output_bytes.min(PDF_MAX_OUTPUT_BYTES);
+            }
+            MarkdownOp::TiptapToPptx => {
+                limits.max_output_bytes = limits.max_output_bytes.min(PPTX_MAX_OUTPUT_BYTES);
+            }
+            MarkdownOp::TiptapToMdExport => {
+                limits.max_output_bytes = limits.max_output_bytes.min(MD_EXPORT_MAX_OUTPUT_BYTES);
             }
             _ => {}
         }
@@ -462,7 +523,10 @@ fn docx_result(written: Result<Vec<u8>, DocxError>) -> ChildResult {
 /// writer panic is a server fault (500).
 fn panic_exit_code(op: MarkdownOp) -> i32 {
     match op {
-        MarkdownOp::TiptapToDocx | MarkdownOp::TiptapToPdf => EXIT_FAILURE,
+        MarkdownOp::TiptapToDocx
+        | MarkdownOp::TiptapToPdf
+        | MarkdownOp::TiptapToPptx
+        | MarkdownOp::TiptapToMdExport => EXIT_FAILURE,
         MarkdownOp::MdToTiptap | MarkdownOp::MdToSafeHtml | MarkdownOp::TiptapToMd => {
             EXIT_INVALID_INPUT
         }
@@ -482,6 +546,56 @@ fn tiptap_to_pdf(input: &[u8]) -> ChildResult {
         // As for DOCX: the body is valid by now, a writer error is a fault.
         Err(err @ PdfError::Write(_)) => ChildResult::Failed(err.to_string()),
     }
+}
+
+fn tiptap_to_pptx(input: &[u8]) -> ChildResult {
+    let Ok(req) = serde_json::from_slice::<DocxRequest>(input) else {
+        return ChildResult::InvalidInput("input is not a pptx request".into());
+    };
+    if !is_tiptap_doc(&req.content_json) {
+        return ChildResult::InvalidInput("not a tiptap doc".into());
+    }
+    match write_pptx(&export_doc(&req.title, &req.content_json)) {
+        Ok(bytes) => ChildResult::Output(bytes),
+        Err(PptxError::TooLarge) => ChildResult::OutputTooLarge,
+        Err(err @ PptxError::Pack(_)) => ChildResult::Failed(err.to_string()),
+    }
+}
+
+fn tiptap_to_md_export(input: &[u8]) -> ChildResult {
+    let Ok(req) = serde_json::from_slice::<DocxRequest>(input) else {
+        return ChildResult::InvalidInput("input is not a markdown export request".into());
+    };
+    if !is_tiptap_doc(&req.content_json) {
+        return ChildResult::InvalidInput("not a tiptap doc".into());
+    }
+    let out = document_markdown(&req.title, &req.content_json).into_bytes();
+    if out.len() > MD_EXPORT_MAX_OUTPUT_BYTES {
+        return ChildResult::OutputTooLarge;
+    }
+    ChildResult::Output(out)
+}
+
+/// Source `documentMarkdown`: the visible title with every ASCII punctuation
+/// character backslash-escaped as `# title`, a blank line, then
+/// `tiptapDocToMd(doc)`; the body alone when the title is empty.
+pub fn document_markdown(title: &str, doc: &Value) -> String {
+    let body = tiptap_doc_to_md(doc);
+    let title = visible_title(title);
+    if title.is_empty() {
+        return body;
+    }
+    let mut out = String::with_capacity(title.len() * 2 + body.len() + 4);
+    out.push_str("# ");
+    for c in title.chars() {
+        if c.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push_str("\n\n");
+    out.push_str(&body);
+    out
 }
 
 fn convert(op: MarkdownOp, input: Vec<u8>) -> ChildResult {
@@ -508,6 +622,8 @@ fn convert(op: MarkdownOp, input: Vec<u8>) -> ChildResult {
             }),
         MarkdownOp::TiptapToDocx => return tiptap_to_docx(&input),
         MarkdownOp::TiptapToPdf => return tiptap_to_pdf(&input),
+        MarkdownOp::TiptapToPptx => return tiptap_to_pptx(&input),
+        MarkdownOp::TiptapToMdExport => return tiptap_to_md_export(&input),
     };
     match result {
         Ok(out) => ChildResult::Output(out),
