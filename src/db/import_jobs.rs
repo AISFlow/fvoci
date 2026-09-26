@@ -659,22 +659,25 @@ pub async fn finish_import_job(
     Ok(true)
 }
 
-/// Gives a claimed run back to the queue after a transient failure: the
-/// runner already compensated its rows, so refs and parked events are
-/// cleared, the lease is dropped (fencing this runner out) and the row is
+/// Gives a claimed run back to the queue after a transient failure. Only
+/// successful compensation permits clearing refs and parked events; otherwise
+/// the next claim must retry cleanup before creating anything. The lease is
+/// dropped (fencing this runner out) and the row is
 /// claimable again [`IMPORT_RETRY_BACKOFF_SECS`] after the release (from
 /// `updated_at`). The spent attempt stays counted, so
 /// [`IMPORT_MAX_ATTEMPTS`] still bounds the retries.
 pub async fn release_import_job_for_retry(
     pool: &PgPool,
     claim: &ImportClaim,
+    clear_refs: bool,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, claim.workspace_id).await?;
     let result = sqlx::query(&format!(
         r#"
         UPDATE fvoci.import_jobs
-        SET created_refs = '{{"documentIds":[],"taskIds":[],"storedKeys":[]}}'::jsonb,
+        SET created_refs = CASE WHEN $4 THEN '{{"documentIds":[],"taskIds":[],"storedKeys":[]}}'::jsonb
+                                ELSE created_refs END,
             lease_token = NULL,
             lease_until = NULL,
             updated_at = now()
@@ -684,13 +687,16 @@ pub async fn release_import_job_for_retry(
     .bind(claim.workspace_id)
     .bind(claim.job_id)
     .bind(claim.lease_token)
+    .bind(clear_refs)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() != 1 {
         tx.rollback().await?;
         return Ok(false);
     }
-    discard_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
+    if clear_refs {
+        discard_deferred_events(&mut tx, claim.workspace_id, claim.job_id).await?;
+    }
     tx.commit().await?;
     Ok(true)
 }

@@ -218,6 +218,8 @@ enum RunError {
     /// Capacity pressure (no collab seed slot / engine did not start):
     /// retried while attempts remain.
     Transient(String),
+    /// A prior run's refs still name resources that could not be removed.
+    CleanupIncomplete,
     Failed(String),
 }
 
@@ -276,29 +278,35 @@ async fn run_claimed(
                     "import.compensate_failed"
                 );
             }
-            if let RunError::Transient(detail) = &err {
-                if claim.attempt < IMPORT_MAX_ATTEMPTS {
-                    match release_import_job_for_retry(pool, claim).await {
-                        Ok(true) => warn!(
-                            workspace_id = %claim.workspace_id,
-                            import_job_id = %claim.job_id,
-                            attempt = claim.attempt,
-                            reason = error_hash(detail),
-                            "import.retry_scheduled"
-                        ),
-                        Ok(false) => {
-                            warn!(import_job_id = %claim.job_id, "import.retry_after_fence_lost")
-                        }
-                        Err(e) => {
-                            error!(error = %e, import_job_id = %claim.job_id, "import.retry_failed")
-                        }
+            if matches!(err, RunError::Transient(_) | RunError::CleanupIncomplete)
+                && claim.attempt < IMPORT_MAX_ATTEMPTS
+            {
+                let clear_refs = undo.failed == 0 && !matches!(err, RunError::CleanupIncomplete);
+                match release_import_job_for_retry(pool, claim, clear_refs).await {
+                    Ok(true) => warn!(
+                        workspace_id = %claim.workspace_id,
+                        import_job_id = %claim.job_id,
+                        attempt = claim.attempt,
+                        reason = match &err {
+                            RunError::Transient(detail) => error_hash(detail),
+                            RunError::CleanupIncomplete => "compensate_incomplete".to_string(),
+                            _ => unreachable!(),
+                        },
+                        "import.retry_scheduled"
+                    ),
+                    Ok(false) => {
+                        warn!(import_job_id = %claim.job_id, "import.retry_after_fence_lost")
                     }
-                    return;
+                    Err(e) => {
+                        error!(error = %e, import_job_id = %claim.job_id, "import.retry_failed")
+                    }
                 }
+                return;
             }
             let reason = match &err {
                 RunError::Aborted => "shutdown".to_string(),
                 RunError::Failed(detail) | RunError::Transient(detail) => error_hash(detail),
+                RunError::CleanupIncomplete => "compensate_incomplete".to_string(),
                 RunError::Fenced => unreachable!(),
             };
             match finish_import_job(pool, claim, ImportStatus::Failed).await {
@@ -337,6 +345,9 @@ async fn run_claimed_inner(
             failed = undo.failed,
             "import.restarted"
         );
+        if undo.failed > 0 {
+            return Err(RunError::CleanupIncomplete);
+        }
         if !reset_import_refs(pool, claim).await.map_err(db_failed)? {
             return Err(RunError::Fenced);
         }
@@ -978,7 +989,7 @@ pub struct CompensateOutcome {
 }
 
 /// Source `compensateImport`: tasks, then documents newest first (children
-/// reference parents), then stored objects.
+/// reference parents), then stored objects when every row purge succeeded.
 /// A row that is already gone counts as skipped, not failed.
 pub async fn compensate_import(
     pool: &PgPool,
@@ -1018,12 +1029,14 @@ pub async fn compensate_import(
             }
         }
     }
-    for key in keys {
-        // Also aborts an open multipart upload, which could otherwise
-        // publish an object after its row is gone.
-        if let Err(err) = storage.purge_key(&key).await {
-            out.failed += 1;
-            warn!(error = %err, "import.compensate_object_failed");
+    if out.failed == 0 {
+        for key in keys {
+            // Also aborts an open multipart upload, which could otherwise
+            // publish an object after its row is gone.
+            if let Err(err) = storage.purge_key(&key).await {
+                out.failed += 1;
+                warn!(error = %err, "import.compensate_object_failed");
+            }
         }
     }
     out
