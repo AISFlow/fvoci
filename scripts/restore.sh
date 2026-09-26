@@ -102,6 +102,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PROJECT" && -n "$ENV_FILE" && -n "$INPUT" ]] || usage
+# Manifest/key checks run on the operator host, before any target volume exists.
+for dependency in docker python3; do
+  command -v "$dependency" >/dev/null 2>&1 || {
+    echo "restore host requires $dependency" >&2
+    exit 1
+  }
+done
+docker compose version >/dev/null
 if [[ ! "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
   echo "--project must be a lowercase Compose project name" >&2
   exit 1

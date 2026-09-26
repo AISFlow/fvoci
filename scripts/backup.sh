@@ -105,6 +105,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PROJECT" && -n "$ENV_FILE" && -n "$OUTPUT" ]] || usage
+# These are host-side tools; no Python runtime is needed in the server image.
+# Fail before stopping the server or creating backup state.
+for dependency in docker python3 tar stat sha256sum; do
+  command -v "$dependency" >/dev/null 2>&1 || {
+    echo "backup host requires $dependency" >&2
+    exit 1
+  }
+done
+docker compose version >/dev/null
 if [[ ! "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
   echo "--project must be a lowercase Compose project name" >&2
   exit 1

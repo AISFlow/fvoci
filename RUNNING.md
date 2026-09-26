@@ -389,8 +389,14 @@ document export (`GET …/documents/{id}/md|docx|pdf|pptx`, wiki and project) an
 PDF run in the same child as the Markdown conversions
 (`--op tiptap-to-md-export|tiptap-to-docx|tiptap-to-pdf|tiptap-to-pptx`), see "DOCX export",
 "PDF export" and "PPTX and Markdown export" below. The server no longer runs the Node document
-convert helper and ignores `FVOCI_DOCUMENT_CONVERT_BIN`; `scripts/document-convert` remains only
+convert helper; the final image contains no Node/Bun/Deno or bundled JavaScript engine.
+Node is used only to build the web assets and run development oracles/tests.
+`scripts/document-convert` remains only
 as the development oracle for the fixture regeneration scripts (`scripts/regen-*-oracle.sh`).
+The installed document smoke uses a host-side Python standard-library client;
+it checks the installed Rust API before and after restart, including parsed
+OOXML text. Python and its test client are not copied into the product image.
+Development/CI Python fixtures and independent readers remain supported.
 
 The child is chosen before any runtime, config or credential is loaded, gets a cleared
 environment, RLIMIT_AS 2 GiB and RLIMIT_CPU 30 s, reads one input from stdin (4 MiB cap; the
@@ -595,6 +601,13 @@ CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
 This is the logical backup for the Compose install above (the source advanced
 install path: PostgreSQL + attachment storage). It is not a stopped-stack copy
 of every volume, and it is not PITR.
+
+Run `scripts/backup.sh` and `scripts/restore.sh` on the operator's Linux host
+with Bash, Docker Compose, Python 3 (standard library only), GNU coreutils and
+tar. The scripts check their principal host tools before changing the stack.
+Manifest and key-fingerprint checks run in host Python; PostgreSQL dump/restore,
+storage archiving and the Rust `--verify-storage`/`--verify-secrets` probes run in
+the specified Compose containers. Python is not required inside the server image.
 
 **Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
 functions) and `fvoci`, taken as the PostgreSQL owner role through the
