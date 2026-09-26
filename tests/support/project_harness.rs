@@ -215,6 +215,7 @@ pub async fn app_state(app_url: &str) -> AppState {
         },
         collab: None,
         meili: None,
+        search_embedder: None,
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,

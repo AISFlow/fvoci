@@ -237,6 +237,7 @@ impl Harness {
             },
             collab: None,
             meili: None,
+            search_embedder: None,
             mailer: mailer.clone(),
             document_convert: None,
             import_wake: None,
