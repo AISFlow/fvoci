@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createE2eUser } from "./helpers";
+import { createE2eUser, waitForCapturedMail } from "./helpers";
 
 const admin = {
   email: "Admin@Example.COM",
@@ -110,5 +110,46 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(memberPage).toHaveURL(/\/$/);
   expect((await memberPage.request.get("/api/v1/admin/system")).status()).toBe(404);
   expect((await memberPage.request.get("/api/v1/admin/users")).status()).toBe(404);
+
+  // Admin erasure: scheduling signs the member out at once; cancelling clears it.
+  await page.goto("/settings/admin");
+  const memberRow = page
+    .getByRole("region", { name: "사용자", exact: true })
+    .getByRole("row")
+    .filter({ hasText: member.email });
+  await memberRow.getByRole("button", { name: "삭제 예약", exact: true }).click();
+  const eraseConfirm = page.getByRole("alertdialog");
+  await expect(eraseConfirm).toContainText("삭제를 예약할까요?");
+  const scheduled = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/admin/users/erase") && res.request().method() === "POST",
+  );
+  await eraseConfirm.getByRole("button", { name: "삭제 예약", exact: true }).click();
+  const scheduledRes = await scheduled;
+  expect(scheduledRes.status()).toBe(200);
+  const scheduledBody = (await scheduledRes.json()) as Record<string, unknown>;
+  // The cancel link goes to the member by mail, never to the admin.
+  expect(scheduledBody.mailSent).toBe(true);
+  expect("cancelToken" in scheduledBody).toBe(false);
+  const cancelMail = await waitForCapturedMail(
+    (mail) => mail.to === member.email && mail.text.includes("/cancel-withdraw#token="),
+  );
+  expect(cancelMail.text).toContain("Subject: FVOCI 탈퇴 취소");
+  await expect(memberRow).toContainText("삭제 예약 · 14일 남음");
+  expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(401);
+
+  await memberRow.getByRole("button", { name: "삭제 취소", exact: true }).click();
+  const cancelConfirm = page.getByRole("alertdialog");
+  await expect(cancelConfirm).toContainText("이전 세션과 토큰은 되살아나지 않습니다.");
+  await cancelConfirm.getByRole("button", { name: "삭제 취소", exact: true }).click();
+  await expect(memberRow.getByRole("button", { name: "삭제 예약", exact: true })).toBeVisible();
+  await expect(memberRow).not.toContainText("일 남음");
+  const listed = (await (await page.request.get("/api/v1/admin/users")).json()) as {
+    items: { email: string; deletedAt: string | null; eraseAt: string | null }[];
+  };
+  const restored = listed.items.find((item) => item.email === member.email)!;
+  expect(restored.deletedAt).toBeNull();
+  expect(restored.eraseAt).toBeNull();
+  // The revoked session stays revoked; the member signs in again.
+  expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(401);
   await memberContext.close();
 });

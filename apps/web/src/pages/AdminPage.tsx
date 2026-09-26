@@ -65,6 +65,18 @@ function AdminConsole() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin"] }),
   });
 
+  // Source eraseUser / cancelEraseUser mutations.
+  const eraseUser = useMutation({
+    mutationFn: async (userId: string) =>
+      ensureOk(await api.POST("/api/v1/admin/users/erase", { body: { userId } })),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin"] }),
+  });
+  const cancelEraseUser = useMutation({
+    mutationFn: async (userId: string) =>
+      ensureOk(await api.POST("/api/v1/admin/users/cancel-erase", { body: { userId } })),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin"] }),
+  });
+
   const err = usersQuery.error ?? workspacesQuery.error ?? systemQuery.error;
   const settingsError = settingsQuery.error ?? saveSettings.error ?? saveAsset.error;
 
@@ -75,8 +87,10 @@ function AdminConsole() {
       system={systemQuery.data ?? null}
       loading={usersQuery.isLoading || workspacesQuery.isLoading || systemQuery.isLoading}
       error={err ? adminActionMessage(err) : null}
-      pending={patchUser.isPending}
+      pending={patchUser.isPending || eraseUser.isPending || cancelEraseUser.isPending}
       onPatchUser={(userId, patch) => patchUser.mutateAsync({ userId, ...patch }).then(() => undefined)}
+      onEraseUser={(userId) => eraseUser.mutateAsync(userId).then(() => undefined)}
+      onCancelEraseUser={(userId) => cancelEraseUser.mutateAsync(userId).then(() => undefined)}
       settings={settingsQuery.data ?? null}
       settingsLoading={settingsQuery.isLoading}
       settingsError={settingsError ? adminActionMessage(settingsError) : null}

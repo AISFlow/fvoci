@@ -5,6 +5,7 @@ pub mod attachments;
 pub mod auth;
 pub mod collections;
 pub mod comments;
+pub mod document_body;
 pub mod document_tags;
 pub mod documents;
 pub mod groups;

@@ -53,6 +53,16 @@ pub enum Request {
         #[serde(default = "encoding_v1")]
         encoding: u8,
     },
+    /// Compute a forward updateV1 that replaces the live `prosemirror` fragment
+    /// with the fragment of a standalone Doc built from `update_b64` (an external
+    /// body write seeded from Tiptap JSON). Does not mutate the live Doc; the
+    /// parent persists then applies the returned update.
+    ReplaceFromUpdate {
+        #[serde(with = "b64")]
+        update_b64: Vec<u8>,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
 }
 
 fn encoding_v1() -> u8 {
@@ -66,7 +76,8 @@ impl Request {
             | Self::Apply { encoding, .. }
             | Self::Sync { encoding, .. }
             | Self::Project { encoding }
-            | Self::RestoreFromSnapshot { encoding, .. } => *encoding,
+            | Self::RestoreFromSnapshot { encoding, .. }
+            | Self::ReplaceFromUpdate { encoding, .. } => *encoding,
             Self::Ping | Self::Snapshot | Self::Inspect | Self::RevisionSnapshot => 1,
         }
     }
@@ -84,6 +95,7 @@ impl Request {
                 state_vector_b64, ..
             } => state_vector_b64.len() as u64,
             Self::RestoreFromSnapshot { snap_b64, .. } => snap_b64.len() as u64,
+            Self::ReplaceFromUpdate { update_b64, .. } => update_b64.len() as u64,
             Self::Load {
                 snapshot_b64,
                 tail_b64,

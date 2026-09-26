@@ -69,6 +69,7 @@ struct ConvertResponse {
     detail: Option<String>,
     content_json: Option<Value>,
     html: Option<String>,
+    markdown: Option<String>,
     update_b64: Option<String>,
     content_type: Option<String>,
     ext: Option<String>,
@@ -251,6 +252,20 @@ impl ConvertClient {
         )?;
         resp.content_json.ok_or(ConvertError::Failed(
             "convert helper omitted contentJson".into(),
+        ))
+    }
+
+    /// Tiptap -> Markdown body (source `documentContentMd`, no title heading).
+    pub async fn tiptap_to_md(&self, content_json: &Value) -> Result<String, ConvertError> {
+        let resp = Self::map_code(
+            self.call(json!({
+                "op": "tiptap_to_md",
+                "contentJson": content_json,
+            }))
+            .await?,
+        )?;
+        resp.markdown.ok_or(ConvertError::Failed(
+            "convert helper omitted markdown".into(),
         ))
     }
 
