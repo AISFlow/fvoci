@@ -607,7 +607,10 @@ same `sub` is refused. Links saved earlier hold the literal template
 (`https://login.microsoftonline.com/{tenantid}/v2.0`); such a link still
 matches any tenant of that template and is re-pinned to the tenant of its next
 successful sign-in. Only a stored value equal to the provider's template is
-rewritten, nothing else. Until then the template link does not separate
+rewritten, nothing else. The re-pin happens only while the provider is still
+configured with the `{tenantid}` template; if the provider is changed to a
+single tenant first, legacy template links fail closed (`oidc_not_linked`)
+until the user unlinks and links again. Until then the template link does not separate
 tenants (the per-app Microsoft `sub` still does); to review them before
 upgrading, `SELECT id, user_id FROM fvoci.identity_links WHERE provider =
 'microsoft' AND issuer LIKE '%{tenantid}%'`. A JWKS key that names an
