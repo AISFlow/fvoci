@@ -605,21 +605,29 @@ pub fn wait_for_server_exit(
     deadline: std::time::Instant,
 ) -> (std::process::ExitStatus, String) {
     let mut stderr = String::new();
+    let push_line = |stderr: &mut String, line: String| {
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+        stderr.push_str(&line);
+    };
     while std::time::Instant::now() < deadline {
         while let Ok(line) = stderr_lines.try_recv() {
-            if !stderr.is_empty() {
-                stderr.push('\n');
-            }
-            stderr.push_str(&line);
+            push_line(&mut stderr, line);
         }
         if let Some(status) = child.try_wait().expect("wait") {
-            while let Ok(line) = stderr_lines.try_recv() {
-                if !stderr.is_empty() {
-                    stderr.push('\n');
+            // The child's last lines can still be in the pipe after it has been
+            // reaped; read until the reader thread hits EOF and drops its sender.
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                match stderr_lines.recv_timeout(remaining) {
+                    Ok(line) => push_line(&mut stderr, line),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return (status, stderr),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("fvoci-server stderr did not close before deadline; stderr={stderr}")
+                    }
                 }
-                stderr.push_str(&line);
             }
-            return (status, stderr);
         }
         std::thread::sleep(Duration::from_millis(25));
     }
