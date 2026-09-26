@@ -199,6 +199,7 @@ async fn create_workspace(
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::create_workspace_as_instance_admin(
         &state.auth.db.pool,
+        &state.auth.db.license,
         user_id,
         session_id,
         body.name.trim(),
@@ -235,6 +236,7 @@ async fn personal_workspace(
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::ensure_personal_workspace(
         &state.auth.db.pool,
+        &state.auth.db.license,
         user_id,
         session_id,
         Some(&ip),
@@ -270,7 +272,7 @@ async fn patch_member(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::set_member_role(
-        &state.auth.db.pool,
+        &state.auth.db,
         workspace_id,
         actor_user_id,
         session_id,

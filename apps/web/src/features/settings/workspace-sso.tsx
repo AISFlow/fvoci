@@ -1,8 +1,8 @@
 // Adapted from fvoci/FVOCI apps/web/src/features/settings/settings-sso.tsx and
 // routes/w.$slug.settings.sso.tsx. The source keeps SSO on its own settings
 // tab; this app keeps workspace settings as sections of one page, so the view
-// is a collapsed disclosure (like API tokens) shown to owners/admins only. The source's enterprise-license
-// gate (404 → `ee.required`) has no Rust counterpart and is not ported.
+// is a collapsed disclosure (like API tokens) shown to owners/admins only.
+// A 404 from the configuration route is the enterprise-license gate.
 import { t } from "@fvoci/i18n";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -200,7 +200,8 @@ export function WorkspaceSsoSection({ workspaceId }: { workspaceId: string }) {
 
   const pending = save.isPending || remove.isPending;
   const current = oidc.data ?? null;
-  const error = actionError ?? (oidc.error ? failMessage(oidc.error) : null);
+  const eeRequired = oidc.error instanceof ProblemError && oidc.error.status === 404;
+  const error = actionError ?? (oidc.error && !eeRequired ? failMessage(oidc.error) : null);
 
   return (
     <details className="settings-disclosure">
@@ -218,6 +219,9 @@ export function WorkspaceSsoSection({ workspaceId }: { workspaceId: string }) {
               await remove.mutateAsync().catch(() => undefined);
             }}
           />
+        ) : null}
+        {eeRequired ? (
+          <p className="text-ui text-muted-foreground">{t("ee.required")}</p>
         ) : null}
         {error ? (
           <p className="text-ui text-destructive" role="alert">

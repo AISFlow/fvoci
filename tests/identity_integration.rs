@@ -11,6 +11,9 @@ mod project_harness;
 #[path = "support/fake_oidc.rs"]
 mod fake_oidc;
 
+#[path = "support/license.rs"]
+mod license_fixture;
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -75,12 +78,14 @@ pub struct Harness {
 pub struct Options {
     pub encryption: bool,
     pub oidc: OidcSettings,
+    pub license: Arc<fvoci_server::license::Entitlements>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             encryption: true,
+            license: license_fixture::signed_license(),
             oidc: OidcSettings {
                 public_origin: "http://localhost".into(),
                 ..OidcSettings::default()
@@ -107,7 +112,7 @@ impl Harness {
         let storage = ObjectStorage::from(LocalStorage::new(storage_root.clone()));
         let state = AppState {
             auth: Arc::new(AuthService {
-                db: Db::new(app_pool.clone()),
+                db: Db::with_license(app_pool.clone(), options.license.clone()),
                 password_keys: keyring(),
             }),
             branding_name: "FVOCI".to_string(),
@@ -1209,6 +1214,7 @@ async fn oidc_harness(fake: &FakeOidc, keys: &[ProviderKey]) -> Harness {
     Harness::start_with(Options {
         encryption: true,
         oidc: oidc_settings(providers, true),
+        license: license_fixture::signed_license(),
     })
     .await
 }
@@ -2050,6 +2056,7 @@ async fn oidc_redirecting_jwks_and_private_issuers_are_refused() {
     ] {
         let h = Harness::start_with(Options {
             encryption: true,
+            license: license_fixture::signed_license(),
             oidc: oidc_settings(
                 vec![provider(ProviderKey::Generic, issuer, CLIENT_SECRET)],
                 insecure,
@@ -2081,6 +2088,7 @@ async fn oidc_outbound_fetches_are_ssrf_guarded() {
     // Production policy: plain http to loopback is refused before any fetch.
     let strict = Harness::start_with(Options {
         encryption: true,
+        license: license_fixture::signed_license(),
         oidc: oidc_settings(
             vec![provider(ProviderKey::Generic, &fake.base, CLIENT_SECRET)],
             false,

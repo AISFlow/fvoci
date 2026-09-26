@@ -16,10 +16,14 @@ use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
 use rand::RngCore;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+#[path = "support/license.rs"]
+mod license_fixture;
 
 const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
@@ -137,11 +141,15 @@ struct Harness {
     admin_id: Uuid,
 }
 
-async fn app_state(app_url: &str, storage_root: &std::path::Path) -> AppState {
+async fn app_state(
+    app_url: &str,
+    storage_root: &std::path::Path,
+    license: Arc<fvoci_server::license::Entitlements>,
+) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool),
+            db: Db::with_license(pool, license),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
         }),
         branding_name: "FVOCI".to_string(),
@@ -258,10 +266,18 @@ fn session_cookie(headers: &HeaderMap) -> String {
 }
 
 async fn harness() -> Harness {
+    harness_with_license(license_fixture::signed_license()).await
+}
+
+async fn harness_unlicensed() -> Harness {
+    harness_with_license(license_fixture::absent_license()).await
+}
+
+async fn harness_with_license(license: Arc<fvoci_server::license::Entitlements>) -> Harness {
     let db = TestDb::bootstrap().await;
     let storage_root = std::env::temp_dir().join(format!("fvoci-admin-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    let app = router(app_state(&db.app_url, &storage_root).await, None);
+    let app = router(app_state(&db.app_url, &storage_root, license).await, None);
     let setup = with_json(
         &app,
         "POST",
@@ -387,6 +403,120 @@ const ADMIN_GETS: &[&str] = &[
     "/api/v1/admin/workspaces",
     "/api/v1/admin/instance-settings",
 ];
+
+#[tokio::test]
+async fn unlicensed_enterprise_routes_fail_closed_without_erasing_branding() {
+    let h = harness_unlicensed().await;
+    let initial = get(
+        &h.app,
+        "/api/v1/admin/instance-settings",
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(initial.status, StatusCode::OK);
+    assert_eq!(initial.json["eeFeatures"], json!([]));
+    assert_eq!(initial.json["values"]["branding"]["name"], "FVOCI");
+
+    let audit = get(&h.app, "/api/v1/admin/audit", Some(&h.admin_cookie)).await;
+    assert_eq!(audit.status, StatusCode::NOT_FOUND);
+    assert_eq!(audit.json["code"], "not_found");
+
+    let branding = with_json(
+        &h.app,
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        json!({"branding":{"name":"Denied","smtpFromDisplay":null,"loginBrandText":null}}),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(branding.status, StatusCode::FORBIDDEN);
+    assert_eq!(branding.json["code"], "enterprise_license_required");
+    let upload = send(
+        &h.app,
+        "POST",
+        "/api/v1/admin/branding/assets/logo",
+        Some(("application/octet-stream", tiny_png())),
+        Some(&h.admin_cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(upload.status, StatusCode::FORBIDDEN);
+    assert_eq!(upload.json["code"], "enterprise_license_required");
+    let admin = h.db.admin().await;
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.instance_settings WHERE key = 'branding'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0);
+    // A previously licensed row remains stored, but no longer projects into
+    // effective admin or public branding.
+    let stored = json!({
+        "name":"Stored Brand","smtpFromDisplay":null,"logo":null,
+        "favicon":null,"loginBrandText":"Welcome"
+    });
+    sqlx::query("INSERT INTO fvoci.instance_settings (key, value) VALUES ('branding', $1)")
+        .bind(&stored)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let effective = get(
+        &h.app,
+        "/api/v1/admin/instance-settings",
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(effective.json["values"]["branding"]["name"], "FVOCI");
+    let row: Value =
+        sqlx::query_scalar("SELECT value FROM fvoci.instance_settings WHERE key = 'branding'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(row, stored);
+    admin.close().await;
+
+    let providers = get(&h.app, "/api/v1/auth/providers", None).await;
+    assert_eq!(providers.status, StatusCode::OK);
+    assert_eq!(providers.json["workspaceSso"], false);
+    let workspace = h.acme_id().await;
+    let sso = get(
+        &h.app,
+        &format!("/api/v1/workspaces/{workspace}/oidc"),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(sso.status, StatusCode::NOT_FOUND);
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn signed_license_seat_limit_is_enforced_in_admin_promotion_transaction() {
+    let h = harness_with_license(license_fixture::signed_license_with_limits(
+        json!({"seats":1}),
+    ))
+    .await;
+    let (user_id, _) = h.user("extra@example.com", None).await;
+    let reply = with_json(
+        &h.app,
+        "PATCH",
+        "/api/v1/admin/users",
+        json!({"userId":user_id,"instanceAdmin":true}),
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::PAYMENT_REQUIRED, "{}", reply.json);
+    assert_eq!(reply.json["code"], "limit.seats");
+    let admin = h.db.admin().await;
+    let promoted: bool =
+        sqlx::query_scalar("SELECT is_instance_admin FROM fvoci.users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert!(!promoted);
+    admin.close().await;
+    h.finish().await;
+}
 
 #[tokio::test]
 async fn admin_routes_are_hidden_from_non_admins_tokens_and_anonymous() {
@@ -2420,6 +2550,56 @@ async fn verify_storage_covers_branding_assets() {
     assert_eq!(report.branding_mismatch, vec!["logo"]);
     assert_eq!(report.branding_missing, vec!["favicon"]);
     assert!(!report.is_complete());
+    pool.close().await;
+    h.finish().await;
+}
+
+/// Persisted branding assets are verified after restore even when the instance
+/// is unlicensed and admin routes no longer project them into effective values.
+#[tokio::test]
+async fn verify_storage_checks_persisted_branding_when_unlicensed() {
+    let h = harness_unlicensed().await;
+    let storage: fvoci_server::attachments::ObjectStorage =
+        fvoci_server::attachments::LocalStorage::new(h.storage_root.clone()).into();
+    let pool = pool::connect_app(&h.db.app_url).await.unwrap();
+    let png = tiny_png();
+    let key = Uuid::now_v7();
+    let sha256 = hex::encode(Sha256::digest(&png));
+    storage
+        .put_bytes(&key.to_string(), png)
+        .await
+        .expect("logo object");
+    let stored = json!({
+        "name": "Stored Brand",
+        "smtpFromDisplay": null,
+        "logo": {"key": key, "sha256": sha256, "mime": "image/png"},
+        "favicon": null,
+        "loginBrandText": null
+    });
+    let admin = h.db.admin().await;
+    sqlx::query("INSERT INTO fvoci.instance_settings (key, value) VALUES ('branding', $1)")
+        .bind(&stored)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let effective = get(
+        &h.app,
+        "/api/v1/admin/instance-settings",
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(effective.status, StatusCode::OK);
+    assert_eq!(effective.json["values"]["branding"]["name"], "FVOCI");
+    assert!(effective.json["values"]["branding"]["logo"].is_null());
+
+    let report = fvoci_server::attachments::verify_stored_objects(&pool, &storage)
+        .await
+        .unwrap();
+    assert_eq!(report.branding_checked, 1);
+    assert!(report.is_complete(), "{report:?}");
+
     pool.close().await;
     h.finish().await;
 }

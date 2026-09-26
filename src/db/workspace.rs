@@ -426,6 +426,7 @@ pub async fn update_workspace_meta(
 
 pub async fn create_workspace_as_instance_admin(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     actor_user_id: Uuid,
     session_id: Uuid,
     name: &str,
@@ -450,7 +451,9 @@ pub async fn create_workspace_as_instance_admin(
         tx.rollback().await?;
         return Ok(Err(WorkspaceDbError::Forbidden));
     }
-    if let Err(err) = require_new_instance_billable_user(&mut tx, Some(actor_user_id)).await? {
+    if let Err(err) =
+        require_new_instance_billable_user(&mut tx, Some(actor_user_id), license).await?
+    {
         tx.rollback().await?;
         return Ok(Err(quota_error(err)));
     }
@@ -508,6 +511,7 @@ pub async fn create_workspace_as_instance_admin(
 
 pub async fn ensure_personal_workspace(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     user_id: Uuid,
     session_id: Uuid,
     client_ip: Option<&str>,
@@ -560,7 +564,7 @@ pub async fn ensure_personal_workspace(
             return Ok(Ok(WorkspaceMeta { id, name, slug }));
         }
     }
-    if let Err(err) = require_new_instance_billable_user(&mut tx, Some(user_id)).await? {
+    if let Err(err) = require_new_instance_billable_user(&mut tx, Some(user_id), license).await? {
         tx.rollback().await?;
         return Ok(Err(quota_error(err)));
     }
@@ -614,7 +618,7 @@ pub async fn ensure_personal_workspace(
 }
 
 pub async fn set_member_role(
-    pool: &PgPool,
+    db: &crate::db::Db,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -622,6 +626,8 @@ pub async fn set_member_role(
     next_role: WorkspaceRole,
     client_ip: Option<&str>,
 ) -> Result<Result<MemberRow, WorkspaceDbError>, sqlx::Error> {
+    let pool = &db.pool;
+    let license = &db.license;
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -679,8 +685,14 @@ pub async fn set_member_role(
         let member = fetch_member(pool, workspace_id, target_user_id).await?;
         return Ok(member.ok_or(WorkspaceDbError::NotFound));
     }
-    if let Err(err) =
-        require_membership_admission(&mut tx, target_user_id, next_role, Some(target_role)).await?
+    if let Err(err) = require_membership_admission(
+        &mut tx,
+        target_user_id,
+        next_role,
+        Some(target_role),
+        license,
+    )
+    .await?
     {
         tx.rollback().await?;
         return Ok(Err(quota_error(err)));

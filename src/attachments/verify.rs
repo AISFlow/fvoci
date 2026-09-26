@@ -114,12 +114,13 @@ async fn verify_branding_assets(
     storage: &ObjectStorage,
     report: &mut StorageVerifyReport,
 ) -> Result<(), String> {
-    // The display-name default does not matter here; only asset leaves are read.
-    let values = crate::settings::current_values(pool, "FVOCI")
+    // Product reads may hide branding when the license is absent; restore checks
+    // must still HEAD/hash every asset leaf stored in the settings row.
+    let branding = crate::settings::persisted_branding(pool, "FVOCI")
         .await
         .map_err(|e| format!("read instance settings: {e}"))?;
     for kind in [BrandingAssetKind::Logo, BrandingAssetKind::Favicon] {
-        let Some(asset) = values.branding.asset(kind) else {
+        let Some(asset) = branding.asset(kind) else {
             continue;
         };
         report.branding_checked += 1;

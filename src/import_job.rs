@@ -64,7 +64,7 @@ pub struct ImportJobSettings {
     pub seed: Option<SeedEngine>,
     pub office_limits: OfficeLimits,
     /// Storage quota imported Notion assets reserve against (source
-    /// `requireStorageReservation`; unlimited until the license port).
+    /// `requireStorageReservation`; reads the live signed limit).
     pub quota: StorageQuota,
     pub poll_interval: Duration,
 }
@@ -83,6 +83,10 @@ impl ImportJobSettings {
     }
 
     pub fn from_env() -> Self {
+        Self::from_env_with_license(Arc::new(crate::license::absent()))
+    }
+
+    pub fn from_env_with_license(license: Arc<crate::license::Entitlements>) -> Self {
         let extractor_bin = std::env::var("FVOCI_EXTRACTOR_BIN")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -100,7 +104,7 @@ impl ImportJobSettings {
             markdown: MarkdownHelper::current_exe().ok(),
             seed: SeedEngine::from_env(),
             office_limits: OfficeLimits::import(),
-            quota: StorageQuota::default(),
+            quota: StorageQuota::from_license(license),
             poll_interval,
         }
     }
