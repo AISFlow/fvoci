@@ -19,7 +19,7 @@ use crate::db::documents::{
 use crate::db::projects::{lock_project, project_permission};
 use crate::projects::ProjectPermission;
 
-async fn require_project_document_access(
+pub(crate) async fn require_project_document_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -46,7 +46,7 @@ async fn require_project_document_access(
     Ok(Ok(()))
 }
 
-async fn assert_project_document(
+pub(crate) async fn assert_project_document(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,
@@ -77,7 +77,7 @@ async fn assert_project_document(
     Ok(Ok(()))
 }
 
-async fn project_key(
+pub(crate) async fn project_key(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     project_id: Uuid,
@@ -92,7 +92,7 @@ async fn project_key(
     Ok(row.map(|(key,)| key))
 }
 
-fn with_project_display_id(meta: DocumentMeta, project_key: &str) -> DocumentMeta {
+pub(crate) fn with_project_display_id(meta: DocumentMeta, project_key: &str) -> DocumentMeta {
     let mut meta = meta;
     meta.display_id = Some(format_display_id(project_key, meta.number));
     meta

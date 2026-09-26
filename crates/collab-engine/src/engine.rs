@@ -82,6 +82,7 @@ impl CollabEngine {
             Request::Project { .. } => self.project(),
             Request::RevisionSnapshot => self.revision_snapshot(),
             Request::RestoreFromSnapshot { snap_b64, .. } => self.restore_from_snapshot(snap_b64),
+            Request::ReplaceFromUpdate { update_b64, .. } => self.replace_from_update(update_b64),
         }
     }
 
@@ -314,6 +315,49 @@ impl CollabEngine {
         let dest = work.get_or_insert_xml_fragment(FRAGMENT);
         let bytes = {
             let src_txn = reconstructed.transact();
+            let mut dst_txn = work.transact_mut();
+            replace_fragment_from(&src_txn, &mut dst_txn, &dest)?;
+            dst_txn.encode_update_v1()
+        };
+        Ok(bytes)
+    }
+
+    /// Compute a forward updateV1 that replaces the live fragment with the
+    /// fragment of a standalone Doc built from `update_bytes`. Same copy as
+    /// revision restore; does not mutate `self.doc`.
+    pub fn replace_from_update(&mut self, update_bytes: &[u8]) -> EngineStatus {
+        if let Err(st) = self.bump_op() {
+            return st;
+        }
+        match self.encode_replace_update(update_bytes) {
+            Ok(bytes) => {
+                if let Err(st) = self.cap_output(&bytes, "replace_body") {
+                    return st;
+                }
+                self.ok_applied(Some(bytes))
+            }
+            Err(st) => st,
+        }
+    }
+
+    fn encode_replace_update(&self, update_bytes: &[u8]) -> Result<Vec<u8>, EngineStatus> {
+        self.cap_input(update_bytes, "replace_body")?;
+        if update_bytes.is_empty() {
+            return Err(EngineStatus::Malformed {
+                detail: "empty replace_body updateV1".into(),
+            });
+        }
+        let source = new_doc();
+        apply_bytes_to_doc(&source, update_bytes)?;
+        if source.transact().has_missing_updates() {
+            return Err(EngineStatus::Malformed {
+                detail: "replace_body update has missing dependencies".into(),
+            });
+        }
+        let work = clone_doc(&self.doc)?;
+        let dest = work.get_or_insert_xml_fragment(FRAGMENT);
+        let bytes = {
+            let src_txn = source.transact();
             let mut dst_txn = work.transact_mut();
             replace_fragment_from(&src_txn, &mut dst_txn, &dest)?;
             dst_txn.encode_update_v1()

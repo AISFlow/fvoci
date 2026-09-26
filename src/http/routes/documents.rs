@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::api::dto::{
-    AncestorResponse, AncestorsResponse, BodyResponse, CreateDocumentBody, DocumentMetaResponse,
+    AncestorResponse, AncestorsResponse, CreateDocumentBody, DocumentMetaResponse,
     MoveDocumentBody, OkResponse, PatchDocumentBody, RequiredNullable, SortDocumentBody,
     TrashItemResponse, TrashListResponse, TreeNodeResponse, TreeResponse,
 };
@@ -254,21 +254,7 @@ async fn patch_document(
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
     let Json(body) = body.map_err(AppError::from)?;
     check_origin(&headers, &state.public_origin)?;
-    if let Some(title) = body.title.as_ref() {
-        if !crate::db::documents::title_is_valid(title) {
-            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-        }
-    }
-    if let Some(Some(icon)) = body.icon.as_ref() {
-        if !crate::db::documents::icon_is_valid(icon) {
-            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-        }
-    }
-    if let Some(status) = body.status.as_ref() {
-        if !crate::db::documents::status_is_valid(status) {
-            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-        }
-    }
+    validate_patch_body(&body)?;
     let (_user, user_id, session_id) = require_session(
         &state,
         &headers,
@@ -704,34 +690,37 @@ async fn get_body(
     jar: CookieJar,
     Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<BodyQuery>,
-) -> Result<Json<BodyResponse>, DocumentApiError> {
-    if query.format.is_some() {
-        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
-    }
-    let (_user, user_id, session_id) = require_session(
+) -> Result<Json<crate::api::documents_dto::DocumentBodyResponse>, DocumentApiError> {
+    crate::http::routes::document_body::read_body(
         &state,
         &headers,
         &jar,
-        crate::http::authz::Access::Scope(crate::auth::scopes::ApiTokenScope::DocumentsRead),
-        Some(workspace_id),
-    )
-    .await?;
-    let result = get_wiki_document(
-        &state.auth.db.pool,
         workspace_id,
-        user_id,
-        session_id,
+        crate::db::document_ops::DocumentScope::Wiki,
         document_id,
+        query.format.as_deref(),
     )
     .await
-    .map_err(internal)?;
-    match result {
-        Ok(meta) => Ok(Json(BodyResponse {
-            content_json: meta.content_json,
-            version: meta.version,
-        })),
-        Err(err) => Err(map_document_error(err)),
+}
+
+/// Source `documentMetaUpdateInput` field rules.
+pub(crate) fn validate_patch_body(body: &PatchDocumentBody) -> Result<(), DocumentApiError> {
+    if let Some(title) = body.title.as_ref() {
+        if !crate::db::documents::title_is_valid(title) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
     }
+    if let Some(Some(icon)) = body.icon.as_ref() {
+        if !crate::db::documents::icon_is_valid(icon) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+    }
+    if let Some(status) = body.status.as_ref() {
+        if !crate::db::documents::status_is_valid(status) {
+            return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn meta_response(meta: &DocumentMeta, include_display_id: bool) -> DocumentMetaResponse {
@@ -759,7 +748,7 @@ pub(crate) fn meta_response(meta: &DocumentMeta, include_display_id: bool) -> Do
     }
 }
 
-fn parse_trash_children(value: Option<&str>) -> Result<TrashChildrenMode, DocumentApiError> {
+pub(crate) fn parse_trash_children(value: Option<&str>) -> Result<TrashChildrenMode, DocumentApiError> {
     match value {
         None => Ok(TrashChildrenMode::Trash),
         Some("trash") => Ok(TrashChildrenMode::Trash),

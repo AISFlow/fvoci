@@ -152,6 +152,7 @@ pub fn router_with_settings(
         .merge(routes::search::router())
         .merge(routes::tasks::router())
         .merge(routes::documents::router())
+        .merge(routes::document_body::router())
         .merge(routes::import::router())
         .merge(routes::revisions::router())
         .merge(routes::attachments::router())
