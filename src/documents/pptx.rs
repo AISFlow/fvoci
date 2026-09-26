@@ -11,7 +11,7 @@
 //! indented; attachments/embeds as their text placeholders. Box heights use
 //! the TS `estimateH` line estimate. Fonts are named only (`Noto Sans KR`,
 //! `Noto Sans Mono CJK KR`), nothing is embedded, no attachment bytes are
-//! read. Intentional differences from the TS output (P1–P12: marks and safe
+//! read. Intentional differences from the TS output (P1–P15: marks and safe
 //! hyperlinks kept, list nesting as levels with the right numbers, task
 //! checkboxes, blocks taller than the rest of a slide continue on the next
 //! slide instead of shrinking, tables split across slides, ...) are listed in
@@ -156,10 +156,22 @@ impl Para {
         p
     }
 
+    /// A line break inside stored text is a line break on the slide (source:
+    /// pptxgenjs splits text runs at `\n`), unlike DOCX where it reads as a
+    /// space.
     fn push(&mut self, text: &str, marks: Marks) {
-        let text = clean(text);
-        if !text.is_empty() {
-            self.runs.push(Run::Text { text, marks });
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.runs.push(Run::Break);
+            }
+            let line = clean(line);
+            if !line.is_empty() {
+                self.runs.push(Run::Text {
+                    text: line,
+                    marks: marks.clone(),
+                });
+            }
         }
     }
 
@@ -920,8 +932,7 @@ fn paragraph(out: &mut String, slide: &mut Slide, p: &Para, size: f64) {
 
 /// XML 1.0 forbids most C0 controls (and U+FFFE/U+FFFF) even escaped, and the
 /// stored JSON may hold them: NUL reads as U+FFFD, the others are dropped;
-/// line breaks and tabs inside prose read as one space (as the DOCX export;
-/// hard breaks are `HardBreak` inlines).
+/// tabs read as one space (line breaks were split off by the caller).
 fn clean(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();

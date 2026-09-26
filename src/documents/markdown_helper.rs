@@ -168,8 +168,8 @@ impl Default for MarkdownLimits {
 pub struct MarkdownHelper {
     program: PathBuf,
     limits: MarkdownLimits,
-    /// Public share PDFs: their own pool of one that never waits (source
-    /// `ConvertClient::for_public`), so anonymous requests cannot queue
+    /// Public share PDFs: their own pool of one that never waits (source:
+    /// the Node helper's public pool), so anonymous requests cannot queue
     /// ahead of members. Shared by clones (the app state's one helper).
     public_permits: Arc<Semaphore>,
 }
@@ -263,7 +263,7 @@ impl MarkdownHelper {
     }
 
     /// The same PDF for an anonymous share request: its own pool of one that
-    /// answers `Busy` instead of waiting (source `ConvertClient::for_public`).
+    /// answers `Busy` instead of waiting (source: the Node helper's public pool).
     pub async fn tiptap_to_pdf_public(
         &self,
         title: &str,
