@@ -1,6 +1,7 @@
 import path from "node:path";
 import { crc32 } from "node:zlib";
 import { expect, type Page, test } from "@playwright/test";
+import { watchCspViolations } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -73,6 +74,7 @@ function docx(title: string, body: string): Buffer {
 }
 
 test("owner imports markdown zip and exports document markdown", async ({ page }) => {
+  const cspViolations = watchCspViolations(page);
   test.setTimeout(120_000);
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
@@ -165,4 +167,5 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
   await page.goto("/w/acme/wiki");
   await page.getByRole("link", { name: "로드맵" }).click();
   await expect(page.getByText("노션 본문")).toBeVisible({ timeout: 15_000 });
+  expect(cspViolations).toEqual([]);
 });

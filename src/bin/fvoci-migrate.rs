@@ -41,6 +41,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         [flag] if flag == "--verify-storage" => {
             verify_storage().await?;
         }
+        [flag] if flag == "--doctor" => {
+            let report = fvoci_server::doctor::run_doctor().await;
+            println!("{}", serde_json::to_string(&report)?);
+            if !report.ok {
+                std::process::exit(1);
+            }
+        }
+        [flag, rest @ ..] if flag == "--init-env" => {
+            let flags = fvoci_server::init_env::parse_init_env_flags(rest)?;
+            let path = fvoci_server::init_env::write_env(&flags)?;
+            println!("{}", path.display());
+        }
         [flag, rest @ ..] if flag == "--recover-outbox" => {
             let url = migration_url()?;
             let opts = parse_recover_outbox_args(rest)?;
@@ -49,7 +61,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
             );
         }
     }
