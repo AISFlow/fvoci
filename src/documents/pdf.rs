@@ -39,6 +39,7 @@ use krilla::text::{Font, GlyphId, KrillaGlyph, Tag};
 use krilla::Document;
 use unicode_linebreak::{linebreaks, BreakOpportunity};
 
+use crate::documents::docx::hyperlink_target;
 use crate::documents::export_model::{Block, ExportDoc, Inline, ListItem, ListKind, TableRow};
 
 /// Source `limits.ts` / `convert.mjs` `MAX_OUTPUT_BYTES`.
@@ -587,7 +588,7 @@ impl Layout<'_> {
                 }
                 let mut style = Style::base(Family::Sans, BODY_SIZE, false);
                 let text = if entity == "url" {
-                    if let Some(href) = link_target(reference) {
+                    if let Some(href) = hyperlink_target(reference) {
                         style.link = Some(href.into());
                         style.color = LINK;
                         style.underline = true;
@@ -785,7 +786,7 @@ impl Layout<'_> {
                 if m.code {
                     style.family = Family::Mono;
                 }
-                if let Some(href) = m.link.as_deref().and_then(link_target) {
+                if let Some(href) = m.link.as_deref().and_then(hyperlink_target) {
                     style.link = Some(href.into());
                     style.color = LINK;
                     style.underline = true;
@@ -981,24 +982,6 @@ impl LineBuilder {
         self.width += piece.width();
         self.pieces.push(piece);
     }
-}
-
-/// URI annotations only for absolute http(s)/mailto URLs (source
-/// `sanitize.ts` `allowedSchemes`); other hrefs (relative, `javascript:`,
-/// `data:`, `attachment:`) keep their text only. A PDF URI is 7-bit ASCII:
-/// the stored href when it already is, else the URL parser's
-/// percent-encoded form.
-fn link_target(href: &str) -> Option<String> {
-    let href = href.trim();
-    let url = url::Url::parse(href).ok()?;
-    if !matches!(url.scheme(), "http" | "https" | "mailto") {
-        return None;
-    }
-    Some(if href.bytes().all(|b| b.is_ascii_graphic()) {
-        href.to_string()
-    } else {
-        url.to_string()
-    })
 }
 
 /// Stored text for drawing: CR LF / CR -> LF (a line break, as the TS Text
@@ -1782,6 +1765,18 @@ mod tests {
         assert_eq!(
             links,
             vec![("ok", Some("https://e.com/a")), (" ", None), ("bad", None)]
+        );
+        // Annotation URIs are RFC 3986 (the DOCX writer's encoding).
+        let doc = json!({"type": "doc", "content": [{"type": "paragraph", "content": [
+            {"type": "text", "text": "m", "marks": [{"type": "link", "attrs": {"href": "mailto:홍 <g@e.com>"}}]},
+        ]}]});
+        let (pages, _) = layout_of(&doc);
+        let Item::Line(line) = &pages[0][0].entry.item else {
+            panic!("line")
+        };
+        assert_eq!(
+            line.pieces[0].1.style.link.as_deref(),
+            Some("mailto:%ED%99%8D%20%3Cg@e.com%3E")
         );
     }
 
