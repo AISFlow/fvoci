@@ -5,12 +5,11 @@ set -euo pipefail
 : "${ROOT:?ROOT is required}"
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR is required}"
 
-if (($# < 1)) && [[ "${FVOCI_E2E_PENDING:-}" != "1" ]]; then
-  echo "usage: web-e2e-run-group.sh <spec-path>..." >&2
-  exit 1
+GROUP_LABEL="default-suite"
+if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]] && (($# < 1)); then
+  GROUP_LABEL="collaboration-pending"
 fi
 
-GROUP_LABEL="collaboration-pending"
 if (($# >= 1)); then
   GROUP_LABEL="$(basename "${1%.spec.ts}")"
   if (($# > 1)); then

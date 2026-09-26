@@ -29,13 +29,6 @@ UNSUPPORTED_SUFFIXES = (
 )
 
 
-def e2e_dir() -> Path:
-    override = os.environ.get("FVOCI_WEB_E2E_DIR")
-    if override:
-        return Path(override).resolve()
-    return DEFAULT_E2E_DIR
-
-
 def rel_spec(path: Path) -> str:
     rel = f"e2e/{path.name}"
     if not REL_SPEC_RE.fullmatch(rel):
@@ -72,8 +65,8 @@ def find_unsupported_playwright_paths(directory: Path) -> list[str]:
     return unsupported
 
 
-def discover_groups() -> list[list[str]]:
-    directory = e2e_dir()
+def discover_groups(directory: Path | None = None) -> list[list[str]]:
+    directory = (directory or DEFAULT_E2E_DIR).resolve()
 
     if not directory.is_dir():
         raise SystemExit(f"missing e2e directory: {directory}")
@@ -155,6 +148,7 @@ def cmd_shard_jsonl(args: argparse.Namespace) -> None:
 
 
 def cmd_verify(args: argparse.Namespace) -> None:
+    directory = DEFAULT_E2E_DIR.resolve()
     groups = discover_groups()
     shard_count = args.shards
     shards = assign_shards(groups, shard_count)
@@ -167,7 +161,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
     if len(spec_paths) != len(set(spec_paths)):
         raise SystemExit("duplicate spec membership across groups")
 
-    expected_specs = sorted(p.name for p in e2e_dir().glob("*.spec.ts"))
+    expected_specs = sorted(p.name for p in directory.glob("*.spec.ts"))
     discovered_specs = sorted(Path(s).name for s in spec_paths)
     if expected_specs != discovered_specs:
         raise SystemExit(

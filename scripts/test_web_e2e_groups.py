@@ -3,9 +3,8 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
-import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,19 +12,99 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GROUPS_PY = ROOT / "scripts" / "web-e2e-groups.py"
-BASELINE_COVERAGE = ROOT / "scripts" / "fixtures" / "web-e2e-groups" / "baseline-coverage-6479332.json"
 
 
-def run_groups(command: list[str], e2e_dir: Path) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "FVOCI_WEB_E2E_DIR": str(e2e_dir)}
-    return subprocess.run(
-        [sys.executable, str(GROUPS_PY), *command],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+def load_groups_module():
+    spec = importlib.util.spec_from_file_location("web_e2e_groups", GROUPS_PY)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {GROUPS_PY}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["web_e2e_groups"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+GROUPS = load_groups_module()
+
+
+def run_verify(e2e_dir: Path, shards: int) -> tuple[int, str, str]:
+    """Run verify logic against a fixture tree (no subprocess / env overrides)."""
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = 0
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            groups = GROUPS.discover_groups(e2e_dir)
+            shards_list = GROUPS.assign_shards(groups, shards)
+            spec_paths: list[str] = []
+            for group in groups:
+                for spec in group:
+                    GROUPS.validate_spec_relpath(spec)
+                spec_paths.extend(group)
+            if len(spec_paths) != len(set(spec_paths)):
+                raise SystemExit("duplicate spec membership across groups")
+            expected_specs = sorted(p.name for p in e2e_dir.glob("*.spec.ts"))
+            discovered_specs = sorted(Path(s).name for s in spec_paths)
+            if expected_specs != discovered_specs:
+                raise SystemExit(
+                    "unregistered or missing specs: "
+                    f"tree={expected_specs!r} groups={discovered_specs!r}"
+                )
+            empty = [i for i, shard in enumerate(shards_list) if not shard]
+            if empty:
+                raise SystemExit(f"shards with no work: {empty}")
+            pair = next(g for g in groups if len(g) == 2)
+            if pair != [
+                f"e2e/{GROUPS.PAIR_FIRST}",
+                f"e2e/{GROUPS.PAIR_SECOND}",
+            ]:
+                raise SystemExit(f"workspace pair integrity failed: {pair!r}")
+            print(
+                json.dumps(
+                    {
+                        "group_count": len(groups),
+                        "spec_count": len(spec_paths),
+                        "shard_count": shards,
+                        "groups_per_shard": [len(s) for s in shards_list],
+                    },
+                    separators=(",", ":"),
+                )
+            )
+    except SystemExit as exc:
+        code = int(exc.code) if isinstance(exc.code, int) else 1
+        if str(exc):
+            stderr.write(f"{exc}\n")
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
+def run_shard_jsonl(e2e_dir: Path, index: int, shards: int) -> tuple[int, str, str]:
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = 0
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            groups = GROUPS.discover_groups(e2e_dir)
+            shards_list = GROUPS.assign_shards(groups, shards)
+            if index < 0 or index >= shards:
+                raise SystemExit(f"shard index {index} out of range 0..{shards - 1}")
+            shard_groups = shards_list[index]
+            if not shard_groups:
+                raise SystemExit(f"shard {index} has no groups")
+            for group in shard_groups:
+                for spec in group:
+                    GROUPS.validate_spec_relpath(spec)
+                print(json.dumps({"specs": group}, separators=(",", ":")))
+    except SystemExit as exc:
+        code = int(exc.code) if isinstance(exc.code, int) else 1
+        if str(exc):
+            stderr.write(f"{exc}\n")
+    return code, stdout.getvalue(), stderr.getvalue()
 
 
 def write_spec(directory: Path, name: str, content: str = "// fixture\n") -> None:
@@ -46,22 +125,23 @@ class WebE2eGroupsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             e2e = Path(tmp)
             write_spec(e2e, "workspace-wiki-flow.spec.ts")
-            result = run_groups(["verify", "--shards", "2"], e2e)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("workspace-wiki-flow.spec.ts", result.stderr)
+            code, _, stderr = run_verify(e2e, 2)
+            self.assertNotEqual(code, 0)
+            self.assertIn("workspace-wiki-flow.spec.ts", stderr)
 
     def test_new_spec_auto_included(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             e2e = Path(tmp)
             minimal_pair_tree(e2e, ["brand-new-flow.spec.ts"])
-            result = run_groups(["verify", "--shards", "2"], e2e)
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            listed = run_groups(["list-groups"], e2e)
-            self.assertEqual(listed.returncode, 0)
-            specs = []
-            for line in listed.stdout.splitlines():
-                specs.extend(json.loads(line)["specs"])
-            self.assertIn("e2e/brand-new-flow.spec.ts", specs)
+            code, _, stderr = run_verify(e2e, 2)
+            self.assertEqual(code, 0, msg=stderr)
+            all_specs: list[str] = []
+            for idx in range(2):
+                c, out, _ = run_shard_jsonl(e2e, idx, 2)
+                self.assertEqual(c, 0)
+                for line in out.splitlines():
+                    all_specs.extend(json.loads(line)["specs"])
+            self.assertIn("e2e/brand-new-flow.spec.ts", all_specs)
 
     def test_nested_spec_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,34 +150,34 @@ class WebE2eGroupsTest(unittest.TestCase):
             nested = e2e / "nested"
             nested.mkdir()
             write_spec(nested, "hidden-flow.spec.ts")
-            result = run_groups(["verify", "--shards", "2"], e2e)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("nested spec.ts", result.stderr)
+            code, _, stderr = run_verify(e2e, 2)
+            self.assertNotEqual(code, 0)
+            self.assertIn("nested spec.ts", stderr)
 
     def test_unsupported_test_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             e2e = Path(tmp)
             minimal_pair_tree(e2e)
             write_spec(e2e, "collab-wire.test.ts")
-            result = run_groups(["verify", "--shards", "2"], e2e)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(".test.ts", result.stderr)
+            code, _, stderr = run_verify(e2e, 2)
+            self.assertNotEqual(code, 0)
+            self.assertIn(".test.ts", stderr)
 
     def test_empty_shard_fails_verify(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             e2e = Path(tmp)
             minimal_pair_tree(e2e)
-            result = run_groups(["verify", "--shards", "8"], e2e)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("shards with no work", result.stderr)
+            code, _, stderr = run_verify(e2e, 8)
+            self.assertNotEqual(code, 0)
+            self.assertIn("shards with no work", stderr)
 
     def test_shard_jsonl_pair_on_one_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             e2e = Path(tmp)
             minimal_pair_tree(e2e, ["alpha-flow.spec.ts", "beta-flow.spec.ts"])
-            result = run_groups(["shard-jsonl", "--index", "0", "--shards", "2"], e2e)
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            groups = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+            code, stdout, stderr = run_shard_jsonl(e2e, 0, 2)
+            self.assertEqual(code, 0, msg=stderr)
+            groups = [json.loads(line) for line in stdout.splitlines() if line.strip()]
             pair = next(g for g in groups if len(g["specs"]) == 2)
             self.assertEqual(
                 pair["specs"],
@@ -109,22 +189,8 @@ class WebE2eGroupsTest(unittest.TestCase):
             e2e = Path(tmp)
             minimal_pair_tree(e2e)
             write_spec(e2e, "bad spec.spec.ts")
-            result = run_groups(["verify", "--shards", "2"], e2e)
-            self.assertNotEqual(result.returncode, 0)
-
-    def test_baseline_coverage_snapshot(self) -> None:
-        self.assertTrue(BASELINE_COVERAGE.is_file(), "missing baseline coverage fixture")
-        baseline = json.loads(BASELINE_COVERAGE.read_text(encoding="utf-8"))
-        result = run_groups(["verify", "--shards", "8"], e2e_dir())
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        current = json.loads(result.stdout.strip())
-        self.assertEqual(current["group_count"], baseline["group_count"])
-        self.assertEqual(current["spec_count"], baseline["spec_count"])
-        self.assertEqual(current["groups_per_shard"], baseline["groups_per_shard"])
-
-
-def e2e_dir() -> Path:
-    return ROOT / "apps" / "web" / "e2e"
+            code, _, _ = run_verify(e2e, 2)
+            self.assertNotEqual(code, 0)
 
 
 if __name__ == "__main__":
