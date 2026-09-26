@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { SearchCommand } from "@/features/workspace/search-command";
 import { NotificationBell } from "@/features/notifications/notification-bell";
 import {
+  myTasksPath,
   projectsPath,
   searchPath,
   settingsPath,
@@ -18,11 +19,19 @@ import { api, ProblemError, problemMessage } from "@/lib/api";
 import { workspacesQuery } from "@/lib/queries";
 import "@/features/workspace/workspace-aux.css";
 
-export type WorkspaceNav = "home" | "wiki" | "settings" | "projects" | "search" | "notifications";
+export type WorkspaceNav =
+  | "home"
+  | "wiki"
+  | "settings"
+  | "projects"
+  | "myTasks"
+  | "search"
+  | "notifications";
 
 function landingPath(slug: string, activeNav: WorkspaceNav): string {
   if (activeNav === "settings") return settingsPath(slug);
   if (activeNav === "projects") return projectsPath(slug);
+  if (activeNav === "myTasks") return myTasksPath(slug);
   if (activeNav === "search") return searchPath(slug);
   if (activeNav === "notifications") return notificationsPath(slug);
   if (activeNav === "home") return workspaceHomePath(slug);
@@ -105,6 +114,13 @@ export function WorkspaceShell({
               aria-current={activeNav === "projects" ? "page" : undefined}
             >
               {t("nav.projects")}
+            </Link>
+            <Link
+              to={myTasksPath(slug)}
+              className={activeNav === "myTasks" ? "workspace-shell__nav-link is-active" : "workspace-shell__nav-link"}
+              aria-current={activeNav === "myTasks" ? "page" : undefined}
+            >
+              {t("task.mine")}
             </Link>
             <Link
               to={searchPath(slug)}

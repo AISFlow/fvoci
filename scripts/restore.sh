@@ -9,7 +9,11 @@
 #
 # Keep POSTGRES_USER, POSTGRES_DB, and FVOCI_APP_ROLE names the same as the
 # backed-up install. Database and Meili passwords may be new. PASSWORD_PEPPER_KEYS
-# must match the original or existing passwords will not verify.
+# must match the original or existing passwords will not verify. ENCRYPTION_KEYS
+# must hold every key id of the original with the same key (a rotated superset
+# is fine); both are checked against the manifest before any volume exists.
+# After the database is restored, fvoci-migrate --verify-secrets opens every
+# sealed secret (MFA, workspace SSO, webhooks) before the server starts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,6 +49,14 @@ read_env() {
     echo "missing ${key} in env file" >&2
     exit 1
   fi
+  printf '%s\n' "${line#*=}"
+}
+
+# Optional variable: empty output when the env file does not set it.
+read_env_optional() {
+  local key="$1"
+  local line
+  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 || true)"
   printf '%s\n' "${line#*=}"
 }
 
@@ -170,6 +182,31 @@ if [[ "$ACTUAL_PEPPER_FP" != "$EXPECTED_PEPPER_FP" ]]; then
   exit 1
 fi
 
+# Every ENCRYPTION_KEYS key id of the backup must be present with the same key
+# (compared by per-id HMAC fingerprints; keys are never printed).
+ENCRYPTION_ENTRY_FILE="$(mktemp "${TMPDIR:-/tmp}/fvoci-restore-keys.XXXXXX")"
+python3 -c '
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+if "encryptionKeys" not in manifest:
+    sys.exit(3)
+json.dump(manifest["encryptionKeys"], open(sys.argv[2], "w"))
+' "$MANIFEST" "$ENCRYPTION_ENTRY_FILE" && ENTRY_STATUS=0 || ENTRY_STATUS=$?
+if (( ENTRY_STATUS == 3 )); then
+  echo "backup manifest predates the ENCRYPTION_KEYS fingerprint; the keyring is checked only by fvoci-migrate --verify-secrets after the database restore" >&2
+elif (( ENTRY_STATUS != 0 )); then
+  rm -f "$ENCRYPTION_ENTRY_FILE"
+  echo "could not read encryptionKeys from the backup manifest" >&2
+  exit 1
+elif ! ENCRYPTION_KEYS="$(read_env_optional ENCRYPTION_KEYS)" \
+  ENCRYPTION_ACTIVE_KEY_ID="$(read_env_optional ENCRYPTION_ACTIVE_KEY_ID)" \
+  python3 "$ROOT/scripts/encryption_keys.py" check "$ENCRYPTION_ENTRY_FILE"; then
+  rm -f "$ENCRYPTION_ENTRY_FILE"
+  echo "ENCRYPTION_KEYS cannot open the secrets sealed by the backed-up install (MFA, workspace SSO, webhooks). Use the original keyring or a superset of it." >&2
+  exit 1
+fi
+rm -f "$ENCRYPTION_ENTRY_FILE"
+
 for vol in "${VOLUME_KEYS[@]}"; do
   if docker volume inspect "${PROJECT}_${vol}" >/dev/null 2>&1; then
     echo "volume ${PROJECT}_${vol} already exists; restore only into a fresh project" >&2
@@ -266,8 +303,13 @@ echo "rebuilding the search index from PostgreSQL"
 echo "verifying stored attachments against the configured storage"
 "${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
 
+# Every sealed secret in the restored database must open with the server's
+# ENCRYPTION_KEYS (same environment and app role as the server).
+echo "opening every sealed secret with the configured ENCRYPTION_KEYS"
+"${COMPOSE[@]}" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-secrets
+
 echo "starting the server"
 "${COMPOSE[@]}" up -d --wait server
 
-python3 -c 'import json,sys; json.dump({"restoredProject": sys.argv[1], "searchRebuilt": "rebuild-search", "storageVerified": True}, sys.stdout)' "$PROJECT"
+python3 -c 'import json,sys; json.dump({"restoredProject": sys.argv[1], "searchRebuilt": "rebuild-search", "storageVerified": True, "secretsVerified": True}, sys.stdout)' "$PROJECT"
 printf '\n'

@@ -75,7 +75,9 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}",
-            get(get_task_route).patch(patch_task_route),
+            get(get_task_route)
+                .patch(patch_task_route)
+                .delete(crate::http::routes::task_ops::purge_task_route),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/activity",
@@ -209,40 +211,44 @@ async fn get_task_route(
     .await
     .map_err(internal)?;
     match result {
-        Ok(task) => Ok(Json(TaskOutput {
-            meta: task_meta_output(task.meta),
-            content_json: task.content_json,
-            can_edit: task.can_edit,
-            assignee_ids: uuid_strings(&task.assignee_ids),
-            label_ids: uuid_strings(&task.label_ids),
-            dependencies: task
-                .dependencies
-                .into_iter()
-                .map(dependency_output)
-                .collect(),
-            child_progress: task.child_progress.map(|progress| TaskChildProgressOutput {
-                done: progress.done,
-                total: progress.total,
-            }),
-            parent: task.parent.map(|parent| TaskParentOutput {
-                id: parent.id.to_string(),
-                title: parent.title,
-                task_type: parent.task_type,
-                number: parent.number,
-            }),
-            children: task
-                .children
-                .into_iter()
-                .map(|child| TaskChildOutput {
-                    id: child.id.to_string(),
-                    number: child.number,
-                    title: child.title,
-                    task_type: child.task_type,
-                    status_id: child.status_id.to_string(),
-                })
-                .collect(),
-        })),
+        Ok(task) => Ok(Json(task_detail_output(task))),
         Err(err) => Err(map_task_db_error(err)),
+    }
+}
+
+pub(crate) fn task_detail_output(task: crate::db::tasks::TaskDetailRow) -> TaskOutput {
+    TaskOutput {
+        meta: task_meta_output(task.meta),
+        content_json: task.content_json,
+        can_edit: task.can_edit,
+        assignee_ids: uuid_strings(&task.assignee_ids),
+        label_ids: uuid_strings(&task.label_ids),
+        dependencies: task
+            .dependencies
+            .into_iter()
+            .map(dependency_output)
+            .collect(),
+        child_progress: task.child_progress.map(|progress| TaskChildProgressOutput {
+            done: progress.done,
+            total: progress.total,
+        }),
+        parent: task.parent.map(|parent| TaskParentOutput {
+            id: parent.id.to_string(),
+            title: parent.title,
+            task_type: parent.task_type,
+            number: parent.number,
+        }),
+        children: task
+            .children
+            .into_iter()
+            .map(|child| TaskChildOutput {
+                id: child.id.to_string(),
+                number: child.number,
+                title: child.title,
+                task_type: child.task_type,
+                status_id: child.status_id.to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -806,7 +812,7 @@ async fn remove_dependency_route(
     }
 }
 
-fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiError> {
+pub(crate) fn parse_patch_body(body: &PatchTaskBody) -> Result<PatchTaskMetaInput, TaskApiError> {
     if body.expected_dates.is_none()
         && body.task_type.is_none()
         && body.title.is_none()
@@ -906,7 +912,7 @@ fn recurrence_preset_is_valid(value: &serde_json::Value) -> bool {
     )
 }
 
-fn map_task_db_error(err: ProjectDbError) -> TaskApiError {
+pub(crate) fn map_task_db_error(err: ProjectDbError) -> TaskApiError {
     match err {
         ProjectDbError::Conflict => TaskApiError::Coded {
             status: StatusCode::CONFLICT,
@@ -958,6 +964,21 @@ fn map_task_db_error(err: ProjectDbError) -> TaskApiError {
             status: StatusCode::BAD_REQUEST,
             code: "task_cannot_block_itself",
             title: "task cannot block itself".to_string(),
+        },
+        ProjectDbError::OpenTimeEntryExists => TaskApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "open_time_entry_exists",
+            title: "open time entry exists".to_string(),
+        },
+        ProjectDbError::StatusHasTasks => TaskApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "status_has_tasks",
+            title: "status has tasks".to_string(),
+        },
+        ProjectDbError::WorkflowStatusLimit => TaskApiError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "workflow_status_limit",
+            title: "workflow status limit reached".to_string(),
         },
         other => map_project_error(other).into(),
     }
@@ -1024,7 +1045,7 @@ async fn list_tasks(
     }
 }
 
-fn map_task_list_query_error(err: TaskListQueryError) -> TaskApiError {
+pub(crate) fn map_task_list_query_error(err: TaskListQueryError) -> TaskApiError {
     match err {
         TaskListQueryError::InvalidInput => AppError::from_code(ProblemCode::InvalidInput).into(),
         TaskListQueryError::InvalidCursor => AppError {
@@ -1097,7 +1118,7 @@ fn dependency_output(edge: crate::db::tasks::TaskDependencyEdge) -> TaskDependen
     }
 }
 
-enum TaskApiError {
+pub(crate) enum TaskApiError {
     App(AppError),
     Coded {
         status: StatusCode,
@@ -1138,7 +1159,7 @@ impl IntoResponse for TaskApiError {
     }
 }
 
-fn activity_channel(headers: &HeaderMap) -> &'static str {
+pub(crate) fn activity_channel(headers: &HeaderMap) -> &'static str {
     if headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -1286,7 +1307,7 @@ fn activity_actor_output(
     }
 }
 
-async fn require_session(
+pub(crate) async fn require_session(
     state: &AppState,
     headers: &HeaderMap,
     jar: &CookieJar,
@@ -1298,11 +1319,11 @@ async fn require_session(
     Ok((auth.user, auth.user_id, auth.credential_id))
 }
 
-fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
+pub(crate) fn parse_user_id(value: &str) -> Result<Uuid, AppError> {
     Uuid::parse_str(value).map_err(|_| AppError::from_code(ProblemCode::AuthenticationRequired))
 }
 
-fn internal(err: sqlx::Error) -> AppError {
+pub(crate) fn internal(err: sqlx::Error) -> AppError {
     tracing::error!("database error: {}", err);
     AppError::internal()
 }

@@ -11,6 +11,10 @@ description: FVOCI 인증·인가·세션·DB 쿼리·트랜잭션·migration �
 
 원본/새 구현의 접근 주체와 자원, 관련 SQL·transaction/migration, 실제 앱 DB 역할, 보존할 이벤트·감사 계약.
 
+OIDC/JWT·TOTP 등 표준 인증 처리를 구현·교체하면
+[standard-implementations](../fvoci-standard-implementations/SKILL.md)를 함께 적용한다.
+SDK의 토큰 검증은 아래 현재 세션·identity 연결·RLS·replay/원자성 검사를 대신하지 않는다.
+
 ## 절차
 
 1. 사용자 활성 상태, 실제 멤버십, 리소스 권한과 PAT 범위가 어디에서 강제되는지 명시한다. tenant/workspace ID 입력과 인증된 사용자 타입만으로 현재 권한을 증명하지 않는다.

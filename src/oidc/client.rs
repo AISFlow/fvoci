@@ -206,6 +206,10 @@ fn insert_bounded_instant(map: &mut HashMap<String, Instant>, key: String) {
 #[derive(Debug, Clone)]
 pub struct SocialProfile {
     pub sub: String,
+    /// The issuer the subject was verified against: the discovery issuer
+    /// (which the id_token `iss` matched), or the configured base URL for an
+    /// OAuth2 provider without discovery. `sub` is only unique within it.
+    pub issuer: String,
     pub email: Option<String>,
     pub name: Option<String>,
     pub email_verified: bool,
@@ -310,6 +314,7 @@ pub async fn oidc_exchange(
     )?;
     Ok(SocialProfile {
         sub: string_claim(&claims, "sub").ok_or(ExchangeError::Response("sub"))?,
+        issuer: discovery.issuer.clone(),
         email: normalize_provider_email(string_claim(&claims, "email")),
         name: string_claim(&claims, "name").or_else(|| string_claim(&claims, "nickname")),
         email_verified: claims.get("email_verified") == Some(&Value::Bool(true)),
@@ -376,6 +381,7 @@ pub async fn naver_exchange(
         .ok_or(ExchangeError::Response("naver id"))?;
     Ok(SocialProfile {
         sub,
+        issuer: provider.issuer.clone(),
         email: normalize_provider_email(body.email),
         name: body.name.or(body.nickname),
         email_verified: false,

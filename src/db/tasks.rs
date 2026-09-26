@@ -13,7 +13,9 @@ use crate::db::holidays::list_holiday_dates;
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
 use crate::db::labels::{assignee_filter_member_exists, project_label_exists};
 use crate::db::milestones::project_milestone_exists;
-use crate::db::projects::{lock_project, project_permission, ProjectDbError};
+use crate::db::projects::{
+    lock_project, project_permission, visible_project_sql_for_guest, ProjectDbError,
+};
 use crate::db::task_activity::{record_task_activity, task_activity_snapshot};
 use crate::db::view_query::{
     compile_view_query, scalar_value_sql, value_column, CompileOptions, RootKind, SqlArgs,
@@ -125,17 +127,17 @@ pub struct CreateTaskInput<'a> {
     pub recurrence: Option<Value>,
 }
 
-struct TaskChangeRecord<'a> {
-    workspace_id: Uuid,
-    actor_user_id: Uuid,
-    verb: &'a str,
-    target_type: &'a str,
-    target_id: Uuid,
-    payload: Value,
-    client_ip: Option<&'a str>,
+pub(crate) struct TaskChangeRecord<'a> {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) actor_user_id: Uuid,
+    pub(crate) verb: &'a str,
+    pub(crate) target_type: &'a str,
+    pub(crate) target_id: Uuid,
+    pub(crate) payload: Value,
+    pub(crate) client_ip: Option<&'a str>,
 }
 
-async fn workspace_is_live(
+pub(crate) async fn workspace_is_live(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
@@ -160,7 +162,7 @@ fn unique_ids(ids: &[Uuid]) -> Vec<Uuid> {
     out
 }
 
-fn uuid_strings(ids: &[Uuid]) -> Vec<String> {
+pub(crate) fn uuid_strings(ids: &[Uuid]) -> Vec<String> {
     ids.iter().map(ToString::to_string).collect()
 }
 
@@ -262,7 +264,7 @@ async fn membership_exists(
     Ok(exists.0)
 }
 
-async fn copy_task_assignees_and_labels(
+pub(crate) async fn copy_task_assignees_and_labels(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     source_task_id: Uuid,
@@ -461,7 +463,7 @@ async fn replace_task_labels(
     Ok(Ok(()))
 }
 
-async fn record_task_event_and_audit(
+pub(crate) async fn record_task_event_and_audit(
     tx: &mut Transaction<'_, Postgres>,
     change: TaskChangeRecord<'_>,
 ) -> Result<(), sqlx::Error> {
@@ -775,7 +777,7 @@ pub(crate) struct TaskRowRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-fn map_task_row(row: &sqlx::postgres::PgRow) -> Result<TaskRowRecord, sqlx::Error> {
+pub(crate) fn map_task_row(row: &sqlx::postgres::PgRow) -> Result<TaskRowRecord, sqlx::Error> {
     Ok(TaskRowRecord {
         id: row.try_get("id")?,
         project_id: row.try_get("project_id")?,
@@ -800,7 +802,11 @@ fn map_task_row(row: &sqlx::postgres::PgRow) -> Result<TaskRowRecord, sqlx::Erro
     })
 }
 
-fn row_to_meta(workspace_id: Uuid, row: TaskRowRecord, recurrence: Option<Value>) -> TaskMetaRow {
+pub(crate) fn row_to_meta(
+    workspace_id: Uuid,
+    row: TaskRowRecord,
+    recurrence: Option<Value>,
+) -> TaskMetaRow {
     TaskMetaRow {
         id: row.id,
         workspace_id,
@@ -972,7 +978,6 @@ pub async fn create_task_tx(
     client_ip: Option<&str>,
     channel: &str,
 ) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
-    let task_id = Uuid::now_v7();
     lock_membership_users(tx, &[actor_user_id]).await?;
     if !recheck_session(tx, actor_user_id, session_id).await? {
         return Ok(Err(ProjectDbError::Forbidden));
@@ -992,6 +997,31 @@ pub async fn create_task_tx(
         return Ok(Err(ProjectDbError::NotFound));
     }
 
+    insert_task_in_locked_project(
+        tx,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        &input,
+        client_ip,
+        channel,
+    )
+    .await
+}
+
+/// Inserts a task into a project the caller has already locked and authorized
+/// for edit (active session, live workspace, writable project) in this
+/// transaction. Records the create event, audit and activity.
+pub(crate) async fn insert_task_in_locked_project(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    input: &CreateTaskInput<'_>,
+    client_ip: Option<&str>,
+    channel: &str,
+) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
+    let task_id = Uuid::now_v7();
     if input.task_type == "subtask" && input.parent_id.is_none() {
         return Ok(Err(ProjectDbError::Conflict));
     }
@@ -1265,6 +1295,39 @@ pub async fn list_project_tasks(
     session_id: Uuid,
     query: &ParsedTaskListQuery,
 ) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
+    list_tasks_in_scope(
+        pool,
+        workspace_id,
+        Some(project_id),
+        actor_user_id,
+        session_id,
+        query,
+    )
+    .await
+}
+
+/// Source `listTasks(projectId = null)`: live tasks of every live project the
+/// actor can currently view, for any workspace member (guests included).
+pub async fn list_workspace_tasks(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    query: &ParsedTaskListQuery,
+) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
+    list_tasks_in_scope(pool, workspace_id, None, actor_user_id, session_id, query).await
+}
+
+/// `$2` is the project id for a project list and the actor id for the
+/// workspace-wide list, whose rows are limited to projects the actor can view.
+async fn list_tasks_in_scope(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Option<Uuid>,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    query: &ParsedTaskListQuery,
+) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
     let fingerprint = filter_fingerprint(workspace_id, project_id, query);
     if let Some(cursor) = &query.cursor {
         if cursor.f != fingerprint {
@@ -1285,26 +1348,66 @@ pub async fn list_project_tasks(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
-    let Some(locked) = locked else {
-        tx.rollback().await?;
-        return Ok(Err(ProjectDbError::NotFound));
+    let scope_condition = match project_id {
+        Some(project_id) => {
+            let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+            let Some(locked) = locked else {
+                tx.rollback().await?;
+                return Ok(Err(ProjectDbError::NotFound));
+            };
+            if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
+                .await?
+                .at_least(ProjectPermission::View)
+            {
+                tx.rollback().await?;
+                return Ok(Err(ProjectDbError::NotFound));
+            }
+            "t.project_id = $2".to_string()
+        }
+        None => {
+            let Some(role) =
+                crate::db::documents::membership_role(&mut tx, workspace_id, actor_user_id).await?
+            else {
+                tx.rollback().await?;
+                return Ok(Err(ProjectDbError::NotFound));
+            };
+            let visible = visible_project_sql_for_guest(
+                "p",
+                role == crate::db::workspace::WorkspaceRole::Guest,
+                2,
+            );
+            format!(
+                "EXISTS (
+                    SELECT 1 FROM fvoci.projects p
+                    WHERE p.workspace_id = t.workspace_id
+                      AND p.id = t.project_id
+                      AND p.deleted_at IS NULL
+                      AND {visible}
+                )"
+            )
+        }
     };
-    if !project_permission(&mut tx, workspace_id, actor_user_id, &locked)
-        .await?
-        .at_least(ProjectPermission::View)
-    {
-        tx.rollback().await?;
-        return Ok(Err(ProjectDbError::NotFound));
-    }
+    let scope_bind = project_id.unwrap_or(actor_user_id);
     if let Some(label_id) = query.view.filters.label_id {
-        if !project_label_exists(&mut tx, workspace_id, project_id, label_id).await? {
+        let exists = match project_id {
+            Some(project_id) => {
+                project_label_exists(&mut tx, workspace_id, project_id, label_id).await?
+            }
+            None => workspace_row_exists(&mut tx, "labels", workspace_id, label_id).await?,
+        };
+        if !exists {
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::InvalidInput));
         }
     }
     if let Some(milestone_id) = query.view.filters.milestone_id {
-        if !project_milestone_exists(&mut tx, workspace_id, project_id, milestone_id).await? {
+        let exists = match project_id {
+            Some(project_id) => {
+                project_milestone_exists(&mut tx, workspace_id, project_id, milestone_id).await?
+            }
+            None => workspace_row_exists(&mut tx, "milestones", workspace_id, milestone_id).await?,
+        };
+        if !exists {
             tx.rollback().await?;
             return Ok(Err(ProjectDbError::InvalidInput));
         }
@@ -1316,7 +1419,8 @@ pub async fn list_project_tasks(
         }
     }
 
-    let (mut base_conditions, mut base_binds) = task_list_filter_conditions(query, actor_user_id);
+    let (mut base_conditions, mut base_binds) =
+        task_list_filter_conditions(query, actor_user_id, scope_condition.clone());
     // Collection-backed parts of the view query (custom field filters,
     // dueBefore, field sorts) come from the shared compiler.
     let mut compiled_args = SqlArgs::starting_at(base_binds.len() + 3);
@@ -1324,7 +1428,7 @@ pub async fn list_project_tasks(
         &mut tx,
         ViewScope {
             workspace_id,
-            project_id: Some(project_id),
+            project_id,
             collection_id: None,
             kind: RootKind::Task,
         },
@@ -1365,7 +1469,10 @@ pub async fn list_project_tasks(
     let mut binds = base_binds.clone();
     let sort = effective_sort_entries(&query.view.sort);
     if let Some(cursor) = &query.cursor {
-        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(
+        // The anchor row is subject to the same scope predicate as the page
+        // (project, or visible projects for the workspace scope), so a cursor
+        // naming a task the actor cannot see is rejected like a missing one.
+        let anchor_sql = format!(
             r#"
             SELECT t.created_at, t.updated_at, t.id, t.number, t.title, t.sort_key, t.priority, t.status_id,
                    t.due_date, t.due_at,
@@ -1377,14 +1484,18 @@ pub async fn list_project_tasks(
                          AND st.id = t.status_id
                    ) AS status_sort_key
             FROM fvoci.tasks t
-            WHERE t.workspace_id = $1 AND t.project_id = $2 AND t.id = $3 AND t.deleted_at IS NULL
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(cursor.id)
-        .fetch_optional(&mut *tx)
-        .await?;
+            WHERE t.workspace_id = $1
+              AND {scope_condition}
+              AND t.id = $3
+              AND t.deleted_at IS NULL
+            "#
+        );
+        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(&anchor_sql)
+            .bind(workspace_id)
+            .bind(scope_bind)
+            .bind(cursor.id)
+            .fetch_optional(&mut *tx)
+            .await?;
         let Some((
             created_at,
             updated_at,
@@ -1464,7 +1575,7 @@ pub async fn list_project_tasks(
         LIMIT {limit}
         "#
     );
-    let mut list_query = sqlx::query(&list_sql).bind(workspace_id).bind(project_id);
+    let mut list_query = sqlx::query(&list_sql).bind(workspace_id).bind(scope_bind);
     for value in &binds {
         list_query = list_query.bind(value);
     }
@@ -1480,7 +1591,7 @@ pub async fn list_project_tasks(
     );
     let mut count_query = sqlx::query_as::<_, (Uuid, i64)>(&count_sql)
         .bind(workspace_id)
-        .bind(project_id);
+        .bind(scope_bind);
     for value in &base_binds {
         count_query = count_query.bind(value);
     }
@@ -1551,11 +1662,12 @@ pub async fn list_project_tasks(
 fn task_list_filter_conditions(
     query: &ParsedTaskListQuery,
     actor_user_id: Uuid,
+    scope_condition: String,
 ) -> (Vec<String>, Vec<String>) {
     let mut binds: Vec<String> = Vec::new();
     let mut conditions = vec![
         "t.workspace_id = $1".to_string(),
-        "t.project_id = $2".to_string(),
+        scope_condition,
         "t.deleted_at IS NULL".to_string(),
     ];
     if query.archived {
@@ -1644,6 +1756,22 @@ fn task_list_filter_conditions(
     binds.push(query.as_of.to_rfc3339());
     conditions.push(format!("t.created_at <= ${as_of_idx}::timestamptz"));
     (conditions, binds)
+}
+
+/// Label/milestone filter target anywhere in the workspace (workspace-wide list).
+async fn workspace_row_exists(
+    tx: &mut Transaction<'_, Postgres>,
+    table: &'static str,
+    workspace_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let sql =
+        format!("SELECT EXISTS (SELECT 1 FROM fvoci.{table} WHERE workspace_id = $1 AND id = $2)");
+    sqlx::query_scalar(&sql)
+        .bind(workspace_id)
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await
 }
 
 fn escape_ilike_pattern(input: &str) -> String {
@@ -1843,9 +1971,9 @@ fn cursor_bind_value(
 }
 
 #[derive(Debug, Clone)]
-struct TaskWriteRow {
-    record: TaskRowRecord,
-    recurrence: Option<Value>,
+pub(crate) struct TaskWriteRow {
+    pub(crate) record: TaskRowRecord,
+    pub(crate) recurrence: Option<Value>,
 }
 
 async fn task_project_id_for_write(
@@ -1895,7 +2023,7 @@ async fn load_task_for_write_locked(
     Ok(Some(TaskWriteRow { record, recurrence }))
 }
 
-async fn require_task_write_access(
+pub(crate) async fn require_task_write_access(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,

@@ -1,7 +1,6 @@
 import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import type { components } from "@/generated/api";
 import { api, ensureOk } from "@/lib/api";
-import { parentListViewQuery } from "./task-parent-query";
 
 export type TaskMeta = components["schemas"]["TaskMetaOutput"];
 export type TaskListItem = components["schemas"]["TaskListItemOutput"];
@@ -40,24 +39,26 @@ export function taskListQuery(workspaceId: string, projectId: string, viewQuery?
   });
 }
 
+/** Source `listTaskParents`: the server resolves display ids, the hierarchy
+ * rule (subtask → task/bug/story, others → epic) and archived candidates. */
 export function taskParentListQuery(
   workspaceId: string,
   projectId: string,
   childType: string,
   excludeTaskId: string,
-  title?: string,
+  q: string,
 ) {
-  const query = parentListViewQuery(childType, title);
   return infiniteQueryOptions({
-    queryKey: ["task-parents", workspaceId, projectId, childType, excludeTaskId, title ?? ""] as const,
+    queryKey: ["task-parents", workspaceId, projectId, childType, excludeTaskId, q] as const,
     queryFn: async ({ pageParam }) =>
       ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks", {
+        await api.GET("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks/parents", {
           params: {
             path: { workspace_id: workspaceId, project_id: projectId },
             query: {
-              query,
-              limit: 20,
+              childType,
+              ...(q ? { q } : {}),
+              ...(excludeTaskId ? { excludeTaskId } : {}),
               ...(pageParam ? { cursor: pageParam } : {}),
             },
           },

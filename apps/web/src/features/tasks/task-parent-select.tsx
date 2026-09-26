@@ -1,26 +1,13 @@
 import { t } from "@fvoci/i18n";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatDisplayId } from "@/lib/href";
-import { lookupQuery } from "./lookup";
-import { taskParentListQuery, taskQuery } from "./queries";
-import { eligibleParentCandidates } from "./task-edit-payload";
-import { parentSearchMode } from "./task-parent-query";
-
-type ParentCandidate = {
-  id: string;
-  type: string;
-  number: number;
-  title: string;
-  displayId?: string;
-};
+import { taskParentListQuery } from "./queries";
 
 export function TaskParentSelect({
   workspaceId,
   projectId,
-  projectKey,
   childType,
   excludeTaskId,
   value,
@@ -41,39 +28,11 @@ export function TaskParentSelect({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<{ id: string; title: string } | null>(null);
-  const q = useDeferredValue(query);
-  const mode = parentSearchMode(q, projectKey);
-  const title = mode.kind === "list" ? mode.title : undefined;
-  const displayId = mode.kind === "display-id" ? mode.displayId : "";
-  const listEnabled = open && mode.kind === "list";
-  const lookupEnabled = open && mode.kind === "display-id";
+  const q = useDeferredValue(query).trim();
 
   const list = useInfiniteQuery({
-    ...taskParentListQuery(workspaceId, projectId, childType, excludeTaskId, title),
-    enabled:
-      listEnabled &&
-      Boolean(workspaceId) &&
-      Boolean(projectId) &&
-      childType !== "epic",
-  });
-  const lookup = useQuery({
-    ...lookupQuery(workspaceId, displayId),
-    enabled: lookupEnabled && Boolean(workspaceId) && Boolean(displayId),
-  });
-  const lookupTaskId = useMemo(() => {
-    if (mode.kind !== "display-id") return "";
-    return (
-      lookup.data?.items.find(
-        (item) =>
-          item.kind === "task" &&
-          item.id !== excludeTaskId &&
-          item.projectId === projectId,
-      )?.id ?? ""
-    );
-  }, [excludeTaskId, lookup.data, mode.kind, projectId]);
-  const resolvedTask = useQuery({
-    ...taskQuery(workspaceId, lookupTaskId),
-    enabled: lookupEnabled && Boolean(lookupTaskId),
+    ...taskParentListQuery(workspaceId, projectId, childType, excludeTaskId, q),
+    enabled: open && Boolean(workspaceId) && Boolean(projectId) && childType !== "epic",
   });
 
   useEffect(() => {
@@ -82,41 +41,19 @@ export function TaskParentSelect({
     setSelected(null);
   }, [childType, excludeTaskId]);
 
-  const items = useMemo((): ParentCandidate[] => {
-    if (mode.kind === "empty") return [];
-    if (mode.kind === "display-id") {
-      const task = resolvedTask.data;
-      if (!task || task.archivedAt) return [];
-      return eligibleParentCandidates(
-        { id: excludeTaskId, type: childType },
-        [{ id: task.id, type: task.type, number: task.number, title: task.title }],
-      ).map((item) => ({
-        ...item,
-        displayId: formatDisplayId(projectKey, item.number),
-      }));
-    }
-    const pages = list.data?.pages.flatMap((page) => page.items) ?? [];
-    return eligibleParentCandidates({ id: excludeTaskId, type: childType }, pages);
-  }, [
-    childType,
-    excludeTaskId,
-    list.data,
-    mode.kind,
-    projectKey,
-    resolvedTask.data,
-  ]);
+  const items = useMemo(
+    () => list.data?.pages.flatMap((page) => page.items) ?? [],
+    [list.data],
+  );
 
   const label = value
     ? selected?.id === value
       ? selected.title
       : (currentTitle ?? t("task.parent.current"))
     : t("task.parent.none");
-  const listPending = listEnabled && list.isPending;
-  const lookupPending =
-    lookupEnabled && (lookup.isPending || (Boolean(lookupTaskId) && resolvedTask.isPending));
-  const listError = listEnabled ? list.error : lookupEnabled ? lookup.error ?? resolvedTask.error : null;
-  const showEmpty =
-    items.length === 0 && !(mode.kind === "list" && list.hasNextPage);
+  const listPending = open && list.isPending;
+  const listError = open ? list.error : null;
+  const showEmpty = items.length === 0 && !list.hasNextPage;
 
   return (
     <div className="task-parent-select">
@@ -144,7 +81,7 @@ export function TaskParentSelect({
             data-testid="task-edit-parent-search"
             disabled={disabled}
           />
-          {listPending || lookupPending ? (
+          {listPending ? (
             <p role="status" className="task-home__note">
               {t("task.parent.loading")}
             </p>
@@ -156,11 +93,7 @@ export function TaskParentSelect({
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  if (mode.kind === "list") void list.refetch();
-                  else {
-                    void lookup.refetch();
-                    if (lookupTaskId) void resolvedTask.refetch();
-                  }
+                  void list.refetch();
                 }}
               >
                 {t("task.parent.retry")}
@@ -171,7 +104,7 @@ export function TaskParentSelect({
               className="task-parent-select__list"
               role="listbox"
               aria-label={t("task.parent.label")}
-              aria-busy={list.isFetching || lookup.isFetching || resolvedTask.isFetching}
+              aria-busy={list.isFetching}
             >
               {childType !== "subtask" ? (
                 <li role="presentation">
@@ -192,7 +125,7 @@ export function TaskParentSelect({
                 </li>
               ) : null}
               {items.map((item) => {
-                const text = `${item.displayId ?? formatDisplayId(projectKey, item.number)} ${item.title}`;
+                const text = `${item.displayId} ${item.title}`;
                 return (
                   <li key={item.id} role="presentation">
                     <button
@@ -219,7 +152,7 @@ export function TaskParentSelect({
               ) : null}
             </ul>
           )}
-          {mode.kind === "list" && list.hasNextPage ? (
+          {list.hasNextPage ? (
             <Button
               type="button"
               variant="outline"

@@ -69,6 +69,7 @@ pub struct Harness {
     pub owner_id: Uuid,
     pub workspace_id: Uuid,
     storage_root: std::path::PathBuf,
+    state: AppState,
 }
 
 pub struct Options {
@@ -144,7 +145,7 @@ impl Harness {
             oidc: options.oidc,
             clock: Arc::new(move || clock_read.load(Ordering::SeqCst)),
         };
-        let app = router_with_identity(state, None, Arc::new(identity));
+        let app = router_with_identity(state.clone(), None, Arc::new(identity));
         let admin = admin_pool(&db).await;
         let res = call(
             &app,
@@ -183,7 +184,21 @@ impl Harness {
             owner_id,
             workspace_id,
             storage_root,
+            state,
         }
+    }
+
+    /// A second server over the same database and pools with other OIDC
+    /// settings (an operator reconfiguring a provider).
+    pub fn app_with_oidc(&self, oidc: OidcSettings) -> axum::Router {
+        let clock_read = self.clock.clone();
+        let identity = Identity {
+            encryption_keys: Some(encryption_keys()),
+            totp_issuer: "localhost".into(),
+            oidc,
+            clock: Arc::new(move || clock_read.load(Ordering::SeqCst)),
+        };
+        router_with_identity(self.state.clone(), None, Arc::new(identity))
     }
 
     pub async fn finish(self) {
@@ -1206,37 +1221,11 @@ struct Started {
 
 impl Harness {
     async fn oidc_start(&self, path: &str, cookie: Option<&str>, from: SocketAddr) -> Response {
-        let method = if path.contains("/link") {
-            "POST"
-        } else {
-            "GET"
-        };
-        call(&self.app, method, path, None, cookie, from).await
+        oidc_start_on(&self.app, path, cookie, from).await
     }
 
     async fn begin(&self, path: &str, cookie: Option<&str>, from: SocketAddr) -> Started {
-        let res = self.oidc_start(path, cookie, from).await;
-        assert!(
-            res.status == StatusCode::FOUND || res.status == StatusCode::SEE_OTHER,
-            "{path}: {} {:?}",
-            res.status,
-            res.json
-        );
-        let set = res
-            .headers
-            .get_all("set-cookie")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .find(|v| v.starts_with("fvoci_oidc_state="))
-            .expect("state cookie")
-            .to_string();
-        assert!(
-            set.contains("HttpOnly") && set.contains("SameSite=Lax") && set.contains("Max-Age=600")
-        );
-        Started {
-            location: res.location(),
-            state_cookie: res.cookie_named("fvoci_oidc_state").unwrap(),
-        }
+        begin_on(&self.app, path, cookie, from).await
     }
 
     async fn callback(
@@ -1247,24 +1236,7 @@ impl Harness {
         session: Option<&str>,
         from: SocketAddr,
     ) -> Response {
-        let mut cookies = Vec::new();
-        if let Some(c) = state_cookie {
-            cookies.push(("fvoci_oidc_state", c));
-        }
-        if let Some(c) = session {
-            cookies.push(("fvoci_session", c));
-        }
-        let res = call_with(
-            &self.app,
-            "GET",
-            &format!("/api/v1/auth/oidc/{provider}/callback?{query}"),
-            None,
-            &cookies,
-            from,
-            &[],
-        )
-        .await;
-        res
+        callback_on(&self.app, provider, query, state_cookie, session, from).await
     }
 
     /// start → provider authorize → callback, all for `profile`.
@@ -1277,11 +1249,105 @@ impl Harness {
         session: Option<&str>,
         from: SocketAddr,
     ) -> Response {
-        let started = self.begin(start_path, session, from).await;
-        let query = fake.authorize(&started.location, profile);
-        self.callback(provider, &query, Some(&started.state_cookie), session, from)
-            .await
+        oidc_round_on(
+            &self.app, fake, start_path, provider, profile, session, from,
+        )
+        .await
     }
+}
+
+async fn oidc_start_on(
+    app: &axum::Router,
+    path: &str,
+    cookie: Option<&str>,
+    from: SocketAddr,
+) -> Response {
+    let method = if path.contains("/link") {
+        "POST"
+    } else {
+        "GET"
+    };
+    call(app, method, path, None, cookie, from).await
+}
+
+async fn begin_on(
+    app: &axum::Router,
+    path: &str,
+    cookie: Option<&str>,
+    from: SocketAddr,
+) -> Started {
+    let res = oidc_start_on(app, path, cookie, from).await;
+    assert!(
+        res.status == StatusCode::FOUND || res.status == StatusCode::SEE_OTHER,
+        "{path}: {} {:?}",
+        res.status,
+        res.json
+    );
+    let set = res
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("fvoci_oidc_state="))
+        .expect("state cookie")
+        .to_string();
+    assert!(
+        set.contains("HttpOnly") && set.contains("SameSite=Lax") && set.contains("Max-Age=600")
+    );
+    Started {
+        location: res.location(),
+        state_cookie: res.cookie_named("fvoci_oidc_state").unwrap(),
+    }
+}
+
+async fn callback_on(
+    app: &axum::Router,
+    provider: &str,
+    query: &str,
+    state_cookie: Option<&str>,
+    session: Option<&str>,
+    from: SocketAddr,
+) -> Response {
+    let mut cookies = Vec::new();
+    if let Some(c) = state_cookie {
+        cookies.push(("fvoci_oidc_state", c));
+    }
+    if let Some(c) = session {
+        cookies.push(("fvoci_session", c));
+    }
+    call_with(
+        app,
+        "GET",
+        &format!("/api/v1/auth/oidc/{provider}/callback?{query}"),
+        None,
+        &cookies,
+        from,
+        &[],
+    )
+    .await
+}
+
+/// start → provider authorize → callback, all for `profile`.
+async fn oidc_round_on(
+    app: &axum::Router,
+    fake: &FakeOidc,
+    start_path: &str,
+    provider: &str,
+    profile: Profile,
+    session: Option<&str>,
+    from: SocketAddr,
+) -> Response {
+    let started = begin_on(app, start_path, session, from).await;
+    let query = fake.authorize(&started.location, profile);
+    callback_on(
+        app,
+        provider,
+        &query,
+        Some(&started.state_cookie),
+        session,
+        from,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -2473,6 +2539,669 @@ async fn naver_oauth2_and_post_only_client_auth() {
         "http://localhost/settings/account?linked=1",
         "{:?}",
         res.headers
+    );
+    h.finish().await;
+}
+
+// ---------------------------------------------------------------------------
+// Identity link issuer boundary (035) and link save vs session revocation.
+
+async fn link_row(h: &Harness, provider: &str, subject: &str) -> Option<(Uuid, Option<String>)> {
+    sqlx::query_as(
+        "SELECT user_id, issuer FROM fvoci.identity_links WHERE provider = $1 AND provider_user_id = $2",
+    )
+    .bind(provider)
+    .bind(subject)
+    .fetch_optional(&h.admin)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn oidc_same_sub_from_another_global_issuer_is_not_the_linked_account() {
+    let fake_a = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-a")).await;
+    let fake_b = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-b")).await;
+    assert_ne!(fake_a.base, fake_b.base);
+    let h = oidc_harness(&fake_a, &[ProviderKey::Generic]).await;
+    let (kim, _email, kim_cookie) = h.member("kim").await;
+    let res = h
+        .oidc_round(
+            &fake_a,
+            "/api/v1/auth/oidc/generic/link",
+            "generic",
+            Profile::new("same-sub", "kim@example.com", true),
+            Some(&kim_cookie),
+            peer(60),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
+    // New links record the verified issuer.
+    assert_eq!(
+        link_row(&h, "generic", "same-sub").await,
+        Some((kim, Some(fake_a.base.clone())))
+    );
+
+    // The operator points the instance-level generic provider at another
+    // IdP, which happens to use the same `sub` for someone else.
+    let app_b = h.app_with_oidc(oidc_settings(
+        vec![provider(ProviderKey::Generic, &fake_b.base, CLIENT_SECRET)],
+        true,
+    ));
+    let res = oidc_round_on(
+        &app_b,
+        &fake_b,
+        "/api/v1/auth/oidc/generic/start",
+        "generic",
+        Profile::new("same-sub", "stranger@example.com", true),
+        None,
+        peer(61),
+    )
+    .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_not_linked"
+    );
+    assert!(res.cookie().is_none());
+    // Nor can another account take the subject over (the unique key holds).
+    let (_lee, _lee_email, lee_cookie) = h.member("lee").await;
+    let res = oidc_round_on(
+        &app_b,
+        &fake_b,
+        "/api/v1/auth/oidc/generic/link",
+        "generic",
+        Profile::new("same-sub", "lee@example.com", true),
+        Some(&lee_cookie),
+        peer(62),
+    )
+    .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/settings/account?error=oidc_already_linked"
+    );
+    assert_eq!(
+        link_row(&h, "generic", "same-sub").await,
+        Some((kim, Some(fake_a.base.clone())))
+    );
+
+    // Through the original issuer the link still signs kim in.
+    let res = h
+        .oidc_round(
+            &fake_a,
+            "/api/v1/auth/oidc/generic/start",
+            "generic",
+            Profile::new("same-sub", "kim@example.com", true),
+            None,
+            peer(63),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/");
+    assert!(res.cookie().is_some());
+    assert_eq!(h.login_methods(kim).await, vec!["password", "oidc:generic"]);
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn workspace_sso_issuer_change_does_not_remap_existing_links() {
+    let fake_a = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-a")).await;
+    let fake_b = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-b")).await;
+    let h = oidc_harness(&fake_a, &[]).await;
+    let put = |issuer: String| {
+        let app = h.app.clone();
+        let cookie = h.owner_cookie.clone();
+        let path = format!("/api/v1/workspaces/{}/oidc", h.workspace_id);
+        async move {
+            let res = call(
+                &app,
+                "PUT",
+                &path,
+                Some(json!({"issuer": issuer, "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET, "label": "사내 SSO"})),
+                Some(&cookie),
+                peer(130),
+            )
+            .await;
+            assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+        }
+    };
+    put(fake_a.base.clone()).await;
+    sqlx::query(
+        "UPDATE fvoci.workspaces SET auto_join_domains = ARRAY['corp.example'] WHERE id = $1",
+    )
+    .bind(h.workspace_id)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    let sso = "/api/v1/auth/sso?slug=acme";
+    let subject = format!("{}:corp-1", h.workspace_id);
+
+    // JIT through IdP A creates the account and a link on issuer A.
+    let res = h
+        .oidc_round(
+            &fake_a,
+            sso,
+            "generic",
+            Profile::new("corp-1", "first@corp.example", true),
+            None,
+            peer(131),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/");
+    let first: Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.users WHERE email = 'first@corp.example'")
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(
+        link_row(&h, "generic", &subject).await,
+        Some((first, Some(fake_a.base.clone())))
+    );
+
+    // The admin switches the workspace to IdP B; links are not touched.
+    put(fake_b.base.clone()).await;
+    assert_eq!(
+        link_row(&h, "generic", &subject).await,
+        Some((first, Some(fake_a.base.clone())))
+    );
+    // B's `corp-1` is someone else: not signed in as the old account, and not
+    // JIT-joined either (the subject stays taken), whatever email B reports.
+    for (email, from) in [
+        ("first@corp.example", peer(132)),
+        ("second@corp.example", peer(133)),
+    ] {
+        let res = h
+            .oidc_round(
+                &fake_b,
+                sso,
+                "generic",
+                Profile::new("corp-1", email, true),
+                None,
+                from,
+            )
+            .await;
+        assert_eq!(
+            res.location(),
+            "http://localhost/login?error=oidc_not_linked",
+            "{email}"
+        );
+        assert!(res.cookie().is_none());
+    }
+    assert_eq!(h.login_methods(first).await, vec!["oidc:generic"]);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM fvoci.users WHERE email LIKE '%@corp.example'"
+        )
+        .fetch_one(&h.admin)
+        .await
+        .unwrap(),
+        1
+    );
+    // A new B subject still joins normally.
+    let res = h
+        .oidc_round(
+            &fake_b,
+            sso,
+            "generic",
+            Profile::new("corp-2", "second@corp.example", true),
+            None,
+            peer(134),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/");
+    let second_subject = format!("{}:corp-2", h.workspace_id);
+    assert_eq!(
+        link_row(&h, "generic", &second_subject)
+            .await
+            .and_then(|(_, issuer)| issuer),
+        Some(fake_b.base.clone())
+    );
+
+    // Switching back to A restores the original mapping.
+    put(fake_a.base.clone()).await;
+    let res = h
+        .oidc_round(
+            &fake_a,
+            sso,
+            "generic",
+            Profile::new("corp-1", "first@corp.example", true),
+            None,
+            peer(135),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/");
+    assert_eq!(
+        h.login_methods(first).await,
+        vec!["oidc:generic", "oidc:generic"]
+    );
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn pre_issuer_links_sign_in_once_and_are_pinned_to_that_issuer() {
+    let fake_a = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-a")).await;
+    let fake_b = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-b")).await;
+    let h = oidc_harness(&fake_a, &[ProviderKey::Generic]).await;
+    let (user_id, _email, _cookie) = h.member("legacy").await;
+    // A link written before 035: no issuer.
+    let link_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, email) VALUES ($1, $2, 'generic', 'legacy-sub', NULL)")
+        .bind(link_id)
+        .bind(user_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        link_row(&h, "generic", "legacy-sub").await,
+        Some((user_id, None))
+    );
+    let res = h
+        .oidc_round(
+            &fake_a,
+            "/api/v1/auth/oidc/generic/start",
+            "generic",
+            Profile::new("legacy-sub", "legacy@example.com", true),
+            None,
+            peer(70),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/");
+    assert!(res.cookie().is_some());
+    // The successful sign-in recorded the issuer that verified it.
+    assert_eq!(
+        link_row(&h, "generic", "legacy-sub").await,
+        Some((user_id, Some(fake_a.base.clone())))
+    );
+    // From now on another issuer's same `sub` is refused.
+    let app_b = h.app_with_oidc(oidc_settings(
+        vec![provider(ProviderKey::Generic, &fake_b.base, CLIENT_SECRET)],
+        true,
+    ));
+    let res = oidc_round_on(
+        &app_b,
+        &fake_b,
+        "/api/v1/auth/oidc/generic/start",
+        "generic",
+        Profile::new("legacy-sub", "legacy@example.com", true),
+        None,
+        peer(71),
+    )
+    .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/login?error=oidc_not_linked"
+    );
+    assert_eq!(
+        h.login_methods(user_id).await,
+        vec!["password", "oidc:generic"]
+    );
+
+    // The app role cannot rewrite links; the backfill function is write-once.
+    let mut tx = h.app_pool.begin().await.unwrap();
+    fvoci_server::db::context::set_system(&mut tx)
+        .await
+        .unwrap();
+    let err =
+        sqlx::query("UPDATE fvoci.identity_links SET issuer = 'https://evil.test' WHERE id = $1")
+            .bind(link_id)
+            .execute(&mut *tx)
+            .await
+            .expect_err("app role has no UPDATE on identity_links");
+    assert_eq!(
+        err.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
+    );
+    tx.rollback().await.unwrap();
+    let mut tx = h.app_pool.begin().await.unwrap();
+    fvoci_server::db::context::set_system(&mut tx)
+        .await
+        .unwrap();
+    let overwritten: bool = sqlx::query_scalar(
+        "SELECT fvoci.app_identity_link_backfill_issuer($1, 'https://evil.test')",
+    )
+    .bind(link_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert!(!overwritten);
+    let same: bool = sqlx::query_scalar("SELECT fvoci.app_identity_link_backfill_issuer($1, $2)")
+        .bind(link_id)
+        .bind(&fake_a.base)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert!(same);
+    tx.commit().await.unwrap();
+    assert_eq!(
+        link_row(&h, "generic", "legacy-sub").await,
+        Some((user_id, Some(fake_a.base.clone())))
+    );
+    // Outside the system context (and not the owner) RLS hides the row, so
+    // even a NULL-issuer link cannot be claimed.
+    let other = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id) VALUES ($1, $2, 'google', 'legacy-g')")
+        .bind(other)
+        .bind(user_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let claimed: bool = sqlx::query_scalar(
+        "SELECT fvoci.app_identity_link_backfill_issuer($1, 'https://evil.test')",
+    )
+    .bind(other)
+    .fetch_one(&h.app_pool)
+    .await
+    .unwrap();
+    assert!(!claimed);
+    assert_eq!(
+        link_row(&h, "google", "legacy-g").await,
+        Some((user_id, None))
+    );
+    h.finish().await;
+}
+
+/// Waits (bounded) until a backend of this test database is blocked on a
+/// row lock: the callback's link transaction queued behind `lock_sign_in`.
+async fn wait_for_lock_waiter(h: &Harness) {
+    for _ in 0..500 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%'",
+        )
+        .fetch_one(&h.admin)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the link transaction never queued behind the sign-in lock");
+}
+
+#[tokio::test]
+async fn oidc_link_is_not_saved_for_a_session_revoked_during_the_round_trip() {
+    let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-1")).await;
+    let h = oidc_harness(&fake, &[ProviderKey::Generic]).await;
+    let (user_id, _email, cookie) = h.member("revoked").await;
+    let links = |h: &Harness| {
+        let admin = h.admin.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM fvoci.identity_links WHERE user_id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    };
+
+    // In flight: the callback has read the live session and finished the
+    // provider exchange; the logout commits while the link waits for the
+    // sign-in lock. The link must see the revocation.
+    let started = h
+        .begin("/api/v1/auth/oidc/generic/link", Some(&cookie), peer(80))
+        .await;
+    let query = fake.authorize(
+        &started.location,
+        Profile::new("inflight-sub", "revoked@example.com", true),
+    );
+    let mut barrier = h.admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR UPDATE")
+        .bind(user_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    let app = h.app.clone();
+    let (state_cookie, session_cookie) = (started.state_cookie.clone(), cookie.clone());
+    let callback = tokio::spawn(async move {
+        callback_on(
+            &app,
+            "generic",
+            &query,
+            Some(&state_cookie),
+            Some(&session_cookie),
+            peer(80),
+        )
+        .await
+    });
+    wait_for_lock_waiter(&h).await;
+    assert!(!callback.is_finished());
+    sqlx::query(
+        "UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *barrier)
+    .await
+    .unwrap();
+    barrier.commit().await.unwrap();
+    let res = callback.await.unwrap();
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{:?}", res.json);
+    assert_eq!(res.code(), "authentication_required");
+    assert!(res
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .any(|v| v.to_str().unwrap().starts_with("fvoci_oidc_state=;")));
+    assert_eq!(links(&h).await, 0);
+    assert_eq!(
+        h.count(
+            "SELECT count(*) FROM fvoci.events WHERE verb = 'identity.linked' AND actor_user_id = $1",
+            user_id
+        )
+        .await,
+        0
+    );
+
+    // Revoked before the callback arrives, with the original cookie string:
+    // the callback has no live session, so nothing is linked either.
+    let res = h.login("revoked@example.com", PASSWORD, peer(81)).await;
+    let cookie = res.cookie().expect("cookie");
+    let started = h
+        .begin("/api/v1/auth/oidc/generic/link", Some(&cookie), peer(81))
+        .await;
+    let query = fake.authorize(
+        &started.location,
+        Profile::new("inflight-sub", "revoked@example.com", true),
+    );
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/logout",
+        None,
+        Some(&cookie),
+        peer(81),
+    )
+    .await;
+    assert!(res.status.is_success(), "{:?}", res.json);
+    let res = h
+        .callback(
+            "generic",
+            &query,
+            Some(&started.state_cookie),
+            Some(&cookie),
+            peer(81),
+        )
+        .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/settings/account?error=oidc_state_mismatch"
+    );
+    assert_eq!(links(&h).await, 0);
+
+    // A live session still links.
+    let res = h.login("revoked@example.com", PASSWORD, peer(82)).await;
+    let cookie = res.cookie().expect("cookie");
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/generic/link",
+            "generic",
+            Profile::new("inflight-sub", "revoked@example.com", true),
+            Some(&cookie),
+            peer(82),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
+    assert_eq!(links(&h).await, 1);
+    h.finish().await;
+}
+
+// ---------------------------------------------------------------------------
+// Post-restore decrypt probe (`fvoci-migrate --verify-secrets`).
+
+async fn run_verify_secrets(h: &Harness, keys: Option<(&str, &str)>) -> (bool, Value, String) {
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_fvoci-migrate"));
+    cmd.arg("--verify-secrets")
+        .env_clear()
+        .env("DATABASE_APP_URL", &h.db.app_url);
+    if let Some((ring, active)) = keys {
+        cmd.env("ENCRYPTION_KEYS", ring)
+            .env("ENCRYPTION_ACTIVE_KEY_ID", active);
+    }
+    let out = cmd.output().await.expect("run fvoci-migrate");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let report = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+    (out.status.success(), report, format!("{stdout}{stderr}"))
+}
+
+#[tokio::test]
+async fn verify_secrets_opens_every_sealed_value_and_fails_on_a_bad_one() {
+    use fvoci_server::secret_verify::verify_sealed_secrets;
+    let h = Harness::start().await;
+    // One sealed value of each kind, written through the product paths where
+    // they exist: MFA setup, workspace SSO PUT; the webhook row is sealed the
+    // way the integrations route seals it.
+    let (user_id, _email, cookie) = h.member("sealed").await;
+    h.enable_mfa(&cookie, Some(PASSWORD)).await;
+    let res = call(
+        &h.app,
+        "PUT",
+        &format!("/api/v1/workspaces/{}/oidc", h.workspace_id),
+        Some(json!({"issuer": "https://idp.example", "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET, "label": "SSO"})),
+        Some(&h.owner_cookie),
+        peer(90),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    let webhook_id = Uuid::now_v7();
+    let webhook_secret = fvoci_server::secret_box::seal(
+        &encryption_keys(),
+        "whsec-value",
+        &fvoci_server::integrations::webhooks::webhook_secret_context(h.workspace_id, webhook_id),
+    )
+    .unwrap();
+    sqlx::query("INSERT INTO fvoci.webhooks (id, workspace_id, url, secret, events, created_by) VALUES ($1, $2, 'https://hooks.example/x', $3, ARRAY['document.created'], $4)")
+        .bind(webhook_id)
+        .bind(h.workspace_id)
+        .bind(&webhook_secret)
+        .bind(h.owner_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+
+    let keys = encryption_keys();
+    let report = verify_sealed_secrets(&h.app_pool, Some(&keys))
+        .await
+        .unwrap();
+    assert!(report.is_complete(), "{report:?}");
+    assert_eq!(
+        (
+            report.user_mfa.checked,
+            report.workspace_oidc.checked,
+            report.webhooks.checked
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(report.key_ids_in_use.get("k1"), Some(&3));
+
+    // Rotated superset keyring (new active key, old one kept): still opens.
+    let rotated = format!(r#"{{"k1":"{}","k2":"{}"}}"#, "1".repeat(64), "2".repeat(64));
+    let ring = Keyring::parse_named(&rotated, "k2", "ENCRYPTION_KEYS").unwrap();
+    assert!(verify_sealed_secrets(&h.app_pool, Some(&ring))
+        .await
+        .unwrap()
+        .is_complete());
+    // The backed-up key id is missing: every value is key-unavailable.
+    let missing = Keyring::parse_named(
+        &format!(r#"{{"k2":"{}"}}"#, "2".repeat(64)),
+        "k2",
+        "ENCRYPTION_KEYS",
+    )
+    .unwrap();
+    let report = verify_sealed_secrets(&h.app_pool, Some(&missing))
+        .await
+        .unwrap();
+    assert_eq!(report.failed(), 3);
+    assert_eq!(report.user_mfa.key_unavailable, vec![user_id]);
+    assert_eq!(report.workspace_oidc.key_unavailable, vec![h.workspace_id]);
+    assert_eq!(report.webhooks.key_unavailable, vec![webhook_id]);
+    // Same key id, another key (mis-keyed restore env): every value invalid.
+    let mis_keyed = Keyring::parse_named(
+        &format!(r#"{{"k1":"{}"}}"#, "3".repeat(64)),
+        "k1",
+        "ENCRYPTION_KEYS",
+    )
+    .unwrap();
+    let report = verify_sealed_secrets(&h.app_pool, Some(&mis_keyed))
+        .await
+        .unwrap();
+    assert_eq!(report.failed(), 3);
+    assert_eq!(report.webhooks.invalid, vec![webhook_id]);
+    // No keyring at all while sealed values exist.
+    let report = verify_sealed_secrets(&h.app_pool, None).await.unwrap();
+    assert!(!report.keyring_configured);
+    assert_eq!(report.failed(), 3);
+
+    // The binary: good keyring passes and prints counts, never the values.
+    let (ok, printed, output) = run_verify_secrets(&h, Some((ENCRYPTION, "k1"))).await;
+    assert!(ok, "{output}");
+    assert_eq!(printed["userMfa"]["checked"], 1);
+    assert_eq!(printed["workspaceOidc"]["checked"], 1);
+    assert_eq!(printed["webhooks"]["checked"], 1);
+    assert_eq!(printed["keyIdsInUse"], json!({"k1": 3}));
+    for secret in [
+        "whsec-value",
+        CLIENT_SECRET,
+        webhook_secret.as_str(),
+        "1111111111111111",
+    ] {
+        assert!(!output.contains(secret), "printed a secret");
+    }
+    // A mis-keyed environment fails nonzero.
+    let wrong = format!(r#"{{"k1":"{}"}}"#, "3".repeat(64));
+    let (ok, printed, output) = run_verify_secrets(&h, Some((&wrong, "k1"))).await;
+    assert!(!ok);
+    assert_eq!(printed["webhooks"]["invalid"], json!([webhook_id]));
+    assert!(
+        output.contains("3 sealed secret(s) do not open"),
+        "{output}"
+    );
+    // Unset ENCRYPTION_KEYS with sealed rows fails too.
+    let (ok, _printed, _output) = run_verify_secrets(&h, None).await;
+    assert!(!ok);
+
+    // One corrupted ciphertext (a value moved to another row does not open
+    // under that row's context): only that row fails.
+    let sso_sealed: String = sqlx::query_scalar(
+        "SELECT client_secret FROM fvoci.workspace_oidc WHERE workspace_id = $1",
+    )
+    .bind(h.workspace_id)
+    .fetch_one(&h.admin)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE fvoci.user_mfa SET totp_secret = $1 WHERE user_id = $2")
+        .bind(&sso_sealed)
+        .bind(user_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let (ok, printed, output) = run_verify_secrets(&h, Some((ENCRYPTION, "k1"))).await;
+    assert!(!ok, "{output}");
+    assert_eq!(printed["userMfa"]["invalid"], json!([user_id]));
+    assert_eq!(printed["workspaceOidc"]["invalid"], json!([]));
+    assert_eq!(printed["webhooks"]["invalid"], json!([]));
+    assert!(
+        output.contains("1 sealed secret(s) do not open"),
+        "{output}"
     );
     h.finish().await;
 }

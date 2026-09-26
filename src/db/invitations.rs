@@ -359,6 +359,8 @@ pub struct IdentityAcceptRequest<'a> {
     pub provider: &'a str,
     /// Provider subject (invite links never carry a workspace prefix).
     pub subject: &'a str,
+    /// Issuer that verified `subject` (see `db::oidc::find_link`).
+    pub issuer: &'a str,
     pub link_email: Option<&'a str>,
     pub given_name: Option<&'a str>,
     pub client_ip: Option<&'a str>,
@@ -383,9 +385,14 @@ pub async fn accept_invitation_with_identity(
         return Ok(Err(InvitationDbError::ConsentRequired));
     }
     let existing = find_user_id_by_email(pool, &invitation.email).await?;
-    let link = crate::db::oidc::find_link(pool, request.provider, request.subject).await?;
+    let link =
+        crate::db::oidc::find_link(pool, request.provider, request.subject, request.issuer).await?;
     if let Some((user_id, suspended_at)) = existing {
-        if link.as_ref().map(|l| l.user_id) != Some(user_id) || suspended_at.is_some() {
+        let owner = match &link {
+            crate::db::oidc::LinkLookup::Found(l) => Some(l.user_id),
+            _ => None,
+        };
+        if owner != Some(user_id) || suspended_at.is_some() {
             return Ok(Err(InvitationDbError::Unauthorized));
         }
         return Ok(grant_membership(
@@ -403,7 +410,7 @@ pub async fn accept_invitation_with_identity(
     if email_exists(pool, &invitation.email).await? {
         return Ok(Err(InvitationDbError::Unauthorized));
     }
-    if link.is_some() {
+    if link.subject_taken() {
         return Ok(Err(InvitationDbError::AlreadyLinked));
     }
     let user_id = Uuid::now_v7();
@@ -424,6 +431,7 @@ pub async fn accept_invitation_with_identity(
         user_id,
         provider: request.provider,
         subject: request.subject,
+        issuer: request.issuer,
         email: request.link_email,
         workspace_id: None,
     };
