@@ -561,7 +561,7 @@ fn runs(mut p: Paragraph, inlines: &[Inline]) -> Paragraph {
 /// parser's percent-encoded form is the relationship target (it must be a
 /// valid URI). Other hrefs (relative, `javascript:`, `data:`, `attachment:`)
 /// keep their text only.
-fn hyperlink_target(href: &str) -> Option<String> {
+pub(crate) fn hyperlink_target(href: &str) -> Option<String> {
     let href = href.trim();
     let url = url::Url::parse(href).ok()?;
     if !matches!(url.scheme(), "http" | "https" | "mailto") {

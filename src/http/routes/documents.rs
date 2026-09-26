@@ -25,7 +25,8 @@ use crate::db::documents::{
     DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
 };
 use crate::documents::export::{
-    export_filename, render_document_export, render_docx_export, ExportFormat, ExportRenderError,
+    export_filename, render_document_export, render_docx_export, render_pdf_export, ExportFormat,
+    ExportRenderError,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
@@ -640,13 +641,17 @@ pub(crate) async fn export_document(
         Ok(meta) => meta,
         Err(err) => return Err(map_document_error(err)),
     };
-    let rendered = if format == ExportFormat::Docx {
-        // DOCX is written by this binary's `--internal-markdown` child.
+    let rendered = if matches!(format, ExportFormat::Docx | ExportFormat::Pdf) {
+        // DOCX and PDF are written by this binary's `--internal-markdown` child.
         let Some(markdown) = state.markdown.as_ref() else {
-            tracing::error!("docx export requested but the markdown child is unavailable");
+            tracing::error!("export requested but the markdown child is unavailable");
             return Err(AppError::internal().into());
         };
-        render_docx_export(markdown, &meta.title, &meta.content_json).await
+        if format == ExportFormat::Pdf {
+            render_pdf_export(markdown, &meta.title, &meta.content_json, false).await
+        } else {
+            render_docx_export(markdown, &meta.title, &meta.content_json).await
+        }
     } else {
         let Some(convert) = state.document_convert.as_ref() else {
             tracing::error!("document export requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");

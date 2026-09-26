@@ -42,9 +42,7 @@ use crate::db::share::{
     share_document, share_public_meta, share_search_scope, share_tree, DocumentAffiliation,
     ShareDbError, ShareLinkRecord, ShareSearchRow, ShareTarget,
 };
-use crate::documents::export::{
-    export_filename, render_document_export, ExportFormat, ExportRenderError,
-};
+use crate::documents::export::{export_filename, render_pdf_export, ExportRenderError};
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access};
 use crate::http::guard::check_origin;
@@ -729,9 +727,10 @@ pub struct SharePdfQuery {
 }
 
 /// Source share `pdf`: the root (or `documentId` inside the visible subtree)
-/// rendered by the document convert helper, `${title}.pdf` as an attachment.
-/// Same share-ip limit and per-request scope checks as the body route. Without
-/// a configured helper the route fails like the member export route (500, logged).
+/// rendered by the `--internal-markdown` child (`tiptap-to-pdf`, the member
+/// export's writer on its fail-fast public pool), `${title}.pdf` as an
+/// attachment. Same share-ip limit and per-request scope checks as the body
+/// route. Without the child the route fails like the member export (500, logged).
 async fn public_pdf_route(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -751,18 +750,12 @@ async fn public_pdf_route(
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
-    let Some(convert) = state.document_convert.as_ref() else {
-        tracing::error!("share pdf requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
+    let Some(markdown) = state.markdown.as_ref() else {
+        tracing::error!("share pdf requested but the markdown child is unavailable");
         return Err(AppError::internal());
     };
-    let rendered = match render_document_export(
-        &convert.for_public(),
-        ExportFormat::Pdf,
-        &doc.title,
-        &doc.content_json,
-    )
-    .await
-    {
+    // Public pool of one that never waits: 503 below instead of queueing.
+    let rendered = match render_pdf_export(markdown, &doc.title, &doc.content_json, true).await {
         Ok(v) => v,
         Err(ExportRenderError::InvalidInput) => {
             return Err(AppError::from_code(ProblemCode::InvalidInput));

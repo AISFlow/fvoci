@@ -68,6 +68,9 @@ WORKDIR /opt/fvoci
 COPY --from=rust-build --chown=root:root /src/target/release/fvoci-server /src/target/release/fvoci-migrate ./bin/
 COPY --from=rust-build --chown=root:root /src/target/release/collab-engine ./bin/
 COPY --from=rust-build --chown=root:root /src/target/release/document-extract ./bin/
+# PDF export fonts (SIL OFL 1.1), read by the export child at run time (FVOCI_EXPORT_FONT_DIR).
+COPY --chown=root:root packages/editor/src/fonts/*.ttf ./share/fonts/
+COPY --chown=root:root packages/editor/src/fonts/*-OFL.txt ./share/licenses/fonts/
 COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --from=convert-build --chown=root:root /usr/local/bin/node ./node/bin/node
 COPY --from=convert-build --chown=root:root /opt/fvoci/convert ./convert/
@@ -75,7 +78,8 @@ COPY --chown=root:root infra/rust/init-db.sh ./sbin/init-db.sh
 RUN chmod 755 ./sbin/init-db.sh ./bin/* \
  && mkdir -p /data/storage /run/fvoci/meili \
  && chown fvoci:fvoci /data/storage /run/fvoci/meili
-ENV PATH=/opt/fvoci/node/bin:$PATH \
+ENV FVOCI_EXPORT_FONT_DIR=/opt/fvoci/share/fonts \
+    PATH=/opt/fvoci/node/bin:$PATH \
     FVOCI_DOCUMENT_CONVERT_BIN=/opt/fvoci/convert/scripts/run-document-convert.sh \
     FVOCI_STATIC_DIR=/opt/fvoci/static \
     FVOCI_COLLAB_ENGINE=/opt/fvoci/bin/collab-engine \
