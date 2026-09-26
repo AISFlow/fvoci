@@ -3037,3 +3037,165 @@ async fn oidc_link_is_not_saved_for_a_session_revoked_during_the_round_trip() {
     assert_eq!(links(&h).await, 1);
     h.finish().await;
 }
+
+// ---------------------------------------------------------------------------
+// Post-restore decrypt probe (`fvoci-migrate --verify-secrets`).
+
+async fn run_verify_secrets(h: &Harness, keys: Option<(&str, &str)>) -> (bool, Value, String) {
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_fvoci-migrate"));
+    cmd.arg("--verify-secrets")
+        .env_clear()
+        .env("DATABASE_APP_URL", &h.db.app_url);
+    if let Some((ring, active)) = keys {
+        cmd.env("ENCRYPTION_KEYS", ring)
+            .env("ENCRYPTION_ACTIVE_KEY_ID", active);
+    }
+    let out = cmd.output().await.expect("run fvoci-migrate");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let report = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+    (out.status.success(), report, format!("{stdout}{stderr}"))
+}
+
+#[tokio::test]
+async fn verify_secrets_opens_every_sealed_value_and_fails_on_a_bad_one() {
+    use fvoci_server::secret_verify::verify_sealed_secrets;
+    let h = Harness::start().await;
+    // One sealed value of each kind, written through the product paths where
+    // they exist: MFA setup, workspace SSO PUT; the webhook row is sealed the
+    // way the integrations route seals it.
+    let (user_id, _email, cookie) = h.member("sealed").await;
+    h.enable_mfa(&cookie, Some(PASSWORD)).await;
+    let res = call(
+        &h.app,
+        "PUT",
+        &format!("/api/v1/workspaces/{}/oidc", h.workspace_id),
+        Some(json!({"issuer": "https://idp.example", "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET, "label": "SSO"})),
+        Some(&h.owner_cookie),
+        peer(90),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    let webhook_id = Uuid::now_v7();
+    let webhook_secret = fvoci_server::secret_box::seal(
+        &encryption_keys(),
+        "whsec-value",
+        &fvoci_server::integrations::webhooks::webhook_secret_context(h.workspace_id, webhook_id),
+    )
+    .unwrap();
+    sqlx::query("INSERT INTO fvoci.webhooks (id, workspace_id, url, secret, events, created_by) VALUES ($1, $2, 'https://hooks.example/x', $3, ARRAY['document.created'], $4)")
+        .bind(webhook_id)
+        .bind(h.workspace_id)
+        .bind(&webhook_secret)
+        .bind(h.owner_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+
+    let keys = encryption_keys();
+    let report = verify_sealed_secrets(&h.app_pool, Some(&keys))
+        .await
+        .unwrap();
+    assert!(report.is_complete(), "{report:?}");
+    assert_eq!(
+        (
+            report.user_mfa.checked,
+            report.workspace_oidc.checked,
+            report.webhooks.checked
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(report.key_ids_in_use.get("k1"), Some(&3));
+
+    // Rotated superset keyring (new active key, old one kept): still opens.
+    let rotated = format!(r#"{{"k1":"{}","k2":"{}"}}"#, "1".repeat(64), "2".repeat(64));
+    let ring = Keyring::parse_named(&rotated, "k2", "ENCRYPTION_KEYS").unwrap();
+    assert!(verify_sealed_secrets(&h.app_pool, Some(&ring))
+        .await
+        .unwrap()
+        .is_complete());
+    // The backed-up key id is missing: every value is key-unavailable.
+    let missing = Keyring::parse_named(
+        &format!(r#"{{"k2":"{}"}}"#, "2".repeat(64)),
+        "k2",
+        "ENCRYPTION_KEYS",
+    )
+    .unwrap();
+    let report = verify_sealed_secrets(&h.app_pool, Some(&missing))
+        .await
+        .unwrap();
+    assert_eq!(report.failed(), 3);
+    assert_eq!(report.user_mfa.key_unavailable, vec![user_id]);
+    assert_eq!(report.workspace_oidc.key_unavailable, vec![h.workspace_id]);
+    assert_eq!(report.webhooks.key_unavailable, vec![webhook_id]);
+    // Same key id, another key (mis-keyed restore env): every value invalid.
+    let mis_keyed = Keyring::parse_named(
+        &format!(r#"{{"k1":"{}"}}"#, "3".repeat(64)),
+        "k1",
+        "ENCRYPTION_KEYS",
+    )
+    .unwrap();
+    let report = verify_sealed_secrets(&h.app_pool, Some(&mis_keyed))
+        .await
+        .unwrap();
+    assert_eq!(report.failed(), 3);
+    assert_eq!(report.webhooks.invalid, vec![webhook_id]);
+    // No keyring at all while sealed values exist.
+    let report = verify_sealed_secrets(&h.app_pool, None).await.unwrap();
+    assert!(!report.keyring_configured);
+    assert_eq!(report.failed(), 3);
+
+    // The binary: good keyring passes and prints counts, never the values.
+    let (ok, printed, output) = run_verify_secrets(&h, Some((ENCRYPTION, "k1"))).await;
+    assert!(ok, "{output}");
+    assert_eq!(printed["userMfa"]["checked"], 1);
+    assert_eq!(printed["workspaceOidc"]["checked"], 1);
+    assert_eq!(printed["webhooks"]["checked"], 1);
+    assert_eq!(printed["keyIdsInUse"], json!({"k1": 3}));
+    for secret in [
+        "whsec-value",
+        CLIENT_SECRET,
+        webhook_secret.as_str(),
+        "1111111111111111",
+    ] {
+        assert!(!output.contains(secret), "printed a secret");
+    }
+    // A mis-keyed environment fails nonzero.
+    let wrong = format!(r#"{{"k1":"{}"}}"#, "3".repeat(64));
+    let (ok, printed, output) = run_verify_secrets(&h, Some((&wrong, "k1"))).await;
+    assert!(!ok);
+    assert_eq!(printed["webhooks"]["invalid"], json!([webhook_id]));
+    assert!(
+        output.contains("3 sealed secret(s) do not open"),
+        "{output}"
+    );
+    // Unset ENCRYPTION_KEYS with sealed rows fails too.
+    let (ok, _printed, _output) = run_verify_secrets(&h, None).await;
+    assert!(!ok);
+
+    // One corrupted ciphertext (a value moved to another row does not open
+    // under that row's context): only that row fails.
+    let sso_sealed: String = sqlx::query_scalar(
+        "SELECT client_secret FROM fvoci.workspace_oidc WHERE workspace_id = $1",
+    )
+    .bind(h.workspace_id)
+    .fetch_one(&h.admin)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE fvoci.user_mfa SET totp_secret = $1 WHERE user_id = $2")
+        .bind(&sso_sealed)
+        .bind(user_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let (ok, printed, output) = run_verify_secrets(&h, Some((ENCRYPTION, "k1"))).await;
+    assert!(!ok, "{output}");
+    assert_eq!(printed["userMfa"]["invalid"], json!([user_id]));
+    assert_eq!(printed["workspaceOidc"]["invalid"], json!([]));
+    assert_eq!(printed["webhooks"]["invalid"], json!([]));
+    assert!(
+        output.contains("1 sealed secret(s) do not open"),
+        "{output}"
+    );
+    h.finish().await;
+}

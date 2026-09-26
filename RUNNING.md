@@ -40,7 +40,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. |
 | `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Outgoing mail (invitations, password reset). All three or none; unset disables mail and invitation links are shown instead. No AUTH (same as the source). STARTTLS is used whenever the relay offers it, with certificate verification against public roots, so an internal relay needs a publicly trusted certificate or must not offer STARTTLS. |
-| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists. Back it up with the database. |
+| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --verify-secrets` lists the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
 | `FVOCI_WEBHOOK_ALLOW_TARGETS` | Comma list of host names / IP addresses that webhook URLs may use despite the outbound rules (default empty). A listed URL host skips the port (80/443) and host-name rules; a listed IP is accepted as a literal or resolved private address. Meant for local receivers (tests, e2e); leave empty in production. `0.0.0.0` / `::` are refused. |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` | Optional GitHub App (all three or none; the PEM may use literal `\n`). Enables `/github/install`, `/api/v1/github/callback`, the signed `/api/v1/github/webhook` endpoint and the `github` outbox consumer that closes/reopens linked issues. The install `state` is single use and bound to the admin session that started it (the callback needs that session cookie); the callback confirms the installation with `GET /app/installations/{id}` and never replaces an existing link to another installation (uninstall first). While the app is not configured the `github` cursor still advances, so enabling it later does not replay older status changes. |
 | `GITHUB_STATE_SECRET` | Server-only key (at least 32 bytes) for the install `state` MAC. If unset it is derived (HKDF-SHA256) from the active `ENCRYPTION_KEYS` key; with neither, a configured GitHub App fails at boot. The webhook secret is not used because GitHub App managers also hold it. |
@@ -441,7 +441,7 @@ of every volume, and it is not PITR.
 **Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
 functions) and `fvoci`, taken as the PostgreSQL owner role through the
 `postgres` service, plus a `tar` of the `storage` volume. **Omitted:** Meilisearch (`searchdata`), the scoped API key
-volume, Compose env files, pepper keys, and database passwords. The search
+volume, Compose env files, pepper keys, `ENCRYPTION_KEYS`, and database passwords. The search
 index is derived. Restore runs `fvoci-migrate --ensure-meili-key` (new scoped
 key, index settings), then `fvoci-migrate --recover-outbox` (rebases outbox
 cursors to the new cluster's xids before any server starts) and
@@ -451,13 +451,25 @@ the original or existing passwords will not verify. `POSTGRES_USER`,
 `POSTGRES_DB`, and `FVOCI_APP_ROLE` names must match; cluster passwords and
 `MEILI_MASTER_KEY` may be new. `scripts/restore.sh` compares the keyring fingerprint recorded in the backup manifest and refuses to restore with a different keyring.
 
+`ENCRYPTION_KEYS` seals TOTP secrets, workspace SSO client secrets and webhook
+signing secrets in the dump. The manifest's `encryptionKeys` entry records, per
+key id, `HMAC-SHA256(key, label || id)` (and a whole-keyring SHA-256 like the
+pepper's), never the keys (`scripts/encryption_keys.py`). Before any volume is
+created, restore requires every backed-up key id with the same key; extra keys
+and another active id (a rotation done since the backup) are accepted, a
+missing or changed key id is refused. A backup made without `ENCRYPTION_KEYS`
+records `configured: false`; an older manifest without the entry skips this
+comparison. Either way the decrypt probe below decides.
+
 **Ordering:** `scripts/backup.sh` stops the server (the only writer) and checks
 that no other client sessions remain, then dumps PostgreSQL, then archives
 storage. Stored attachment keys in the dump must exist as
 `objects/<key>/payload` in the tar, so restored files cover every database
 reference. Archives are created with directory mode `0700` and file mode
-`0600`. The dump contains whatever the database already stored (including
-password hashes); the archive does not add the env file or Meili master key.
+`0600`. Published image previews (`variants.preview.key`) are never
+regenerated, so they must be in the tar too. The dump contains whatever the
+database already stored (including password hashes and sealed secrets); the
+archive does not add the env file, the keyrings or the Meili master key.
 
 Backup a running project (restarts the server afterwards unless
 `--leave-stopped`):
@@ -485,17 +497,28 @@ application role, restores the dump, restores storage, then runs the one-shot
 `init` job (`fvoci-migrate`, `--grant-app-role`, `--ensure-meili-key`; all
 idempotent on this path), rebases the outbox, rebuilds search, and runs
 `fvoci-migrate --verify-storage` with the server's own environment: every
-`stored` attachment in the restored database must exist in the configured
-storage with its recorded size, and every branding asset (logo/favicon) the
-restored instance settings reference must exist with its recorded SHA-256, or
-the restore stops before the server starts.
+`stored` attachment and its published preview in the restored database must
+exist in the configured storage with their recorded sizes (a missing preview
+fails: the product does not regenerate a published one), and every branding
+asset (logo/favicon) the restored instance settings reference must exist with
+its recorded SHA-256. It then runs `fvoci-migrate --verify-secrets`, also with
+the server's environment (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`; the app role
+reads the ciphertext columns in the system context, no owner URL): every
+sealed value in `user_mfa`, `workspace_oidc` and `webhooks` must open with its
+row's context. It prints counts, failing row ids and the key ids in use, never
+secret values, and exits nonzero on any failure. OIDC flow states are not
+opened (single-use, expired ten minutes after issue, fail closed per sign-in).
+Either failure stops the restore before the server starts.
 Then it starts the server. Confirm login with the original password, document
 body, attachment bytes, extraction text, and tasks.
 
 `scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
-project/task, a document comment), backs it up, deletes that stack
-and its volumes, restores into a second project, and checks those artifacts
+project/task, a document comment, an MFA secret sealed with `ENCRYPTION_KEYS`),
+backs it up, checks a restore with a different pepper and one with a different
+key under the backed-up `ENCRYPTION_KEYS` id are refused before any volume
+exists, restores into a second project with a rotated superset keyring (the
+secret opens), and checks those artifacts
 plus uid `1000` and that the restored server receives only `DATABASE_APP_URL`.
 Trap cleanup removes only those two projects. CI runs it as a separate job on
 `ubuntu-24.04` and `ubuntu-24.04-arm` in `.github/workflows/install.yml` (no

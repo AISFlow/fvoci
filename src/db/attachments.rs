@@ -1843,19 +1843,22 @@ pub struct StoredObject {
     pub workspace_id: Uuid,
     pub storage_key: String,
     pub size_bytes: i64,
+    /// Published preview object (`variants.preview`), if any.
+    pub preview: Option<PreviewVariant>,
 }
 
-/// Every stored attachment's key and size in one workspace, read under that
-/// workspace's tenant context (the app role has no cross-tenant bypass).
+/// Every stored attachment's key and size (and its published preview) in one
+/// workspace, read under that workspace's tenant context (the app role has no
+/// cross-tenant bypass).
 pub async fn list_workspace_stored_objects(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> Result<Vec<StoredObject>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let rows: Vec<(Uuid, String, i64)> = sqlx::query_as(
+    let rows: Vec<(Uuid, String, i64, Value)> = sqlx::query_as(
         r#"
-        SELECT id, storage_key, size_bytes
+        SELECT id, storage_key, size_bytes, variants
         FROM fvoci.attachments
         WHERE workspace_id = $1 AND status = 'stored'
         ORDER BY id
@@ -1867,11 +1870,12 @@ pub async fn list_workspace_stored_objects(
     tx.commit().await?;
     Ok(rows
         .into_iter()
-        .map(|(id, storage_key, size_bytes)| StoredObject {
+        .map(|(id, storage_key, size_bytes, variants)| StoredObject {
             id,
             workspace_id,
             storage_key,
             size_bytes,
+            preview: preview_variant_of(&variants),
         })
         .collect())
 }
