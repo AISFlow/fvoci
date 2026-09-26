@@ -41,16 +41,17 @@ struct UserRejectBudget {
     rejects: VecDeque<Instant>,
     cooldown_until: Option<Instant>,
 }
+use crate::collab::wire::CollabKind;
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
-use crate::db::collab::verify_collab_operation;
 use crate::db::collab::{
-    append_collab_update, append_collab_update_on_conn_timed, claim_writer_and_load,
-    compact_collab_snapshot, load_collab_readonly, project_derived_body, resolve_collab_admission,
-    AppendCollabInput, AppendCollabResult, CollabDbError, CompactCollabInput,
-    ProjectDerivedBodyInput, ProjectDerivedBodyResult, VerifyCollabInput,
+    append_collab_update_kind, append_collab_update_on_conn_timed, claim_writer_and_load_kind,
+    compact_collab_snapshot_kind, load_collab_readonly_kind, project_derived_body_kind,
+    resolve_collab_admission_kind, verify_collab_operation_kind, AppendCollabInput,
+    AppendCollabResult, CollabDbError, CompactCollabInput, ProjectDerivedBodyInput,
+    ProjectDerivedBodyResult, VerifyCollabInput,
 };
-use crate::db::collab_delivery::{check_delivery_admission, DeliveryAdmission};
+use crate::db::collab_delivery::{check_delivery_admission_kind, DeliveryAdmission};
 use crate::db::identity::LiveSession;
 
 #[cfg(feature = "db-tests")]
@@ -546,7 +547,31 @@ async fn wait_spawn_room_block(_document_id: Uuid) {
     }
 }
 
-pub type RoomKey = (Uuid, Uuid);
+/// Hub room identity: `(workspace_id, resource_id, kind)`. Tuple fields keep
+/// `key.0` / `key.1` as workspace and resource; a `(workspace_id, document_id)`
+/// pair converts to a document room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RoomKey(pub Uuid, pub Uuid, pub CollabKind);
+
+impl RoomKey {
+    pub fn document(workspace_id: Uuid, document_id: Uuid) -> Self {
+        Self(workspace_id, document_id, CollabKind::Document)
+    }
+
+    pub fn task(workspace_id: Uuid, task_id: Uuid) -> Self {
+        Self(workspace_id, task_id, CollabKind::Task)
+    }
+
+    pub fn kind(&self) -> CollabKind {
+        self.2
+    }
+}
+
+impl From<(Uuid, Uuid)> for RoomKey {
+    fn from((workspace_id, document_id): (Uuid, Uuid)) -> Self {
+        Self::document(workspace_id, document_id)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CollabSession {
@@ -1054,7 +1079,9 @@ enum ProjectDerivedOutcome {
 
 struct RoomActor {
     workspace_id: Uuid,
+    /// Resource id of the room (document or task, see `kind`).
     document_id: Uuid,
+    kind: CollabKind,
     config: CollabConfig,
     pool: PgPool,
     engine: EngineBridge,
@@ -1088,6 +1115,7 @@ struct RoomActor {
 pub async fn spawn_room(
     workspace_id: Uuid,
     document_id: Uuid,
+    kind: CollabKind,
     config: CollabConfig,
     pool: PgPool,
     room_guard: RoomGuard,
@@ -1111,6 +1139,7 @@ pub async fn spawn_room(
     let actor = RoomActor {
         workspace_id,
         document_id,
+        kind,
         config,
         pool,
         engine,
@@ -1355,8 +1384,9 @@ impl RoomActor {
             .map(|(id, c)| (*id, c.session.clone(), c.read_only))
             .collect::<Vec<_>>();
         for (conn_id, session, read_only) in snapshots {
-            match check_delivery_admission(
+            match check_delivery_admission_kind(
                 &self.pool,
+                self.kind,
                 self.workspace_id,
                 session.user_id,
                 session.session_id,
@@ -1392,8 +1422,9 @@ impl RoomActor {
         session_id: Uuid,
         read_only: bool,
     ) -> LockingAuth {
-        match resolve_collab_admission(
+        match resolve_collab_admission_kind(
             &self.pool,
+            self.kind,
             self.workspace_id,
             user_id,
             session_id,
@@ -1526,8 +1557,9 @@ impl RoomActor {
         if self.connections.len() >= self.config.max_connections_per_room {
             return Err(JoinError::RoomFull);
         }
-        let admission = resolve_collab_admission(
+        let admission = resolve_collab_admission_kind(
             &self.pool,
+            self.kind,
             self.workspace_id,
             join.conn.session.user_id,
             join.conn.session.session_id,
@@ -1546,8 +1578,9 @@ impl RoomActor {
         let admission = admission.map_err(|_| JoinError::AdmissionDenied)?;
         let read_only = join.conn.read_only || admission.read_only;
         if self.writer_generation.is_none() && !read_only {
-            let claim = claim_writer_and_load(
+            let claim = claim_writer_and_load_kind(
                 &self.pool,
+                self.kind,
                 self.workspace_id,
                 join.conn.session.user_id,
                 join.conn.session.session_id,
@@ -1575,8 +1608,9 @@ impl RoomActor {
             }
             self.writer_generation = Some(claim.writer_generation);
         } else if self.writer_generation.is_none() && read_only {
-            let load = load_collab_readonly(
+            let load = load_collab_readonly_kind(
                 &self.pool,
+                self.kind,
                 self.workspace_id,
                 join.conn.session.user_id,
                 join.conn.session.session_id,
@@ -1858,8 +1892,9 @@ impl RoomActor {
                     self.close_connection(conn_id, 1008, "invalid room").await;
                     return;
                 }
-                match check_delivery_admission(
+                match check_delivery_admission_kind(
                     &self.pool,
+                    self.kind,
                     self.workspace_id,
                     session.user_id,
                     session.session_id,
@@ -1930,8 +1965,9 @@ impl RoomActor {
                     .await;
             }
             DocumentMessage::Awareness(payload) => {
-                match check_delivery_admission(
+                match check_delivery_admission_kind(
                     &self.pool,
+                    self.kind,
                     self.workspace_id,
                     session.user_id,
                     session.session_id,
@@ -2190,6 +2226,7 @@ impl RoomActor {
                 let append_started = std::time::Instant::now();
                 let timed_append = append_collab_update_on_conn_timed(
                     room_conn,
+                    self.kind,
                     AppendCollabInput {
                         workspace_id: self.workspace_id,
                         actor_user_id,
@@ -2396,8 +2433,9 @@ impl RoomActor {
         payload: &[u8],
         digest: &[u8],
     ) -> Option<AppendCollabResult> {
-        match verify_collab_operation(
+        match verify_collab_operation_kind(
             &self.pool,
+            self.kind,
             VerifyCollabInput {
                 workspace_id: self.workspace_id,
                 actor_user_id,
@@ -2413,8 +2451,9 @@ impl RoomActor {
         {
             Ok(Ok(lookup)) => Some(AppendCollabResult::DuplicateAck { seq: lookup.seq }),
             Ok(Err(CollabDbError::NotFound)) => {
-                match load_collab_readonly(
+                match load_collab_readonly_kind(
                     &self.pool,
+                    self.kind,
                     self.workspace_id,
                     actor_user_id,
                     session_id,
@@ -2468,8 +2507,9 @@ impl RoomActor {
     }
 
     async fn fatal_room_divergence(&mut self, actor_user_id: Uuid, session_id: Uuid) {
-        if let Ok(Ok(load)) = load_collab_readonly(
+        if let Ok(Ok(load)) = load_collab_readonly_kind(
             &self.pool,
+            self.kind,
             self.workspace_id,
             actor_user_id,
             session_id,
@@ -2488,8 +2528,9 @@ impl RoomActor {
     }
 
     async fn fatal_primary_unhealthy(&mut self, actor_user_id: Uuid, session_id: Uuid) {
-        if let Ok(Ok(load)) = load_collab_readonly(
+        if let Ok(Ok(load)) = load_collab_readonly_kind(
             &self.pool,
+            self.kind,
             self.workspace_id,
             actor_user_id,
             session_id,
@@ -2731,8 +2772,9 @@ impl RoomActor {
             }
         };
 
-        match project_derived_body(
+        match project_derived_body_kind(
             &self.pool,
+            self.kind,
             ProjectDerivedBodyInput::new(
                 self.workspace_id,
                 actor_user_id,
@@ -3095,8 +3137,9 @@ impl RoomActor {
         self.persist_step("validated", started);
         if let Some(writer_generation) = self.writer_generation {
             let cutoff = self.committed.tail_seq;
-            let compact = compact_collab_snapshot(
+            let compact = compact_collab_snapshot_kind(
                 &self.pool,
+                self.kind,
                 CompactCollabInput {
                     workspace_id: self.workspace_id,
                     actor_user_id,
@@ -3190,8 +3233,9 @@ impl RoomActor {
         session_id: Uuid,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
         if !self.committed_loaded {
-            let load = load_collab_readonly(
+            let load = load_collab_readonly_kind(
                 &self.pool,
+                self.kind,
                 self.workspace_id,
                 actor_user_id,
                 session_id,
@@ -3358,8 +3402,9 @@ impl RoomActor {
         session_id: Uuid,
     ) -> Result<(), ForwardWriteError> {
         if self.writer_generation.is_none() {
-            let claim = claim_writer_and_load(
+            let claim = claim_writer_and_load_kind(
                 &self.pool,
+                self.kind,
                 self.workspace_id,
                 actor_user_id,
                 session_id,
@@ -3448,8 +3493,9 @@ impl RoomActor {
         let op_id = Uuid::now_v7();
         let expected_tail = self.committed.tail_seq;
         let digest = payload_digest(&payload);
-        let append = append_collab_update(
+        let append = append_collab_update_kind(
             &self.pool,
+            self.kind,
             AppendCollabInput {
                 workspace_id: self.workspace_id,
                 actor_user_id,

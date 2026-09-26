@@ -22,9 +22,9 @@ use crate::collab::room::{
     parse_client_id, AuthenticatedConnection, CollabSession, ConnectionCancel, ConnectionLease,
     JoinError, OutboundFrame, OutboundKind, RoomClientEvent, RoomJoin,
 };
-use crate::collab::wire::{AuthMessage, CollabKind, CollabRoomName, DocumentMessage, WireFrame};
-use crate::db::collab::resolve_collab_admission;
-use crate::db::collab_delivery::{authorize_outbound_delivery, OutboundDeliveryAuth};
+use crate::collab::wire::{AuthMessage, CollabRoomName, DocumentMessage, WireFrame};
+use crate::db::collab::resolve_collab_admission_kind;
+use crate::db::collab_delivery::{authorize_outbound_delivery_kind, OutboundDeliveryAuth};
 use crate::db::identity::find_live_session;
 use crate::error::SESSION_COOKIE;
 use crate::http::state::AppState;
@@ -372,6 +372,7 @@ async fn handle_socket(
                                 if *authenticated {
                                     let workspace_id = key.0;
                                     let document_id = key.1;
+                                    let kind = key.2;
                                     let read_only = *read_only;
                                     let deadline =
                                         tokio::time::Instant::now() + send_deadline;
@@ -395,8 +396,9 @@ async fn handle_socket(
                                         }
                                         auth = tokio::time::timeout_at(
                                             deadline,
-                                            authorize_outbound_delivery(
+                                            authorize_outbound_delivery_kind(
                                                 hub.pool(),
+                                                kind,
                                                 workspace_id,
                                                 live.user_id,
                                                 live.session_id,
@@ -726,14 +728,11 @@ async fn first_room_from_frame(
     let Some(room_name) = room else {
         return FirstRoom::None;
     };
-    if room_name.kind != CollabKind::Document {
-        if !send_auth_denied(pre_auth_outbound, events, &routing_key, "unsupported kind") {
-            signal_pre_auth_close(cancel);
-            return FirstRoom::Closed;
-        }
-        return FirstRoom::None;
-    }
-    let key = (room_name.workspace_id, room_name.resource_id);
+    let key = crate::collab::room::RoomKey(
+        room_name.workspace_id,
+        room_name.resource_id,
+        room_name.kind,
+    );
     if matches!(message, DocumentMessage::Auth(AuthMessage::Token { .. })) {
         match try_authenticate(
             hub,
@@ -847,8 +846,8 @@ async fn try_authenticate(
     }
     let room = CollabRoomName::parse(routing_key.split('\0').next().unwrap_or(routing_key));
     let room = match room {
-        Some(r) if r.kind == CollabKind::Document => r,
-        _ => {
+        Some(r) => r,
+        None => {
             if !send_auth_denied(pre_auth_outbound, events, routing_key, "not found") {
                 signal_pre_auth_close(cancel);
                 return AuthAttempt::Closed;
@@ -856,8 +855,10 @@ async fn try_authenticate(
             return AuthAttempt::Denied;
         }
     };
-    let admission = match resolve_collab_admission(
+    let key = crate::collab::room::RoomKey(room.workspace_id, room.resource_id, room.kind);
+    let admission = match resolve_collab_admission_kind(
         hub.pool(),
+        room.kind,
         room.workspace_id,
         live.user_id,
         live.session_id,
@@ -904,17 +905,13 @@ async fn try_authenticate(
         events: events.clone(),
         cancel: Some(cancel.clone()),
     };
-    match hub
-        .join_room((room.workspace_id, room.resource_id), join)
-        .await
-    {
+    match hub.join_room(key, join).await {
         Ok(lease) => {
             let scope = if read_only { "readonly" } else { "read-write" };
             if send_auth_ok(pre_auth_outbound, events, routing_key, scope) {
                 AuthAttempt::Joined { read_only, lease }
             } else {
-                hub.leave_room((room.workspace_id, room.resource_id), conn_id)
-                    .await;
+                hub.leave_room(key, conn_id).await;
                 drop(lease);
                 signal_pre_auth_close(cancel);
                 AuthAttempt::Closed

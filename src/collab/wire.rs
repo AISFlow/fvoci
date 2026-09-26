@@ -124,7 +124,7 @@ pub struct CollabRoomName {
     pub resource_id: Uuid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CollabKind {
     Document,
     Task,

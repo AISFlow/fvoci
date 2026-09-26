@@ -21,8 +21,8 @@ use crate::collab::room::{
     BodyWriteError, CapturedRevision, ConnectionLease, JoinDelivery, JoinError, LiveProjection,
     RevisionCaptureError, RevisionRestoreError, RoomHandle, RoomJoin, RoomKey,
 };
-use crate::db::collab::estimate_persisted_collab_bytes;
-use crate::db::collab::resolve_collab_admission;
+use crate::db::collab::estimate_persisted_collab_bytes_kind;
+use crate::db::collab::resolve_collab_admission_kind;
 
 #[cfg(feature = "db-tests")]
 pub const HUB_JOIN_BARRIER_BEFORE_ACTOR_JOIN: u8 = 0;
@@ -437,15 +437,17 @@ impl CollabHub {
 
     pub async fn capture_if_live(
         &self,
-        key: RoomKey,
+        key: impl Into<RoomKey>,
         actor_user_id: Uuid,
         session_id: Uuid,
     ) -> Option<Result<CapturedRevision, RevisionCaptureError>> {
+        let key: RoomKey = key.into();
         let handle = self.live_handle(key).await?;
         Some(handle.capture_revision(actor_user_id, session_id).await)
     }
 
-    pub async fn ensure_live_room(&self, key: RoomKey) -> Result<RoomHandle, JoinError> {
+    pub async fn ensure_live_room(&self, key: impl Into<RoomKey>) -> Result<RoomHandle, JoinError> {
+        let key: RoomKey = key.into();
         let mut retries = 0u8;
         loop {
             if self.shutting_down.load(Ordering::Acquire) {
@@ -464,11 +466,12 @@ impl CollabHub {
 
     pub async fn restore_revision(
         &self,
-        key: RoomKey,
+        key: impl Into<RoomKey>,
         actor_user_id: Uuid,
         session_id: Uuid,
         snap: Vec<u8>,
     ) -> Result<(), RevisionRestoreError> {
+        let key: RoomKey = key.into();
         let handle = self
             .ensure_live_room(key)
             .await
@@ -481,12 +484,13 @@ impl CollabHub {
     /// External body write through the room actor (source `replaceBody`).
     pub async fn replace_body(
         &self,
-        key: RoomKey,
+        key: impl Into<RoomKey>,
         actor_user_id: Uuid,
         session_id: Uuid,
         seed: Vec<u8>,
         expected_tail_seq: Option<i64>,
     ) -> Result<(), BodyWriteError> {
+        let key: RoomKey = key.into();
         let handle = self
             .ensure_live_room(key)
             .await
@@ -499,10 +503,11 @@ impl CollabHub {
     /// Live Tiptap projection for a read-modify-write (source `withLiveDoc`).
     pub async fn project_live(
         &self,
-        key: RoomKey,
+        key: impl Into<RoomKey>,
         actor_user_id: Uuid,
         session_id: Uuid,
     ) -> Result<LiveProjection, BodyWriteError> {
+        let key: RoomKey = key.into();
         let handle = self
             .ensure_live_room(key)
             .await
@@ -511,7 +516,8 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn probe_actor(&self, key: RoomKey) -> crate::collab::room::ActorProbe {
+    pub async fn probe_actor(&self, key: impl Into<RoomKey>) -> crate::collab::room::ActorProbe {
+        let key: RoomKey = key.into();
         let handle = {
             let Some(slot) = self.room_slot(key).await else {
                 return crate::collab::room::ActorProbe {
@@ -534,7 +540,8 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn idle_evict_decision(&self, key: RoomKey) -> IdleEvictDecision {
+    pub async fn idle_evict_decision(&self, key: impl Into<RoomKey>) -> IdleEvictDecision {
+        let key: RoomKey = key.into();
         let Some(slot) = self.room_slot(key).await else {
             return IdleEvictDecision::NotApplicable;
         };
@@ -546,7 +553,8 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn force_room_idle_eligible(&self, key: RoomKey) {
+    pub async fn force_room_idle_eligible(&self, key: impl Into<RoomKey>) {
+        let key: RoomKey = key.into();
         let Some(slot) = self.room_slot(key).await else {
             return;
         };
@@ -558,7 +566,8 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn execute_idle_evict_if_eligible(&self, key: RoomKey) -> bool {
+    pub async fn execute_idle_evict_if_eligible(&self, key: impl Into<RoomKey>) -> bool {
+        let key: RoomKey = key.into();
         let Some(slot) = self.room_slot(key).await else {
             return false;
         };
@@ -606,7 +615,8 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn room_joining_count(&self, key: RoomKey) -> usize {
+    pub async fn room_joining_count(&self, key: impl Into<RoomKey>) -> usize {
+        let key: RoomKey = key.into();
         let Some(slot) = self.room_slot(key).await else {
             return 0;
         };
@@ -618,7 +628,8 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn room_member_count(&self, key: RoomKey) -> usize {
+    pub async fn room_member_count(&self, key: impl Into<RoomKey>) -> usize {
+        let key: RoomKey = key.into();
         let Some(slot) = self.room_slot(key).await else {
             return 0;
         };
@@ -645,14 +656,16 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn room_waiter_count(&self, key: RoomKey) -> usize {
+    pub async fn room_waiter_count(&self, key: impl Into<RoomKey>) -> usize {
+        let key: RoomKey = key.into();
         self.room_slot(key)
             .await
             .map_or(0, |slot| slot.waiters.load(Ordering::Acquire))
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn room_occupies_slot(&self, key: RoomKey) -> bool {
+    pub async fn room_occupies_slot(&self, key: impl Into<RoomKey>) -> bool {
+        let key: RoomKey = key.into();
         matches!(
             self.room_lifecycle_phase(key).await,
             RoomLifecyclePhase::Starting
@@ -663,7 +676,8 @@ impl CollabHub {
     }
 
     #[cfg(feature = "db-tests")]
-    pub async fn room_lifecycle_phase(&self, key: RoomKey) -> RoomLifecyclePhase {
+    pub async fn room_lifecycle_phase(&self, key: impl Into<RoomKey>) -> RoomLifecyclePhase {
+        let key: RoomKey = key.into();
         let slot = self.room_slot(key).await;
         let Some(slot) = slot else {
             return RoomLifecyclePhase::Absent;
@@ -680,14 +694,16 @@ impl CollabHub {
 
     pub async fn join_room(
         &self,
-        key: RoomKey,
+        key: impl Into<RoomKey>,
         mut join: RoomJoin,
     ) -> Result<ConnectionLease, JoinError> {
+        let key: RoomKey = key.into();
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(JoinError::EngineUnavailable);
         }
-        let admission = resolve_collab_admission(
+        let admission = resolve_collab_admission_kind(
             &self.pool,
+            key.2,
             key.0,
             join.conn.session.user_id,
             join.conn.session.session_id,
@@ -808,7 +824,8 @@ impl CollabHub {
         }));
     }
 
-    pub async fn leave_room(&self, key: RoomKey, conn_id: Uuid) {
+    pub async fn leave_room(&self, key: impl Into<RoomKey>, conn_id: Uuid) {
+        let key: RoomKey = key.into();
         let slot = self.room_slot(key).await;
         if let Some(slot) = slot {
             let handle = {
@@ -828,7 +845,8 @@ impl CollabHub {
         }
     }
 
-    pub async fn send_frame(&self, key: RoomKey, conn_id: Uuid, bytes: Vec<u8>) {
+    pub async fn send_frame(&self, key: impl Into<RoomKey>, conn_id: Uuid, bytes: Vec<u8>) {
+        let key: RoomKey = key.into();
         if self.shutting_down.load(Ordering::Acquire) {
             return;
         }
@@ -1192,16 +1210,16 @@ impl CollabHub {
             self.fail_starting(key, &slot).await;
             return Err(JoinError::EngineUnavailable);
         }
-        let persisted_bytes = match estimate_persisted_collab_bytes(&mut pooled, key.0, key.1).await
-        {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                warn_join_db_error("hub.start_room.estimate_bytes", key.0, key.1, &err);
-                drop(pooled);
-                self.fail_starting(key, &slot).await;
-                return Err(JoinError::DbError);
-            }
-        };
+        let persisted_bytes =
+            match estimate_persisted_collab_bytes_kind(&mut pooled, key.2, key.0, key.1).await {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    warn_join_db_error("hub.start_room.estimate_bytes", key.0, key.1, &err);
+                    drop(pooled);
+                    self.fail_starting(key, &slot).await;
+                    return Err(JoinError::DbError);
+                }
+            };
         if memory_budget_exceeded(self.config.memory_budget_bytes, persisted_bytes) {
             drop(pooled);
             self.fail_starting(key, &slot).await;
@@ -1225,11 +1243,12 @@ impl CollabHub {
             return Err(JoinError::EngineUnavailable);
         }
 
-        let (workspace_id, document_id) = key;
+        let RoomKey(workspace_id, document_id, kind) = key;
         let live_conns = Arc::new(AtomicUsize::new(0));
         let spawn = crate::collab::room::spawn_room(
             workspace_id,
             document_id,
+            kind,
             self.config.clone(),
             self.pool.clone(),
             guard,

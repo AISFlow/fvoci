@@ -166,3 +166,46 @@ pub struct StatusPatchBody {
     #[serde(default, deserialize_with = "present")]
     pub after_id: Option<Uuid>,
 }
+
+/// `POST /workspaces/{ws}/documents/{id}/tasks` (source `documentTaskCreateInput`).
+/// `task` is kept raw for the request hash and parsed as [`crate::api::dto::CreateTaskBody`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DocumentTaskCreateBody {
+    pub project_id: Uuid,
+    pub request_id: Uuid,
+    #[serde(default)]
+    pub anchor: Option<String>,
+    #[cfg_attr(feature = "api-schema", schema(value_type = crate::api::dto::CreateTaskBody))]
+    pub task: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct DocumentTaskCreateOutput {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskOriginItemOutput {
+    pub task_id: String,
+    pub document_id: String,
+    pub task_display_id: String,
+    pub document_display_id: String,
+    pub task_title: String,
+    pub document_title: String,
+    pub anchor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct TaskOriginListResponse {
+    pub items: Vec<TaskOriginItemOutput>,
+    pub count: usize,
+    pub next_cursor: Option<String>,
+}
