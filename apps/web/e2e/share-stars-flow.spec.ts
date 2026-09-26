@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { watchCspViolations } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -14,6 +15,15 @@ test("owner stars and shares a wiki document; the public link needs no session a
   browser,
 }) => {
   test.setTimeout(90_000);
+  const cspViolations = watchCspViolations(page);
+
+  // Global security headers on the SPA shell served by the Rust server.
+  const appShell = await page.request.get("/");
+  expect(appShell.headers()["content-security-policy"]).toContain("default-src 'self'");
+  expect(appShell.headers()["content-security-policy"]).toContain("frame-ancestors 'self'");
+  expect(appShell.headers()["referrer-policy"]).toBe("no-referrer");
+  expect(appShell.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(appShell.headers()["x-frame-options"]).toBe("SAMEORIGIN");
 
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
@@ -112,6 +122,7 @@ test("owner stars and shares a wiki document; the public link needs no session a
   const anon = await browser.newContext();
   expect(await anon.cookies()).toEqual([]);
   const reader = await anon.newPage();
+  const readerCspViolations = watchCspViolations(reader);
   const apiPaths: string[] = [];
   reader.on("request", (request) => {
     const path = new URL(request.url()).pathname;
@@ -170,4 +181,6 @@ test("owner stars and shares a wiki document; the public link needs no session a
   await expect(off.getByRole("alert")).toHaveText("관리자가 공개 공유를 비활성화했습니다.");
   await expect(off.getByRole("button", { name: "공유 링크", exact: true })).toBeDisabled();
   await expect(off.getByLabel("만료 기간")).toBeDisabled();
+  expect(cspViolations).toEqual([]);
+  expect(readerCspViolations).toEqual([]);
 });

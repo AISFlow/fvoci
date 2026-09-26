@@ -205,6 +205,16 @@ fn parse_s3_endpoint(name: &str, raw: &str) -> Result<String, String> {
 
 /// Attachment storage settings from `STORAGE_DRIVER` and its variables, as
 /// the server reads them. Also used by `fvoci-migrate --verify-storage`.
+/// Creates the local storage root. Only the server does this at start;
+/// parsing the settings (doctor, migrate) never touches the filesystem.
+pub fn ensure_storage_root(settings: &StorageSettings) -> Result<(), String> {
+    if let StorageSettings::Local { root } = settings {
+        std::fs::create_dir_all(root)
+            .map_err(|e| format!("failed to create storage root {}: {e}", root.display()))?;
+    }
+    Ok(())
+}
+
 pub fn storage_settings_from_env() -> Result<StorageSettings, String> {
     let driver = env::var("STORAGE_DRIVER")
         .ok()
@@ -217,8 +227,6 @@ pub fn storage_settings_from_env() -> Result<StorageSettings, String> {
                 env::var("FVOCI_STORAGE_DIR").ok().as_deref(),
                 env::var("STORAGE_LOCAL_PATH").ok().as_deref(),
             )?;
-            std::fs::create_dir_all(&path)
-                .map_err(|e| format!("failed to create storage root {}: {e}", path.display()))?;
             Ok(StorageSettings::Local { root: path })
         }
         "s3" => {
@@ -302,7 +310,7 @@ fn parse_positive_u64(name: &str, raw: Option<&str>, default: u64) -> Result<u64
     Ok(value)
 }
 
-fn storage_root_path_from_values(
+pub(crate) fn storage_root_path_from_values(
     fvoci_storage_dir: Option<&str>,
     storage_local_path: Option<&str>,
 ) -> Result<PathBuf, String> {

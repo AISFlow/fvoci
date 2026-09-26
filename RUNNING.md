@@ -186,6 +186,22 @@ Integration tests always create and drop their own UUID database and app role; t
 
 PATCH requires `givenName`; `familyName` omitted preserves the value, null or an empty string clears it. Other optional fields are `locale` (`ko`), `timezone`, `weekStartsOn` (0/1), and `textScale` (16/18/20). Unknown fields are rejected. Use the bound address printed at startup; default port 0 is selected by the listening socket.
 
+### Response security headers
+
+Every response carries the source's global security headers (`http-security.ts`,
+nosecone defaults): a `Content-Security-Policy` (`default-src 'self'`, same-origin
+`connect-src` for the API and `/collab` WebSocket, `frame-ancestors 'self'`,
+`object-src 'none'`, inline shell blocks only by build-time hash, embed frames for
+YouTube/Vimeo/Figma), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
+nosniff`, `X-Frame-Options: SAMEORIGIN`, COOP/CORP `same-origin`,
+`Origin-Agent-Cluster`, `X-DNS-Prefetch-Control: off`, `X-Download-Options`,
+`X-Permitted-Cross-Domain-Policies: none`, `X-XSS-Protection: 0` and a
+`Permissions-Policy` that denies unused device APIs. With an `https://`
+`FVOCI_PUBLIC_ORIGIN` it adds `Strict-Transport-Security: max-age=31536000;
+includeSubDomains` and `upgrade-insecure-requests`. Routes that set a stricter
+policy keep it (share pages and fragments, attachment and branding downloads use
+`sandbox` or nonce policies).
+
 ## Initial workspace operations
 
 Authenticated sessions can list `GET /api/v1/me/workspaces` and read metadata with
@@ -382,7 +398,8 @@ all three helpers and enables them via the defaults above.
 
 ### Bootstrap
 
-1. Copy `infra/rust/.env.example` to `infra/rust/.env` and replace placeholders.
+1. Generate `infra/rust/.env` with `fvoci-migrate --init-env` (above), or copy
+   `infra/rust/.env.example` to `infra/rust/.env` and replace placeholders.
    Keep `POSTGRES_*` as the migration owner credentials. Create the dedicated app
    role only through the init path below — never grant superuser or `BYPASSRLS` to
    the app role.
@@ -610,3 +627,109 @@ offline test commands are in `scripts/prepare-extract-helper.sh` and
 `scripts/run-extract-tests.sh`; the latter must fail if required DB/helper inputs
 are absent. These integration commands are being wired with the pending native
 job submission and are not yet a released support claim.
+
+## Operator commands (`fvoci-migrate`)
+
+The source's `fvoci <command>` CLI maps onto `fvoci-migrate`, the one-shot
+operator binary already shipped in the image and used by the Compose `init`
+job, backup and restore (the server binary stays single-purpose):
+
+| Source | Rust | Environment |
+| --- | --- | --- |
+| `fvoci init` | `fvoci-migrate --init-env --public-origin <url> --out <path> [--yes]` | none |
+| `fvoci doctor` | `fvoci-migrate --doctor` | the server's |
+| `fvoci bootstrap` (migrate) | `fvoci-migrate`, then `--grant-app-role <role>` | owner `DATABASE_URL` |
+| `fvoci search-rebuild [workspaceId]` | `fvoci-migrate --rebuild-search [workspace-id]` | owner `DATABASE_URL`, Meili |
+| `fvoci outbox-recover` | `fvoci-migrate --recover-outbox ...` | owner `DATABASE_URL` |
+| `fvoci backup <collect\|restore\|...>` | `scripts/backup.sh`, `scripts/restore.sh` (below) | Compose project |
+| — (restore check) | `fvoci-migrate --verify-storage` | the server's |
+
+Not ported: `secrets audit/rotate`, `reindex` (extract re-enqueue), `healthcheck`
+and the split worker roles (`worker`, `compact`, `thumbnail`, `collab`); the Rust
+server runs those jobs in-process.
+
+**`--init-env`** writes the Compose env file from `infra/rust/.env.example` with
+fresh secrets: `POSTGRES_PASSWORD`, `FVOCI_APP_PASSWORD`, `MEILI_MASTER_KEY`
+(64 hex), `PASSWORD_PEPPER_KEYS` and `ENCRYPTION_KEYS` (`{"install":"<64 hex>"}`),
+`FVOCI_PUBLIC_ORIGIN`, and `FVOCI_COOKIE_SECURE=true` for an https origin (a
+loopback `http://` origin also sets `FVOCI_PUBLISH_PORT` to its port). The file
+is created mode 0600 and renamed into place; an existing file is kept unless
+`--yes`. Only the path is printed. It replaces step 1 of "Bootstrap" below:
+
+```sh
+cargo run --release --bin fvoci-migrate -- --init-env \
+  --public-origin https://fvoci.example.com --out infra/rust/.env
+```
+
+Back up the generated file with the database backups: the pepper and
+encryption keys cannot be regenerated.
+
+**`--doctor`** checks the server's environment without starting it and prints
+`{"ok":true|false,"checks":[{"name","ok","detail"?}]}`; the exit code is 1 when
+any check fails. Each setting is checked on its own so every problem is named:
+`env` (the server's full config parse), `password_pepper_keys` and
+`encryption_keys` (published development keys fail), `public_origin` (plain
+http off loopback, or https without secure cookies, fail), `identity`,
+`integrations`, `database` (connect with `DATABASE_APP_URL`), `app_role`
+(no superuser/`BYPASSRLS`, not the schema owner), `schema_version` (migrated to
+this build), `pg_connection_budget` (collab rooms + pool + reserve ≤
+`max_connections`), `storage` (local directory or S3 bucket probe),
+`meilisearch` (the scoped key reads its index), `smtp` (connect/EHLO/STARTTLS
+when offered; no mail sent), `document_convert` (one real conversion),
+`collab_engine` (spawn and ping; a set path that is not a file fails because
+the server would silently disable collaboration) and `extractor`. Optional
+features that are unset report `disabled (...)`. Nothing is created, migrated or
+sent, and database URLs in details are masked.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --doctor
+```
+
+## Product MCP server (`fvoci-mcp`)
+
+`fvoci-mcp` is the source `apps/mcp` server as a Rust binary: an MCP server over
+stdio (newline-delimited JSON-RPC 2.0) whose tools call the FVOCI HTTP API with a
+personal API token. Tool names, descriptions and input schemas are the source's
+(`src/bin/fvoci-mcp/tools.json`, generated from the source server at the pinned
+SHA): `list_tasks`, `get_task`, `list_task_activity`, `create_task`, `patch_task`,
+`add_comment`, `resolve_comment`, `list_labels`, `create_label`, `patch_label`,
+`list_task_dependencies`, `add_task_dependency`, `remove_task_dependency`,
+`search`, `get_document_body`, `put_document_body`, `patch_document_block`,
+`get_calendar`, `ai_summarize_document`, `ai_generate_tasks`, `ai_suggest_links`.
+There are no resources or prompts (as in the source).
+
+```sh
+cargo build --release --bin fvoci-mcp
+FVOCI_URL=https://fvoci.example.com FVOCI_TOKEN=<personal API token> target/release/fvoci-mcp
+```
+
+MCP client configuration (for example):
+
+```json
+{ "mcpServers": { "fvoci": { "command": "/path/to/fvoci-mcp",
+  "env": { "FVOCI_URL": "https://fvoci.example.com", "FVOCI_TOKEN": "<token>" } } } }
+```
+
+- Create the token in workspace settings (API tokens). The server enforces its
+  scopes and workspace: `tasks.read`/`tasks.write` for task, label, dependency
+  and task-comment tools, `documents.read`/`documents.write` for document body
+  and document-comment tools. A call outside the token's scope or workspace
+  returns the server's refusal as a tool error (`{"status":404,...}`), a revoked
+  token `{"status":401,...}`.
+- `FVOCI_URL` must be `https://`, or `http://` to `localhost`/`127.0.0.1`/`[::1]`.
+  The token is read only from `FVOCI_TOKEN`, never printed, and never sent
+  across a redirect (redirects are not followed). Messages over 16 MiB on stdin,
+  API responses over 8 MiB and requests over 60 s are refused.
+- Arguments are validated against the schema before any request (tool error
+  `MCP error -32602: Input validation error: ...`).
+- Not provided: the source's `--http <port>` streamable HTTP transport (the
+  binary exits 1 on any argument). Server routes still missing for some tools
+  return their HTTP error: PAT access to `search`, `get_document_body` with
+  `format=md`, `put_document_body`, `patch_document_block`, and project-document
+  bodies.
+
+Tests: `tests/mcp_integration.rs` starts a real `fvoci-server` process (fresh
+database, app role, port 0), mints tokens over HTTP and drives the binary over
+stdio (`cargo test --features db-tests --test mcp_integration`).
+
