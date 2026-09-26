@@ -21,6 +21,27 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [flag, manifest, project, created, pg_version, dump, storage]
+            if flag == "--backup-manifest" =>
+        {
+            fvoci_server::backup_manifest::create(
+                &PathBuf::from(manifest),
+                project,
+                created,
+                pg_version,
+                &PathBuf::from(dump),
+                &PathBuf::from(storage),
+            )?;
+        }
+        [flag, manifest, dump, storage, project] if flag == "--restore-preflight" => {
+            let (snapshot, since) = fvoci_server::backup_manifest::preflight(
+                &PathBuf::from(manifest),
+                &PathBuf::from(dump),
+                &PathBuf::from(storage),
+                project,
+            )?;
+            println!("{snapshot} {since}");
+        }
         [] => {
             let url = migration_url()?;
             migrate::run_migrations(&url).await?;
@@ -66,7 +87,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay]]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
             );
         }
     }

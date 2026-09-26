@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,6 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GROUPS_PY = ROOT / "scripts" / "web-e2e-groups.py"
+PLAYWRIGHT_INDEX = (
+    ROOT / "apps" / "web" / "node_modules" / "playwright" / "lib" / "common" / "index.js"
+)
+PLAYWRIGHT_UTIL = ROOT / "apps" / "web" / "node_modules" / "playwright" / "lib" / "util.js"
 
 
 def load_groups_module():
@@ -30,6 +38,48 @@ def write_spec(directory: Path, name: str, content: str = "// fixture\n") -> Non
     if "/" in name:
         raise ValueError(name)
     (directory / name).write_text(content, encoding="utf-8")
+
+
+def playwright_default_suffixes() -> list[str]:
+    """Expand Playwright default suite suffixes without a glob parser."""
+    suffixes: list[str] = []
+    for kind in ("spec", "test"):
+        for prefix in ("", "c", "m"):
+            for lang in ("j", "t"):
+                for ext_x in ("", "x"):
+                    suffixes.append(f".{kind}.{prefix}{lang}s{ext_x}")
+    return suffixes
+
+
+def read_pinned_playwright_test_match() -> str:
+    text = PLAYWRIGHT_INDEX.read_text(encoding="utf-8")
+    match = re.search(
+        r'testMatch:\s*takeFirst\([^,]+,\s*[^,]+,\s*"([^"]+)"\)',
+        text,
+    )
+    if match is None:
+        raise RuntimeError(f"default testMatch not found in {PLAYWRIGHT_INDEX}")
+    return match.group(1)
+
+
+def playwright_match_rels(pattern: str, rels: list[str]) -> list[str]:
+    payload = json.dumps({"pattern": pattern, "rels": rels})
+    script = """
+const { createFileMatcher } = require(process.env.PW_UTIL);
+const fs = require('fs');
+const { pattern, rels } = JSON.parse(fs.readFileSync(0, 'utf8'));
+const matcher = createFileMatcher(pattern);
+process.stdout.write(JSON.stringify(rels.filter((rel) => matcher(rel))));
+"""
+    proc = subprocess.run(
+        ["node", "-e", script],
+        input=payload,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PW_UTIL": str(PLAYWRIGHT_UTIL)},
+    )
+    return json.loads(proc.stdout)
 
 
 def minimal_pair_tree(directory: Path, extra: list[str] | None = None) -> None:
@@ -104,6 +154,56 @@ class WebE2eGroupsTest(unittest.TestCase):
             write_spec(e2e, "bad spec.spec.ts")
             with self.assertRaises(SystemExit):
                 GROUPS.verify_plan(e2e, 2)
+
+    def test_representative_module_suffixes_fail_closed(self) -> None:
+        pattern = read_pinned_playwright_test_match()
+        self.assertEqual(pattern, "**/*.@(spec|test).?(c|m)[jt]s?(x)")
+        names = (
+            "extra-flow.spec.mts",
+            "extra-flow.test.mjs",
+            "extra-flow.spec.cts",
+            "extra-flow.test.cjs",
+        )
+        rels = [f"e2e/{name}" for name in names]
+        self.assertEqual(playwright_match_rels(pattern, rels), rels)
+        for name in names:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                e2e = Path(tmp)
+                minimal_pair_tree(e2e)
+                write_spec(e2e, name)
+                with self.assertRaises(SystemExit) as ctx:
+                    GROUPS.verify_plan(e2e, 2)
+                self.assertIn(name, str(ctx.exception))
+                suffix = "." + name.split(".", 1)[1]
+                self.assertIn(suffix, str(ctx.exception))
+
+    def test_all_default_discoverable_suffixes_fail_closed(self) -> None:
+        pattern = read_pinned_playwright_test_match()
+        names = [
+            f"extra-flow{suffix}"
+            for suffix in playwright_default_suffixes()
+            if suffix != ".spec.ts"
+        ]
+        rels = [f"e2e/{name}" for name in names]
+        self.assertEqual(set(playwright_match_rels(pattern, rels)), set(rels))
+        with tempfile.TemporaryDirectory() as tmp:
+            e2e = Path(tmp)
+            minimal_pair_tree(e2e)
+            for name in names:
+                write_spec(e2e, name)
+            with self.assertRaises(SystemExit) as ctx:
+                GROUPS.verify_plan(e2e, 2)
+            message = str(ctx.exception)
+            for name in names:
+                self.assertIn(name, message)
+
+    def test_new_spec_ts_does_not_hide_sibling_mts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            e2e = Path(tmp)
+            minimal_pair_tree(e2e, ["brand-new-flow.spec.ts", "brand-new-flow.spec.mts"])
+            with self.assertRaises(SystemExit) as ctx:
+                GROUPS.verify_plan(e2e, 2)
+            self.assertIn(".spec.mts", str(ctx.exception))
 
 
 if __name__ == "__main__":

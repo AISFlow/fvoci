@@ -16,15 +16,12 @@ PAIR_SECOND = "workspace-wiki-flow.spec.ts"
 DEFAULT_SHARD_COUNT = 8
 SPEC_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.spec\.ts$")
 REL_SPEC_RE = re.compile(r"^e2e/[A-Za-z0-9][A-Za-z0-9._-]*\.spec\.ts$")
-
-UNSUPPORTED_SUFFIXES = (
-    ".spec.tsx",
-    ".spec.js",
-    ".spec.jsx",
-    ".test.ts",
-    ".test.tsx",
-    ".test.js",
-    ".test.jsx",
+# Playwright default testMatch '**/*.@(spec|test).?(c|m)[jt]s?(x)' (pinned
+# playwright/lib/common/index.js). Supported CI grouping is only top-level
+# *.spec.ts; every other default-discoverable suite must fail closed.
+PLAYWRIGHT_DEFAULT_SUITE_RE = re.compile(
+    r"\.(?:spec|test)\.(?:[cm])?[jt]sx?$",
+    re.IGNORECASE,
 )
 
 
@@ -51,16 +48,18 @@ def find_unsupported_playwright_paths(directory: Path) -> list[str]:
             continue
         rel = path.relative_to(directory).as_posix()
         name = path.name
-        if path.suffix == ".ts" and name.endswith(".spec.ts"):
-            if "/" in rel:
-                unsupported.append(f"{rel} (nested spec.ts is not supported in normal e2e)")
-            elif not SPEC_BASENAME_RE.fullmatch(name):
-                unsupported.append(f"{rel} (unsupported spec.ts basename)")
+        matched = PLAYWRIGHT_DEFAULT_SUITE_RE.search(name)
+        if not matched:
             continue
-        for suffix in UNSUPPORTED_SUFFIXES:
-            if name.endswith(suffix):
-                unsupported.append(f"{rel} (unsupported Playwright pattern {suffix})")
-                break
+        if "/" not in rel and SPEC_BASENAME_RE.fullmatch(name):
+            continue
+        suffix = matched.group(0).lower()
+        if "/" in rel and suffix == ".spec.ts":
+            unsupported.append(f"{rel} (nested spec.ts is not supported in normal e2e)")
+        elif suffix == ".spec.ts":
+            unsupported.append(f"{rel} (unsupported spec.ts basename)")
+        else:
+            unsupported.append(f"{rel} (unsupported Playwright pattern {suffix})")
     return unsupported
 
 
