@@ -201,6 +201,8 @@ jobs:
             scripts/document-convert/package-lock.json
       - name: Prepare the document convert helper (npm ci)
         run: bash scripts/prepare-document-convert.sh >> "$GITHUB_ENV"
+      - name: Editor schema matches the Yjs seed fixture
+        run: bash scripts/check-yjs-seed-schema.sh
       - name: WebSocket, PostgreSQL and native helper integration tests
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
