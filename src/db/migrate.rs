@@ -44,7 +44,11 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/030_attachments_complete.sql"),
         30,
     ),
-    // 031 and 032 are reserved by open branches.
+    // 031 is reserved by an open branch.
+    (
+        include_str!("../../migrations/032_admin_user_erase.sql"),
+        32,
+    ),
     (
         include_str!("../../migrations/033_import_deferred_events.sql"),
         33,
@@ -495,6 +499,10 @@ mod tests {
         (
             30,
             "c5fb3f817fb536b10dd9ab68b626b9cd598c2a4198eded19b2dd8d58c385d1e8",
+        ),
+        (
+            32,
+            "dbf49b5d5bf969376406208582f976bd9cc4d04a8b2d76d90fee53d2902b3687",
         ),
         (
             33,

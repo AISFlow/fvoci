@@ -1,8 +1,30 @@
 /** Pure helpers for stars/recent rows and the public share page (no DOM, no app imports). */
 
-/** Source share dialog expiry choices (instance setting catalog default 7, max 365). */
-export const SHARE_EXPIRES_OPTIONS = [7, 30, 90, 365] as const;
-export const SHARE_DEFAULT_EXPIRES_DAYS = 7;
+/** Public `/instance` share policy (`values.share`). */
+export type SharePolicy = { enabled: boolean; defaultExpiresDays: number; maxExpiresDays: number };
+
+/** Source `SETTINGS_CATALOG.share.default`, used until `/instance` loads. */
+export const SHARE_POLICY_DEFAULT: SharePolicy = {
+  enabled: true,
+  defaultExpiresDays: 7,
+  maxExpiresDays: 365,
+};
+
+const SHARE_EXPIRES_PRESETS = [7, 30, 90, 365];
+
+/** Source share dialog: presets plus the policy default, none above the policy max, ascending. */
+export function shareExpiresOptions(policy: SharePolicy): number[] {
+  return [...new Set([...SHARE_EXPIRES_PRESETS, policy.defaultExpiresDays])]
+    .filter((days) => days <= policy.maxExpiresDays)
+    .sort((a, b) => a - b);
+}
+
+/** The user's pick while it is still offered, otherwise the policy default. */
+export function selectedShareExpires(chosen: number | null, policy: SharePolicy): number {
+  return chosen !== null && shareExpiresOptions(policy).includes(chosen)
+    ? chosen
+    : policy.defaultExpiresDays;
+}
 
 export type ShareTreeNode = { id: string; parentId: string | null };
 

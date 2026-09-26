@@ -457,6 +457,32 @@ async fn enforce_share_limit(state: &AppState, peer: SocketAddr) -> Result<(), A
         .map_err(AppError::rate_limited)
 }
 
+/// Source server.ts `shareOgMeta` behind `onShareLimit` for the `/s/{token}`
+/// shell: `None` while sharing is disabled, over the share-ip limit (the
+/// shell is still served, without a 429), or for a token that does not
+/// resolve. Other failures are errors, as in the source.
+pub(crate) async fn shell_head_meta(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    token: &str,
+) -> Result<Option<crate::db::share::SharePublicMeta>, AppError> {
+    let Some(peer) = peer else {
+        return Ok(None);
+    };
+    if enforce_share_limit(state, peer).await.is_err() {
+        return Ok(None);
+    }
+    let policy = crate::settings::share_policy(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
+    if !policy.enabled {
+        return Ok(None);
+    }
+    share_public_meta(&state.auth.db.pool, token, true)
+        .await
+        .map_err(internal)
+}
+
 async fn public_meta_route(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -464,7 +490,7 @@ async fn public_meta_route(
 ) -> Result<Json<SharePublicMetaOutput>, AppError> {
     ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
-    let meta = share_public_meta(&state.auth.db.pool, &token)
+    let meta = share_public_meta(&state.auth.db.pool, &token, false)
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
@@ -828,6 +854,7 @@ async fn collect_share_hits(
                     stem: stem.to_string(),
                     scopes: scopes.clone(),
                     kind: Some(SearchSourceKind::Document),
+                    parent_kinds: None,
                     limit: SHARE_MEILI_PAGE,
                     offset,
                 },
@@ -847,6 +874,7 @@ async fn collect_share_hits(
         stem: stem.to_string(),
         scopes: scopes.clone(),
         kind: Some(SearchSourceKind::Document),
+        parent_kinds: None,
         limit: SHARE_SEARCH_LIMIT as u32,
         offset: 0,
     };

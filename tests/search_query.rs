@@ -1145,3 +1145,240 @@ async fn search_global_query_cross_workspace_and_leak() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+async fn bearer_get(app: axum::Router, token: &str, path: &str) -> (StatusCode, Value) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(project_harness::test_peer()));
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default();
+    (status, serde_json::from_slice(&bytes).unwrap_or(json!({})))
+}
+
+async fn create_scoped_token(
+    app: axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    scopes: &[&str],
+) -> String {
+    let (status, created) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": format!("search {}", scopes.join(" ")), "scopes": scopes})),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    created["token"].as_str().unwrap().to_string()
+}
+
+/// Source `allowedContentKinds`: a PAT searches only mixed content whose parent
+/// domain it can read (documents.* / tasks.*), in its own workspace; sessions
+/// keep the full ACL-filtered result.
+#[tokio::test]
+async fn search_api_token_scopes_narrow_content_kinds() {
+    let harness = TestDb::bootstrap().await;
+    let (_, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let meili = test_meili_config();
+    ensure_meili_index(&meili)
+        .await
+        .unwrap_or_else(|e| panic!("ensure index: {e}"));
+    let app = search_router(search_state(&harness.app_url, Some(meili.clone())).await);
+    let admin = admin_pool(&harness).await;
+
+    let project =
+        create_project(app.clone(), &owner_cookie, workspace_id, "PAT", "workspace").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let token = format!("pat{}", Uuid::now_v7().simple());
+    let wiki_id = Uuid::now_v7();
+    insert_wiki_document(
+        &admin,
+        workspace_id,
+        wiki_id,
+        owner_id,
+        501,
+        &format!("{token} wiki"),
+        "wiki body",
+    )
+    .await;
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": format!("{token} task")})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task:?}");
+    let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+    let (status, doc_comment) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{wiki_id}/comments"),
+        Some(json!({"body": format!("{token} doc-comment")})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{doc_comment:?}");
+    let doc_comment_id = Uuid::parse_str(doc_comment["id"].as_str().unwrap()).unwrap();
+    let (status, task_comment) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments"),
+        Some(json!({"body": format!("{token} task-comment")})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task_comment:?}");
+    let task_comment_id = Uuid::parse_str(task_comment["id"].as_str().unwrap()).unwrap();
+    upsert_meili_sources(
+        &meili,
+        &[
+            document_source(
+                workspace_id,
+                None,
+                wiki_id,
+                &format!("{token} wiki"),
+                "wiki body",
+            ),
+            task_source(workspace_id, project_id, task_id, &format!("{token} task")),
+            comment_source(
+                workspace_id,
+                None,
+                Some(wiki_id),
+                None,
+                doc_comment_id,
+                &format!("{token} wiki"),
+                &format!("{token} doc-comment"),
+            ),
+            comment_source(
+                workspace_id,
+                Some(project_id),
+                None,
+                Some(task_id),
+                task_comment_id,
+                &format!("{token} task"),
+                &format!("{token} task-comment"),
+            ),
+        ],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("upsert_meili_sources: {e}"));
+
+    let all = [wiki_id, task_id, doc_comment_id, task_comment_id];
+    let (status, session_hits) = search(app.clone(), &owner_cookie, workspace_id, &token, "").await;
+    assert_eq!(status, StatusCode::OK, "{session_hits:?}");
+    for id in all {
+        assert!(
+            contains_id(&session_hits, id),
+            "session sees {id}: {session_hits:?}"
+        );
+    }
+
+    let path = format!("/api/v1/workspaces/{workspace_id}/search?q={token}");
+    let docs = create_scoped_token(
+        app.clone(),
+        &owner_cookie,
+        workspace_id,
+        &["documents.read"],
+    )
+    .await;
+    let (status, hits) = bearer_get(app.clone(), &docs, &path).await;
+    assert_eq!(status, StatusCode::OK, "{hits:?}");
+    assert_eq!(
+        {
+            let mut ids = ids_of(&hits);
+            ids.sort();
+            ids
+        },
+        {
+            let mut ids = vec![wiki_id.to_string(), doc_comment_id.to_string()];
+            ids.sort();
+            ids
+        },
+        "documents.read sees document-parented hits only"
+    );
+    let (status, typed) = bearer_get(app.clone(), &docs, &format!("{path}&type=task")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ids_of(&typed).is_empty(), "{typed:?}");
+
+    let tasks =
+        create_scoped_token(app.clone(), &owner_cookie, workspace_id, &["tasks.write"]).await;
+    let (status, hits) = bearer_get(app.clone(), &tasks, &path).await;
+    assert_eq!(status, StatusCode::OK, "{hits:?}");
+    let mut ids = ids_of(&hits);
+    ids.sort();
+    let mut expected = vec![task_id.to_string(), task_comment_id.to_string()];
+    expected.sort();
+    assert_eq!(ids, expected, "tasks.write implies tasks.read only");
+
+    let both = create_scoped_token(
+        app.clone(),
+        &owner_cookie,
+        workspace_id,
+        &["documents.read", "tasks.read"],
+    )
+    .await;
+    let (status, hits) = bearer_get(app.clone(), &both, &path).await;
+    assert_eq!(status, StatusCode::OK);
+    for id in all {
+        assert!(contains_id(&hits, id), "{hits:?}");
+    }
+
+    let projects =
+        create_scoped_token(app.clone(), &owner_cookie, workspace_id, &["projects.read"]).await;
+    let (status, hits) = bearer_get(app.clone(), &projects, &path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        ids_of(&hits).is_empty(),
+        "no content domain, no hits: {hits:?}"
+    );
+
+    // Global search with a token stays inside the token's workspace and scope.
+    let (status, global) =
+        bearer_get(app.clone(), &docs, &format!("/api/v1/search?q={token}")).await;
+    assert_eq!(status, StatusCode::OK, "{global:?}");
+    assert!(contains_id(&global, wiki_id));
+    assert!(!contains_id(&global, task_id));
+
+    // A token cannot search another workspace, and an unknown token is 401.
+    let other_workspace = Uuid::now_v7();
+    let (status, _) = bearer_get(
+        app.clone(),
+        &docs,
+        &format!("/api/v1/workspaces/{other_workspace}/search?q={token}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = bearer_get(app.clone(), "fvoci_pat_invalid", &path).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A cursor minted for one token scope is not valid for another.
+    let (status, first) = bearer_get(app.clone(), &both, &format!("{path}&limit=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    let cursor = first["nextCursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_string();
+    let (status, _) = bearer_get(
+        app.clone(),
+        &docs,
+        &format!("{path}&limit=1&cursor={}", urlencoding(&cursor)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    admin.close().await;
+    harness.cleanup().await;
+}

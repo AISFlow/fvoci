@@ -7,7 +7,7 @@
 //! lock -> users row (`lockSignIn`). Every mutation writes its event and audit
 //! row in the same transaction.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SubsecRound, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -93,12 +93,25 @@ async fn lock_account(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    lock_account_for(tx, None, user_id).await
+}
+
+/// Source lock order; an acting instance admin's membership lock is taken
+/// together with the target's (`lockMembershipChanges([actorAdminId, userId])`).
+async fn lock_account_for(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_admin: Option<Uuid>,
+    user_id: Uuid,
+) -> Result<(), sqlx::Error> {
     acquire_admission_lock(tx).await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(INSTANCE_ADMIN_LOCK_KEY)
         .execute(&mut **tx)
         .await?;
-    lock_membership_users(tx, &[user_id]).await?;
+    match actor_admin {
+        Some(actor) => lock_membership_users(tx, &[actor, user_id]).await?,
+        None => lock_membership_users(tx, &[user_id]).await?,
+    }
     lock_sign_in(tx, user_id).await
 }
 
@@ -345,17 +358,63 @@ pub async fn withdraw_user(
         tx.rollback().await?;
         return Ok(Err(WithdrawError::ConfirmInvalid));
     }
-    let memberships = membership_workspaces(&mut tx, user_id).await?;
-    if has_live_team_ownership(&mut tx, &memberships).await? {
-        tx.rollback().await?;
-        return Ok(Err(WithdrawError::OwnerTransferRequired));
+    let erase_at = match schedule_erasure_locked(
+        &mut tx,
+        user_id,
+        user_id,
+        current.is_instance_admin,
+        &cancel.hash,
+        ip,
+    )
+    .await?
+    {
+        Ok(erase_at) => erase_at,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(match err {
+                ScheduleRefusal::OwnerTransferRequired => WithdrawError::OwnerTransferRequired,
+                ScheduleRefusal::LastInstanceAdmin => WithdrawError::LastInstanceAdmin,
+                ScheduleRefusal::NotMarked => WithdrawError::ConfirmInvalid,
+            }));
+        }
+    };
+    tx.commit().await?;
+    Ok(Ok(WithdrawScheduled {
+        cancel_token: cancel.token,
+        erase_at,
+        email: current.email,
+    }))
+}
+
+enum ScheduleRefusal {
+    OwnerTransferRequired,
+    LastInstanceAdmin,
+    /// The row changed under the lock (already withdrawn or anonymized).
+    NotMarked,
+}
+
+/// Source `scheduleErasureLocked` after the live-row and confirmation checks:
+/// owner and last-admin rules, pending invitations the user sent, the
+/// withdraw mark with its cancel hash, credential revocation and the
+/// `user.withdrawn` event + audit. The caller holds the account locks and
+/// commits or rolls back. Returns the erase deadline.
+async fn schedule_erasure_locked(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    actor: Uuid,
+    is_instance_admin: bool,
+    cancel_hash: &str,
+    ip: Option<&str>,
+) -> Result<Result<DateTime<Utc>, ScheduleRefusal>, sqlx::Error> {
+    let memberships = membership_workspaces(tx, user_id).await?;
+    if has_live_team_ownership(tx, &memberships).await? {
+        return Ok(Err(ScheduleRefusal::OwnerTransferRequired));
     }
-    if current.is_instance_admin && count_live_instance_admins(&mut tx).await? <= 1 {
-        tx.rollback().await?;
-        return Ok(Err(WithdrawError::LastInstanceAdmin));
+    if is_instance_admin && count_live_instance_admins(tx).await? <= 1 {
+        return Ok(Err(ScheduleRefusal::LastInstanceAdmin));
     }
     for (workspace_id, _) in &memberships {
-        set_tenant(&mut tx, *workspace_id).await?;
+        set_tenant(tx, *workspace_id).await?;
         sqlx::query(
             r#"
             DELETE FROM fvoci.invitations
@@ -364,38 +423,104 @@ pub async fn withdraw_user(
         )
         .bind(workspace_id)
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    let at = Utc::now();
+    // Microseconds, as stored: the returned deadline must equal the one the
+    // admin directory later derives from `deleted_at`.
+    let at = Utc::now().trunc_subsecs(6);
     let marked: bool = sqlx::query_scalar("SELECT fvoci.app_user_withdraw($1, $2, $3)")
         .bind(user_id)
         .bind(at)
-        .bind(&cancel.hash)
-        .fetch_one(&mut *tx)
+        .bind(cancel_hash)
+        .fetch_one(&mut **tx)
         .await?;
     if !marked {
-        tx.rollback().await?;
-        return Ok(Err(WithdrawError::ConfirmInvalid));
+        return Ok(Err(ScheduleRefusal::NotMarked));
     }
-    revoke_user_credentials(&mut tx, user_id).await?;
+    revoke_user_credentials(tx, user_id).await?;
     record_account_change(
-        &mut tx,
+        tx,
         user_record(
             "user.withdrawn",
-            Some(user_id),
+            Some(actor),
             user_id,
             json!({ "userId": user_id.to_string() }),
             ip,
         ),
     )
     .await?;
+    Ok(Ok(withdrawal_deadline(at)))
+}
+
+#[derive(Debug)]
+pub enum AdminEraseOutcome {
+    /// `cancel_token` is empty for a replay (the user was already withdrawn):
+    /// no new token exists and no cancel mail is sent.
+    Scheduled(WithdrawScheduled),
+    NotFound,
+    OwnerTransferRequired,
+    LastInstanceAdmin,
+}
+
+/// Source `scheduleUserErasure({ actorAdminId, userId })`. `None` when the
+/// actor is not a live instance admin (checked under the locks). Unlike the
+/// user's own withdraw there is no confirmation, and an already withdrawn
+/// target replays its deadline.
+pub async fn schedule_user_erasure(
+    pool: &PgPool,
+    actor: Uuid,
+    user_id: Uuid,
+    ip: Option<&str>,
+) -> Result<Option<AdminEraseOutcome>, sqlx::Error> {
+    let cancel = new_token();
+    let mut tx = pool.begin().await?;
+    lock_account_for(&mut tx, Some(actor), user_id).await?;
+    if !crate::db::admin::require_live_instance_admin(&mut tx, actor).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let current = match account_row(&mut tx, user_id).await? {
+        Some(row) if row.anonymized_at.is_none() => row,
+        _ => {
+            tx.rollback().await?;
+            return Ok(Some(AdminEraseOutcome::NotFound));
+        }
+    };
+    if let Some(deleted_at) = current.deleted_at {
+        tx.rollback().await?;
+        return Ok(Some(AdminEraseOutcome::Scheduled(WithdrawScheduled {
+            cancel_token: String::new(),
+            erase_at: withdrawal_deadline(deleted_at),
+            email: current.email,
+        })));
+    }
+    let outcome = schedule_erasure_locked(
+        &mut tx,
+        user_id,
+        actor,
+        current.is_instance_admin,
+        &cancel.hash,
+        ip,
+    )
+    .await?;
+    let erase_at = match outcome {
+        Ok(erase_at) => erase_at,
+        Err(refusal) => {
+            tx.rollback().await?;
+            return Ok(Some(match refusal {
+                ScheduleRefusal::OwnerTransferRequired => AdminEraseOutcome::OwnerTransferRequired,
+                ScheduleRefusal::LastInstanceAdmin => AdminEraseOutcome::LastInstanceAdmin,
+                ScheduleRefusal::NotMarked => AdminEraseOutcome::NotFound,
+            }));
+        }
+    };
     tx.commit().await?;
-    Ok(Ok(WithdrawScheduled {
+    Ok(Some(AdminEraseOutcome::Scheduled(WithdrawScheduled {
         cancel_token: cancel.token,
-        erase_at: withdrawal_deadline(at),
+        erase_at,
         email: current.email,
-    }))
+    })))
 }
 
 async fn user_id_by_cancel_hash(
@@ -462,6 +587,66 @@ pub async fn cancel_withdraw(
     .await?;
     tx.commit().await?;
     Ok(CancelWithdrawOutcome::Ok)
+}
+
+/// Source `cancelUserErasure({ actorAdminId, userId })`. `None` when the
+/// actor is not a live instance admin. Same locks as the user's token cancel,
+/// so the two serialize on the target's row: the second one sees a live row
+/// and answers `NotFound`. The restore goes through
+/// `app_admin_user_restore_withdrawn`, which rechecks the admin and the
+/// deadline itself; sessions and tokens revoked by the withdraw stay revoked.
+pub async fn admin_cancel_user_erasure(
+    pool: &PgPool,
+    actor: Uuid,
+    user_id: Uuid,
+    ip: Option<&str>,
+) -> Result<Option<CancelWithdrawOutcome>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    lock_account_for(&mut tx, Some(actor), user_id).await?;
+    if !crate::db::admin::require_live_instance_admin(&mut tx, actor).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let deleted_at = match account_row(&mut tx, user_id).await? {
+        Some(AccountRow {
+            deleted_at: Some(deleted_at),
+            anonymized_at: None,
+            ..
+        }) => deleted_at,
+        _ => {
+            tx.rollback().await?;
+            return Ok(Some(CancelWithdrawOutcome::NotFound));
+        }
+    };
+    // Wall clock after the row lock: a pre-lock `now` could cancel past the deadline.
+    if Utc::now() >= withdrawal_deadline(deleted_at) {
+        tx.rollback().await?;
+        return Ok(Some(CancelWithdrawOutcome::DeadlinePassed));
+    }
+    set_self_user(&mut tx, actor).await?;
+    let restored: bool = sqlx::query_scalar("SELECT fvoci.app_admin_user_restore_withdrawn($1)")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    clear_self_user(&mut tx).await?;
+    if !restored {
+        // Only the deadline can differ here: the definer uses the database clock.
+        tx.rollback().await?;
+        return Ok(Some(CancelWithdrawOutcome::DeadlinePassed));
+    }
+    record_account_change(
+        &mut tx,
+        user_record(
+            "user.withdraw_cancelled",
+            Some(actor),
+            user_id,
+            json!({ "userId": user_id.to_string() }),
+            ip,
+        ),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Some(CancelWithdrawOutcome::Ok))
 }
 
 /// Source `markPersonalWorkspaceDeleted`; the workspace purge job removes it.

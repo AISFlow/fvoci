@@ -23,6 +23,8 @@ pub struct RequestAuth {
     pub credential_id: Uuid,
     /// Present only for API tokens. Session auth keeps mixed content unfiltered.
     pub token_scopes: Option<Vec<ApiTokenScope>>,
+    /// The workspace an API token is bound to; `None` for sessions.
+    pub token_workspace_id: Option<Uuid>,
 }
 
 pub fn canonicalize_api_token_path(raw_path: &str) -> Result<(), AppError> {
@@ -100,6 +102,7 @@ pub async fn require_request_auth(
             user_id,
             credential_id: session_id,
             token_scopes: None,
+            token_workspace_id: None,
         });
     }
 
@@ -139,6 +142,7 @@ fn apply_token_access(
         user_id,
         credential_id: token.token_id,
         token_scopes: Some(token.scopes),
+        token_workspace_id: Some(token.workspace_id),
     })
 }
 

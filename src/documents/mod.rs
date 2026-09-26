@@ -1,3 +1,4 @@
+pub mod blocks;
 pub mod convert;
 pub mod export;
 pub mod import_body;
