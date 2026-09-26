@@ -2046,3 +2046,162 @@ pub mod test_barrier {
         }
     }
 }
+
+/// Import asset reservation (source `storeImportedAsset`, first `importTx`):
+/// the creator is still a workspace admin, the parent document is live, the
+/// workspace storage quota admits the bytes under the storage lock, and the
+/// `uploading` row plus its storage key in the job's `created_refs` commit
+/// together, so a run that dies during the object write leaves the key to
+/// the restart recovery or the orphan sweep. `Ok(Ok(None))` = fence lost.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_import_attachment(
+    pool: &PgPool,
+    quota: &StorageQuota,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    name: &str,
+    size_bytes: i64,
+    fence: crate::db::documents::ImportFence,
+) -> Result<Result<Option<(Uuid, String)>, AttachmentDbError>, sqlx::Error> {
+    let attachment_id = Uuid::now_v7();
+    let storage_key = Uuid::now_v7().to_string();
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::Forbidden));
+    }
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
+    let role = membership_role_for_update(&mut tx, workspace_id, actor_user_id).await?;
+    if !role.is_some_and(|r| r.at_least(crate::db::workspace::WorkspaceRole::Admin)) {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::Forbidden));
+    }
+    let parent: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+        "SELECT deleted_at FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR SHARE",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if !matches!(parent, Some((None,))) {
+        tx.rollback().await?;
+        return Ok(Err(AttachmentDbError::NotFound));
+    }
+    lock_workspace_storage(&mut tx, workspace_id).await?;
+    let reserved = count_reserved_bytes(&mut tx, workspace_id).await?;
+    if let Err(err) = quota.check(reserved, size_bytes) {
+        tx.rollback().await?;
+        return Ok(Err(match err {
+            StorageQuotaError::Upload => AttachmentDbError::UploadLimit,
+            StorageQuotaError::Storage => AttachmentDbError::StorageLimit,
+        }));
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.attachments (
+            id, workspace_id, document_id, task_id, uploader_id, status, name, declared_mime,
+            reserved_size_bytes, storage_key, upload_meta
+        ) VALUES ($1, $2, $3, NULL, $4, 'uploading', $5, NULL, $6, $7, '{}'::jsonb)
+        "#,
+    )
+    .bind(attachment_id)
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(actor_user_id)
+    .bind(name)
+    .bind(size_bytes)
+    .bind(&storage_key)
+    .execute(&mut *tx)
+    .await?;
+    if !crate::db::import_jobs::append_import_ref(
+        &mut tx,
+        workspace_id,
+        fence.job_id,
+        fence.lease_token,
+        crate::db::import_jobs::ImportRefKind::StoredKey,
+        &storage_key,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(Ok(None));
+    }
+    tx.commit().await?;
+    Ok(Ok(Some((attachment_id, storage_key))))
+}
+
+/// Import asset finalize (source `markStored` in the second `importTx`): the
+/// bytes are in storage; the row becomes `stored` with the sniffed MIME and
+/// is queued for extraction / preview like an uploaded file. `false` = the
+/// fence was lost or the row is no longer `uploading`.
+#[allow(clippy::too_many_arguments)]
+pub async fn mark_import_attachment_stored(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    attachment_id: Uuid,
+    name: &str,
+    mime: &str,
+    size_bytes: i64,
+    fence: crate::db::documents::ImportFence,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !crate::db::import_jobs::hold_import_fence(&mut tx, workspace_id, fence).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let image = is_image_mime(mime);
+    let preview_status = if image && crate::attachments::preview::preview_mime_supported(mime) {
+        "pending"
+    } else {
+        "skipped"
+    };
+    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
+        r#"
+        UPDATE fvoci.attachments
+        SET status = 'stored', mime = $3, size_bytes = $4, image = $5,
+            scan_status = 'skipped', extract_status = $6, preview_status = $7,
+            upload_meta = NULL, completed_at = now()
+        WHERE workspace_id = $1 AND id = $2 AND status = 'uploading'
+        RETURNING document_id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(attachment_id)
+    .bind(mime)
+    .bind(size_bytes)
+    .bind(image)
+    .bind(initial_extract_status(name, mime))
+    .bind(preview_status)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((document_id,)) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    record_attachment_event(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        "attachment.completed",
+        attachment_id,
+        json!({
+            "name": name,
+            "documentId": document_id.map(|id| id.to_string()),
+            "sizeBytes": size_bytes,
+            "mime": mime,
+        }),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}

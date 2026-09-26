@@ -22,6 +22,8 @@ on:
       - packages/**
       - scripts/generate-api.sh
       - scripts/grant-app-role.sql
+      - scripts/document-convert/**
+      - scripts/run-document-convert.sh
       - compat/fixtures/**
   push:
     branches: [main]
@@ -45,6 +47,8 @@ on:
       - packages/**
       - scripts/generate-api.sh
       - scripts/grant-app-role.sql
+      - scripts/document-convert/**
+      - scripts/run-document-convert.sh
       - compat/fixtures/**
 
 concurrency:

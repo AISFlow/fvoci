@@ -97,9 +97,12 @@ struct DrainOutcome {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // The image preview child is this binary in a hidden mode: decide before
+    // The image preview and office children are this binary in hidden modes: decide before
     // a runtime, logger or config exists, so the child holds nothing else.
     if let Some(code) = fvoci_server::attachments::preview::maybe_run_helper() {
+        std::process::exit(code);
+    }
+    if let Some(code) = fvoci_server::documents::office::maybe_run_helper() {
         std::process::exit(code);
     }
     server_main()
@@ -257,9 +260,18 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     }
     let extract_job = match ExtractJobSettings::from_env()? {
         Some(settings) => {
+            match &settings.extractor_bin {
+                Some(bin) => tracing::info!(
+                    extractor = %bin.display(),
+                    "attachment native HWP extraction enabled"
+                ),
+                None => tracing::info!(
+                    "attachment native HWP extraction disabled (FVOCI_EXTRACTOR_BIN unset)"
+                ),
+            }
             tracing::info!(
-                extractor = %settings.extractor_bin.display(),
-                "attachment native extraction enabled"
+                office = settings.office_helper.is_some(),
+                "attachment office/text extraction configured"
             );
             Some(spawn_extract_job_with_embedder(
                 settings,
@@ -269,10 +281,10 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             ))
         }
         None => {
-            tracing::info!("attachment native extraction disabled (FVOCI_EXTRACTOR_BIN unset)");
+            tracing::warn!("attachment extraction disabled: no helper available");
             if search_embedder.is_some() {
                 tracing::warn!(
-                    "attachment chunks are embedded by the extract job; without FVOCI_EXTRACTOR_BIN no new vectors are written"
+                    "attachment chunks are embedded by the extract job; without an extraction helper no new vectors are written"
                 );
             }
             None

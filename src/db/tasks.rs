@@ -942,32 +942,63 @@ pub async fn create_task(
 ) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    lock_membership_users(&mut tx, &[actor_user_id]).await?;
-    if !recheck_session(&mut tx, actor_user_id, session_id).await? {
-        tx.rollback().await?;
+    let created = create_task_tx(
+        &mut tx,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        input,
+        client_ip,
+        channel,
+    )
+    .await?;
+    match created {
+        Ok(row) => {
+            tx.commit().await?;
+            Ok(Ok(row))
+        }
+        Err(err) => {
+            tx.rollback().await?;
+            Ok(Err(err))
+        }
+    }
+}
+
+/// `create_task` inside the caller's tenant transaction (import runs append
+/// their fenced ref in the same transaction). The caller rolls back on `Err`.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_task_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateTaskInput<'_>,
+    client_ip: Option<&str>,
+    channel: &str,
+) -> Result<Result<TaskMetaRow, ProjectDbError>, sqlx::Error> {
+    lock_membership_users(tx, &[actor_user_id]).await?;
+    if !recheck_session(tx, actor_user_id, session_id).await? {
         return Ok(Err(ProjectDbError::Forbidden));
     }
-    if !workspace_is_live(&mut tx, workspace_id).await? {
-        tx.rollback().await?;
+    if !workspace_is_live(tx, workspace_id).await? {
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let locked = lock_project(&mut tx, workspace_id, project_id).await?;
+    let locked = lock_project(tx, workspace_id, project_id).await?;
     let Some(locked) = locked else {
-        tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     };
     if locked.status == "archived" {
-        tx.rollback().await?;
         return Ok(Err(ProjectDbError::Archived));
     }
-    let permission = project_permission(&mut tx, workspace_id, actor_user_id, &locked).await?;
+    let permission = project_permission(tx, workspace_id, actor_user_id, &locked).await?;
     if !permission.at_least(ProjectPermission::Edit) {
-        tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
 
-    match insert_task_in_locked_project(
-        &mut tx,
+    insert_task_in_locked_project(
+        tx,
         workspace_id,
         project_id,
         actor_user_id,
@@ -975,17 +1006,7 @@ pub async fn create_task(
         client_ip,
         channel,
     )
-    .await?
-    {
-        Ok(task) => {
-            tx.commit().await?;
-            Ok(Ok(task))
-        }
-        Err(err) => {
-            tx.rollback().await?;
-            Ok(Err(err))
-        }
-    }
+    .await
 }
 
 /// Inserts a task into a project the caller has already locked and authorized
@@ -3629,4 +3650,103 @@ pub(crate) async fn list_open_assigned_in_tx(
             )
         })
         .collect())
+}
+
+/// Import variant of [`create_task`] (source `importNotionDatabases` row
+/// `importTx`): the creator must still be a workspace admin with edit access
+/// to the project, the optional assignee is attached only while still a
+/// member, and the task id joins the job's `created_refs` in the same
+/// transaction. `Ok(Ok(None))` = the job's fence was lost.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_import_task(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CreateTaskInput<'_>,
+    assignee: Option<Uuid>,
+    fence: crate::db::documents::ImportFence,
+) -> Result<Result<Option<Uuid>, ProjectDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    lock_membership_users(&mut tx, &[actor_user_id]).await?;
+    let role = crate::db::workspace::membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    if !role.is_some_and(|r| r.at_least(crate::db::workspace::WorkspaceRole::Admin)) {
+        tx.rollback().await?;
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    let created = create_task_tx(
+        &mut tx,
+        workspace_id,
+        project_id,
+        actor_user_id,
+        session_id,
+        input,
+        None,
+        "web",
+    )
+    .await?;
+    let row = match created {
+        Ok(row) => row,
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    };
+    if let Some(user_id) = assignee {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.task_assignees (workspace_id, task_id, user_id)
+            SELECT $1, $2, $3
+            WHERE EXISTS (
+                SELECT 1 FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $3
+            )
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(row.id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if !crate::db::import_jobs::append_import_ref(
+        &mut tx,
+        workspace_id,
+        fence.job_id,
+        fence.lease_token,
+        crate::db::import_jobs::ImportRefKind::Task,
+        &row.id.to_string(),
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(Ok(None));
+    }
+    tx.commit().await?;
+    Ok(Ok(Some(row.id)))
+}
+
+/// Status ids and names of a project's workflow (import status matching).
+pub async fn project_status_names(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT id, name FROM fvoci.statuses
+        WHERE workspace_id = $1 AND project_id = $2
+        ORDER BY sort_key COLLATE "C", id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(project_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
 }
