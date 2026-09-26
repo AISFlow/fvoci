@@ -233,3 +233,7 @@ GRANT EXECUTE ON FUNCTION fvoci.app_workspace_sso_id_by_slug(text) TO :"app_role
 -- 032 admin user erasure cancel.
 REVOKE EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) TO :"app_role";
+
+-- 035 identity link issuer (write-once backfill; no UPDATE on the table).
+REVOKE EXECUTE ON FUNCTION fvoci.app_identity_link_backfill_issuer(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_identity_link_backfill_issuer(uuid, text) TO :"app_role";

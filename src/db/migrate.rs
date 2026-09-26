@@ -48,6 +48,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/032_admin_user_erase.sql"),
         32,
     ),
+    (
+        include_str!("../../migrations/035_identity_link_issuer.sql"),
+        35,
+    ),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -498,6 +502,10 @@ mod tests {
         (
             32,
             "dbf49b5d5bf969376406208582f976bd9cc4d04a8b2d76d90fee53d2902b3687",
+        ),
+        (
+            35,
+            "9ab2a7432d458d2663e3caa796cf9ac71a6cda1117a94d1ccdeb5c8bc8585b69",
         ),
     ];
 

@@ -25,6 +25,14 @@ pub struct LinkRow {
 }
 
 type LinkTuple = (Uuid, Uuid, String, Option<String>, DateTime<Utc>);
+type IssuedLinkTuple = (
+    Uuid,
+    Uuid,
+    String,
+    Option<String>,
+    DateTime<Utc>,
+    Option<String>,
+);
 
 fn link_from(t: LinkTuple) -> LinkRow {
     LinkRow {
@@ -36,17 +44,45 @@ fn link_from(t: LinkTuple) -> LinkRow {
     }
 }
 
-/// Sign-in lookup: no user is known yet, so it runs in system context.
+/// Result of looking a provider subject up for sign-in.
+#[derive(Debug)]
+pub enum LinkLookup {
+    /// No link holds this subject.
+    Missing,
+    /// A link holds this subject but was verified by another issuer (the
+    /// provider was reconfigured and the new IdP reuses the `sub`): it is not
+    /// this identity, and its subject stays taken.
+    OtherIssuer,
+    Found(LinkRow),
+}
+
+impl LinkLookup {
+    pub fn found(self) -> Option<LinkRow> {
+        match self {
+            Self::Found(link) => Some(link),
+            Self::Missing | Self::OtherIssuer => None,
+        }
+    }
+
+    pub fn subject_taken(&self) -> bool {
+        !matches!(self, Self::Missing)
+    }
+}
+
+/// Sign-in lookup: no user is known yet, so it runs in system context. A
+/// link made before 035 has no issuer; it matches and records `issuer` in
+/// the same transaction (write-once), so later sign-ins must match it.
 pub async fn find_link(
     pool: &PgPool,
     provider: &str,
     subject: &str,
-) -> Result<Option<LinkRow>, sqlx::Error> {
+    issuer: &str,
+) -> Result<LinkLookup, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
-    let row: Option<LinkTuple> = sqlx::query_as(
+    let row: Option<IssuedLinkTuple> = sqlx::query_as(
         r#"
-        SELECT id, user_id, provider, email, created_at
+        SELECT id, user_id, provider, email, created_at, issuer
         FROM fvoci.identity_links
         WHERE provider = $1 AND provider_user_id = $2
         "#,
@@ -55,8 +91,29 @@ pub async fn find_link(
     .bind(subject)
     .fetch_optional(&mut *tx)
     .await?;
+    let Some((id, user_id, provider, email, created_at, stored_issuer)) = row else {
+        tx.commit().await?;
+        return Ok(LinkLookup::Missing);
+    };
+    let matches = match stored_issuer.as_deref() {
+        Some(stored) => stored == issuer,
+        None => {
+            sqlx::query_scalar("SELECT fvoci.app_identity_link_backfill_issuer($1, $2)")
+                .bind(id)
+                .bind(issuer)
+                .fetch_one(&mut *tx)
+                .await?
+        }
+    };
     tx.commit().await?;
-    Ok(row.map(link_from))
+    if !matches {
+        // No subject, issuer or email values are logged.
+        tracing::warn!(provider = %provider, "oidc.link_issuer_mismatch");
+        return Ok(LinkLookup::OtherIssuer);
+    }
+    Ok(LinkLookup::Found(link_from((
+        id, user_id, provider, email, created_at,
+    ))))
 }
 
 async fn links_in_tx(
@@ -90,6 +147,9 @@ pub struct NewLink<'a> {
     pub user_id: Uuid,
     pub provider: &'a str,
     pub subject: &'a str,
+    /// The issuer that verified the subject (discovery issuer, or the
+    /// configured base URL of an OAuth2 provider without discovery).
+    pub issuer: &'a str,
     pub email: Option<&'a str>,
     pub workspace_id: Option<Uuid>,
 }
@@ -104,8 +164,8 @@ pub(crate) async fn insert_link(
     let id = Uuid::now_v7();
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         r#"
-        INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, email)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, email, issuer)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT DO NOTHING
         RETURNING id
         "#,
@@ -115,6 +175,7 @@ pub(crate) async fn insert_link(
     .bind(link.provider)
     .bind(link.subject)
     .bind(link.email)
+    .bind(link.issuer)
     .fetch_optional(&mut **tx)
     .await?;
     if inserted.is_some() {
@@ -148,17 +209,18 @@ pub enum LinkOutcome {
 }
 
 /// Source `linkIdentity`: the subject must be free and the user must not
-/// already have a link for this provider.
-pub async fn link_for_user(pool: &PgPool, link: &NewLink<'_>) -> Result<LinkOutcome, sqlx::Error> {
+/// already have a link for this provider. The session that started the flow
+/// is rechecked under the sign-in lock, so a logout or revocation that
+/// committed while the provider round-trip was in flight wins (the source
+/// only compares the user id captured when the callback started).
+pub async fn link_for_user(
+    pool: &PgPool,
+    session_id: Uuid,
+    link: &NewLink<'_>,
+) -> Result<LinkOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_sign_in(&mut tx, link.user_id).await?;
-    let live: Option<(bool,)> = sqlx::query_as(
-        "SELECT deleted_at IS NULL AND suspended_at IS NULL FROM fvoci.users WHERE id = $1",
-    )
-    .bind(link.user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if live != Some((true,)) {
+    if !recheck_session(&mut tx, link.user_id, session_id).await? {
         tx.rollback().await?;
         return Ok(LinkOutcome::SessionGone);
     }
@@ -396,6 +458,8 @@ pub struct WorkspaceOidcInput<'a> {
     pub label: &'a str,
 }
 
+/// Existing identity links are left alone: they keep the issuer that
+/// verified them, so a new issuer's same `sub` does not reach old accounts.
 pub async fn upsert_workspace_oidc(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -523,6 +587,7 @@ pub struct JitInput<'a> {
     pub domain: &'a str,
     pub given_name: &'a str,
     pub subject: &'a str,
+    pub issuer: &'a str,
 }
 
 /// Source `tryJitJoin` transaction: under the admission lock, recheck the
@@ -581,6 +646,7 @@ pub async fn jit_join(pool: &PgPool, input: JitInput<'_>) -> Result<JitOutcome, 
             user_id,
             provider: "generic",
             subject: input.subject,
+            issuer: input.issuer,
             email: Some(input.email),
             workspace_id: Some(input.workspace_id),
         },
