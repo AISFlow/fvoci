@@ -136,7 +136,7 @@ pub async fn load_sources(
             SELECT 'task'::text AS kind, t.id AS resource_id, t.workspace_id,
                    t.project_id, NULL::uuid AS document_id, t.id AS task_id,
                    NULL::uuid AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
-                   t.title, ''::text AS body, ''::text AS chosung,
+                   t.title, t.text AS body, t.chosung,
                    date_trunc('milliseconds', t.updated_at) AS ua, NULL::jsonb AS embedding
             FROM fvoci.tasks t
             WHERE t.workspace_id = $1 AND t.id = $2
@@ -372,7 +372,7 @@ async fn query_tasks(
         SELECT 'task'::text AS kind, t.id AS resource_id, t.workspace_id,
                t.project_id, NULL::uuid AS document_id, t.id AS task_id,
                NULL::uuid AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
-               t.title, ''::text AS body, ''::text AS chosung,
+               t.title, t.text AS body, t.chosung,
                date_trunc('milliseconds', t.updated_at) AS ua, NULL::jsonb AS embedding
         FROM fvoci.tasks t
         WHERE t.workspace_id = $1 AND t.deleted_at IS NULL AND t.archived_at IS NULL

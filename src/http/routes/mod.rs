@@ -26,6 +26,7 @@ pub mod search;
 pub mod setup;
 pub mod share;
 pub mod stars;
+pub mod task_body;
 pub mod task_ops;
 pub mod tasks;
 pub mod workspaces;
