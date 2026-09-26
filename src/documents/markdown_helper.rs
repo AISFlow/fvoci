@@ -183,7 +183,8 @@ impl MarkdownHelper {
         }
     }
 
-    /// The running server binary.
+    /// The running server binary. Call only from `fvoci-server`: the
+    /// `fvoci-migrate` doctor resolves its sibling server executable instead.
     pub fn current_exe() -> std::io::Result<Self> {
         std::env::current_exe().map(Self::new)
     }

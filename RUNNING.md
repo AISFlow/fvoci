@@ -856,7 +856,12 @@ this build), `pg_connection_budget` (collab rooms + pool + reserve ≤
 `meilisearch` (the scoped key reads its index), `smtp` (connect/EHLO/STARTTLS
 when offered; no mail sent),
 `collab_engine` (spawn and ping; a set path that is not a file fails because
-the server would silently disable collaboration) and `extractor`. Optional
+the server would silently disable collaboration), `extractor`, and
+`document_convert` (run a small Markdown→Tiptap/HTML conversion and MD, DOCX,
+PDF, PPTX exports through the sibling `fvoci-server` binary). A missing,
+nonexecutable, or wrong server binary or unavailable PDF font files fails this
+check. It confirms basic converter readiness and output structure; independent
+reader and renderer tests cover export quality. Optional
 features that are unset report `disabled (...)`. Nothing is created, migrated or
 sent, and database URLs in details are masked.
 
