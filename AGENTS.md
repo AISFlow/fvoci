@@ -50,6 +50,9 @@ worktree별 target 디렉터리, 실행별 DB/Redis prefix/검색 index/스토�
 
 작업 전에 필요한 계약을 찾고, 변경 후 최소 충분한 검사를 실행한다. 실제 RLS·잠금·원자성은 실제 DB와 앱 역할로 검증한다. mock, skip, retry, timeout 증액으로 실패를 숨기지 않는다. 워커의 관련 검사와 통합 SHA의 수락 검사를 구분한다.
 
+표준 처리에는 현재 의존성 또는 유지보수되는 Rust 구현을 우선하고, FVOCI 정책만 얇게 연결한다.
+RFC/공식 명세를 직접 재구현하기 전에 아래 표준 구현 스킬로 적용 범위·보안 설정·교체 비용을 확인한다.
+
 ## 도구와 권한
 
 개발용 MCP 정책·실제 연결은 환경 기록을 따른다. 가능한 네이티브 도구를 중복 MCP로 만들지 않는다. 원본 GitHub는 읽기 전용이고 대상 원격 쓰기·수락은 승인된 코디네이터가 담당한다. 운영 DB·배포·시크릿 권한을 워커에게 주지 않는다.
@@ -62,11 +65,15 @@ worktree별 target 디렉터리, 실행별 DB/Redis prefix/검색 index/스토�
 | --- | --- |
 | 원본 계약 조사 | `.agents/skills/fvoci-source-contract/SKILL.md` |
 | Rust 수직 구현 | `.agents/skills/fvoci-rust-slice/SKILL.md` |
+| RFC·공식 프로토콜·파서·직렬화·SDK 선택/교체 | `.agents/skills/fvoci-standard-implementations/SKILL.md` |
+| Node 대체·바이너리·child·배포/build 경계 | `.agents/skills/fvoci-runtime-boundaries/SKILL.md` |
 | 인증·인가·DB·migration | `.agents/skills/fvoci-db-security/SKILL.md` |
 | 검사 선택·실패·시간 측정 | `.agents/skills/fvoci-fast-verify/SKILL.md` |
 | 제출·검토·통합·재개·정리 | `.agents/skills/fvoci-handoff/SKILL.md` |
 
 스킬은 이 정본에서 읽는다. 클라이언트 자동 탐색은 실제 세션에서 확인한다. 지원하지 않으면 필요한 파일만 명시적으로 읽힌다. 모델마다 전문을 복제하지 않는다.
+스킬은 재사용 절차만 보관하고 참조 자료는 관련 작업에서만 읽는다. 현재 PR/SHA·Pending 상태·로그는
+`docs/rewrite.md`와 거기서 연결한 인계 기록에, 모델/권한은 이 파일에, 도구 설정은 환경 기록에 둔다.
 
 ## 작업 제출
 
@@ -96,20 +103,13 @@ PR 수락·머지는 전체 작업 종료가 아니다. 기능 대응표에서 �
 
 ## 제품 런타임은 Rust다
 
-서버 측 제품 기능은 Rust 구현이 기준이다. Rust에서 기존 TypeScript를 호출하는 것은 포팅 완료가
-아니다. 현재 Node 문서 변환 helper는 승인된 영구 예외가 아니라 Rust로 옮겨야 할 잔여 포팅이며,
-새 기능의 Node 의존 확장은 중단한다. 최종 런타임에는 Node/Bun/Deno 서버 기능, JS 백엔드·worker
-위임, 내장 JS 엔진, JS 런타임 번들 실행 파일, 외부 변환 서비스로의 이전을 남기지 않는다. 기존
-React/Tiptap 프론트엔드와 브라우저 JS, 프론트엔드 빌드·검사용 Node 도구, 원본 TS를 테스트
-oracle로 쓰는 것, 합의한 PostgreSQL·Meilisearch·S3·SMTP는 허용한다. 동작하는 경로는 Rust 대체와
-계약 검증을 끝낸 단위부터 전환하고, 최종 수락은 Node가 없는 깨끗한 환경에서 실제 경로를 실행한다.
-
-실행 파일 경계는 근거로 정한다. Cargo crate·배포 바이너리·프로세스·운영 서비스는 다른 개념이다.
-운영자 진입점(serve·migrate·doctor·MCP)의 통합은 검토하되, 서버 모드는 migration 소유자
-credential을 읽지 않고 기동 시 migration을 수행하지 않는다. parser·CRDT처럼 격리가 필요한 작업은
-child process를 유지할 수 있으며 기존 timeout·메모리 제한·종료 회수를 지킨다. 같은 실행 파일을
-child로 쓰면 내부 모드는 서버 초기화·credential 로딩 전에 분기한다. rlimit·env_clear를
-파일시스템·네트워크 sandbox라고 주장하지 않는다.
+서버 측 제품 연산은 Rust가 기준이며 남아 있는 Node 변환 경로는 영구 예외가 아니라 잔여 포팅이다.
+새 Node 의존은 늘리지 않는다. 최종 제품에 Node/Bun/Deno 서버 기능·JS worker 위임·내장 JS 엔진·
+JS 런타임 번들·외부 변환 서비스로의 우회를 남기지 않는다. 기존 React/Tiptap·브라우저 JS·개발용
+Node/CodeGraph·TS 비교 oracle와 합의한 PostgreSQL·Meilisearch·S3·SMTP는 별개다.
+서버 모드에 migration 소유자 credential이나 기동 시 자동 migration을 넣지 않고, 필요한 parser·CRDT
+process 격리를 유지한다. 대체·바이너리/명령 통합·비용 비교·Node 없는 최종 검증의 절차는
+[실행 경계 스킬](.agents/skills/fvoci-runtime-boundaries/SKILL.md)을 해당 작업에서만 읽는다.
 
 ## 로컬과 원격 검증
 
@@ -125,7 +125,7 @@ child로 쓰면 내부 모드는 서버 초기화·credential 로딩 전에 분�
 고정 원본 기준과 승인된 최종 지원 범위는 docs/rewrite.md의 기능 대응표로 추적한다.
 개별 task·PR 완료로 종료하지 않고 의존성이 준비된 다음 제품 기능을 이어간다.
 전체 완료는 기능/UI 연결, 보안·데이터·복구, 지원 DB·플랫폼, 배포 산출물의
-필수 검증과 Opus 검토를 마치고 main에 수락됐을 때만 선언한다. 미구현·미연결·
+필수 검증과 현재 역할표의 독립 검토를 마치고 main에 수락됐을 때만 선언한다. 미구현·미연결·
 부분 검증·원본부터 미구현을 구분하며 opt-in이나 후속 분류로 범위를 제외하지 않는다.
 세션 한계에서는 기존 진행 기록에 검증 SHA·미수락 diff·활성 소유권·실패·다음
 명령·CI 상태·잔존 자원을 남긴다. 설정되지 않은 백그라운드 실행을 약속하지 않는다.
