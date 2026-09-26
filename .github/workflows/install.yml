@@ -2,56 +2,10 @@ name: Container install
 
 on:
   pull_request:
-    paths:
-      - .github/workflows/**
-      - infra/rust/**
-      - scripts/install-smoke.sh
-      - scripts/install-smoke-documents.py
-      - scripts/install-smoke-collab.mjs
-      - scripts/backup.sh
-      - scripts/restore.sh
-      - scripts/backup-restore-smoke.sh
-      - Dockerfile
-      - .dockerignore
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - migrations/**
-      - src/**
-      - crates/**
-      - vendor/**
-      - apps/web/**
-      - packages/**
-      - scripts/generate-api.sh
-      - scripts/grant-app-role.sql
-      - scripts/encryption_keys.py
-      - compat/fixtures/**
   push:
     branches: [main]
-    paths:
-      - .github/workflows/**
-      - infra/rust/**
-      - scripts/install-smoke.sh
-      - scripts/install-smoke-documents.py
-      - scripts/install-smoke-collab.mjs
-      - scripts/backup.sh
-      - scripts/restore.sh
-      - scripts/backup-restore-smoke.sh
-      - Dockerfile
-      - .dockerignore
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - migrations/**
-      - src/**
-      - crates/**
-      - vendor/**
-      - apps/web/**
-      - packages/**
-      - scripts/generate-api.sh
-      - scripts/grant-app-role.sql
-      - scripts/encryption_keys.py
-      - compat/fixtures/**
+  merge_group:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
@@ -61,7 +15,35 @@ permissions:
   contents: read
 
 jobs:
+  ci-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      reason_code: ${{ steps.plan.outputs.reason_code }}
+      plan_ok: ${{ steps.plan.outputs.plan_ok }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
+      select_install_smoke: ${{ steps.plan.outputs.select_install_smoke }}
+      select_backup_restore_smoke: ${{ steps.plan.outputs.select_backup_restore_smoke }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
+          python3 scripts/ci_selection.py plan \
+            --workflow install \
+            --event-json "$GITHUB_EVENT_PATH" \
+            --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
+            --github-output "$GITHUB_OUTPUT"
+
   install-smoke:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_install_smoke == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -84,6 +66,8 @@ jobs:
 
   # Native GitHub-hosted ubuntu-24.04 and ubuntu-24.04-arm (not a cross-build).
   backup-restore-smoke:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_backup_restore_smoke == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -102,3 +86,19 @@ jobs:
           node-version: '24.21.0'
       - name: Run container backup/restore smoke
         run: bash scripts/backup-restore-smoke.sh
+
+  install-ci-gate:
+    name: install-ci-gate
+    needs: [ci-plan, install-smoke, backup-restore-smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Fail closed on selection results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_selection.py gate --workflow install --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"

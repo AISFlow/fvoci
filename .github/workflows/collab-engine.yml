@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+  workflow_dispatch:
 
 # Only obsolete runs of this workflow on the same PR are cancelled.
 concurrency:
@@ -20,7 +22,34 @@ permissions:
   contents: read
 
 jobs:
+  ci-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      reason_code: ${{ steps.plan.outputs.reason_code }}
+      plan_ok: ${{ steps.plan.outputs.plan_ok }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
+      select_native_collab_engine: ${{ steps.plan.outputs.select_native_collab_engine }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
+          python3 scripts/ci_selection.py plan \
+            --workflow collab-engine \
+            --event-json "$GITHUB_EVENT_PATH" \
+            --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
+            --github-output "$GITHUB_OUTPUT"
+
   native-collab-engine:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_native_collab_engine == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -59,3 +88,19 @@ jobs:
         run: cargo test --locked --offline --all-targets --features worker
       - name: Parent API compiles without the CRDT engine
         run: cargo check --locked --offline --lib --no-default-features
+
+  collab-engine-ci-gate:
+    name: collab-engine-ci-gate
+    needs: [ci-plan, native-collab-engine]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Fail closed on selection results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_selection.py gate --workflow collab-engine --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"
