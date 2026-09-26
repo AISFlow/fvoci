@@ -291,7 +291,9 @@ export function TaskDetailPage() {
             number: item.number,
             title: item.title,
           }))}
-          readOnly={!task.data.canEdit || task.data.archivedAt !== null}
+          readOnly={
+            !task.data.canEdit || task.data.archivedAt !== null || project?.status === "archived"
+          }
           canEdit={task.data.canEdit}
           pending={pending}
           fieldError={fieldError}
