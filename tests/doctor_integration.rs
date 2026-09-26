@@ -98,6 +98,8 @@ fn passthrough(envs: &mut Vec<(&'static str, String)>, names: &[&'static str]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doctor_passes_a_healthy_install_and_names_each_broken_setting() {
+    // The doctor launches this sibling executable for its conversion check.
+    assert!(std::path::Path::new(env!("CARGO_BIN_EXE_fvoci-server")).is_file());
     let harness = TestDb::bootstrap().await;
     let storage = std::env::temp_dir().join(format!("fvoci-doctor-store-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage).unwrap();
@@ -114,15 +116,10 @@ async fn doctor_passes_a_healthy_install_and_names_each_broken_setting() {
         ("SMTP_FROM", "doctor@example.com".to_string()),
     ];
     // Helpers and Meili are checked when this environment provides them (CI
-    // sets the convert helper and Meili; the collab job sets the engine).
+    // sets Meili; the collab job sets the engine).
     passthrough(
         &mut healthy,
-        &[
-            "FVOCI_DOCUMENT_CONVERT_BIN",
-            "FVOCI_COLLAB_ENGINE",
-            "FVOCI_MEILI_URL",
-            "FVOCI_MEILI_KEY",
-        ],
+        &["FVOCI_COLLAB_ENGINE", "FVOCI_MEILI_URL", "FVOCI_MEILI_KEY"],
     );
     let (code, report, _) = doctor(&healthy).await;
     assert_eq!(code, 0, "{report}");
@@ -141,8 +138,8 @@ async fn doctor_passes_a_healthy_install_and_names_each_broken_setting() {
         "storage",
         "meilisearch",
         "smtp",
-        "document_convert",
         "extractor",
+        "document_convert",
     ] {
         assert_eq!(check(&report, name)["ok"], true, "{name}: {report}");
     }
@@ -151,10 +148,7 @@ async fn doctor_passes_a_healthy_install_and_names_each_broken_setting() {
         "disabled (FVOCI_EXTRACTOR_BIN unset)"
     );
     // Probes provided by the environment actually ran (not "disabled").
-    for (var, name) in [
-        ("FVOCI_DOCUMENT_CONVERT_BIN", "document_convert"),
-        ("FVOCI_MEILI_URL", "meilisearch"),
-    ] {
+    for (var, name) in [("FVOCI_MEILI_URL", "meilisearch")] {
         if healthy.iter().any(|(k, _)| *k == var) {
             assert!(
                 check(&report, name).get("detail").is_none(),

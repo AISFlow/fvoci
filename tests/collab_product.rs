@@ -601,7 +601,6 @@ async fn collab_app_state_with_config(app_url: &str, cfg: CollabConfig) -> AppSt
         collab: Some(Arc::new(CollabHub::new(cfg, pool))),
         meili: None,
         search_embedder: None,
-        document_convert: None,
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"
@@ -653,7 +652,6 @@ async fn collab_app_state(
         collab,
         meili: None,
         search_embedder: None,
-        document_convert: None,
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                 "CARGO_BIN_EXE_fvoci-server"

@@ -1965,11 +1965,7 @@ async fn ai_routes_are_member_gated_and_use_the_document_markdown() {
     let harness = TestDb::bootstrap().await;
     let (_, cookie, _, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
-    let convert = fvoci_server::documents::convert::ConvertClient::from_env().expect(
-        "FVOCI_DOCUMENT_CONVERT_BIN is required; run scripts/prepare-document-convert.sh first",
-    );
-    let mut state = app_state(&harness.app_url).await;
-    state.document_convert = Some(convert);
+    let state = app_state(&harness.app_url).await;
     let enabled = Arc::new(Integrations {
         ai: Some(AiConfig::new("ai-secret")),
         ..(*integrations(outbound("", &[]))).clone()
@@ -2824,11 +2820,7 @@ async fn ai_routes_follow_document_permission_and_rate_limit() {
     let harness = TestDb::bootstrap().await;
     let (_, cookie, owner_id, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
-    let convert = fvoci_server::documents::convert::ConvertClient::from_env().expect(
-        "FVOCI_DOCUMENT_CONVERT_BIN is required; run scripts/prepare-document-convert.sh first",
-    );
-    let mut state = app_state(&harness.app_url).await;
-    state.document_convert = Some(convert);
+    let state = app_state(&harness.app_url).await;
     let enabled = Arc::new(Integrations {
         ai: Some(AiConfig::new("ai-secret")),
         ..(*integrations(outbound("", &[]))).clone()

@@ -3,9 +3,10 @@ name: Container install
 on:
   pull_request:
     paths:
-      - .github/workflows/install.yml
+      - .github/workflows/**
       - infra/rust/**
       - scripts/install-smoke.sh
+      - scripts/install-smoke-documents.py
       - scripts/install-smoke-collab.mjs
       - scripts/backup.sh
       - scripts/restore.sh
@@ -24,15 +25,14 @@ on:
       - scripts/generate-api.sh
       - scripts/grant-app-role.sql
       - scripts/encryption_keys.py
-      - scripts/document-convert/**
-      - scripts/run-document-convert.sh
       - compat/fixtures/**
   push:
     branches: [main]
     paths:
-      - .github/workflows/install.yml
+      - .github/workflows/**
       - infra/rust/**
       - scripts/install-smoke.sh
+      - scripts/install-smoke-documents.py
       - scripts/install-smoke-collab.mjs
       - scripts/backup.sh
       - scripts/restore.sh
@@ -51,8 +51,6 @@ on:
       - scripts/generate-api.sh
       - scripts/grant-app-role.sql
       - scripts/encryption_keys.py
-      - scripts/document-convert/**
-      - scripts/run-document-convert.sh
       - compat/fixtures/**
 
 concurrency:
