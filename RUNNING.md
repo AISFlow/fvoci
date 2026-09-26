@@ -630,13 +630,13 @@ Either failure stops the restore before the server starts.
 Then it starts the server. Confirm login with the original password, document
 body, attachment bytes, extraction text, and tasks.
 
-Upgrading to migration 035 (identity link issuer): links created before 035
-have `issuer IS NULL` and adopt the verified issuer of their next successful
-sign-in. If you changed a workspace's SSO issuer before upgrading, review
-`SELECT id, provider, user_id FROM fvoci.identity_links WHERE issuer IS NULL`
-first and unlink the accounts you do not expect the new IdP to own; after the
-first sign-in the link is pinned and a different issuer with the same subject
-is refused.
+Links created before migration 035 can have `issuer IS NULL`. With migration
+038 these links remain unchanged and sign-in is refused: a new token cannot
+establish their historical issuer. An already authenticated account holder can
+unlink and reconnect through the normal account flow. An account holder with
+no other trusted sign-in method needs verified account recovery; do not infer
+ownership from the new token's email or subject. Review affected links with
+`SELECT id, provider, user_id FROM fvoci.identity_links WHERE issuer IS NULL`.
 
 Upgrading to migration 036 (Microsoft tenant issuer): Microsoft
 `common`/`organizations`/`consumers` sign-ins now record the tenant issuer the
