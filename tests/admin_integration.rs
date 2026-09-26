@@ -18,6 +18,7 @@ use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
 use rand::RngCore;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -2517,6 +2518,56 @@ async fn verify_storage_covers_branding_assets() {
     assert_eq!(report.branding_mismatch, vec!["logo"]);
     assert_eq!(report.branding_missing, vec!["favicon"]);
     assert!(!report.is_complete());
+    pool.close().await;
+    h.finish().await;
+}
+
+/// Persisted branding assets are verified after restore even when the instance
+/// is unlicensed and admin routes no longer project them into effective values.
+#[tokio::test]
+async fn verify_storage_checks_persisted_branding_when_unlicensed() {
+    let h = harness_unlicensed().await;
+    let storage: fvoci_server::attachments::ObjectStorage =
+        fvoci_server::attachments::LocalStorage::new(h.storage_root.clone()).into();
+    let pool = pool::connect_app(&h.db.app_url).await.unwrap();
+    let png = tiny_png();
+    let key = Uuid::now_v7();
+    let sha256 = hex::encode(Sha256::digest(&png));
+    storage
+        .put_bytes(&key.to_string(), png)
+        .await
+        .expect("logo object");
+    let stored = json!({
+        "name": "Stored Brand",
+        "smtpFromDisplay": null,
+        "logo": {"key": key, "sha256": sha256, "mime": "image/png"},
+        "favicon": null,
+        "loginBrandText": null
+    });
+    let admin = h.db.admin().await;
+    sqlx::query("INSERT INTO fvoci.instance_settings (key, value) VALUES ('branding', $1)")
+        .bind(&stored)
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let effective = get(
+        &h.app,
+        "/api/v1/admin/instance-settings",
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(effective.status, StatusCode::OK);
+    assert_eq!(effective.json["values"]["branding"]["name"], "FVOCI");
+    assert!(effective.json["values"]["branding"]["logo"].is_null());
+
+    let report = fvoci_server::attachments::verify_stored_objects(&pool, &storage)
+        .await
+        .unwrap();
+    assert_eq!(report.branding_checked, 1);
+    assert!(report.is_complete(), "{report:?}");
+
     pool.close().await;
     h.finish().await;
 }
