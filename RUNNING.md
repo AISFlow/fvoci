@@ -686,28 +686,23 @@ Either failure stops the restore before the server starts.
 Then it starts the server. Confirm login with the original password, document
 body, attachment bytes, extraction text, and tasks.
 
-Upgrading to migration 035 (identity link issuer): links created before 035
-have `issuer IS NULL` and adopt the verified issuer of their next successful
-sign-in. If you changed a workspace's SSO issuer before upgrading, review
-`SELECT id, provider, user_id FROM fvoci.identity_links WHERE issuer IS NULL`
-first and unlink the accounts you do not expect the new IdP to own; after the
-first sign-in the link is pinned and a different issuer with the same subject
-is refused.
+Links created before migration 035 can have `issuer IS NULL`. With migration
+038 these links remain unchanged and sign-in is refused: a new token cannot
+establish their historical issuer. An already authenticated account holder can
+unlink and reconnect through the normal account flow. An account holder with
+no other trusted sign-in method needs verified account recovery; do not infer
+ownership from the new token's email or subject. Review affected links with
+`SELECT id, provider, user_id FROM fvoci.identity_links WHERE issuer IS NULL`.
 
 Upgrading to migration 036 (Microsoft tenant issuer): Microsoft
 `common`/`organizations`/`consumers` sign-ins now record the tenant issuer the
 id_token was verified against (the discovery template with the token's `tid`,
 which must be a GUID), so a link is pinned to one tenant and another tenant's
-same `sub` is refused. Links saved earlier hold the literal template
-(`https://login.microsoftonline.com/{tenantid}/v2.0`); such a link still
-matches any tenant of that template and is re-pinned to the tenant of its next
-successful sign-in. Only a stored value equal to the provider's template is
-rewritten, nothing else. The re-pin happens only while the provider is still
-configured with the `{tenantid}` template; if the provider is changed to a
-single tenant first, legacy template links fail closed (`oidc_not_linked`)
-until the user unlinks and links again. Until then the template link does not separate
-tenants (the per-app Microsoft `sub` still does); to review them before
-upgrading, `SELECT id, user_id FROM fvoci.identity_links WHERE provider =
+same `sub` is refused. Earlier links with a NULL issuer or a literal template
+(`https://login.microsoftonline.com/{tenantid}/v2.0`) fail closed with
+`oidc_not_linked` and remain unchanged. The account holder can use an existing
+authenticated session to unlink and reconnect, which stores the verified issuer.
+Review template links with `SELECT id, user_id FROM fvoci.identity_links WHERE provider =
 'microsoft' AND issuer LIKE '%{tenantid}%'`. A JWKS key that names an
 `issuer` (Microsoft's common key set does) only verifies id_tokens from that
 issuer or, for a `{tenantid}` template, from a tenant of it.
