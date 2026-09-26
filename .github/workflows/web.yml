@@ -66,71 +66,17 @@ jobs:
           npm test --prefix apps/web
           npm run typecheck --prefix packages/editor
           npm test --prefix packages/editor
+      - name: Verify normal web e2e shard plan
+        run: bash scripts/test-web-e2e-groups.sh
 
-  workspace-flow:
-    name: ${{ matrix.flow }}
+  workspace-browser-shard:
+    name: web-browser-shard-${{ matrix.shard }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - flow: workspace-flow
-            specs: e2e/workspace-flow.spec.ts e2e/workspace-wiki-flow.spec.ts
-          - flow: project-task-flow
-            specs: e2e/project-task-flow.spec.ts
-          - flow: project-home-flow
-            specs: e2e/project-home-flow.spec.ts
-          - flow: project-trash-flow
-            specs: e2e/project-trash-flow.spec.ts
-          - flow: invite-flow
-            specs: e2e/workspace-invite-flow.spec.ts
-          - flow: task-edit-flow
-            specs: e2e/task-edit-flow.spec.ts
-          - flow: task-assign-labels-flow
-            specs: e2e/task-assign-labels-flow.spec.ts
-          - flow: workspace-groups-flow
-            specs: e2e/workspace-groups-flow.spec.ts
-          - flow: task-milestones-deps-flow
-            specs: e2e/task-milestones-deps-flow.spec.ts
-          - flow: notifications-flow
-            specs: e2e/notifications-flow.spec.ts
-          - flow: task-comments-flow
-            specs: e2e/task-comments-flow.spec.ts
-          - flow: task-activity-flow
-            specs: e2e/task-activity-flow.spec.ts
-          - flow: task-ops-flow
-            specs: e2e/task-ops-flow.spec.ts
-          - flow: search-flow
-            specs: e2e/search-flow.spec.ts
-          - flow: schedule-ics-flow
-            specs: e2e/schedule-ics-flow.spec.ts
-          - flow: workspace-lifecycle-flow
-            specs: e2e/workspace-lifecycle-flow.spec.ts
-          - flow: mail-reset-flow
-            specs: e2e/mail-reset-flow.spec.ts
-          - flow: wiki-lifecycle-flow
-            specs: e2e/workspace-wiki-lifecycle.spec.ts
-          - flow: comments-flow
-            specs: e2e/comments-flow.spec.ts
-          - flow: api-token-flow
-            specs: e2e/api-token-flow.spec.ts
-          - flow: import-export-flow
-            specs: e2e/workspace-import-export.spec.ts
-          - flow: integrations-flow
-            specs: e2e/integrations-flow.spec.ts
-          - flow: share-stars-flow
-            specs: e2e/share-stars-flow.spec.ts
-          - flow: account-lifecycle-flow
-            specs: e2e/account-lifecycle-flow.spec.ts
-          - flow: admin-console-flow
-            specs: e2e/admin-console-flow.spec.ts
-          - flow: collections-flow
-            specs: e2e/collections-flow.spec.ts
-          - flow: mfa-flow
-            specs: e2e/mfa-flow.spec.ts
-          - flow: task-attachments-flow
-            specs: e2e/task-attachments-flow.spec.ts
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -169,14 +115,14 @@ jobs:
       - name: Prepare Chromium and system libraries
         working-directory: apps/web
         run: npm exec --no -- playwright install --with-deps chromium
-      - name: Real React ${{ matrix.flow }} with PostgreSQL app role
+      - name: Real React browser shard ${{ matrix.shard }} with PostgreSQL app role
         id: browser
-        run: bash scripts/run-web-e2e.sh ${{ matrix.specs }}
+        run: bash scripts/run-web-e2e-shard.sh ${{ matrix.shard }}
       - name: Retain failed browser DOM diagnostics
         if: failure() && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ matrix.flow }}-browser-failure-${{ github.run_attempt }}
+          name: web-browser-shard-${{ matrix.shard }}-browser-failure-${{ github.run_attempt }}
           # Traces contain network headers/cookies; retain only rendered test DOM.
           path: ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
           retention-days: 3

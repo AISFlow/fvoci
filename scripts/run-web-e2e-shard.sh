@@ -3,12 +3,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-# Freeze relative output paths before changing cwd for frontend/build commands.
 CARGO_TARGET_DIR="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$CARGO_TARGET_DIR")"
 COLLAB_ENGINE_TARGET_DIR="$ROOT/crates/collab-engine/target"
 export CARGO_TARGET_DIR
 export FVOCI_COLLAB_ENGINE="$COLLAB_ENGINE_TARGET_DIR/debug/collab-engine"
 export ROOT
+
+SHARD_INDEX="${1:?shard index 0..7 required}"
+SHARD_COUNT="${FVOCI_WEB_E2E_SHARD_COUNT:-8}"
 
 require_prepared() {
   local missing=0
@@ -39,6 +41,26 @@ build_current_artifacts() {
 }
 
 require_prepared
+
+echo "=== web e2e shard ${SHARD_INDEX}/${SHARD_COUNT}: build once ===" >&2
 build_current_artifacts
 
-bash "$ROOT/scripts/web-e2e-run-group.sh" "$@"
+mapfile -t GROUP_LINES < <(
+  python3 "$ROOT/scripts/web-e2e-groups.py" shard --index "$SHARD_INDEX" --shards "$SHARD_COUNT"
+)
+
+if ((${#GROUP_LINES[@]} == 0)); then
+  echo "shard ${SHARD_INDEX} has no groups" >&2
+  exit 1
+fi
+
+for line in "${GROUP_LINES[@]}"; do
+  # shellcheck disable=SC2206
+  specs=($line)
+  if ! bash "$ROOT/scripts/web-e2e-run-group.sh" "${specs[@]}"; then
+    echo "shard ${SHARD_INDEX} failed on group: ${line}" >&2
+    exit 1
+  fi
+done
+
+echo "=== web e2e shard ${SHARD_INDEX}: all groups passed ===" >&2
