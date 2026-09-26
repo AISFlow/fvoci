@@ -29,6 +29,8 @@ pub mod protocol;
 pub mod engine;
 #[cfg(feature = "worker")]
 mod project;
+#[cfg(feature = "worker")]
+pub mod seed;
 
 #[cfg(feature = "worker")]
 pub use engine::{new_doc, CollabEngine, FRAGMENT as ENGINE_FRAGMENT};

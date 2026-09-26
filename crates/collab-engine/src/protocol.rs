@@ -63,6 +63,15 @@ pub enum Request {
         #[serde(default = "encoding_v1")]
         encoding: u8,
     },
+    /// Stateless: encode Tiptap JSON (compact JSON text in `content_json`) as the
+    /// updateV1 of a fresh Doc (source `tiptapJsonToYUpdate`). Does not touch the
+    /// session Doc. JSON travels as a string so the envelope adds no nesting
+    /// level to the child's serde_json recursion limit.
+    SeedFromTiptap {
+        content_json: String,
+        #[serde(default = "encoding_v1")]
+        encoding: u8,
+    },
 }
 
 fn encoding_v1() -> u8 {
@@ -77,7 +86,8 @@ impl Request {
             | Self::Sync { encoding, .. }
             | Self::Project { encoding }
             | Self::RestoreFromSnapshot { encoding, .. }
-            | Self::ReplaceFromUpdate { encoding, .. } => *encoding,
+            | Self::ReplaceFromUpdate { encoding, .. }
+            | Self::SeedFromTiptap { encoding, .. } => *encoding,
             Self::Ping | Self::Snapshot | Self::Inspect | Self::RevisionSnapshot => 1,
         }
     }
@@ -96,6 +106,7 @@ impl Request {
             } => state_vector_b64.len() as u64,
             Self::RestoreFromSnapshot { snap_b64, .. } => snap_b64.len() as u64,
             Self::ReplaceFromUpdate { update_b64, .. } => update_b64.len() as u64,
+            Self::SeedFromTiptap { content_json, .. } => content_json.len() as u64,
             Self::Load {
                 snapshot_b64,
                 tail_b64,

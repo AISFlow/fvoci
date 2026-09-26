@@ -1,0 +1,7 @@
+{"type":"doc","content":[
+ {"type":"paragraph","content":[{"type":"text","text":"only ychange","marks":[{"type":"ychange","attrs":{"type":"added"}}]},{"type":"text","text":" ychange+bold","marks":[{"type":"ychange"},{"type":"bold"}]}]},
+ {"type":"blockquote","content":[{"type":"paragraph","content":[{"type":"text","text":"quote"}]},{"type":"horizontalRule","attrs":{"id":"hr"}}]},
+ {"type":"paragraph","marks":[{"type":"bold"}],"content":[{"type":"text","text":"element marks ignored"}]},
+ {"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"nested doc node"}]}]},
+ {"type":"paragraph","content":[{"type":"hardBreak"},{"type":"hardBreak"}]}
+]}

@@ -1,0 +1,9 @@
+{"type":"doc","content":[{"type":"paragraph","content":[
+ {"type":"text","text":"full","marks":[{"type":"link","attrs":{"href":"https://x.example/?q=1&r=가","target":"_self","rel":"noopener","class":"ext","title":"제목"}}]},
+ {"type":"text","text":" "},
+ {"type":"text","text":"href only","marks":[{"type":"link","attrs":{"href":"/relative"}}]},
+ {"type":"text","text":" "},
+ {"type":"text","text":"null href","marks":[{"type":"link","attrs":{"href":null,"target":null}}]},
+ {"type":"text","text":" "},
+ {"type":"text","text":"unsafe","marks":[{"type":"link","attrs":{"href":"javascript:alert(1)","extra":"dropped"}}]}
+]}]}

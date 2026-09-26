@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::collab::derived_body::{prepare_derived_body, DOCUMENT_MAX_BODY_BYTES};
+use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::collab::{
     append_collab_update, claim_writer_and_load, project_derived_body, AppendCollabInput,
     CollabDbError, ProjectDerivedBodyInput,
@@ -11,7 +12,6 @@ use crate::db::documents::{
     create_wiki_document, create_wiki_document_for_import, CreateDocumentInput, DocumentDbError,
     ImportFence,
 };
-use crate::documents::convert::{ConvertClient, ConvertError};
 use crate::documents::markdown_helper::{MarkdownError, MarkdownHelper};
 
 #[derive(Debug, thiserror::Error)]
@@ -96,10 +96,10 @@ pub async fn create_fenced_wiki_document(
     }
 }
 
-fn map_convert_error(err: ConvertError) -> ImportBodyError {
+fn map_seed_error(err: SeedError) -> ImportBodyError {
     match err {
-        ConvertError::InvalidInput => ImportBodyError::InvalidInput,
-        ConvertError::TooLarge => ImportBodyError::TooLarge,
+        SeedError::InvalidInput(_) => ImportBodyError::InvalidInput,
+        SeedError::TooLarge(_) => ImportBodyError::TooLarge,
         other => ImportBodyError::Failed(other.to_string()),
     }
 }
@@ -114,11 +114,11 @@ fn map_markdown_error(err: MarkdownError) -> ImportBodyError {
 
 /// Converts Markdown with the editor's parser (Rust, in the
 /// `--internal-markdown` child) and writes it through the collaboration path
-/// (Yjs update + derived body), like an editor save.
+/// (Yjs update from the `collab-engine` child + derived body), like an editor save.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_imported_markdown(
     pool: &PgPool,
-    convert: &ConvertClient,
+    seed: &SeedEngine,
     markdown_helper: &MarkdownHelper,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -135,7 +135,7 @@ pub async fn apply_imported_markdown(
         .map_err(map_markdown_error)?;
     apply_imported_tiptap(
         pool,
-        convert,
+        seed,
         workspace_id,
         actor_user_id,
         session_id,
@@ -147,7 +147,7 @@ pub async fn apply_imported_markdown(
 
 pub async fn apply_imported_tiptap(
     pool: &PgPool,
-    convert: &ConvertClient,
+    seed: &SeedEngine,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -161,10 +161,10 @@ pub async fn apply_imported_tiptap(
         }
         Err(_) => return Err(ImportBodyError::InvalidInput),
     };
-    let update = convert
+    let update = seed
         .tiptap_to_yjs_update(content_json)
         .await
-        .map_err(map_convert_error)?;
+        .map_err(map_seed_error)?;
     let failed = |e: sqlx::Error| ImportBodyError::Failed(e.to_string());
     let claim = claim_writer_and_load(pool, workspace_id, actor_user_id, session_id, document_id)
         .await

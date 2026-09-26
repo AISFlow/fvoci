@@ -1,0 +1,11 @@
+{"type":"doc","content":[{"type":"table","attrs":{"id":"t1"},"content":[
+ {"type":"tableRow","content":[
+  {"type":"tableHeader","attrs":{"colspan":2,"colwidth":[120,80],"align":"left"},"content":[{"type":"paragraph","content":[{"type":"text","text":"H","marks":[{"type":"bold"}]}]}]},
+  {"type":"tableHeader","content":[{"type":"paragraph"}]}
+ ]},
+ {"type":"tableRow","content":[
+  {"type":"tableCell","attrs":{"background":"#eee","rowspan":1,"colspan":1,"colwidth":null},"content":[{"type":"paragraph","content":[{"type":"text","text":"셀"}]}]},
+  {"type":"tableCell","attrs":{"align":"right"},"content":[{"type":"paragraph","content":[{"type":"text","text":"1"}]},{"type":"paragraph","content":[{"type":"text","text":"2"}]}]},
+  {"type":"tableCell","content":[{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"in cell"}]}]}]}]}
+ ]}
+]}]}

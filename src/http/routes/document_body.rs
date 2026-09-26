@@ -35,6 +35,7 @@ use crate::collab::derived_body::{
     prepare_derived_body, DerivedBodyError, DOCUMENT_MAX_BODY_BYTES,
 };
 use crate::collab::room::BodyWriteError;
+use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::document_ops::{
     authorize_document, commit_duplicate, list_document_backlinks, list_project_ancestors,
     load_duplicate_sources, DocumentScope, DuplicateBody, SourceBody,
@@ -42,7 +43,6 @@ use crate::db::document_ops::{
 use crate::db::documents::{list_wiki_tree, DocumentDbError, TreeNode};
 use crate::db::project_documents::list_project_document_tree;
 use crate::documents::blocks::{replace_node_by_id, BlockNode};
-use crate::documents::convert::{ConvertClient, ConvertError};
 use crate::documents::markdown_helper::{MarkdownError, MarkdownHelper};
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access, RequestAuth};
@@ -173,13 +173,6 @@ async fn revision_write_limit(state: &AppState, user_id: Uuid) -> Result<(), App
         .map_err(AppError::rate_limited)
 }
 
-fn convert_client(state: &AppState) -> Result<&ConvertClient, DocumentApiError> {
-    state.document_convert.as_ref().ok_or_else(|| {
-        tracing::error!("document body write requested but FVOCI_DOCUMENT_CONVERT_BIN is unset");
-        AppError::internal().into()
-    })
-}
-
 fn markdown_helper(state: &AppState) -> Result<&MarkdownHelper, DocumentApiError> {
     state.markdown.as_ref().ok_or_else(|| {
         tracing::error!("document body markdown requested but the markdown helper is unavailable");
@@ -201,12 +194,16 @@ fn map_markdown(err: MarkdownError) -> DocumentApiError {
     }
 }
 
-fn map_convert(err: ConvertError) -> DocumentApiError {
+fn map_seed(err: SeedError) -> DocumentApiError {
     match err {
-        ConvertError::InvalidInput => invalid_body(),
-        ConvertError::TooLarge => too_large(),
-        other => {
-            tracing::error!(error = %other, "document convert helper failed");
+        SeedError::InvalidInput(detail) => {
+            tracing::info!(%detail, "document body seed refused");
+            invalid_body()
+        }
+        SeedError::TooLarge(_) => too_large(),
+        SeedError::Unavailable => collab_unavailable(),
+        SeedError::Failed(detail) => {
+            tracing::error!(error = %detail, "document body seed failed");
             AppError::internal().into()
         }
     }
@@ -340,10 +337,13 @@ async fn resolve_body_json(state: &AppState, input: BodyInput) -> Result<Value, 
 }
 
 async fn seed_for(state: &AppState, content_json: &Value) -> Result<Vec<u8>, DocumentApiError> {
-    convert_client(state)?
+    let Some(hub) = state.collab.as_ref() else {
+        return Err(collab_unavailable());
+    };
+    SeedEngine::from_hub(hub)
         .tiptap_to_yjs_update(content_json)
         .await
-        .map_err(map_convert)
+        .map_err(map_seed)
 }
 
 async fn replace_live_body(
@@ -868,10 +868,15 @@ async fn prepare_duplicate_bodies(
     state: &AppState,
     sources: &[crate::db::document_ops::DuplicateSource],
 ) -> Result<Vec<DuplicateBody>, DocumentApiError> {
-    let convert = convert_client(state)?;
     let engine = match state.collab.as_ref() {
         Some(hub) => Some((hub.engine_bin(), hub.limits())),
         None => crate::collab::CollabConfig::from_env().map(|cfg| (cfg.engine_bin, cfg.limits)),
+    };
+    let Some(seed_engine) = engine
+        .clone()
+        .map(|(bin, limits)| SeedEngine::new(bin, limits))
+    else {
+        return Err(collab_unavailable());
     };
     let mut bodies = Vec::with_capacity(sources.len());
     for source in sources {
@@ -893,10 +898,10 @@ async fn prepare_duplicate_bodies(
             }
         };
         let prepared = prepare_derived_body(content_json).map_err(map_derived)?;
-        let seed = convert
+        let seed = seed_engine
             .tiptap_to_yjs_update(prepared.content_json())
             .await
-            .map_err(map_convert)?;
+            .map_err(map_seed)?;
         let (content_json, text, chosung) = prepared.into_parts();
         bodies.push(DuplicateBody {
             source_id: source.id,

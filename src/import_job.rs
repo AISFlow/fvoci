@@ -26,6 +26,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::attachments::{sniff_mime_from_bytes, ObjectStorage};
+use crate::collab::seed::SeedEngine;
 use crate::db::attachment_extract::default_extract_limits;
 use crate::db::attachments::{create_import_attachment, mark_import_attachment_stored};
 use crate::db::context::defer_import_events;
@@ -60,6 +61,8 @@ pub struct ImportJobSettings {
     pub office_helper: Option<PathBuf>,
     /// This binary, run as the `--internal-markdown` child.
     pub markdown: Option<MarkdownHelper>,
+    /// `collab-engine` child that turns imported Tiptap JSON into the Yjs seed.
+    pub seed: Option<SeedEngine>,
     pub office_limits: OfficeLimits,
     /// Storage quota imported Notion assets reserve against (source
     /// `requireStorageReservation`; unlimited until the license port).
@@ -68,6 +71,12 @@ pub struct ImportJobSettings {
 }
 
 impl ImportJobSettings {
+    fn seed_engine(&self) -> Result<&SeedEngine, RunError> {
+        self.seed
+            .as_ref()
+            .ok_or_else(|| RunError::Failed("collab engine unavailable".into()))
+    }
+
     fn markdown_helper(&self) -> Result<&MarkdownHelper, RunError> {
         self.markdown
             .as_ref()
@@ -91,6 +100,7 @@ impl ImportJobSettings {
             extract_limits: default_extract_limits(),
             office_helper: std::env::current_exe().ok(),
             markdown: MarkdownHelper::current_exe().ok(),
+            seed: SeedEngine::from_env(),
             office_limits: OfficeLimits::import(),
             quota: StorageQuota::default(),
             poll_interval,
@@ -375,7 +385,7 @@ async fn run_office_import(
     }
     apply_imported_markdown(
         pool,
-        &settings.convert,
+        settings.seed_engine()?,
         settings.markdown_helper()?,
         claim.workspace_id,
         claim.created_by,
@@ -502,7 +512,7 @@ async fn run_notion_import(
         if !page.markdown.is_empty() {
             apply_imported_markdown(
                 pool,
-                &settings.convert,
+                settings.seed_engine()?,
                 settings.markdown_helper()?,
                 claim.workspace_id,
                 claim.created_by,
@@ -1047,7 +1057,7 @@ pub enum SyncImportError {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_markdown_zip_import(
     pool: &PgPool,
-    convert: &ConvertClient,
+    seed: &SeedEngine,
     markdown_helper: &MarkdownHelper,
     workspace_id: Uuid,
     job_id: Uuid,
@@ -1057,7 +1067,7 @@ pub async fn run_markdown_zip_import(
 ) -> Result<Vec<Uuid>, SyncImportError> {
     let result = markdown_zip_documents(
         pool,
-        convert,
+        seed,
         markdown_helper,
         workspace_id,
         actor_user_id,
@@ -1083,7 +1093,7 @@ pub async fn run_markdown_zip_import(
 
 async fn markdown_zip_documents(
     pool: &PgPool,
-    convert: &ConvertClient,
+    seed: &SeedEngine,
     markdown_helper: &MarkdownHelper,
     workspace_id: Uuid,
     actor_user_id: Uuid,
@@ -1118,7 +1128,7 @@ async fn markdown_zip_documents(
         .map_err(map)?;
         apply_imported_markdown(
             pool,
-            convert,
+            seed,
             markdown_helper,
             workspace_id,
             actor_user_id,

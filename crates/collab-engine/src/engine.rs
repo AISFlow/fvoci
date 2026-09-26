@@ -83,6 +83,7 @@ impl CollabEngine {
             Request::RevisionSnapshot => self.revision_snapshot(),
             Request::RestoreFromSnapshot { snap_b64, .. } => self.restore_from_snapshot(snap_b64),
             Request::ReplaceFromUpdate { update_b64, .. } => self.replace_from_update(update_b64),
+            Request::SeedFromTiptap { content_json, .. } => self.seed_from_tiptap(content_json),
         }
     }
 
@@ -363,6 +364,51 @@ impl CollabEngine {
             dst_txn.encode_update_v1()
         };
         Ok(bytes)
+    }
+
+    /// Stateless Tiptap JSON → updateV1 of a fresh Doc. The JSON text is capped at
+    /// the product body size (`max_project_json_bytes`, compact serde_json, as
+    /// the parent's `prepare_derived_body` measures it).
+    pub fn seed_from_tiptap(&mut self, content_json: &str) -> EngineStatus {
+        if let Err(st) = self.bump_op() {
+            return st;
+        }
+        if content_json.len() as u64 > self.limits.max_project_json_bytes {
+            return EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                detail: format!(
+                    "seed content_json {} bytes exceeds {}-byte limit",
+                    content_json.len(),
+                    self.limits.max_project_json_bytes
+                ),
+            };
+        }
+        let json: serde_json::Value = match serde_json::from_str(content_json) {
+            Ok(v) => v,
+            Err(err) => {
+                return EngineStatus::Malformed {
+                    detail: format!("seed: content_json: {err}"),
+                };
+            }
+        };
+        match crate::seed::tiptap_to_yjs_update(&json, &self.limits) {
+            Ok(bytes) => EngineStatus::Ok {
+                applied: false,
+                pending: false,
+                durable: false,
+                skip_gc: true,
+                offset_kind: "utf16".into(),
+                encoding: 1,
+                fragment: FRAGMENT.into(),
+                update_b64: Some(b64::encode(&bytes)),
+                state_vector_b64: None,
+                xml_string: None,
+                xml_len: None,
+                content_json: None,
+                yrs: Some(crate::YRS_VERSION.into()),
+            },
+            Err(st) => st,
+        }
     }
 
     /// Restore a past revision using a Yrs/Yjs snapshot against the current Doc.

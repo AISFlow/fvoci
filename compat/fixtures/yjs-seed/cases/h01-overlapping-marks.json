@@ -1,0 +1,10 @@
+{"type":"doc","content":[{"type":"paragraph","content":[
+ {"type":"text","text":"plain "},
+ {"type":"text","text":"bold-italic","marks":[{"type":"italic"},{"type":"bold"}]},
+ {"type":"text","text":" all","marks":[{"type":"strike"},{"type":"underline"},{"type":"highlight","attrs":{"color":"#ff0"}},{"type":"textStyle","attrs":{"color":"red"}},{"type":"bold"},{"type":"italic"},{"type":"link","attrs":{"href":"https://a.example"}}]},
+ {"type":"text","text":" code","marks":[{"type":"code"}]},
+ {"type":"text","text":"two links","marks":[{"type":"link","attrs":{"href":"https://first.example"}},{"type":"link","attrs":{"href":"https://second.example"}}]},
+ {"type":"text","text":" same","marks":[{"type":"bold"}]},
+ {"type":"text","text":" merged","marks":[{"type":"bold"}]},
+ {"type":"text","text":" highlight-null","marks":[{"type":"highlight"}]}
+]}]}

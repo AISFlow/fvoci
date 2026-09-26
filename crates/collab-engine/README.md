@@ -35,6 +35,11 @@ and depth caps before allocation. Output is size-checked with a counting
 serializer, not a full `to_vec` then reject. Source `withoutYChange` keeps
 empty `marks: []` and does not rewrite surviving marks (nested `ychange` in
 retained mark attrs stays).
+`seed_from_tiptap` (stateless; `content_json` is Tiptap JSON *text*, ≤ 1 MiB)
+returns in `update_b64` the updateV1 of a fresh Doc seeded like source
+`tiptapJsonToYUpdate` (editor schema defaults, `null`/`ychange` attrs dropped,
+marks as text format attributes). Compared as decoded trees against the TS
+oracle in `compat/fixtures/yjs-seed` (`tests/seed_compat.rs`).
 Yjs reserves the text attribute name `ychange`; fixtures `ychange_only.v1`
 and `ychange_retained_nested.v1` use hashed `ychange--xxxxxxxx` plus a
 surviving mark whose attrs contain `ychange`. Unsupported CRDT shape →

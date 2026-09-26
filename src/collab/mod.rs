@@ -13,6 +13,7 @@ pub mod hub;
 pub mod origin;
 pub mod revision;
 pub mod room;
+pub mod seed;
 pub mod transport;
 pub mod validation;
 pub mod wire;
