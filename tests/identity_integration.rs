@@ -1590,9 +1590,10 @@ async fn oidc_login_link_unlink_and_rules() {
     // A password-less account cannot drop its last sign-in method.
     let nopw = h.insert_user("nopw@example.com", None).await;
     h.add_membership(nopw, "member").await;
-    sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, email) VALUES ($1, $2, 'generic', 'ext-nopw', NULL)")
+    sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, email, issuer) VALUES ($1, $2, 'generic', 'ext-nopw', NULL, $3)")
         .bind(Uuid::now_v7())
         .bind(nopw)
+        .bind(&fake.base)
         .execute(&h.admin)
         .await
         .unwrap();
@@ -2914,12 +2915,11 @@ async fn workspace_sso_issuer_change_does_not_remap_existing_links() {
 }
 
 #[tokio::test]
-async fn pre_issuer_links_sign_in_once_and_are_pinned_to_that_issuer() {
+async fn pre_issuer_links_fail_closed_until_authenticated_reconnect() {
     let fake_a = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-a")).await;
     let fake_b = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-b")).await;
     let h = oidc_harness(&fake_a, &[ProviderKey::Generic]).await;
-    let (user_id, _email, _cookie) = h.member("legacy").await;
-    // A link written before 035: no issuer.
+    let (user_id, email, cookie) = h.member("legacy").await;
     let link_id = Uuid::now_v7();
     sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, email) VALUES ($1, $2, 'generic', 'legacy-sub', NULL)")
         .bind(link_id)
@@ -2927,112 +2927,97 @@ async fn pre_issuer_links_sign_in_once_and_are_pinned_to_that_issuer() {
         .execute(&h.admin)
         .await
         .unwrap();
+    let sessions = "SELECT count(*) FROM fvoci.sessions WHERE user_id = $1";
+    let before = h.count(sessions, user_id).await;
+    for (fake, app, from) in [
+        (&fake_a, h.app.clone(), peer(70)),
+        (
+            &fake_b,
+            h.app_with_oidc(oidc_settings(
+                vec![provider(ProviderKey::Generic, &fake_b.base, CLIENT_SECRET)],
+                true,
+            )),
+            peer(71),
+        ),
+    ] {
+        let res = oidc_round_on(
+            &app,
+            fake,
+            "/api/v1/auth/oidc/generic/start",
+            "generic",
+            Profile::new("legacy-sub", &email, true),
+            None,
+            from,
+        )
+        .await;
+        assert_eq!(
+            res.location(),
+            "http://localhost/login?error=oidc_not_linked"
+        );
+        assert!(res.cookie().is_none());
+        assert_eq!(
+            link_row(&h, "generic", "legacy-sub").await,
+            Some((user_id, None))
+        );
+        assert_eq!(h.count(sessions, user_id).await, before);
+    }
+    let (_, other_email, other_cookie) = h.member("other").await;
+    let res = h
+        .oidc_round(
+            &fake_a,
+            "/api/v1/auth/oidc/generic/link",
+            "generic",
+            Profile::new("legacy-sub", &other_email, true),
+            Some(&other_cookie),
+            peer(72),
+        )
+        .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/settings/account?error=oidc_already_linked"
+    );
     assert_eq!(
         link_row(&h, "generic", "legacy-sub").await,
         Some((user_id, None))
+    );
+
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/oidc/generic/unlink",
+        None,
+        Some(&cookie),
+        peer(73),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    let res = h
+        .oidc_round(
+            &fake_a,
+            "/api/v1/auth/oidc/generic/link",
+            "generic",
+            Profile::new("legacy-sub", &email, true),
+            Some(&cookie),
+            peer(74),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
+    assert_eq!(
+        link_row(&h, "generic", "legacy-sub").await,
+        Some((user_id, Some(fake_a.base.clone())))
     );
     let res = h
         .oidc_round(
             &fake_a,
             "/api/v1/auth/oidc/generic/start",
             "generic",
-            Profile::new("legacy-sub", "legacy@example.com", true),
+            Profile::new("legacy-sub", &email, true),
             None,
-            peer(70),
+            peer(75),
         )
         .await;
     assert_eq!(res.location(), "http://localhost/");
     assert!(res.cookie().is_some());
-    // The successful sign-in recorded the issuer that verified it.
-    assert_eq!(
-        link_row(&h, "generic", "legacy-sub").await,
-        Some((user_id, Some(fake_a.base.clone())))
-    );
-    // From now on another issuer's same `sub` is refused.
-    let app_b = h.app_with_oidc(oidc_settings(
-        vec![provider(ProviderKey::Generic, &fake_b.base, CLIENT_SECRET)],
-        true,
-    ));
-    let res = oidc_round_on(
-        &app_b,
-        &fake_b,
-        "/api/v1/auth/oidc/generic/start",
-        "generic",
-        Profile::new("legacy-sub", "legacy@example.com", true),
-        None,
-        peer(71),
-    )
-    .await;
-    assert_eq!(
-        res.location(),
-        "http://localhost/login?error=oidc_not_linked"
-    );
-    assert_eq!(
-        h.login_methods(user_id).await,
-        vec!["password", "oidc:generic"]
-    );
-
-    // The app role cannot rewrite links; the backfill function is write-once.
-    let mut tx = h.app_pool.begin().await.unwrap();
-    fvoci_server::db::context::set_system(&mut tx)
-        .await
-        .unwrap();
-    let err =
-        sqlx::query("UPDATE fvoci.identity_links SET issuer = 'https://evil.test' WHERE id = $1")
-            .bind(link_id)
-            .execute(&mut *tx)
-            .await
-            .expect_err("app role has no UPDATE on identity_links");
-    assert_eq!(
-        err.as_database_error().and_then(|e| e.code()).as_deref(),
-        Some("42501")
-    );
-    tx.rollback().await.unwrap();
-    let mut tx = h.app_pool.begin().await.unwrap();
-    fvoci_server::db::context::set_system(&mut tx)
-        .await
-        .unwrap();
-    let overwritten: bool = sqlx::query_scalar(
-        "SELECT fvoci.app_identity_link_backfill_issuer($1, 'https://evil.test')",
-    )
-    .bind(link_id)
-    .fetch_one(&mut *tx)
-    .await
-    .unwrap();
-    assert!(!overwritten);
-    let same: bool = sqlx::query_scalar("SELECT fvoci.app_identity_link_backfill_issuer($1, $2)")
-        .bind(link_id)
-        .bind(&fake_a.base)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
-    assert!(same);
-    tx.commit().await.unwrap();
-    assert_eq!(
-        link_row(&h, "generic", "legacy-sub").await,
-        Some((user_id, Some(fake_a.base.clone())))
-    );
-    // Outside the system context (and not the owner) RLS hides the row, so
-    // even a NULL-issuer link cannot be claimed.
-    let other = Uuid::now_v7();
-    sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id) VALUES ($1, $2, 'google', 'legacy-g')")
-        .bind(other)
-        .bind(user_id)
-        .execute(&h.admin)
-        .await
-        .unwrap();
-    let claimed: bool = sqlx::query_scalar(
-        "SELECT fvoci.app_identity_link_backfill_issuer($1, 'https://evil.test')",
-    )
-    .bind(other)
-    .fetch_one(&h.app_pool)
-    .await
-    .unwrap();
-    assert!(!claimed);
-    assert_eq!(
-        link_row(&h, "google", "legacy-g").await,
-        Some((user_id, None))
-    );
     h.finish().await;
 }
 
@@ -3213,41 +3198,90 @@ async fn microsoft_links_pin_the_tenant_issuer_and_refuse_other_tenants() {
 }
 
 #[tokio::test]
-async fn microsoft_template_links_are_repinned_to_the_first_verified_tenant() {
+async fn microsoft_template_links_fail_closed_until_authenticated_reconnect() {
     let fake = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, Key::rsa("rsa-ms")).await;
     let h = oidc_harness(&fake, &[ProviderKey::Microsoft]).await;
     let template = ms_template(&fake);
-    let (user_id, email, _cookie) = h.member("legacy").await;
-    // A link written before 036 stored the discovery template.
-    let link_id = Uuid::now_v7();
+    fake.set(|i| i.key_issuer = Some(template.clone()));
+    let (user_id, email, cookie) = h.member("legacy").await;
     sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, email, issuer) VALUES ($1, $2, 'microsoft', 'ms-legacy', NULL, $3)")
-        .bind(link_id)
+        .bind(Uuid::now_v7())
         .bind(user_id)
         .bind(&template)
         .execute(&h.admin)
         .await
         .unwrap();
+    let sessions = "SELECT count(*) FROM fvoci.sessions WHERE user_id = $1";
+    let before = h.count(sessions, user_id).await;
+    for (tenant, from) in [(TENANT_A, peer(90)), (TENANT_B, peer(91))] {
+        ms_tenant(&fake, tenant);
+        let res = h
+            .oidc_round(
+                &fake,
+                "/api/v1/auth/oidc/microsoft/start",
+                "microsoft",
+                Profile::new("ms-legacy", &email, true),
+                None,
+                from,
+            )
+            .await;
+        assert_eq!(
+            res.location(),
+            "http://localhost/login?error=oidc_not_linked"
+        );
+        assert!(res.cookie().is_none());
+        assert_eq!(
+            link_row(&h, "microsoft", "ms-legacy").await,
+            Some((user_id, Some(template.clone())))
+        );
+        assert_eq!(h.count(sessions, user_id).await, before);
+    }
+    let (_, other_email, other_cookie) = h.member("other").await;
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/microsoft/link",
+            "microsoft",
+            Profile::new("ms-legacy", &other_email, true),
+            Some(&other_cookie),
+            peer(92),
+        )
+        .await;
+    assert_eq!(
+        res.location(),
+        "http://localhost/settings/account?error=oidc_already_linked"
+    );
+    assert_eq!(
+        link_row(&h, "microsoft", "ms-legacy").await,
+        Some((user_id, Some(template.clone())))
+    );
+
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/oidc/microsoft/unlink",
+        None,
+        Some(&cookie),
+        peer(93),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
     let issuer_a = ms_tenant(&fake, TENANT_A);
     let res = h
         .oidc_round(
             &fake,
-            "/api/v1/auth/oidc/microsoft/start",
+            "/api/v1/auth/oidc/microsoft/link",
             "microsoft",
             Profile::new("ms-legacy", &email, true),
-            None,
-            peer(90),
+            Some(&cookie),
+            peer(94),
         )
         .await;
-    assert_eq!(res.location(), "http://localhost/");
-    assert!(res.cookie().is_some());
+    assert_eq!(res.location(), "http://localhost/settings/account?linked=1");
     assert_eq!(
         link_row(&h, "microsoft", "ms-legacy").await,
         Some((user_id, Some(issuer_a.clone())))
     );
-    // Pinned: tenant B's same `sub` is refused.
-    let issuer_b = ms_tenant(&fake, TENANT_B);
-    let sessions = "SELECT count(*) FROM fvoci.sessions WHERE user_id = $1";
-    let before = h.count(sessions, user_id).await;
     let res = h
         .oidc_round(
             &fake,
@@ -3255,116 +3289,96 @@ async fn microsoft_template_links_are_repinned_to_the_first_verified_tenant() {
             "microsoft",
             Profile::new("ms-legacy", &email, true),
             None,
-            peer(91),
+            peer(95),
+        )
+        .await;
+    assert_eq!(res.location(), "http://localhost/");
+    assert!(res.cookie().is_some());
+    ms_tenant(&fake, TENANT_B);
+    let res = h
+        .oidc_round(
+            &fake,
+            "/api/v1/auth/oidc/microsoft/start",
+            "microsoft",
+            Profile::new("ms-legacy", &email, true),
+            None,
+            peer(96),
         )
         .await;
     assert_eq!(
         res.location(),
         "http://localhost/login?error=oidc_not_linked"
     );
-    assert_eq!(h.count(sessions, user_id).await, before);
     assert_eq!(
         link_row(&h, "microsoft", "ms-legacy").await,
-        Some((user_id, Some(issuer_a.clone())))
-    );
-
-    // The function never rewrites anything but the exact template, and only
-    // to a GUID tenant instance of it.
-    let repin = |id: Uuid, template: String, issuer: String| {
-        let pool = h.app_pool.clone();
-        async move {
-            let mut tx = pool.begin().await.unwrap();
-            fvoci_server::db::context::set_system(&mut tx)
-                .await
-                .unwrap();
-            let done: bool =
-                sqlx::query_scalar("SELECT fvoci.app_identity_link_repin_template($1, $2, $3)")
-                    .bind(id)
-                    .bind(template)
-                    .bind(issuer)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .unwrap();
-            tx.commit().await.unwrap();
-            done
-        }
-    };
-    // A stored real issuer: the template does not match it.
-    assert!(!repin(link_id, template.clone(), issuer_b.clone()).await);
-    assert_eq!(
-        link_row(&h, "microsoft", "ms-legacy").await,
-        Some((user_id, Some(issuer_a.clone())))
-    );
-    let other = Uuid::now_v7();
-    sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, issuer) VALUES ($1, $2, 'google', 'tmpl-g', $3)")
-        .bind(other)
-        .bind(user_id)
-        .bind(&template)
-        .execute(&h.admin)
-        .await
-        .unwrap();
-    for issuer in [
-        template.clone(),
-        "https://evil.test".to_string(),
-        format!("{}/abc-123/v2.0", fake.base),
-        format!("{}/{TENANT_B}/v2.0/x", fake.base),
-        format!("https://evil.test/{TENANT_B}/v2.0"),
-    ] {
-        assert!(
-            !repin(other, template.clone(), issuer.clone()).await,
-            "{issuer}"
-        );
-    }
-    // A template argument that is not the stored value.
-    assert!(
-        !repin(
-            other,
-            format!("{}/{{tenantid}}/v1", fake.base),
-            issuer_b.clone()
-        )
-        .await
-    );
-    assert_eq!(
-        link_row(&h, "google", "tmpl-g").await,
-        Some((user_id, Some(template.clone())))
-    );
-    // Outside the system context (and not the owner) RLS hides the row.
-    let claimed: bool =
-        sqlx::query_scalar("SELECT fvoci.app_identity_link_repin_template($1, $2, $3)")
-            .bind(other)
-            .bind(&template)
-            .bind(&issuer_b)
-            .fetch_one(&h.app_pool)
-            .await
-            .unwrap();
-    assert!(!claimed);
-    assert_eq!(
-        link_row(&h, "google", "tmpl-g").await,
-        Some((user_id, Some(template.clone())))
-    );
-    // The app role still cannot UPDATE identity_links directly.
-    let mut tx = h.app_pool.begin().await.unwrap();
-    fvoci_server::db::context::set_system(&mut tx)
-        .await
-        .unwrap();
-    let err = sqlx::query("UPDATE fvoci.identity_links SET issuer = $2 WHERE id = $1")
-        .bind(other)
-        .bind(&issuer_b)
-        .execute(&mut *tx)
-        .await
-        .expect_err("app role has no UPDATE on identity_links");
-    assert_eq!(
-        err.as_database_error().and_then(|e| e.code()).as_deref(),
-        Some("42501")
-    );
-    tx.rollback().await.unwrap();
-    // The exact template to a tenant instance of it is the one rewrite.
-    assert!(repin(other, template.clone(), issuer_b.clone()).await);
-    assert_eq!(
-        link_row(&h, "google", "tmpl-g").await,
-        Some((user_id, Some(issuer_b)))
+        Some((user_id, Some(issuer_a)))
     );
     h.finish().await;
+}
+
+#[tokio::test]
+async fn issuer_rewrite_functions_disappear_without_changing_legacy_links() {
+    let db = TestDb::bootstrap_through(36).await;
+    let admin = admin_pool(&db).await;
+    let user = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.users (id, email, given_name) VALUES ($1, 'upgrade@example.com', 'Upgrade')")
+        .bind(user)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let template = "https://login.microsoftonline.com/{tenantid}/v2.0";
+    let exact = "https://issuer.example.test";
+    let ids = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
+    for (id, provider, issuer) in [
+        (ids[0], "generic", None),
+        (ids[1], "microsoft", Some(template)),
+        (ids[2], "google", Some(exact)),
+    ] {
+        sqlx::query("INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id, issuer) VALUES ($1, $2, $3, 'upgrade-sub', $4)")
+            .bind(id)
+            .bind(user)
+            .bind(provider)
+            .bind(issuer)
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    let snapshot: Vec<(Uuid, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, issuer, updated_at FROM fvoci.identity_links WHERE user_id = $1 ORDER BY id",
+    )
+    .bind(user)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_proc WHERE oid IN ('fvoci.app_identity_link_backfill_issuer(uuid,text)'::regprocedure, 'fvoci.app_identity_link_repin_template(uuid,text,text)'::regprocedure)")
+        .fetch_one(&admin).await.unwrap();
+    assert_eq!(before, 2);
+
+    fvoci_server::db::migrate::run_migrations(&db.admin_url)
+        .await
+        .unwrap();
+    let after: Vec<(Uuid, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, issuer, updated_at FROM fvoci.identity_links WHERE user_id = $1 ORDER BY id",
+    )
+    .bind(user)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        after, snapshot,
+        "migration must preserve link data and timestamps"
+    );
+    let app = pool::connect_app(&db.app_url).await.unwrap();
+    for (sql, id) in [
+        ("SELECT fvoci.app_identity_link_backfill_issuer($1, 'https://new.example')", ids[0]),
+        ("SELECT fvoci.app_identity_link_repin_template($1, 'https://login.microsoftonline.com/{tenantid}/v2.0', 'https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0')", ids[1]),
+    ] {
+        let error = sqlx::query(sql).bind(id).execute(&app).await.expect_err("obsolete rewrite function must be absent");
+        assert_eq!(error.as_database_error().and_then(|e| e.code()).as_deref(), Some("42883"));
+    }
+    app.close().await;
+    admin.close().await;
+    db.cleanup().await;
 }
 
 /// Waits (bounded) until a backend of this test database is blocked on a
