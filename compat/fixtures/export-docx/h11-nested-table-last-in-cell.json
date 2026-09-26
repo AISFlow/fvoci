@@ -1,0 +1,322 @@
+{
+ "content": [
+  {
+   "content": [
+    {
+     "text": "셀의 마지막 블록이 표인 경우",
+     "type": "text"
+    }
+   ],
+   "type": "paragraph"
+  },
+  {
+   "content": [
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "바깥",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableHeader"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "비고",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableHeader"
+      }
+     ],
+     "type": "tableRow"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "앞 문단",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        },
+        {
+         "content": [
+          {
+           "content": [
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "안쪽 머리",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableHeader"
+            },
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "B",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableHeader"
+            }
+           ],
+           "type": "tableRow"
+          },
+          {
+           "content": [
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "안쪽 1",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableCell"
+            },
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "2",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableCell"
+            }
+           ],
+           "type": "tableRow"
+          }
+         ],
+         "type": "table"
+        }
+       ],
+       "type": "tableCell"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "content": [
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "안쪽 머리",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableHeader"
+            },
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "B",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableHeader"
+            }
+           ],
+           "type": "tableRow"
+          },
+          {
+           "content": [
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "안쪽 1",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableCell"
+            },
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "2",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableCell"
+            }
+           ],
+           "type": "tableRow"
+          }
+         ],
+         "type": "table"
+        }
+       ],
+       "type": "tableCell"
+      }
+     ],
+     "type": "tableRow"
+    },
+    {
+     "content": [
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "content": [
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "안쪽 머리",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableHeader"
+            },
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "B",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableHeader"
+            }
+           ],
+           "type": "tableRow"
+          },
+          {
+           "content": [
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "안쪽 1",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableCell"
+            },
+            {
+             "content": [
+              {
+               "content": [
+                {
+                 "text": "2",
+                 "type": "text"
+                }
+               ],
+               "type": "paragraph"
+              }
+             ],
+             "type": "tableCell"
+            }
+           ],
+           "type": "tableRow"
+          }
+         ],
+         "type": "table"
+        },
+        {
+         "content": [
+          {
+           "text": "뒤 문단",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      },
+      {
+       "content": [
+        {
+         "content": [
+          {
+           "text": "끝",
+           "type": "text"
+          }
+         ],
+         "type": "paragraph"
+        }
+       ],
+       "type": "tableCell"
+      }
+     ],
+     "type": "tableRow"
+    }
+   ],
+   "type": "table"
+  }
+ ],
+ "type": "doc"
+}

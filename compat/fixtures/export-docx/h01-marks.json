@@ -1,0 +1,168 @@
+{
+ "content": [
+  {
+   "content": [
+    {
+     "marks": [
+      {
+       "type": "bold"
+      }
+     ],
+     "text": "굵게",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "type": "italic"
+      }
+     ],
+     "text": " 기울임",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "type": "strike"
+      }
+     ],
+     "text": " 취소",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "type": "code"
+      }
+     ],
+     "text": " code()",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "type": "underline"
+      }
+     ],
+     "text": " 밑줄",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "type": "highlight"
+      }
+     ],
+     "text": " 형광",
+     "type": "text"
+    }
+   ],
+   "type": "paragraph"
+  },
+  {
+   "content": [
+    {
+     "marks": [
+      {
+       "type": "bold"
+      },
+      {
+       "type": "italic"
+      }
+     ],
+     "text": "bold+italic",
+     "type": "text"
+    },
+    {
+     "text": " ",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "type": "bold"
+      },
+      {
+       "attrs": {
+        "href": "https://example.com/a?b=1&c=2"
+       },
+       "type": "link"
+      }
+     ],
+     "text": "link",
+     "type": "text"
+    },
+    {
+     "text": " ",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "attrs": {
+        "href": "mailto:a@b.c"
+       },
+       "type": "link"
+      }
+     ],
+     "text": "mail",
+     "type": "text"
+    },
+    {
+     "text": " ",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "type": "code"
+      },
+      {
+       "attrs": {
+        "href": "https://x.org"
+       },
+       "type": "link"
+      }
+     ],
+     "text": "code link",
+     "type": "text"
+    }
+   ],
+   "type": "paragraph"
+  },
+  {
+   "content": [
+    {
+     "marks": [
+      {
+       "type": "strike"
+      },
+      {
+       "type": "code"
+      }
+     ],
+     "text": "strike code",
+     "type": "text"
+    },
+    {
+     "text": " plain ",
+     "type": "text"
+    },
+    {
+     "marks": [
+      {
+       "type": "highlight"
+      },
+      {
+       "type": "bold"
+      }
+     ],
+     "text": "hl bold",
+     "type": "text"
+    }
+   ],
+   "type": "paragraph"
+  }
+ ],
+ "type": "doc"
+}

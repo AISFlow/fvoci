@@ -83,6 +83,13 @@ pdf-extract = "0.12"
 # Markdown -> Tiptap (source remark-parse + remark-gfm + remark-math): the
 # Rust port of the same micromark/mdast pipeline. MIT, no default features.
 markdown = { version = "=1.0.0", default-features = false }
+# Tiptap -> DOCX (source @m2d/core via Markdown), written only in the
+# rlimited `--internal-markdown` child (`tiptap-to-docx`). MIT. No default
+# features: `image` stays off while exports carry attachment names only.
+docx-rs = { version = "=0.4.22", default-features = false }
+# docx-rs stores its parts uncompressed; the writer re-deflates the package
+# with the zip version docx-rs already links (no further crates). MIT.
+docx-zip = { package = "zip", version = "=8.6.0", default-features = false, features = ["deflate"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
@@ -110,6 +117,11 @@ required-features = ["db-tests"]
 [[test]]
 name = "document_import_export_integration"
 path = "tests/document_import_export_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "document_export_docx_integration"
+path = "tests/document_export_docx_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]

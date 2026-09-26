@@ -274,6 +274,7 @@ pub fn maybe_run_helper() -> Option<i32> {
     if let Err(err) = document_extract_client::process::apply_rlimits_now(address_space, cpu_secs) {
         return Some(child_fail(&format!("rlimit: {err}")));
     }
+    crate::alloc_guard::abort_panics_after_allocation_failure();
     let mut source = Vec::new();
     if let Err(err) = std::io::stdin()
         .take(max_input.saturating_add(1))

@@ -1,3 +1,4 @@
+pub mod alloc_guard;
 pub mod api;
 pub mod attachments;
 pub mod auth;
