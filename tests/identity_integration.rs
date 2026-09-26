@@ -128,6 +128,11 @@ impl Harness {
             mailer: Arc::new(Mailer::from_smtp(None)),
             quota: Default::default(),
             document_convert: None,
+            markdown: Some(
+                fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
+                    "CARGO_BIN_EXE_fvoci-server"
+                )),
+            ),
             import_wake: None,
             import_extractor_available: false,
         };

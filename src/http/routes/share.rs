@@ -56,7 +56,7 @@ use crate::search::meili::{
 };
 use crate::search::query::{highlight_snippet, parse_snippet, CHOSUNG_MIN_LENGTH};
 use crate::search::text::{is_chosung_query, stem_text};
-use crate::share_render::{is_tiptap_doc, tiptap_doc_to_md, tiptap_doc_to_safe_html};
+use crate::share_render::{is_tiptap_doc, tiptap_doc_to_md_first_pass, tiptap_doc_to_safe_html};
 use crate::validate::utf16_len;
 
 const SHARE_IP_LIMIT: u32 = 60;
@@ -610,7 +610,7 @@ async fn document_body_response(
                 HeaderValue::from_static("text/markdown; charset=utf-8"),
             );
             if valid {
-                tiptap_doc_to_md(&doc.content_json)
+                tiptap_doc_to_md_first_pass(&doc.content_json)
             } else {
                 String::new()
             }

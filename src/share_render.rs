@@ -31,12 +31,12 @@
 //!   while a `<p>`/heading/cell is the innermost open element).
 //!
 //! Known differences vs the TS source:
-//! - `tiptapDocToMd`'s `selfCheckedMd` re-parses its first pass with the
-//!   Markdown parser (`mdToTiptapJson`) and, when the inline math/text shape
-//!   disagrees, retries with `$` escaped and wider math fences. The parser is
-//!   not ported, so [`self_checked_md`] always returns the first pass. This can
-//!   only differ for paragraphs/headings whose first-pass output contains `$`
-//!   and whose reparse would not match the source math shape.
+//! - The public share page uses [`tiptap_doc_to_md_first_pass`]: the source's
+//!   `selfCheckedMd` reparses its first pass with the Markdown parser and may
+//!   retry with `$` escaped; that parser only runs in the `--internal-markdown`
+//!   child, so the in-process share renderer keeps the first pass. Outputs
+//!   differ only for paragraphs/headings whose first pass contains `$` and
+//!   whose reparse disagrees with the document's math/text shape.
 //! - `callout` `kind.toUpperCase()` uses Rust's `str::to_uppercase`; both are
 //!   full Unicode case mappings but may differ across Unicode versions.
 //! - Recursion has no explicit depth limit (neither does the source); callers
@@ -695,16 +695,84 @@ fn inline_md(nodes: Option<&Vec<Value>>, opts: MdOpts) -> String {
     md_runs(nodes, opts).iter().map(wrap_md_marks).collect()
 }
 
-/// Source `selfCheckedMd`, **first pass only**.
-///
-/// Known difference: the source re-parses the first pass with `mdToTiptapJson`
-/// when it contains `$` and, if the inline math/text shape differs from the
-/// document, retries with `escapeDollars`/`wideMath` (accepting the retry only
-/// when its reparse matches). The Markdown parser is not ported, so outputs
-/// differ only for paragraphs/headings containing `$` where that reparse would
-/// have disagreed.
-fn self_checked_md(content: Option<&Vec<Value>>, wrap: impl Fn(&str) -> String) -> String {
-    wrap(&inline_md(content, MdOpts::default()))
+/// Source `pushMathShape`: the inline math/text layout the parser must reproduce.
+fn push_math_shape(out: &mut String, n: &Value) {
+    match node_type(n) {
+        "mathInline" => {
+            out.push('\u{1}');
+            out.push_str(str_attr(n, "latex"));
+            out.push('\u{2}');
+        }
+        "text" => out.push_str(text_of(n).unwrap_or("")),
+        "hardBreak" => out.push('\n'),
+        "mention" => {
+            let label = str_attr(n, "label");
+            if !label.is_empty() {
+                out.push('@');
+                out.push_str(label);
+            }
+        }
+        "emoji" => out.push_str(&emoji_glyph(n)),
+        _ => {
+            for child in node_content(n).into_iter().flatten() {
+                push_math_shape(out, child);
+            }
+        }
+    }
+}
+
+fn math_shape(nodes: Option<&Vec<Value>>) -> String {
+    let mut out = String::new();
+    for n in nodes.into_iter().flatten() {
+        push_math_shape(&mut out, n);
+    }
+    out
+}
+
+/// Source `shapeOfMd`: reparse the emitted Markdown with the editor parser.
+/// `None` when the parser refuses it (the source would throw), which never
+/// equals a document shape.
+fn shape_of_md(md: &str) -> Option<String> {
+    let doc = crate::documents::markdown::md_to_tiptap(&format!("{md}\n")).ok()?;
+    Some(math_shape(node_content(&doc)))
+}
+
+/// Whether `selfCheckedMd` reparses its first pass. Reparsing runs the
+/// Markdown parser, so it is only done inside the `--internal-markdown` child;
+/// the public share page keeps the first pass in-process.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MathCheck {
+    Reparse,
+    FirstPass,
+}
+
+/// Source `selfCheckedMd`: when the first pass contains `$` and its reparse
+/// disagrees with the document's math/text shape, retry once with `$` escaped
+/// and wider math fences, and keep the retry only if its reparse matches.
+fn self_checked_md(
+    content: Option<&Vec<Value>>,
+    check: MathCheck,
+    wrap: impl Fn(&str) -> String,
+) -> String {
+    let first = wrap(&inline_md(content, MdOpts::default()));
+    if check == MathCheck::FirstPass || !first.contains('$') {
+        return first;
+    }
+    let want = Some(math_shape(content));
+    if shape_of_md(&first) == want {
+        return first;
+    }
+    let opts = MdOpts {
+        escape_dollars: true,
+        wide_math: true,
+        raw_html: false,
+    };
+    let second = wrap(&inline_md(content, opts));
+    if shape_of_md(&second) == want {
+        second
+    } else {
+        first
+    }
 }
 
 fn cell_text(cell: &Value) -> String {
@@ -742,7 +810,7 @@ fn gfm_table(n: &Value) -> String {
     lines.join("\n")
 }
 
-fn list_md(n: &Value, ordered: bool, task: bool) -> String {
+fn list_md(n: &Value, ordered: bool, task: bool, check: MathCheck) -> String {
     node_content(n)
         .into_iter()
         .flatten()
@@ -759,7 +827,7 @@ fn list_md(n: &Value, ordered: bool, task: bool) -> String {
             } else {
                 "- ".to_string()
             };
-            let inner = blocks_md(node_content(item));
+            let inner = blocks_md(node_content(item), check);
             let mut lines = inner.split('\n');
             let head = lines.next().unwrap_or("");
             let rest: Vec<&str> = lines.collect();
@@ -782,23 +850,23 @@ fn list_md(n: &Value, ordered: bool, task: bool) -> String {
         .join("\n")
 }
 
-fn block_md(n: &Value) -> String {
+fn block_md(n: &Value, check: MathCheck) -> String {
     let content = node_content(n);
     match node_type(n) {
         "paragraph" => {
             let first = content.and_then(|c| c.first());
             let math_first = first.is_some_and(|f| node_type(f) == "mathInline");
             let code_first = first.is_some_and(|f| md_marks(f).iter().any(|m| m.ty == "code"));
-            self_checked_md(content, |inline| {
+            self_checked_md(content, check, |inline| {
                 escape_md_line_starts(inline, math_first, code_first)
             })
         }
         "heading" => {
             // `"#".repeat(nLevel)` truncates a fractional level.
             let hashes = "#".repeat(heading_level(n).trunc() as usize);
-            self_checked_md(content, |inline| format!("{hashes} {inline}"))
+            self_checked_md(content, check, |inline| format!("{hashes} {inline}"))
         }
-        "blockquote" => blocks_md(content)
+        "blockquote" => blocks_md(content, check)
             .split('\n')
             .map(|l| format!("> {l}"))
             .collect::<Vec<_>>()
@@ -810,7 +878,7 @@ fn block_md(n: &Value) -> String {
             } else {
                 upper
             };
-            let inner = blocks_md(content);
+            let inner = blocks_md(content, check);
             let mut lines = vec![format!("> [!{kind}]")];
             lines.extend(inner.split('\n').map(|l| format!("> {l}")));
             lines.join("\n")
@@ -826,7 +894,7 @@ fn block_md(n: &Value) -> String {
                     ..MdOpts::default()
                 },
             );
-            let body = blocks_md(body_node.and_then(node_content));
+            let body = blocks_md(body_node.and_then(node_content), check);
             format!("<details><summary>{summary}</summary>\n\n{body}\n\n</details>")
         }
         "math" => {
@@ -852,12 +920,12 @@ fn block_md(n: &Value) -> String {
                 format!("[{name}](attachment:{id})")
             }
         }
-        "taskList" => list_md(n, false, true),
-        "taskItem" => blocks_md(content),
+        "taskList" => list_md(n, false, true, check),
+        "taskItem" => blocks_md(content, check),
         "codeBlock" => fenced_code(&literal_text(content), str_attr(n, "language")),
-        "bulletList" => list_md(n, false, false),
-        "orderedList" => list_md(n, true, false),
-        "listItem" => blocks_md(content),
+        "bulletList" => list_md(n, false, false, check),
+        "orderedList" => list_md(n, true, false, check),
+        "listItem" => blocks_md(content, check),
         "horizontalRule" => "---".to_string(),
         "table" => gfm_table(n),
         "embed" => {
@@ -873,26 +941,39 @@ fn block_md(n: &Value) -> String {
             format!("[[{label}:{reference}]]")
         }
         _ => match content {
-            Some(_) => blocks_md(content),
+            Some(_) => blocks_md(content, check),
             None => String::new(),
         },
     }
 }
 
-fn blocks_md(nodes: Option<&Vec<Value>>) -> String {
+fn blocks_md(nodes: Option<&Vec<Value>>, check: MathCheck) -> String {
     nodes
         .into_iter()
         .flatten()
-        .map(block_md)
+        .map(|n| block_md(n, check))
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-/// Source `tiptapDocToMd` (see the module docs for the self-check difference).
-/// Callers check [`is_tiptap_doc`] first.
+/// Source `tiptapDocToMd`, including the `selfCheckedMd` reparse. Runs the
+/// Markdown parser: product callers use it through the `--internal-markdown`
+/// child. Callers check [`is_tiptap_doc`] first.
 pub fn tiptap_doc_to_md(doc: &Value) -> String {
-    let md = blocks_md(node_content(doc));
+    doc_md(doc, MathCheck::Reparse)
+}
+
+/// `tiptapDocToMd` without the `selfCheckedMd` reparse (first pass only), for
+/// the public share page, which renders in-process. Differs from
+/// [`tiptap_doc_to_md`] only for paragraphs/headings whose first pass contains
+/// `$` and reparses with a different math/text shape.
+pub fn tiptap_doc_to_md_first_pass(doc: &Value) -> String {
+    doc_md(doc, MathCheck::FirstPass)
+}
+
+fn doc_md(doc: &Value, check: MathCheck) -> String {
+    let md = blocks_md(node_content(doc), check);
     if md.is_empty() {
         md
     } else {
@@ -1090,17 +1171,17 @@ mod tests {
         assert_eq!(tiptap_doc_to_md(&doc), "<\u{1F600}>:nosuchcode_zz:\n");
     }
 
-    /// Known difference: the source's `selfCheckedMd` reparses this first pass,
-    /// sees the text `$$` turn into math, and emits the second pass
-    /// `"$$$ $$ $$$\\$\\$ after\n"`. Without the Markdown parser the port keeps
-    /// the first pass.
+    /// The source's `selfCheckedMd` reparses this first pass, sees the text `$$`
+    /// turn into math, and emits the second pass.
     #[test]
-    fn self_check_keeps_first_pass() {
+    fn self_check_retries_with_escaped_dollars() {
         let doc = para(json!([
             {"type": "mathInline", "attrs": {"latex": "$$"}},
             {"type": "text", "text": "$$ after"},
         ]));
-        assert_eq!(tiptap_doc_to_md(&doc), "$$$ $$ $$$$$ after\n");
+        assert_eq!(tiptap_doc_to_md(&doc), "$$$ $$ $$$\\$\\$ after\n");
+        // The public share page renders in-process and keeps the first pass.
+        assert_eq!(tiptap_doc_to_md_first_pass(&doc), "$$$ $$ $$$$$ after\n");
     }
 
     /// Outputs of the TS source (`tiptapDocToSafeHtml` / `tiptapDocToMd`) at

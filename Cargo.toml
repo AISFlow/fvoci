@@ -290,3 +290,9 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# markdown-rs 1.0.0 with one quadratic-time fix (EditMap::add); see
+# vendor/markdown/PATCHES.md. Replace with the crates.io release once upstream
+# ships the fix.
+[patch.crates-io]
+markdown = { path = "vendor/markdown" }

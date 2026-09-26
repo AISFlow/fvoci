@@ -12,6 +12,7 @@ use crate::db::documents::{
     ImportFence,
 };
 use crate::documents::convert::{ConvertClient, ConvertError};
+use crate::documents::markdown_helper::{MarkdownError, MarkdownHelper};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportBodyError {
@@ -103,11 +104,22 @@ fn map_convert_error(err: ConvertError) -> ImportBodyError {
     }
 }
 
-/// Converts Markdown with the editor's parser and writes it through the
-/// collaboration path (Yjs update + derived body), like an editor save.
+fn map_markdown_error(err: MarkdownError) -> ImportBodyError {
+    match err {
+        MarkdownError::InvalidInput(_) => ImportBodyError::InvalidInput,
+        MarkdownError::TooLarge => ImportBodyError::TooLarge,
+        MarkdownError::Failed(detail) => ImportBodyError::Failed(detail),
+    }
+}
+
+/// Converts Markdown with the editor's parser (Rust, in the
+/// `--internal-markdown` child) and writes it through the collaboration path
+/// (Yjs update + derived body), like an editor save.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_imported_markdown(
     pool: &PgPool,
     convert: &ConvertClient,
+    markdown_helper: &MarkdownHelper,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -117,10 +129,10 @@ pub async fn apply_imported_markdown(
     if markdown.len() > DOCUMENT_MAX_BODY_BYTES {
         return Err(ImportBodyError::TooLarge);
     }
-    let content_json = convert
+    let content_json = markdown_helper
         .md_to_tiptap(markdown)
         .await
-        .map_err(map_convert_error)?;
+        .map_err(map_markdown_error)?;
     apply_imported_tiptap(
         pool,
         convert,

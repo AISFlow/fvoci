@@ -27,8 +27,26 @@ fn parse_options() -> ParseOptions {
     }
 }
 
-/// Source `mdToTiptapJson`.
-pub fn md_to_tiptap(markdown: &str) -> Value {
+/// Deepest mdast the walker recurses into. Far beyond any document whose
+/// Tiptap JSON fits [`MAX_TIPTAP_DEPTH`] (inline marks flatten, so the mdast
+/// can be deeper than the JSON); the `--internal-markdown` child runs the walk
+/// on a stack sized for it.
+pub const MAX_MDAST_DEPTH: usize = 4096;
+
+/// Deepest Tiptap JSON (objects and arrays) a conversion may return: the
+/// document must stay readable by `serde_json` (recursion limit 128), which
+/// also parsed the Node helper's `{"ok":true,"contentJson":…}` reply, so 126.
+pub const MAX_TIPTAP_DEPTH: usize = 126;
+
+/// The Markdown nests deeper than the stored document may (source: the TS
+/// parser throws `RangeError`, the helper answers `invalid_input`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("markdown nests too deeply")]
+pub struct TooDeep;
+
+/// Source `mdToTiptapJson`, rejecting documents nested past
+/// [`MAX_MDAST_DEPTH`] / [`MAX_TIPTAP_DEPTH`].
+pub fn md_to_tiptap(markdown: &str) -> Result<Value, TooDeep> {
     // micromark's preprocess turns U+0000 into U+FFFD; markdown-rs keeps it.
     // Parse the replaced text (its offsets index `parsed`) and read raw
     // `source` slices back from the original, as the source does.
@@ -41,6 +59,10 @@ pub fn md_to_tiptap(markdown: &str) -> Value {
     // Only MDX constructs can make `to_mdast` fail; none are enabled.
     let root = markdown::to_mdast(&parsed, &parse_options())
         .expect("markdown without MDX constructs always parses");
+    if mdast_depth(&root) > MAX_MDAST_DEPTH {
+        drop_iteratively(root);
+        return Err(TooDeep);
+    }
     let children = match &root {
         Node::Root(r) => r.children.as_slice(),
         _ => &[],
@@ -51,31 +73,75 @@ pub fn md_to_tiptap(markdown: &str) -> Value {
         nuls: &nuls,
     };
     let content = cx.blocks_from_nodes(children);
-    if content.is_empty() {
+    let doc = if content.is_empty() {
         json!({ "type": "doc", "content": [{ "type": "paragraph" }] })
     } else {
         json!({ "type": "doc", "content": content })
+    };
+    if json_depth(&doc) > MAX_TIPTAP_DEPTH {
+        return Err(TooDeep);
     }
+    Ok(doc)
+}
+
+/// Nesting depth of an mdast tree, without recursion.
+fn mdast_depth(root: &Node) -> usize {
+    let mut max = 0;
+    let mut stack = vec![(root, 1usize)];
+    while let Some((node, depth)) = stack.pop() {
+        max = max.max(depth);
+        for child in node.children().into_iter().flatten() {
+            stack.push((child, depth + 1));
+        }
+    }
+    max
+}
+
+/// Drops a (possibly very deep) mdast without recursing.
+fn drop_iteratively(root: Node) {
+    let mut stack = vec![root];
+    while let Some(mut node) = stack.pop() {
+        if let Some(children) = node.children_mut() {
+            stack.append(children);
+        }
+    }
+}
+
+/// Nesting depth of objects/arrays in a JSON value, without recursion.
+fn json_depth(value: &Value) -> usize {
+    let mut max = 0;
+    let mut stack = vec![(value, 0usize)];
+    while let Some((value, depth)) = stack.pop() {
+        let children: Box<dyn Iterator<Item = &Value>> = match value {
+            Value::Array(items) => Box::new(items.iter()),
+            Value::Object(map) => Box::new(map.values()),
+            _ => continue,
+        };
+        max = max.max(depth + 1);
+        stack.extend(children.map(|c| (c, depth + 1)));
+    }
+    max
+}
+
+/// Source `tiptapDocToSafeHtml(mdToTiptapJson(md))` (legal documents).
+pub fn md_to_safe_html(markdown: &str) -> Result<String, TooDeep> {
+    Ok(crate::share_render::tiptap_doc_to_safe_html(&md_to_tiptap(
+        markdown,
+    )?))
 }
 
 /// JS `\s` (and `String.prototype.trim`): WhiteSpace + LineTerminator.
 fn js_space(c: char) -> bool {
     matches!(
         c,
-        '\t' | '\n'
-            | '\u{0B}'
-            | '\u{0C}'
-            | '\r'
-            | ' '
-            | '\u{A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
+        '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
     )
 }
 
@@ -134,7 +200,14 @@ fn match_ref(s: &str, at: usize) -> Option<(Token<'_>, usize)> {
     let id_end = run_until(s, id_start, &['|', ']'])?;
     let id = &s[id_start..id_end];
     if s[id_end..].starts_with("]]") {
-        return Some((Token::Ref { kind, id, label: None }, id_end + 2));
+        return Some((
+            Token::Ref {
+                kind,
+                id,
+                label: None,
+            },
+            id_end + 2,
+        ));
     }
     if !s[id_end..].starts_with('|') {
         return None;
@@ -231,7 +304,9 @@ fn ref_full(s: &str) -> Option<(&str, &str, Option<&str>)> {
 /// `DETAILS_OPEN = /^<details>\s*<summary>([\s\S]*?)<\/summary>\s*$/`.
 fn details_summary(value: &str) -> Option<&str> {
     let rest = value.strip_prefix("<details>")?;
-    let rest = rest.trim_start_matches(js_space).strip_prefix("<summary>")?;
+    let rest = rest
+        .trim_start_matches(js_space)
+        .strip_prefix("<summary>")?;
     let mut from = 0;
     while let Some(i) = rest[from..].find("</summary>") {
         let close = from + i;
@@ -263,9 +338,8 @@ fn callout_marker(v: &str) -> Option<(&'static str, usize)> {
         ("[!WARNING]", "warning"),
         ("[!CAUTION]", "caution"),
     ] {
-        if v.starts_with(tag) {
-            let len = tag.len() + usize::from(v[tag.len()..].starts_with('\n'));
-            return Some((kind, len));
+        if let Some(rest) = v.strip_prefix(tag) {
+            return Some((kind, tag.len() + usize::from(rest.starts_with('\n'))));
         }
     }
     None
@@ -661,20 +735,35 @@ impl Cx<'_> {
             };
             match n {
                 Node::Text(t) => out.extend(tokenize_text(&t.value, &next, false)),
-                Node::InlineCode(c) => out.push(make_text(&c.value, &plus(&next, json!({ "type": "code" })))),
-                Node::Strong(s) => out.extend(self.map_phrasing(&s.children, &plus(&next, json!({ "type": "bold" })))),
-                Node::Emphasis(e) => out.extend(self.map_phrasing(&e.children, &plus(&next, json!({ "type": "italic" })))),
-                Node::Delete(d) => out.extend(self.map_phrasing(&d.children, &plus(&next, json!({ "type": "strike" })))),
+                Node::InlineCode(c) => {
+                    out.push(make_text(&c.value, &plus(&next, json!({ "type": "code" }))))
+                }
+                Node::Strong(s) => out.extend(
+                    self.map_phrasing(&s.children, &plus(&next, json!({ "type": "bold" }))),
+                ),
+                Node::Emphasis(e) => out.extend(
+                    self.map_phrasing(&e.children, &plus(&next, json!({ "type": "italic" }))),
+                ),
+                Node::Delete(d) => out.extend(
+                    self.map_phrasing(&d.children, &plus(&next, json!({ "type": "strike" }))),
+                ),
                 Node::Link(l) => out.extend(self.map_phrasing(
                     &l.children,
                     &plus(&next, json!({ "type": "link", "attrs": { "href": l.url } })),
                 )),
                 Node::Image(img) => {
                     if img.url.starts_with("http://") || img.url.starts_with("https://") {
-                        let text = if img.alt.is_empty() { &img.url } else { &img.alt };
+                        let text = if img.alt.is_empty() {
+                            &img.url
+                        } else {
+                            &img.alt
+                        };
                         out.push(make_text(
                             text,
-                            &plus(&next, json!({ "type": "link", "attrs": { "href": img.url } })),
+                            &plus(
+                                &next,
+                                json!({ "type": "link", "attrs": { "href": img.url } }),
+                            ),
                         ));
                     } else if !img.alt.is_empty() {
                         out.push(make_text(&img.alt, &next));
@@ -776,7 +865,7 @@ mod tests {
         let mut failed = Vec::new();
         for (name, md) in corpus() {
             let want: Value = serde_json::from_str(&expected(&name, "json")).unwrap();
-            let got = md_to_tiptap(&md);
+            let got = md_to_tiptap(&md).unwrap();
             if got != want {
                 failed.push(format!(
                     "{name}\n  want {}\n  got  {}",
@@ -785,14 +874,58 @@ mod tests {
                 ));
             }
         }
-        assert!(failed.is_empty(), "{} mismatches:\n{}", failed.len(), failed.join("\n"));
+        assert!(
+            failed.is_empty(),
+            "{} mismatches:\n{}",
+            failed.len(),
+            failed.join("\n")
+        );
+    }
+
+    /// md -> Tiptap -> md (Rust `tiptap_doc_to_md`) equals the TS
+    /// `tiptapDocToMd(mdToTiptapJson(md))` output byte for byte.
+    #[test]
+    fn md_round_trip_matches_ts_oracle() {
+        let mut failed = Vec::new();
+        for (name, md) in corpus() {
+            let want = expected(&name, "roundtrip.md");
+            let got = crate::share_render::tiptap_doc_to_md(&md_to_tiptap(&md).unwrap());
+            if got != want {
+                failed.push(format!("{name}\n  want {want:?}\n  got  {got:?}"));
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "{} mismatches:\n{}",
+            failed.len(),
+            failed.join("\n")
+        );
+    }
+
+    /// Legal publish: `tiptapDocToSafeHtml(mdToTiptapJson(md))`.
+    #[test]
+    fn md_to_safe_html_matches_ts_oracle() {
+        let mut failed = Vec::new();
+        for (name, md) in corpus() {
+            let want = expected(&name, "html");
+            let got = md_to_safe_html(&md).unwrap();
+            if got != want {
+                failed.push(format!("{name}\n  want {want:?}\n  got  {got:?}"));
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "{} mismatches:\n{}",
+            failed.len(),
+            failed.join("\n")
+        );
     }
 
     #[test]
     fn empty_and_blank_input_is_one_empty_paragraph() {
         for md in ["", "   \n\n", "<!-- only a comment -->", "[r]: https://x"] {
             assert_eq!(
-                md_to_tiptap(md),
+                md_to_tiptap(md).unwrap(),
                 json!({ "type": "doc", "content": [{ "type": "paragraph" }] }),
                 "{md:?}"
             );
@@ -803,10 +936,36 @@ mod tests {
     fn link_hrefs_are_kept_verbatim_for_render_time_sanitizing() {
         // parse.ts stores the mdast url as-is; schemes are filtered by the HTML
         // renderer (`tiptap_doc_to_safe_html`), not here.
-        let doc = md_to_tiptap("[x](javascript:alert(1))");
+        let doc = md_to_tiptap("[x](javascript:alert(1))").unwrap();
         assert_eq!(
             doc["content"][0]["content"][0]["marks"][0],
             json!({ "type": "link", "attrs": { "href": "javascript:alert(1)" } })
+        );
+    }
+
+    /// Deep containers are refused (not a stack overflow); the TS parser
+    /// throws `RangeError` and the Node helper answers `invalid_input`.
+    #[test]
+    fn deep_nesting_is_rejected_without_overflowing() {
+        let run = |md: String| {
+            std::thread::Builder::new()
+                .stack_size(2 << 20)
+                .spawn(move || md_to_tiptap(&md).map(|_| ()))
+                .unwrap()
+                .join()
+                .expect("no stack overflow / panic")
+        };
+        // doc + content (2) + 2 per blockquote + paragraph/content/text (3):
+        // 60 blockquotes = 125 levels fit, 61 = 127 do not.
+        assert_eq!(run("> ".repeat(60) + "x"), Ok(()));
+        assert_eq!(run("> ".repeat(61) + "x"), Err(TooDeep));
+        assert_eq!(run("> ".repeat(20_000) + "x"), Err(TooDeep));
+        // Inline nesting flattens into marks: deep but storable.
+        assert_eq!(run("*a ".repeat(200) + &"b* ".repeat(200)), Ok(()));
+        // Links do not nest (the innermost wins), so this stays shallow.
+        assert_eq!(
+            run("[".repeat(10_000) + "x" + &"](u)".repeat(10_000)),
+            Ok(())
         );
     }
 }

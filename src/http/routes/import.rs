@@ -140,6 +140,10 @@ async fn start_import(
             tracing::error!("import.failed reason=convert_helper_unset");
             return Err(import_failed());
         };
+        let Some(markdown_helper) = state.markdown.as_ref() else {
+            tracing::error!("import.failed reason=markdown_helper_unset");
+            return Err(import_failed());
+        };
         let job = create_sync_import_job(pool, body.workspace_id, user_id, session_id)
             .await
             .map_err(internal)?
@@ -147,6 +151,7 @@ async fn start_import(
         let created = match run_markdown_zip_import(
             pool,
             convert,
+            markdown_helper,
             body.workspace_id,
             job.id,
             user_id,
