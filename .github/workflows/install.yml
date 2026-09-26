@@ -6,7 +6,7 @@ on:
       - .github/workflows/install.yml
       - infra/rust/**
       - scripts/install-smoke.sh
-      - scripts/install-smoke-documents.py
+      - examples/**
       - scripts/install-smoke-collab.mjs
       - scripts/backup.sh
       - scripts/restore.sh
@@ -32,7 +32,7 @@ on:
       - .github/workflows/install.yml
       - infra/rust/**
       - scripts/install-smoke.sh
-      - scripts/install-smoke-documents.py
+      - examples/**
       - scripts/install-smoke-collab.mjs
       - scripts/backup.sh
       - scripts/restore.sh

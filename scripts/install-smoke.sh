@@ -16,6 +16,7 @@ MEILI_MASTER_KEY="$(openssl rand -hex 16)"
 PEPPER="{\"install\":\"$(openssl rand -hex 32)\"}"
 FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
 DOCUMENT_STATE="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-documents.${RUN_ID}.XXXXXX")"
+SMOKE_BIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-install-client.${RUN_ID}.XXXXXX")"
 ASSERT_LOG="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-assert.${RUN_ID}.XXXXXX")"
 
 START_TS=$SECONDS
@@ -41,6 +42,8 @@ cleanup() {
   fi
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -f "$ENV_FILE" "$DOCUMENT_STATE"
+  rm -f "$SMOKE_BIN_DIR/install-smoke"
+  rmdir "$SMOKE_BIN_DIR"
   if (( status != 0 )); then
     echo "install-smoke failed after $((SECONDS - START_TS))s; assertions:" >&2
     cat "$ASSERT_LOG" >&2 || true
@@ -91,25 +94,28 @@ log_assert "== build image ${IMAGE_TAG}"
 BUILD_START=$SECONDS
 docker build -f "$ROOT/infra/rust/Dockerfile" -t "$IMAGE_TAG" "$ROOT"
 log_assert "build image: ok ($((SECONDS - BUILD_START))s)"
+docker build -f "$ROOT/infra/rust/Dockerfile" --target install-client \
+  --output "type=local,dest=$SMOKE_BIN_DIR" "$ROOT"
 
 # Test the actual final image, not a host PATH with node hidden. Web assets are
 # browser code; only the four Rust product binaries belong in the runtime.
 docker run --rm --entrypoint sh "$IMAGE_TAG" -ec '
-  for runtime in node nodejs bun deno qjs quickjs js d8 jsc; do
+  for runtime in node nodejs bun deno qjs quickjs js d8 jsc python python3 pypy pypy3; do
     if command -v "$runtime" >/dev/null 2>&1; then
-      echo "unexpected JavaScript runtime: $runtime" >&2
+      echo "unexpected script runtime: $runtime" >&2
       exit 1
     fi
   done
   test ! -e /opt/fvoci/node
   test ! -e /opt/fvoci/convert
   test "$(find /opt/fvoci/bin -maxdepth 1 -type f | wc -l)" -eq 4
-  if dpkg-query -W -f="\${binary:Package}\n" | grep -Ei "^(nodejs|libnode|libmozjs|libjavascriptcore|quickjs)([-0-9:]|$)"; then
-    echo "unexpected JavaScript engine package" >&2
+  packages=$(dpkg-query -W -f="\${binary:Package}\n")
+  if printf "%s\n" "$packages" | grep -Ei "^(nodejs|libnode|libmozjs|libjavascriptcore|quickjs|python[0-9]?|libpython[0-9]?|pypy[0-9]?)([-0-9.:]|$)"; then
+    echo "unexpected script runtime package" >&2
     exit 1
   fi
 '
-log_assert "final product image contains no Node/Bun/Deno or installed JavaScript engine: ok"
+log_assert "final product image contains no JavaScript or Python runtime: ok"
 
 
 log_assert "== start compose stack"
@@ -182,7 +188,7 @@ if ! grep -q '"contentJson"' <<<"$BODY_BEFORE"; then
 fi
 log_assert "collab wiki body save + projection: ok"
 
-python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
+"$SMOKE_BIN_DIR/install-smoke" "$BASE_URL" "$WORKSPACE_ID" \
   "$COOKIE_JAR" "$DOCUMENT_STATE" create
 log_assert "document import/edit/exports/public PDF on the runtime image: ok"
 
@@ -328,7 +334,7 @@ if [[ "$EXTRACT_STATUS" != "ok" ]] || ! grep -q '안녕' <<<"$EXTRACT_TEXT"; the
   exit 1
 fi
 log_assert "post-restart doc body, attachment bytes, extraction: ok"
-python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
+"$SMOKE_BIN_DIR/install-smoke" "$BASE_URL" "$WORKSPACE_ID" \
   "$COOKIE_JAR" "$DOCUMENT_STATE" restart
 log_assert "post-restart imported document and import job: ok"
 
