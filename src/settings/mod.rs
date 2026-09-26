@@ -217,22 +217,19 @@ pub async fn current_values(
     current_values_with_license(pool, brand_default, &crate::license::absent()).await
 }
 
-/// Values read from persisted rows for backup/restore storage verification.
-/// Branding asset leaves come from the stored `branding` row even when the
-/// current license hides them from product-facing settings reads.
-pub async fn persisted_values(
+/// Stored `branding` row for backup/restore storage verification.
+/// Skips license overlay and env merging so asset leaves match the database.
+pub async fn persisted_branding(
     pool: &PgPool,
     brand_default: &str,
-) -> Result<SettingsValues, sqlx::Error> {
+) -> Result<BrandingSettings, sqlx::Error> {
     let rows = load_rows(pool).await?;
-    let mut snapshot = resolve(rows, 0, brand_default, &crate::license::absent());
-    if let Some(raw) = snapshot.stored.get(SettingsKey::Branding.as_str()) {
-        let mut from_row = SettingsValues::defaults(brand_default);
-        if from_row.set_json(SettingsKey::Branding, raw).is_some() {
-            snapshot.values.branding = from_row.branding;
-        }
+    let by_key: BTreeMap<String, Value> = rows.into_iter().collect();
+    let mut values = SettingsValues::defaults(brand_default);
+    if let Some(raw) = by_key.get(SettingsKey::Branding.as_str()) {
+        values.set_json(SettingsKey::Branding, raw);
     }
-    Ok(snapshot.values)
+    Ok(values.branding)
 }
 
 pub async fn current_values_with_license(

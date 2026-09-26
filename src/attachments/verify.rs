@@ -116,11 +116,11 @@ async fn verify_branding_assets(
 ) -> Result<(), String> {
     // Product reads may hide branding when the license is absent; restore checks
     // must still HEAD/hash every asset leaf stored in the settings row.
-    let values = crate::settings::persisted_values(pool, "FVOCI")
+    let branding = crate::settings::persisted_branding(pool, "FVOCI")
         .await
         .map_err(|e| format!("read instance settings: {e}"))?;
     for kind in [BrandingAssetKind::Logo, BrandingAssetKind::Favicon] {
-        let Some(asset) = values.branding.asset(kind) else {
+        let Some(asset) = branding.asset(kind) else {
             continue;
         };
         report.branding_checked += 1;
