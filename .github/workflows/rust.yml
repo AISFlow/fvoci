@@ -47,6 +47,7 @@ jobs:
       - run: cargo test --locked --offline --lib --bin fvoci-server
       - run: cargo test --locked --offline --test collab_wire
       - run: cargo test --locked --offline --test markdown_process
+      - run: cargo test --locked --offline --test docx_export_process
       - run: cargo test --locked --offline --manifest-path vendor/markdown/Cargo.toml --target-dir target/vendor-markdown
   postgres:
     name: ${{ matrix.check }}
@@ -64,7 +65,7 @@ jobs:
           - runner: ubuntu-24.04
             check: postgres-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test search_semantic --test mcp_integration --test doctor_integration
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test search_semantic --test mcp_integration --test doctor_integration
           - runner: ubuntu-24.04-arm
             check: postgres-arm64
             shard: a
@@ -72,7 +73,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             check: postgres-arm64-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test search_semantic --test mcp_integration --test doctor_integration
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test search_semantic --test mcp_integration --test doctor_integration
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     services:
