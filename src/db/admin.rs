@@ -446,6 +446,7 @@ async fn count_live_instance_admins(
 /// API token of the target in the same transaction as its audit rows.
 pub async fn patch_instance_user(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     actor: Uuid,
     target: Uuid,
     patch: InstanceUserPatch,
@@ -473,7 +474,17 @@ pub async fn patch_instance_user(
         tx.rollback().await?;
         return Ok(Some(PatchUserOutcome::NotFound));
     };
-    let outcome = patch_locked(&mut tx, actor, target, patch, is_admin, suspended_at, ip).await?;
+    let outcome = patch_locked(
+        &mut tx,
+        actor,
+        target,
+        patch,
+        is_admin,
+        suspended_at,
+        ip,
+        license,
+    )
+    .await?;
     match outcome {
         PatchUserOutcome::Ok { .. } => tx.commit().await?,
         _ => tx.rollback().await?,
@@ -489,6 +500,7 @@ async fn patch_locked(
     is_admin: bool,
     suspended_at: Option<DateTime<Utc>>,
     ip: Option<&str>,
+    license: &crate::license::Entitlements,
 ) -> Result<PatchUserOutcome, sqlx::Error> {
     if patch.instance_admin == Some(false) && is_admin && count_live_instance_admins(tx).await? <= 1
     {
@@ -506,7 +518,7 @@ async fn patch_locked(
     }
     if patch.instance_admin == Some(true) && !is_admin {
         if let Err(QuotaError::SeatLimit | QuotaError::GuestLimit) =
-            require_new_instance_billable_user(tx, Some(target)).await?
+            require_new_instance_billable_user(tx, Some(target), license).await?
         {
             return Ok(PatchUserOutcome::SeatLimit);
         }

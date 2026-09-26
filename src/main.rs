@@ -232,6 +232,7 @@ where
 }
 
 async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let license = Arc::new(fvoci_server::license::from_env());
     // Replace the default SIGTERM/SIGINT handlers before bind or any readiness
     // advertisement. Tokio buffers signals received between install and recv.
     let shutdown_signals = install_shutdown_signals()?;
@@ -380,7 +381,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     // child and the Yjs seed in the collab-engine child. The worker starts
     // whenever the seed engine is configured.
     let import_settings = {
-        let settings = ImportJobSettings::from_env();
+        let settings = ImportJobSettings::from_env_with_license(license.clone());
         if settings.seed.is_some() {
             Some(settings)
         } else {
@@ -402,7 +403,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     );
     let state = AppState {
         auth: Arc::new(AuthService {
-            db: Db::new(pool.clone()),
+            db: Db::with_license(pool.clone(), license.clone()),
             password_keys: config.password_keys.clone(),
         }),
         branding_name: config.branding_name.clone(),
@@ -419,9 +420,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         markdown,
         import_wake,
         import_extractor_available,
-        // Source self-host policy: storage/upload limits come only from the
-        // signed license, which is not ported; unlimited until it is.
-        quota: Default::default(),
+        quota: fvoci_server::db::quota::StorageQuota::from_license(license),
     };
 
     let deadline = config.shutdown_deadline;

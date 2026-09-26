@@ -213,6 +213,7 @@ async fn load_workspace_provider(
 pub async fn begin(
     pool: &PgPool,
     identity: &Identity,
+    license: &crate::license::Entitlements,
     params: BeginParams,
 ) -> Result<Started, BeginError> {
     let keys = identity
@@ -223,6 +224,9 @@ pub async fn begin(
     let workspace_sso = matches!(params.mode, Mode::Login | Mode::Link)
         && params.provider == ProviderKey::Generic
         && params.workspace_id.is_some();
+    if workspace_sso && !license.has_feature("workspaceSso") {
+        return Err(BeginError::NotConfigured);
+    }
     let provider = if workspace_sso {
         load_workspace_provider(pool, keys, params.workspace_id.expect("checked")).await?
     } else {
@@ -331,6 +335,7 @@ pub struct CompleteParams<'a> {
 pub async fn complete(
     pool: &PgPool,
     identity: &Identity,
+    license: &crate::license::Entitlements,
     params: CompleteParams<'_>,
 ) -> Result<OidcResult, sqlx::Error> {
     let Some(keys) = identity.encryption_keys.as_deref() else {
@@ -360,6 +365,11 @@ pub async fn complete(
     let mode = Some(stored.mode);
     if stored.provider != params.provider.as_str() {
         return Ok(error(OidcErrorCode::StateMismatch, mode));
+    }
+    // A valid state may outlive the license; never exchange it into a session
+    // or an identity link after workspace SSO expires.
+    if stored.workspace_id.is_some() && !license.has_feature("workspaceSso") {
+        return Ok(error(OidcErrorCode::ProviderError, mode));
     }
     if params.query.contains_key("error") {
         return Ok(error(OidcErrorCode::ProviderError, mode));
@@ -413,12 +423,18 @@ pub async fn complete(
             return Ok(error(OidcErrorCode::ProviderError, mode));
         }
     };
+    if stored.workspace_id.is_some() && !license.has_feature("workspaceSso") {
+        return Ok(error(OidcErrorCode::ProviderError, mode));
+    }
     match stored.mode {
-        Mode::Login => login_with_identity(pool, provider.key, &profile, stored.workspace_id).await,
+        Mode::Login => {
+            login_with_identity(pool, license, provider.key, &profile, stored.workspace_id).await
+        }
         Mode::Link => link_identity(pool, provider.key, &profile, &stored, params.session).await,
         Mode::Invite => {
             accept_invite_with_identity(
                 pool,
+                license,
                 provider.key,
                 &profile,
                 &stored,
@@ -441,6 +457,7 @@ fn email_domain(email: &str) -> Option<String> {
 /// Source `tryJitJoin`. `None` falls back to `oidc_not_linked`.
 async fn try_jit_join(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     profile: &SocialProfile,
     workspace_id: Uuid,
 ) -> Result<Option<OidcResult>, sqlx::Error> {
@@ -472,6 +489,7 @@ async fn try_jit_join(
     let subject = identity_subject(ProviderKey::Generic, &profile.sub, Some(workspace_id));
     match db::jit_join(
         pool,
+        license,
         JitInput {
             workspace_id,
             email,
@@ -493,6 +511,7 @@ async fn try_jit_join(
 
 async fn login_with_identity(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     provider: ProviderKey,
     profile: &SocialProfile,
     workspace_id: Option<Uuid>,
@@ -511,7 +530,7 @@ async fn login_with_identity(
     let taken = lookup.subject_taken();
     let Some(link) = lookup.found() else {
         if let (ProviderKey::Generic, Some(ws), false) = (provider, workspace_id, taken) {
-            if let Some(result) = try_jit_join(pool, profile, ws).await? {
+            if let Some(result) = try_jit_join(pool, license, profile, ws).await? {
                 return Ok(result);
             }
         }
@@ -556,6 +575,7 @@ async fn link_identity(
 
 async fn accept_invite_with_identity(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     provider: ProviderKey,
     profile: &SocialProfile,
     stored: &StoredState,
@@ -570,6 +590,7 @@ async fn accept_invite_with_identity(
     let subject = identity_subject(provider, &profile.sub, None);
     let accepted = invitations::accept_invitation_with_identity(
         pool,
+        license,
         IdentityAcceptRequest {
             token_hash,
             provider: provider.as_str(),

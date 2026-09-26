@@ -18,6 +18,7 @@ pub mod import_job;
 pub mod init_env;
 pub mod integrations;
 pub mod jobs;
+pub mod license;
 pub mod mail;
 pub mod notifications;
 pub mod oidc;

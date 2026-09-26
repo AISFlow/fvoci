@@ -259,6 +259,7 @@ pub async fn get_invitation_public(
 
 pub async fn accept_invitation(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     keys: &Keyring,
     raw_token: &str,
     request: AcceptInvitationRequest<'_>,
@@ -326,6 +327,7 @@ pub async fn accept_invitation(
 
     if let Err(err) = grant_membership(
         pool,
+        license,
         &invitation,
         user_id,
         new_account,
@@ -376,6 +378,7 @@ pub struct IdentityAcceptRequest<'a> {
 /// caller issues the session through the MFA gate.
 pub async fn accept_invitation_with_identity(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     request: IdentityAcceptRequest<'_>,
 ) -> Result<Result<Uuid, InvitationDbError>, sqlx::Error> {
     let invitation = match load_invitation_by_hash(pool, request.token_hash).await? {
@@ -405,6 +408,7 @@ pub async fn accept_invitation_with_identity(
         }
         return Ok(grant_membership(
             pool,
+            license,
             &invitation,
             user_id,
             None,
@@ -445,6 +449,7 @@ pub async fn accept_invitation_with_identity(
     };
     Ok(grant_membership(
         pool,
+        license,
         &invitation,
         user_id,
         Some(new_account),
@@ -463,6 +468,7 @@ pub fn email_local_part(email: &str) -> String {
 
 async fn grant_membership(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     invitation: &InvitationRow,
     user_id: Uuid,
     new_account: Option<NewAccount>,
@@ -544,7 +550,8 @@ async fn grant_membership(
         .await?
         .is_some();
     if !already_member {
-        if let Err(err) = require_membership_admission(&mut tx, user_id, current.role, None).await?
+        if let Err(err) =
+            require_membership_admission(&mut tx, user_id, current.role, None, license).await?
         {
             tx.rollback().await?;
             return Ok(Err(quota_error(err)));

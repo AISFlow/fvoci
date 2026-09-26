@@ -134,6 +134,9 @@ async fn get_audit(
     query: Result<Query<AuditLogQuery>, QueryRejection>,
 ) -> Result<Json<AuditLogListResponse>, AppError> {
     let auth = session(&state, &headers, &jar).await?;
+    if !state.auth.db.license.has_feature("audit") {
+        return Err(not_found());
+    }
     let Query(query) = query.map_err(AppError::from)?;
     let limit = audit_limit(query.limit.as_deref())?;
     let cursor = match query.cursor.as_deref() {
@@ -274,6 +277,7 @@ async fn patch_users(
     let ip = peer_ip(peer.ip());
     let outcome = patch_instance_user(
         &state.auth.db.pool,
+        &state.auth.db.license,
         auth.user_id,
         body.user_id,
         InstanceUserPatch {
@@ -305,6 +309,7 @@ async fn patch_instance_admins(
     let ip = peer_ip(peer.ip());
     let outcome = patch_instance_user(
         &state.auth.db.pool,
+        &state.auth.db.license,
         auth.user_id,
         body.user_id,
         InstanceUserPatch {
@@ -469,7 +474,11 @@ pub fn admin_settings_output(
             .map(|k| k.as_str().to_string())
             .collect(),
         env_applied: snapshot.env_applied.clone(),
-        ee_features: settings::EE_FEATURES_ENABLED
+        ee_features: state
+            .auth
+            .db
+            .license
+            .enabled_features()
             .iter()
             .map(|s| s.to_string())
             .collect(),
@@ -535,6 +544,9 @@ fn parse_settings_patch(body: &Value) -> Result<Vec<(SettingsKey, Option<Value>)
 fn map_settings_write(err: SettingsWriteError) -> AppError {
     match err {
         SettingsWriteError::NotAdmin | SettingsWriteError::AssetMissing => not_found(),
+        SettingsWriteError::EnterpriseLicenseRequired => {
+            AppError::from_code(ProblemCode::EnterpriseLicenseRequired)
+        }
     }
 }
 
@@ -549,13 +561,20 @@ async fn patch_instance_settings(
     let auth = session(&state, &headers, &jar).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let items = parse_settings_patch(&body)?;
+    if items.iter().any(|(key, _)| *key == SettingsKey::Branding)
+        && !state.auth.db.license.has_feature("branding")
+    {
+        require_admin_read(&state, auth.user_id).await?;
+        return Err(AppError::from_code(ProblemCode::EnterpriseLicenseRequired));
+    }
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change(
+    let outcome = settings::apply_change_with_license(
         &state.auth.db.pool,
         auth.user_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::Patch(items),
+        &state.auth.db.license,
     )
     .await
     .map_err(internal)?
@@ -660,6 +679,9 @@ async fn upload_branding_asset(
     let auth = session(&state, &headers, &jar).await?;
     let kind = parse_asset_kind(&asset)?;
     require_admin_read(&state, auth.user_id).await?;
+    if !state.auth.db.license.has_feature("branding") {
+        return Err(AppError::from_code(ProblemCode::EnterpriseLicenseRequired));
+    }
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -694,7 +716,7 @@ async fn upload_branding_asset(
         mime: mime.to_string(),
     };
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change(
+    let outcome = settings::apply_change_with_license(
         &state.auth.db.pool,
         auth.user_id,
         Some(&ip),
@@ -703,6 +725,7 @@ async fn upload_branding_asset(
             kind,
             asset: Some(record.clone()),
         },
+        &state.auth.db.license,
     )
     .await;
     let outcome = match outcome {
@@ -731,14 +754,19 @@ async fn remove_branding_asset(
 ) -> Result<Json<AdminInstanceSettingsOutput>, AppError> {
     check_origin(&headers, &state.public_origin)?;
     let auth = session(&state, &headers, &jar).await?;
+    require_admin_read(&state, auth.user_id).await?;
+    if !state.auth.db.license.has_feature("branding") {
+        return Err(AppError::from_code(ProblemCode::EnterpriseLicenseRequired));
+    }
     let kind = parse_asset_kind(&asset)?;
     let ip = peer_ip(peer.ip());
-    let outcome = settings::apply_change(
+    let outcome = settings::apply_change_with_license(
         &state.auth.db.pool,
         auth.user_id,
         Some(&ip),
         &state.branding_name,
         SettingsChange::BrandingAsset { kind, asset: None },
+        &state.auth.db.license,
     )
     .await
     .map_err(internal)?

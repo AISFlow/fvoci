@@ -265,9 +265,13 @@ async fn get_branding_asset(
 ) -> Result<Response, AppError> {
     let kind = BrandingAssetKind::parse(&asset)
         .ok_or_else(|| AppError::with_source(ProblemCode::InvalidInput, "/asset"))?;
-    let values = settings::current_values(&state.auth.db.pool, &state.branding_name)
-        .await
-        .map_err(internal)?;
+    let values = settings::current_values_with_license(
+        &state.auth.db.pool,
+        &state.branding_name,
+        &state.auth.db.license,
+    )
+    .await
+    .map_err(internal)?;
     let asset = values.branding.asset(kind).cloned().ok_or_else(not_found)?;
     let tag = strong_etag(asset.sha256.as_bytes());
     if if_none_matches(&headers, &tag) {

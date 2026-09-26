@@ -24,14 +24,27 @@ pub use catalog::{
 use crate::db::admin::{record_instance_change, require_live_instance_admin, InstanceChange};
 use crate::db::context::set_system;
 
-/// Enterprise features the admin form may unlock. The source reads them from a
-/// signed license (`packages/ee`); license verification is not ported, so the
-/// features this server implements are reported as enabled.
-pub const EE_FEATURES_ENABLED: [&str; 3] = ["audit", "branding", "workspaceSso"];
-
 /// Process-local boot snapshot shared by every clone of one `Db`.
-#[derive(Clone, Default)]
-pub struct SettingsBoot(Arc<OnceLock<SettingsValues>>);
+#[derive(Clone)]
+pub struct SettingsBoot {
+    values: Arc<OnceLock<SettingsValues>>,
+    license: Arc<crate::license::Entitlements>,
+}
+
+impl Default for SettingsBoot {
+    fn default() -> Self {
+        Self::with_license(Arc::new(crate::license::absent()))
+    }
+}
+
+impl SettingsBoot {
+    pub fn with_license(license: Arc<crate::license::Entitlements>) -> Self {
+        Self {
+            values: Arc::new(OnceLock::new()),
+            license,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SettingsSnapshot {
@@ -71,7 +84,12 @@ fn env_value(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-fn resolve(rows: Vec<(String, Value)>, revision: i64, brand_default: &str) -> SettingsSnapshot {
+fn resolve(
+    rows: Vec<(String, Value)>,
+    revision: i64,
+    brand_default: &str,
+    license: &crate::license::Entitlements,
+) -> SettingsSnapshot {
     let mut values = SettingsValues::defaults(brand_default);
     let mut stored = BTreeMap::new();
     let mut overridden = Vec::new();
@@ -122,6 +140,11 @@ fn resolve(rows: Vec<(String, Value)>, revision: i64, brand_default: &str) -> Se
             tracing::warn!(key = key.as_str(), reason = "env", "settings.row_invalid");
         }
     }
+    // Keep the stored row intact; only the applied value is forced to the
+    // catalog default while branding is unavailable.
+    if !license.has_feature("branding") {
+        values.branding = BrandingSettings::default_named(brand_default);
+    }
     SettingsSnapshot {
         revision,
         values,
@@ -159,26 +182,31 @@ pub async fn load(
     let revision = load_revision(&mut *tx).await?;
     let rows = load_rows(&mut *tx).await?;
     tx.commit().await?;
-    let snapshot = resolve(rows, revision, brand_default);
-    let _ = boot.0.get_or_init(|| snapshot.values.clone());
+    let snapshot = resolve(rows, revision, brand_default, &boot.license);
+    let _ = boot.values.get_or_init(|| snapshot.values.clone());
     Ok(snapshot)
 }
 
 pub fn boot_values<'a>(boot: &'a SettingsBoot, current: &'a SettingsValues) -> &'a SettingsValues {
-    boot.0.get().unwrap_or(current)
+    boot.values.get().unwrap_or(current)
 }
 
 /// Read API for other features: the instance share-link policy.
 pub async fn share_policy(pool: &PgPool) -> Result<SharePolicy, sqlx::Error> {
     let rows = load_rows(pool).await?;
-    Ok(resolve(rows, 0, "FVOCI").values.share)
+    Ok(resolve(rows, 0, "FVOCI", &crate::license::absent())
+        .values
+        .share)
 }
 
 /// Read API for other features: the attachment preview mode (`auto`,
 /// `client` or `server`), read per request like the source settings store.
 pub async fn attachment_preview_mode(pool: &PgPool) -> Result<String, sqlx::Error> {
     let rows = load_rows(pool).await?;
-    Ok(resolve(rows, 0, "FVOCI").values.attachment_preview.mode)
+    Ok(resolve(rows, 0, "FVOCI", &crate::license::absent())
+        .values
+        .attachment_preview
+        .mode)
 }
 
 /// Effective values without touching the boot snapshot.
@@ -186,8 +214,16 @@ pub async fn current_values(
     pool: &PgPool,
     brand_default: &str,
 ) -> Result<SettingsValues, sqlx::Error> {
+    current_values_with_license(pool, brand_default, &crate::license::absent()).await
+}
+
+pub async fn current_values_with_license(
+    pool: &PgPool,
+    brand_default: &str,
+    license: &crate::license::Entitlements,
+) -> Result<SettingsValues, sqlx::Error> {
     let rows = load_rows(pool).await?;
-    Ok(resolve(rows, 0, brand_default).values)
+    Ok(resolve(rows, 0, brand_default, license).values)
 }
 
 pub enum SettingsChange {
@@ -207,6 +243,7 @@ pub enum SettingsWriteError {
     NotAdmin,
     /// Removing an asset that is not set.
     AssetMissing,
+    EnterpriseLicenseRequired,
 }
 
 pub struct SettingsWriteOutcome {
@@ -264,10 +301,37 @@ pub async fn apply_change(
     brand_default: &str,
     change: SettingsChange,
 ) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
+    apply_change_with_license(
+        pool,
+        actor,
+        ip,
+        brand_default,
+        change,
+        &crate::license::absent(),
+    )
+    .await
+}
+
+pub async fn apply_change_with_license(
+    pool: &PgPool,
+    actor: Uuid,
+    ip: Option<&str>,
+    brand_default: &str,
+    change: SettingsChange,
+    license: &crate::license::Entitlements,
+) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     if !require_live_instance_admin(&mut tx, actor).await? {
         tx.rollback().await?;
         return Ok(Err(SettingsWriteError::NotAdmin));
+    }
+    let branding_change = match &change {
+        SettingsChange::Patch(items) => items.iter().any(|(key, _)| *key == SettingsKey::Branding),
+        SettingsChange::BrandingAsset { .. } => true,
+    };
+    if branding_change && !license.has_feature("branding") {
+        tx.rollback().await?;
+        return Ok(Err(SettingsWriteError::EnterpriseLicenseRequired));
     }
     set_system(&mut tx).await?;
     let revision: i64 = sqlx::query_scalar(
@@ -275,7 +339,7 @@ pub async fn apply_change(
     )
     .fetch_one(&mut *tx)
     .await?;
-    let current = resolve(load_rows(&mut *tx).await?, revision, brand_default);
+    let current = resolve(load_rows(&mut *tx).await?, revision, brand_default, license);
 
     let mut previous_asset = None;
     let mut extra = Map::new();
@@ -403,7 +467,7 @@ pub async fn apply_change(
         },
     )
     .await?;
-    let snapshot = resolve(load_rows(&mut *tx).await?, revision, brand_default);
+    let snapshot = resolve(load_rows(&mut *tx).await?, revision, brand_default, license);
     tx.commit().await?;
     Ok(Ok(SettingsWriteOutcome {
         changed,
@@ -426,7 +490,7 @@ mod tests {
             ("auth".to_string(), json!({"passwordMinLength": 5})),
             ("unknown".to_string(), json!(1)),
         ];
-        let snap = resolve(rows, 4, "FVOCI");
+        let snap = resolve(rows, 4, "FVOCI", &crate::license::absent());
         assert!(!snap.values.share.enabled);
         assert_eq!(snap.values.auth.password_min_length, 10);
         assert_eq!(snap.overridden, vec![SettingsKey::Share]);
