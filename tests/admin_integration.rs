@@ -167,6 +167,7 @@ async fn app_state(app_url: &str, storage_root: &std::path::Path) -> AppState {
         },
         collab: None,
         meili: None,
+        search_embedder: None,
         document_convert: Some(convert_client()),
         import_wake: None,
         import_extractor_available: false,

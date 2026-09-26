@@ -307,6 +307,8 @@ async fn workspace_search(
             cursor: query.cursor.as_deref(),
             limit,
             meili,
+            hybrid: query.mode.as_deref() == Some("hybrid"),
+            embedder: state.search_embedder.as_ref(),
             allowed_kinds: allowed_parent_kinds(&auth),
         },
     )

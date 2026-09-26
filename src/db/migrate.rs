@@ -45,6 +45,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         30,
     ),
     (
+        include_str!("../../migrations/031_attachment_embeddings.sql"),
+        31,
+    ),
+    (
         include_str!("../../migrations/032_admin_user_erase.sql"),
         32,
     ),
@@ -73,34 +77,56 @@ pub fn latest_migration_version() -> i32 {
     MIGRATIONS.last().map(|(_, version)| *version).unwrap_or(0)
 }
 
-pub fn schema_version_gate(actual: Option<i32>, expected: i32) -> Result<(), String> {
-    match actual {
-        Some(version) if version == expected => Ok(()),
-        Some(version) if version > expected => Err(format!(
-            "database schema version {version} is newer than this binary ({expected}); deploy a matching fvoci-server"
-        )),
-        Some(version) => Err(format!(
-            "database schema version {version} is behind compiled version {expected}; {SCHEMA_GATE_OPERATOR_HINT}"
-        )),
-        None => Err(format!(
+/// Every migration version compiled into this binary, ascending.
+pub fn compiled_migration_versions() -> Vec<i32> {
+    MIGRATIONS.iter().map(|(_, version)| *version).collect()
+}
+
+/// Compares the applied migration set with the compiled one. Every compiled
+/// version must be applied and nothing else may be: a version number that
+/// merges after a higher one (031 after 032) is still required, so the check
+/// is on the set, not on `max(version)`.
+pub fn schema_gate(applied: &[i32], compiled: &[i32]) -> Result<(), String> {
+    let expected = compiled.last().copied().unwrap_or(0);
+    if applied.is_empty() {
+        return Err(format!(
             "database has no applied migrations (expected version {expected}); {SCHEMA_GATE_OPERATOR_HINT}"
-        )),
+        ));
     }
+    let unknown: Vec<i32> = applied
+        .iter()
+        .copied()
+        .filter(|version| !compiled.contains(version))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "database schema has migrations {unknown:?} newer than this binary ({expected}); deploy a matching fvoci-server"
+        ));
+    }
+    let missing: Vec<i32> = compiled
+        .iter()
+        .copied()
+        .filter(|version| !applied.contains(version))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "database schema is missing migrations {missing:?} and is behind compiled version {expected}; {SCHEMA_GATE_OPERATOR_HINT}"
+        ));
+    }
+    Ok(())
 }
 
 /// Verifies the connected database matches the compiled migration set.
 pub async fn assert_schema_current(pool: &PgPool) -> Result<(), String> {
-    let expected = latest_migration_version();
-    let actual =
-        sqlx::query_scalar::<_, Option<i32>>("SELECT max(version) FROM fvoci.schema_migrations")
-            .fetch_one(pool)
-            .await
-            .map_err(|error| {
-                format!(
-                    "cannot read fvoci.schema_migrations ({error}); {SCHEMA_GATE_OPERATOR_HINT}"
-                )
-            })?;
-    schema_version_gate(actual, expected)
+    let applied = sqlx::query_scalar::<_, i32>(
+        "SELECT version FROM fvoci.schema_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        format!("cannot read fvoci.schema_migrations ({error}); {SCHEMA_GATE_OPERATOR_HINT}")
+    })?;
+    schema_gate(&applied, &compiled_migration_versions())
 }
 
 // PostgreSQL grants EXECUTE to PUBLIC when a function is created. Revoke it for
@@ -500,6 +526,10 @@ mod tests {
             "c5fb3f817fb536b10dd9ab68b626b9cd598c2a4198eded19b2dd8d58c385d1e8",
         ),
         (
+            31,
+            "c098b60993d173feb3c7f2f4c33a7c4df7a90c6515aa656a1e96400e871ec643",
+        ),
+        (
             32,
             "dbf49b5d5bf969376406208582f976bd9cc4d04a8b2d76d90fee53d2902b3687",
         ),
@@ -528,23 +558,42 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_gate_distinguishes_ahead_behind_and_empty() {
+    fn schema_gate_distinguishes_ahead_behind_gap_and_empty() {
+        let compiled = compiled_migration_versions();
         let expected = latest_migration_version();
-        assert!(schema_version_gate(Some(expected), expected).is_ok());
-        let behind = schema_version_gate(Some(expected - 1), expected).unwrap_err();
+        assert!(schema_gate(&compiled, &compiled).is_ok());
+
+        let mut behind = compiled.clone();
+        behind.pop();
+        let behind = schema_gate(&behind, &compiled).unwrap_err();
         assert!(
             behind.contains(&format!("behind compiled version {expected}")),
             "{behind}"
         );
         assert!(behind.contains(SCHEMA_GATE_OPERATOR_HINT), "{behind}");
-        let ahead = schema_version_gate(Some(expected + 1), expected).unwrap_err();
+
+        // A lower version merged after a higher one: max(version) matches but
+        // the set does not. The server must still refuse to start.
+        let mut gap = compiled.clone();
+        let removed = gap.remove(gap.len() - 2);
+        let gap = schema_gate(&gap, &compiled).unwrap_err();
+        assert!(
+            gap.contains(&format!("missing migrations [{removed}]")),
+            "{gap}"
+        );
+        assert!(gap.contains(SCHEMA_GATE_OPERATOR_HINT), "{gap}");
+
+        let mut ahead = compiled.clone();
+        ahead.push(expected + 1);
+        let ahead = schema_gate(&ahead, &compiled).unwrap_err();
         assert!(
             ahead.contains(&format!("newer than this binary ({expected})")),
             "{ahead}"
         );
         assert!(ahead.contains("deploy a matching fvoci-server"), "{ahead}");
         assert!(!ahead.contains("fvoci-migrate"), "{ahead}");
-        let empty = schema_version_gate(None, expected).unwrap_err();
+
+        let empty = schema_gate(&[], &compiled).unwrap_err();
         assert!(empty.contains("no applied migrations"), "{empty}");
         assert!(empty.contains(SCHEMA_GATE_OPERATOR_HINT), "{empty}");
     }

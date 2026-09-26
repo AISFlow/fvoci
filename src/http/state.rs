@@ -18,6 +18,8 @@ pub struct AppState {
     pub upload: UploadLimits,
     pub collab: Option<Arc<CollabHub>>,
     pub meili: Option<MeiliConfig>,
+    /// Query-time embedder for workspace `mode=hybrid` (`None` = lexical only).
+    pub search_embedder: Option<crate::search::embed::Embedder>,
     pub document_convert: Option<ConvertClient>,
     /// Wakes the async import runner; `None` = no runner in this process, so
     /// office-file and notion-zip imports fail as unavailable (source).
