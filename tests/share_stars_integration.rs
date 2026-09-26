@@ -1742,3 +1742,188 @@ async fn share_pdf_without_convert_helper_is_a_server_error_after_scope_checks()
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     harness.cleanup().await;
 }
+
+const SHELL_INDEX: &str = "<!doctype html>\n<html lang=\"ko\"><head><meta charset=\"UTF-8\" /><title>FVOCI</title><script>document.documentElement.dataset.theme = \"light\";</script></head><body><div id=\"root\"></div><script type=\"module\" src=\"/assets/index.js\"></script></body></html>";
+
+fn body_part(html: &str) -> &str {
+    &html[html.find("<body").unwrap()..]
+}
+
+fn meta_content<'a>(html: &'a str, attr: &str) -> Option<&'a str> {
+    let marker = format!("{attr} content=\"");
+    let start = html.find(&marker)? + marker.len();
+    let end = html[start..].find('"')?;
+    Some(&html[start..start + end])
+}
+
+/// Source server.ts `/s/:token` SPA fallback + spa-html.ts `injectShareOg`:
+/// the shell gets the share's title and OG tags (escaped, one line, excerpt
+/// cut at 200 UTF-16 units), is never cached and not indexed; invalid tokens,
+/// a disabled share policy and a caller over the share-ip limit get the plain
+/// shell without telling whether the token exists.
+#[tokio::test]
+async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let static_dir = std::env::temp_dir().join(format!("fvoci-share-shell-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&static_dir).unwrap();
+    std::fs::write(static_dir.join("index.html"), SHELL_INDEX).unwrap();
+    let shell_app = |dir: &std::path::Path| {
+        let dir = dir.to_path_buf();
+        let url = harness.app_url.clone();
+        async move { fvoci_server::http::router(project_harness::app_state(&url).await, Some(dir)) }
+    };
+    let site = shell_app(&static_dir).await;
+
+    let doc = create_wiki_doc(&app, &cookie, ws, None, "공유 제목").await;
+    // Stored titles may carry markup-looking text, bidi controls and newlines.
+    sqlx::query("UPDATE fvoci.documents SET title = $2 WHERE id = $1")
+        .bind(Uuid::parse_str(&doc).unwrap())
+        .bind("제목 <b>\"따옴표\"</b> & \u{202E}역순\n둘째 줄")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let long = "가".repeat(168);
+    set_content(
+        &admin,
+        &doc,
+        json!({"type": "doc", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "<script>alert(1)</script> \"본문\""}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": format!("{long}😀끝")}]}
+        ]}),
+    )
+    .await;
+    let (_, token) = share_document(&app, &cookie, ws, &doc).await;
+
+    let (status, headers, bytes) = raw_get(site.clone(), &format!("/s/{token}"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+    assert_eq!(headers["cache-control"], "private, no-store");
+    assert_eq!(headers["x-robots-tag"], "noindex");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    assert!(!headers.contains_key("content-security-policy"));
+    let html = String::from_utf8(bytes).unwrap();
+    assert_eq!(body_part(&html), body_part(SHELL_INDEX), "body untouched");
+    // Inline blocks are unchanged, so build-time CSP hashes of the shell hold.
+    assert!(html.contains("<script>document.documentElement.dataset.theme = \"light\";</script>"));
+    assert_eq!(
+        html.matches("<script").count(),
+        SHELL_INDEX.matches("<script").count()
+    );
+    let title = "제목 &lt;b&gt;&quot;따옴표&quot;&lt;/b&gt; &amp; 역순 둘째 줄";
+    assert!(html.contains(&format!("<title>{title}</title>")), "{html}");
+    assert_eq!(meta_content(&html, "property=\"og:title\""), Some(title));
+    assert_eq!(
+        meta_content(&html, "property=\"og:url\""),
+        Some(format!("http://localhost/s/{token}").as_str())
+    );
+    assert_eq!(meta_content(&html, "property=\"og:type\""), Some("article"));
+    assert_eq!(
+        meta_content(&html, "name=\"twitter:card\""),
+        Some("summary")
+    );
+    let description = meta_content(&html, "property=\"og:description\"").unwrap();
+    let expected_start = "&lt;script&gt;alert(1)&lt;/script&gt; &quot;본문&quot; ";
+    assert!(description.starts_with(expected_start), "{description}");
+    // 200 UTF-16 units: 30 of the first paragraph, one joining space, 168 of
+    // the long one (199); the emoji pair would cross 200 and is not split.
+    let raw_description = description
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"");
+    assert_eq!(raw_description.encode_utf16().count(), 199);
+    assert!(raw_description.ends_with('가'));
+    assert!(!raw_description.contains('\u{FFFD}'));
+    assert!(!html.contains("<script>alert"));
+
+    // Trailing slash is the same root; sub-paths are not.
+    let (_, _, bytes) = raw_get(site.clone(), &format!("/s/{token}/"), &[]).await;
+    assert!(String::from_utf8(bytes).unwrap().contains("og:title"));
+    let (status, headers, bytes) =
+        raw_get(site.clone(), &format!("/s/{token}/attachments/x"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key("x-robots-tag"));
+    assert_eq!(bytes, SHELL_INDEX.as_bytes());
+
+    // An unknown token: the plain shell with the same private headers.
+    let (status, headers, bytes) = raw_get(site.clone(), "/s/not-a-token", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-robots-tag"], "noindex");
+    assert_eq!(headers["cache-control"], "private, no-store");
+    assert_eq!(bytes, SHELL_INDEX.as_bytes());
+
+    // A project share: project name, empty description.
+    let project = create_project(app.clone(), &cookie, ws, "OGP", "workspace").await;
+    let (status, link) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/share-links"),
+        Some(json!({"projectId": project["id"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{link}");
+    let project_token = link["url"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+    let (_, _, bytes) = raw_get(site.clone(), &format!("/s/{project_token}"), &[]).await;
+    let html = String::from_utf8(bytes).unwrap();
+    assert_eq!(meta_content(&html, "property=\"og:title\""), Some("OGP"));
+    assert_eq!(meta_content(&html, "property=\"og:description\""), Some(""));
+
+    // Revoked or expired shares stop injecting.
+    sqlx::query("UPDATE fvoci.share_links SET expires_at = now() - interval '1 second' WHERE token_hash = $1")
+        .bind(hash_token(&project_token))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (_, _, bytes) = raw_get(site.clone(), &format!("/s/{project_token}"), &[]).await;
+    assert_eq!(bytes, SHELL_INDEX.as_bytes());
+
+    // Sharing disabled by the instance policy: nothing is injected.
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        Some(json!({"share": {"enabled": false, "defaultExpiresDays": 7, "maxExpiresDays": 365}})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, headers, bytes) = raw_get(site.clone(), &format!("/s/{token}"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-robots-tag"], "noindex");
+    assert_eq!(bytes, SHELL_INDEX.as_bytes());
+    let (status, body) = json_request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        Some(json!({"share": null})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Over the share-ip limit the shell is still served, without meta or 429.
+    let limited = shell_app(&static_dir).await;
+    for i in 0..60 {
+        let (status, _) = public_json(limited.clone(), "/api/v1/share/unknown-token").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "request {i}");
+    }
+    let (status, headers, bytes) = raw_get(limited.clone(), &format!("/s/{token}"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key("retry-after"));
+    assert_eq!(bytes, SHELL_INDEX.as_bytes());
+    // The fresh app (own limiter) still injects after the policy reset.
+    let (_, _, bytes) = raw_get(site.clone(), &format!("/s/{token}"), &[]).await;
+    assert!(String::from_utf8(bytes).unwrap().contains("og:title"));
+
+    let _ = std::fs::remove_dir_all(&static_dir);
+    admin.close().await;
+    harness.cleanup().await;
+}

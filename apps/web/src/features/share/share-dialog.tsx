@@ -7,7 +7,12 @@ import { Label } from "@/components/ui/label";
 import { NativeModal } from "@/features/projects/native-modal";
 import { api, ensureOk, problemMessage } from "@/lib/api";
 import { documentShareLinksQuery, type ShareDocumentTarget } from "@/lib/queries/share";
-import { SHARE_DEFAULT_EXPIRES_DAYS, SHARE_EXPIRES_OPTIONS } from "@/lib/share-links";
+import { publicInstanceQuery, refreshPublicInstance } from "@/lib/queries/admin";
+import {
+  SHARE_POLICY_DEFAULT,
+  selectedShareExpires,
+  shareExpiresOptions,
+} from "@/lib/share-links";
 import "@/features/projects/projects.css";
 import "./share.css";
 
@@ -53,7 +58,11 @@ function RevealedShareUrl({ url }: { url: string }) {
   );
 }
 
-/** Source `ShareDialog` for one document; expiry choices mirror the source catalog defaults. */
+/**
+ * Source `ShareDialog` for one document. Expiry choices and whether links can
+ * be created come from the public instance share policy (`/instance`); the
+ * server enforces the same policy on create.
+ */
 export function ShareDialog({
   workspaceId,
   target,
@@ -67,7 +76,12 @@ export function ShareDialog({
   const [open, setOpen] = useState(false);
   const [createdUrl, setCreatedUrl] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [expiresInDays, setExpiresInDays] = useState<number>(SHARE_DEFAULT_EXPIRES_DAYS);
+  const [expiresInDays, setExpiresInDays] = useState<number | null>(null);
+  const instanceQuery = useQuery(publicInstanceQuery);
+  const policy = instanceQuery.data?.values.share ?? SHARE_POLICY_DEFAULT;
+  const expiresOptions = shareExpiresOptions(policy);
+  const selectedExpires = selectedShareExpires(expiresInDays, policy);
+  const createEnabled = instanceQuery.isSuccess && policy.enabled;
   const linksQuery = documentShareLinksQuery(workspaceId, target);
   const list = useQuery({ ...linksQuery, enabled: open });
 
@@ -126,7 +140,20 @@ export function ShareDialog({
   const pending = create.isPending || revoke.isPending;
   const links = list.data?.items ?? [];
   const error =
-    actionError ?? (list.error ? problemMessage(list.error, "error.share.failed") : null);
+    actionError ??
+    (instanceQuery.error
+      ? problemMessage(instanceQuery.error, "error.share.failed")
+      : !policy.enabled
+        ? t("share.disabled")
+        : null) ??
+    (list.error ? problemMessage(list.error, "error.share.failed") : null);
+
+  // `/instance` is cached (query 30 s, HTTP 60 s); an admin may just have
+  // changed the policy. The server enforces it on create either way.
+  function openDialog() {
+    void refreshPublicInstance(queryClient).catch(() => undefined);
+    setOpen(true);
+  }
 
   function close() {
     setOpen(false);
@@ -136,7 +163,7 @@ export function ShareDialog({
 
   return (
     <>
-      <Button type="button" size="sm" variant="outline" onClick={() => setOpen(true)}>
+      <Button type="button" size="sm" variant="outline" onClick={openDialog}>
         {t("share.create")}
       </Button>
       <NativeModal open={open} labelledBy={titleId} onClose={close}>
@@ -153,11 +180,11 @@ export function ShareDialog({
               <select
                 id={expiresId}
                 className="document-page__field-select"
-                value={String(expiresInDays)}
-                disabled={pending}
+                value={String(selectedExpires)}
+                disabled={!createEnabled || pending}
                 onChange={(event) => setExpiresInDays(Number(event.target.value))}
               >
-                {SHARE_EXPIRES_OPTIONS.map((days) => {
+                {expiresOptions.map((days) => {
                   const key = `share.expires.${days}`;
                   return (
                     <option key={days} value={String(days)}>
@@ -170,8 +197,8 @@ export function ShareDialog({
             <Button
               type="button"
               size="sm"
-              disabled={pending}
-              onClick={() => create.mutate(expiresInDays)}
+              disabled={pending || !createEnabled}
+              onClick={() => create.mutate(selectedExpires)}
             >
               {t("share.create")}
             </Button>
