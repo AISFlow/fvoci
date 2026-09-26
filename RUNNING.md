@@ -636,9 +636,25 @@ sign-in. If you changed a workspace's SSO issuer before upgrading, review
 `SELECT id, provider, user_id FROM fvoci.identity_links WHERE issuer IS NULL`
 first and unlink the accounts you do not expect the new IdP to own; after the
 first sign-in the link is pinned and a different issuer with the same subject
-is refused. Microsoft `common`/`organizations` discovery reports the tenant
-template issuer, so the pin does not separate tenants (the per-app subject
-still does).
+is refused.
+
+Upgrading to migration 036 (Microsoft tenant issuer): Microsoft
+`common`/`organizations`/`consumers` sign-ins now record the tenant issuer the
+id_token was verified against (the discovery template with the token's `tid`,
+which must be a GUID), so a link is pinned to one tenant and another tenant's
+same `sub` is refused. Links saved earlier hold the literal template
+(`https://login.microsoftonline.com/{tenantid}/v2.0`); such a link still
+matches any tenant of that template and is re-pinned to the tenant of its next
+successful sign-in. Only a stored value equal to the provider's template is
+rewritten, nothing else. The re-pin happens only while the provider is still
+configured with the `{tenantid}` template; if the provider is changed to a
+single tenant first, legacy template links fail closed (`oidc_not_linked`)
+until the user unlinks and links again. Until then the template link does not separate
+tenants (the per-app Microsoft `sub` still does); to review them before
+upgrading, `SELECT id, user_id FROM fvoci.identity_links WHERE provider =
+'microsoft' AND issuer LIKE '%{tenantid}%'`. A JWKS key that names an
+`issuer` (Microsoft's common key set does) only verifies id_tokens from that
+issuer or, for a `{tenantid}` template, from a tenant of it.
 
 OIDC providers are read with the `openidconnect` crate (4.0.1) over the
 server's own guarded fetch (https only, public addresses, no redirects or
@@ -646,8 +662,8 @@ proxy, 10 s and 256 KiB per request; `OIDC_ALLOW_INSECURE=1` admits plain
 http to loopback only). A provider must publish the discovery fields OpenID
 Discovery requires (`issuer`, `authorization_endpoint`, `token_endpoint`,
 `jwks_uri`, `response_types_supported`, `subject_types_supported`,
-`id_token_signing_alg_values_supported`). id_tokens must be RS256 (2048 to
-4096 bit keys) or ES256, carry a `kid` when the key set has more than one
+`id_token_signing_alg_values_supported`). id_tokens must be RS256 (keys with
+a 2048 to 4096 bit modulus; shorter keys are dropped from the key set) or ES256, carry a `kid` when the key set has more than one
 eligible key, name only this client in `aud`, and send `email_verified` as a
 JSON boolean; anything else fails the sign-in with `oidc_provider_error`.
 
