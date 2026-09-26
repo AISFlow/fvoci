@@ -131,3 +131,20 @@ dispatch `ctx_cd611507a373`, Claude Code `claude-opus-5-5` medium(requested/effe
 requested/effective 모두 `claude-opus-5-5`/`medium`임을 확인했다(예: ctx_a7cca29eeb44).
 진행 중이던 cursor Composer(가져오기·내보내기)·Grok(S3) 작업은 WIP 커밋·인계 기록 후
 종료하고 Opus 워커가 같은 브랜치에서 이어받는다. 과거 실행 기록은 수정하지 않는다.
+
+## 2026-09-26 역할 재배정 (사용자 통합 지시)
+
+사용자 지시로 AGENTS.md의 역할 표를 교체했다. 이전 All-Opus 강제 규칙은 현재 운영 규칙에서 해제하고
+당시 실행 기록은 위 절에 그대로 둔다. 확인한 실제 실행 경로:
+
+| 역할 | 실행 경로·모델 | 확인 근거 |
+| --- | --- | --- |
+| 코디네이터 | Claude Code 2.1.283, `claude-fable-5-1`, `/effort medium` | 현재 세션 `/model`·`/effort` 출력, Run `run_b01d432a9dee`에 `run-use`로 terminal `term_77898e46` 바인딩 |
+| 주 구현 | Orca `worker-start --agent claude --model claude-opus-5-5 --effort medium` | 첫 dispatch `ctx_07898f6011b7`(#85 수정) receipt requested/effective 모두 `claude-opus-5-5`/`medium` |
+| 조사·검증 | Orca `worker-start --agent cursor --model cursor-grok-4.6-high` | 첫 dispatch `ctx_6612f5d79ee2`(읽기 전용 감사) receipt requested/effective `cursor-grok-4.6-high`, effort null(모델 ID에 포함, 별도 옵션 없음). `cursor-agent --list-models`에 Grok 4.6 계열 확인 |
+| 독립 검토 | Orca `worker-start --agent claude --model claude-fable-5-1 --effort medium`, 별도 세션 | 첫 검토 dispatch receipt를 아래 후속 기록으로 확인한다 |
+
+인계 시점: main `90a3df02`(#84), 열린 PR #81(`2d858c2`)·#82(`e95261e`)·#85(`c475fab`), 미푸시 task-api
+`982f8637`, 활성 Opus 워커 collab-join-flake(`ctx_3a6ef72c2404`). 진행 중 프로세스를 강제 종료하지
+않았고 기존 코드·검토·측정 근거는 그대로 재사용한다. 코디네이터 인계 메모는
+`/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-26.md`.
