@@ -166,17 +166,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Fail closed on selection results
         env:
-          PLAN_READY: ${{ needs.ci-plan.result }}
-          PLAN_JSON: ${{ needs.ci-plan.outputs.plan_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
           TESTED_SHA: ${{ github.sha }}
-          JOB_NATIVE_EXTRACTION: ${{ needs.native-extraction.result }}
         run: |
           set -euo pipefail
-          if [[ "$PLAN_READY" != success ]]; then
-            echo "ci-plan did not succeed"
-            exit 1
-          fi
-          python3 scripts/ci_selection.py gate --workflow documents \
-            --plan-json "$PLAN_JSON" \
-            --tested-sha "$TESTED_SHA" \
-            --job-result native-extraction="$JOB_NATIVE_EXTRACTION"
+          python3 scripts/ci_selection.py gate --workflow documents --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"

@@ -216,6 +216,34 @@ class PlanSelectionTest(unittest.TestCase):
         self.assertTrue(plan["plan_ok"])
         self.assertTrue(plan["jobs"]["web-checks"]["selected"])
 
+    def test_manual_dispatch_is_full(self) -> None:
+        plan = SEL.build_plan(
+            workflow="web",
+            event_name="workflow_dispatch",
+            base_sha=None,
+            head_sha=None,
+            merge_base_sha=None,
+            tested_sha="b" * 40,
+            paths=["docs/rewrite.md"],
+        )
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["reason_code"], "FULL_EVENT_WORKFLOW_DISPATCH")
+        self.assertTrue(plan["plan_ok"])
+
+    def test_merge_group_is_full(self) -> None:
+        plan = SEL.build_plan(
+            workflow="web",
+            event_name="merge_group",
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            merge_base_sha=None,
+            tested_sha="b" * 40,
+            paths=["docs/rewrite.md"],
+        )
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["reason_code"], "FULL_EVENT_MERGE_GROUP")
+        self.assertTrue(plan["plan_ok"])
+
     def test_parent_mismatch_cannot_narrow(self) -> None:
         plan = SEL.build_plan(
             workflow="web",
@@ -441,38 +469,129 @@ class GateSchemaTest(unittest.TestCase):
             "jobs": jobs,
         }
 
-    def _gate(self, plan: dict, workflow: str, results: list[str], tested: str = "a" * 40) -> int:
-        args = [
-            "--workflow",
-            workflow,
-            "--plan-json",
-            json.dumps(plan),
-            "--tested-sha",
-            tested,
-        ]
-        for item in results:
-            args.extend(["--job-result", item])
-        return SEL.cmd_gate(args)
+    def _needs(
+        self,
+        plan: object,
+        workflow: str,
+        results: dict[str, str] | None = None,
+        *,
+        plan_result: str = "success",
+        plan_outputs: dict | None = None,
+        extra: dict | None = None,
+        omit_jobs: frozenset[str] | None = None,
+        job_entries: dict[str, object] | None = None,
+    ) -> str:
+        needs: dict[str, object] = {}
+        if plan_outputs is None:
+            needs["ci-plan"] = {
+                "result": plan_result,
+                "outputs": {"plan_json": json.dumps(plan, separators=(",", ":"))},
+            }
+        else:
+            needs["ci-plan"] = {"result": plan_result, "outputs": plan_outputs}
+        omit = omit_jobs or frozenset()
+        for job in SEL.WORKFLOW_JOBS[workflow]:
+            if job in omit:
+                continue
+            if job_entries and job in job_entries:
+                needs[job] = job_entries[job]
+                continue
+            needs[job] = {"result": (results or {}).get(job, "skipped"), "outputs": {}}
+        if extra:
+            needs.update(extra)
+        return json.dumps(needs)
+
+    def _gate(
+        self,
+        plan: dict,
+        workflow: str,
+        results: dict[str, str] | None = None,
+        tested: str = "a" * 40,
+        needs_json: str | None = None,
+        **needs_kwargs: object,
+    ) -> int:
+        payload = needs_json if needs_json is not None else self._needs(
+            plan, workflow, results, **needs_kwargs
+        )
+        return SEL.cmd_gate(
+            [
+                "--workflow",
+                workflow,
+                "--needs-json",
+                payload,
+                "--tested-sha",
+                tested,
+            ]
+        )
 
     def test_unselected_must_be_skipped(self) -> None:
         plan = self._plan("web", {"web-checks": False})
         rc = self._gate(
             plan,
             "web",
-            [
-                "web-checks=missing",
-                "workspace-browser-shard=skipped",
-                "collaboration-flow=skipped",
-            ],
+            {
+                "web-checks": "success",
+                "workspace-browser-shard": "skipped",
+                "collaboration-flow": "skipped",
+            },
         )
         self.assertEqual(rc, 1)
 
-    def test_duplicate_results_rejected(self) -> None:
+    def test_selected_missing_needs_key_rejected(self) -> None:
+        plan = self._plan("documents", {"native-extraction": True})
+        plan["mode"] = "full"
+        rc = self._gate(plan, "documents", omit_jobs=frozenset({"native-extraction"}))
+        self.assertEqual(rc, 1)
+
+    def test_malformed_needs_rejected(self) -> None:
+        plan = self._plan("documents", {"native-extraction": True})
+        rc = self._gate(plan, "documents", needs_json="{not-json")
+        self.assertEqual(rc, 1)
+
+    def test_needs_list_rejected(self) -> None:
+        plan = self._plan("documents", {"native-extraction": True})
+        rc = self._gate(plan, "documents", needs_json="[]")
+        self.assertEqual(rc, 1)
+
+    def test_missing_needs_json_rejected(self) -> None:
+        rc = SEL.cmd_gate(
+            ["--workflow", "documents", "--tested-sha", "a" * 40, "--needs-json", ""]
+        )
+        self.assertEqual(rc, 1)
+
+    def test_missing_result_field_rejected(self) -> None:
+        plan = self._plan("documents", {"native-extraction": True})
+        plan["mode"] = "full"
+        rc = self._gate(
+            plan,
+            "documents",
+            job_entries={"native-extraction": {"outputs": {}}},
+        )
+        self.assertEqual(rc, 1)
+
+    def test_result_wrong_type_rejected(self) -> None:
+        plan = self._plan("documents", {"native-extraction": True})
+        plan["mode"] = "full"
+        rc = self._gate(
+            plan,
+            "documents",
+            job_entries={"native-extraction": {"result": 1, "outputs": {}}},
+        )
+        self.assertEqual(rc, 1)
+
+    def test_plan_result_failure_rejected(self) -> None:
+        plan = self._plan("documents", {"native-extraction": True})
+        plan["mode"] = "full"
+        rc = self._gate(plan, "documents", {"native-extraction": "success"}, plan_result="failure")
+        self.assertEqual(rc, 1)
+
+    def test_extra_unknown_job_rejected(self) -> None:
         plan = self._plan("documents", {"native-extraction": False})
         rc = self._gate(
             plan,
             "documents",
-            ["native-extraction=skipped", "native-extraction=skipped"],
+            {"native-extraction": "skipped"},
+            extra={"mystery": {"result": "success", "outputs": {}}},
         )
         self.assertEqual(rc, 1)
 
@@ -481,75 +600,85 @@ class GateSchemaTest(unittest.TestCase):
         rc = self._gate(
             plan,
             "web",
-            [
-                "web-checks=success",
-                "workspace-browser-shard=skipped",
-                "collaboration-flow=skipped",
-            ],
+            {
+                "web-checks": "success",
+                "workspace-browser-shard": "skipped",
+                "collaboration-flow": "skipped",
+            },
         )
         self.assertEqual(rc, 1)
 
     def test_selected_failure_rejected(self) -> None:
         plan = self._plan("documents", {"native-extraction": True})
         plan["mode"] = "full"
-        rc = self._gate(plan, "documents", ["native-extraction=failure"])
+        rc = self._gate(plan, "documents", {"native-extraction": "failure"})
         self.assertEqual(rc, 1)
 
     def test_selected_cancelled_rejected(self) -> None:
         plan = self._plan("documents", {"native-extraction": True})
         plan["mode"] = "full"
-        rc = self._gate(plan, "documents", ["native-extraction=cancelled"])
+        rc = self._gate(plan, "documents", {"native-extraction": "cancelled"})
         self.assertEqual(rc, 1)
 
     def test_selected_skip_rejected(self) -> None:
         plan = self._plan("documents", {"native-extraction": True})
         plan["mode"] = "full"
-        rc = self._gate(plan, "documents", ["native-extraction=skipped"])
+        rc = self._gate(plan, "documents", {"native-extraction": "skipped"})
         self.assertEqual(rc, 1)
 
     def test_selected_success_ok(self) -> None:
         plan = self._plan("documents", {"native-extraction": True})
         plan["mode"] = "full"
-        rc = self._gate(plan, "documents", ["native-extraction=success"])
+        rc = self._gate(plan, "documents", {"native-extraction": "success"})
         self.assertEqual(rc, 0)
 
     def test_invalid_json_top_type_rejected(self) -> None:
-        rc = SEL.cmd_gate(
-            [
-                "--workflow",
-                "documents",
-                "--plan-json",
-                json.dumps(["not", "an", "object"]),
-                "--tested-sha",
-                "a" * 40,
-                "--job-result",
-                "native-extraction=success",
-            ]
+        rc = self._gate(
+            ["not", "an", "object"],  # type: ignore[arg-type]
+            "documents",
+            {"native-extraction": "success"},
         )
         self.assertEqual(rc, 1)
 
     def test_unknown_plan_keys_rejected(self) -> None:
         plan = self._plan("documents", {"native-extraction": False})
         plan["extra"] = "nope"
-        rc = self._gate(plan, "documents", ["native-extraction=skipped"])
+        rc = self._gate(plan, "documents", {"native-extraction": "skipped"})
         self.assertEqual(rc, 1)
 
     def test_unknown_job_keys_rejected(self) -> None:
         plan = self._plan("documents", {"native-extraction": False})
         plan["jobs"]["native-extraction"]["reason_code"] = "NARROW_DOCS"
-        rc = self._gate(plan, "documents", ["native-extraction=skipped"])
+        rc = self._gate(plan, "documents", {"native-extraction": "skipped"})
         self.assertEqual(rc, 1)
 
     def test_strict_bool_rejects_string_true(self) -> None:
         plan = self._plan("documents", {"native-extraction": False})
         plan["jobs"]["native-extraction"]["selected"] = "true"
-        rc = self._gate(plan, "documents", ["native-extraction=skipped"])
+        rc = self._gate(plan, "documents", {"native-extraction": "skipped"})
         self.assertEqual(rc, 1)
 
     def test_strict_bool_rejects_integer(self) -> None:
         plan = self._plan("documents", {"native-extraction": False})
         plan["jobs"]["native-extraction"]["selected"] = 1
-        rc = self._gate(plan, "documents", ["native-extraction=success"])
+        rc = self._gate(plan, "documents", {"native-extraction": "success"})
+        self.assertEqual(rc, 1)
+
+    def test_invalid_plan_json_rejected(self) -> None:
+        plan = self._plan("documents", {"native-extraction": True})
+        plan["mode"] = "full"
+        rc = self._gate(
+            plan,
+            "documents",
+            plan_outputs={"plan_json": "{bad"},
+            results={"native-extraction": "success"},
+        )
+        self.assertEqual(rc, 1)
+
+    def test_tested_sha_mismatch_rejected(self) -> None:
+        plan = self._plan("documents", {"native-extraction": True})
+        plan["mode"] = "full"
+        rc = self._gate(plan, "documents", {"native-extraction": "success"}, tested="b" * 40)
         self.assertEqual(rc, 1)
 
 
@@ -661,16 +790,96 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "needs must be ci-plan and every registered job")
 
-    def test_gate_result_args_mismatch_rejected_before_outputs(self) -> None:
+    def test_swapped_needs_json_expr_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
-        web = root / ".github" / "workflows" / "web.yml"
-        text = web.read_text(encoding="utf-8")
-        web.write_text(
-            text.replace('            --job-result web-checks="$JOB_WEB_CHECKS" \\\n', ""),
+        rust = root / ".github" / "workflows" / "rust.yml"
+        text = rust.read_text(encoding="utf-8")
+        rust.write_text(
+            text.replace(
+                "NEEDS_JSON: ${{ toJSON(needs) }}",
+                "NEEDS_JSON: ${{ toJSON(needs.postgres) }}",
+            ),
             encoding="utf-8",
         )
         proc, output = self._plan_against(root)
-        self._assert_no_green_outputs(proc, output, "--job-result arguments must match registered jobs")
+        self._assert_no_green_outputs(proc, output, "env must be exactly")
+
+    def test_forged_needs_json_literal_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        rust = root / ".github" / "workflows" / "rust.yml"
+        text = rust.read_text(encoding="utf-8")
+        rust.write_text(
+            text.replace(
+                "NEEDS_JSON: ${{ toJSON(needs) }}",
+                'NEEDS_JSON: \'{"fast":{"result":"success"}}\'',
+            ),
+            encoding="utf-8",
+        )
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "env must be exactly")
+
+    def test_swapped_tested_sha_expr_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        rust = root / ".github" / "workflows" / "rust.yml"
+        text = rust.read_text(encoding="utf-8")
+        rust.write_text(
+            text.replace(
+                "TESTED_SHA: ${{ github.sha }}",
+                "TESTED_SHA: ${{ needs.fast.result }}",
+            ),
+            encoding="utf-8",
+        )
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "env must be exactly")
+
+    def test_extra_job_env_mapping_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        rust = root / ".github" / "workflows" / "rust.yml"
+        text = rust.read_text(encoding="utf-8")
+        rust.write_text(
+            text.replace(
+                "          TESTED_SHA: ${{ github.sha }}\n",
+                "          TESTED_SHA: ${{ github.sha }}\n          JOB_FAST: ${{ needs.postgres.result }}\n",
+            ),
+            encoding="utf-8",
+        )
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "env must be exactly")
+
+    def test_decoy_echo_gate_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        web = root / ".github" / "workflows" / "web.yml"
+        text = web.read_text(encoding="utf-8")
+        canonical = (
+            '          python3 scripts/ci_selection.py gate --workflow web '
+            '--needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n'
+        )
+        decoy = (
+            '          echo python3 scripts/ci_selection.py gate --workflow web '
+            '--needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n'
+        )
+        self.assertIn(canonical, text)
+        web.write_text(text.replace(canonical, decoy), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "canonical gate invocation")
+
+    def test_commented_gate_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        web = root / ".github" / "workflows" / "web.yml"
+        text = web.read_text(encoding="utf-8")
+        canonical = (
+            '          python3 scripts/ci_selection.py gate --workflow web '
+            '--needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n'
+        )
+        commented = (
+            '          # python3 scripts/ci_selection.py gate --workflow web '
+            '--needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n'
+            "          true\n"
+        )
+        self.assertIn(canonical, text)
+        web.write_text(text.replace(canonical, commented), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "canonical gate invocation")
 
 
 if __name__ == "__main__":

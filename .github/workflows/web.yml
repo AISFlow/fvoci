@@ -233,21 +233,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Fail closed on selection results
         env:
-          PLAN_READY: ${{ needs.ci-plan.result }}
-          PLAN_JSON: ${{ needs.ci-plan.outputs.plan_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
           TESTED_SHA: ${{ github.sha }}
-          JOB_WEB_CHECKS: ${{ needs.web-checks.result }}
-          JOB_WORKSPACE_BROWSER_SHARD: ${{ needs.workspace-browser-shard.result }}
-          JOB_COLLABORATION_FLOW: ${{ needs.collaboration-flow.result }}
         run: |
           set -euo pipefail
-          if [[ "$PLAN_READY" != success ]]; then
-            echo "ci-plan did not succeed"
-            exit 1
-          fi
-          python3 scripts/ci_selection.py gate --workflow web \
-            --plan-json "$PLAN_JSON" \
-            --tested-sha "$TESTED_SHA" \
-            --job-result web-checks="$JOB_WEB_CHECKS" \
-            --job-result workspace-browser-shard="$JOB_WORKSPACE_BROWSER_SHARD" \
-            --job-result collaboration-flow="$JOB_COLLABORATION_FLOW"
+          python3 scripts/ci_selection.py gate --workflow web --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"

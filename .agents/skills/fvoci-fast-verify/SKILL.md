@@ -48,5 +48,5 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 ## CI selection planner/gate (workflow changes)
 
 1. `bash scripts/test-ci-selection.sh` — `python3 scripts/ci_selection.py verify-workflows` 와 `python3 -m unittest scripts.test_ci_selection` 을 DB·브라우저 없이 실행한다. 플래너는 `scripts/ci_selection.py` 단일 구현만 사용한다. `plan` 은 레지스트리 검증을 출력 전에 실행하고, PR narrow 는 체크아웃 merge parent 가 event base/head 와 같을 때만 허용한다.
-2. 각 `.github/workflows/{web,rust,documents,collab-engine,install}.yml` 의 `ci-plan` 은 pinned PyYAML(`scripts/ci_selection_requirements.txt`)을 설치한 뒤 `plan` 을 돌리고, `*-ci-gate` 는 항상 실행된다. 제품 job 은 plan 출력 boolean 으로만 skip 한다. matrix job 은 job-level `if` 로 통째로 skip 하며 빈 matrix 를 만들지 않는다.
+2. 각 `.github/workflows/{web,rust,documents,collab-engine,install}.yml` 의 `ci-plan` 은 pinned PyYAML(`scripts/ci_selection_requirements.txt`)을 설치한 뒤 `plan` 을 돌리고, `*-ci-gate` 는 항상 실행된다. 게이트는 `NEEDS_JSON=${{ toJSON(needs) }}` 와 tested SHA만 받으며 ci-plan 결과·plan_json·등록 job 결과를 그 객체에서 도출한다. 제품 job 은 plan 출력 boolean 으로만 skip 한다. matrix job 은 job-level `if` 로 통째로 skip 하며 빈 matrix 를 만들지 않는다.
 3. 원격 Actions·merge_group·`workflow_dispatch` full 경로는 통합 수락에서 확인한다. 로컬에서는 플래너/게이트 단위 테스트만 최소 충분으로 돌린다.
