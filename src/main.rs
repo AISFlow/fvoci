@@ -17,7 +17,6 @@ use fvoci_server::collab::hub::ShutdownStatus;
 use fvoci_server::collab::{CollabConfig, CollabHub};
 use fvoci_server::config::Config;
 use fvoci_server::db::{migrate, pool, Db};
-use fvoci_server::documents::convert::ConvertClient;
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router_with_settings, state::AppState};
 use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
@@ -364,12 +363,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         storage.clone(),
         mailer.clone(),
     ));
-    let document_convert = ConvertClient::from_env();
-    if document_convert.is_some() {
-        tracing::info!("document convert helper enabled");
-    } else {
-        tracing::info!("document convert helper disabled (FVOCI_DOCUMENT_CONVERT_BIN unset)");
-    }
     let markdown = match fvoci_server::documents::markdown_helper::MarkdownHelper::current_exe() {
         Ok(helper) => Some(helper),
         Err(error) => {
@@ -416,7 +409,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         meili: config.meili.clone(),
         search_embedder,
         mailer,
-        document_convert,
         markdown,
         import_wake,
         import_extractor_available,

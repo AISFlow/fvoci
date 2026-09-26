@@ -239,7 +239,6 @@ impl Harness {
             meili: None,
             search_embedder: None,
             mailer: mailer.clone(),
-            document_convert: None,
             markdown: Some(
                 fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
                     "CARGO_BIN_EXE_fvoci-server"

@@ -15,6 +15,7 @@ APP_PASSWORD="$(openssl rand -hex 16)"
 MEILI_MASTER_KEY="$(openssl rand -hex 16)"
 PEPPER="{\"install\":\"$(openssl rand -hex 32)\"}"
 FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
+DOCUMENT_STATE="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-documents.${RUN_ID}.XXXXXX")"
 ASSERT_LOG="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-assert.${RUN_ID}.XXXXXX")"
 
 START_TS=$SECONDS
@@ -39,7 +40,7 @@ cleanup() {
     "${COMPOSE[@]}" logs --no-color --tail 200 init server >&2 || true
   fi
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -f "$ENV_FILE"
+  rm -f "$ENV_FILE" "$DOCUMENT_STATE"
   if (( status != 0 )); then
     echo "install-smoke failed after $((SECONDS - START_TS))s; assertions:" >&2
     cat "$ASSERT_LOG" >&2 || true
@@ -90,6 +91,28 @@ log_assert "== build image ${IMAGE_TAG}"
 BUILD_START=$SECONDS
 docker build -f "$ROOT/infra/rust/Dockerfile" -t "$IMAGE_TAG" "$ROOT"
 log_assert "build image: ok ($((SECONDS - BUILD_START))s)"
+# Test the actual final image, not a host PATH with node hidden. Web assets are
+# browser code. Verify required product executables, not an incidental count.
+docker run --rm --entrypoint sh "$IMAGE_TAG" -ec '
+  for runtime in node nodejs bun deno qjs quickjs js d8 jsc; do
+    if command -v "$runtime" >/dev/null 2>&1; then
+      echo "unexpected script runtime: $runtime" >&2
+      exit 1
+    fi
+  done
+  test ! -e /opt/fvoci/node
+  test ! -e /opt/fvoci/convert
+  for program in fvoci-server fvoci-migrate collab-engine document-extract; do
+    test -x "/opt/fvoci/bin/$program"
+  done
+  packages=$(dpkg-query -W -f="\${binary:Package}\n")
+  if printf "%s\n" "$packages" | grep -Ei "^(nodejs|libnode|libmozjs|libjavascriptcore|quickjs)([-0-9.:]|$)"; then
+    echo "unexpected script runtime package" >&2
+    exit 1
+  fi
+'
+log_assert "required product executables present; obsolete Node converter runtime absent: ok"
+
 
 log_assert "== start compose stack"
 UP_START=$SECONDS
@@ -121,6 +144,15 @@ wait_http() {
 
 wait_http "/api/v1/setup"
 log_assert "setup endpoint ready: ok"
+
+# Run the installed diagnostic as migrate, so its converter probe must select
+# the deployed server sibling and its shipped fonts rather than current_exe.
+if ! DOCTOR_REPORT="$("${COMPOSE[@]}" exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)"; then
+  printf '%s\n' "$DOCTOR_REPORT" >&2
+  exit 1
+fi
+python3 -c 'import json,sys; report=json.load(sys.stdin); assert report["ok"] is True; assert any(c["name"]=="document_convert" and c["ok"] is True for c in report["checks"]), report' <<<"$DOCTOR_REPORT"
+log_assert "installed doctor executes Rust document conversion with shipped assets: ok"
 
 COOKIE_JAR="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-cookie.${RUN_ID}.XXXXXX")"
 SETUP_BODY='{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}'
@@ -160,6 +192,11 @@ if ! grep -q '"contentJson"' <<<"$BODY_BEFORE"; then
   exit 1
 fi
 log_assert "collab wiki body save + projection: ok"
+
+python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
+  "$COOKIE_JAR" "$DOCUMENT_STATE" create
+log_assert "document import/edit/exports/public PDF on the runtime image: ok"
+
 
 COLLAB_STATUS="$(curl -sS -o /tmp/fvoci-collab-probe.$$ -w '%{http_code}' -H "origin: $ORIGIN" "$BASE_URL/collab")"
 rm -f "/tmp/fvoci-collab-probe.$$"
@@ -302,6 +339,10 @@ if [[ "$EXTRACT_STATUS" != "ok" ]] || ! grep -q '안녕' <<<"$EXTRACT_TEXT"; the
   exit 1
 fi
 log_assert "post-restart doc body, attachment bytes, extraction: ok"
+python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
+  "$COOKIE_JAR" "$DOCUMENT_STATE" restart
+log_assert "post-restart imported document and import job: ok"
+
 
 TOTAL=$((SECONDS - START_TS))
 log_assert "== install-smoke complete (${TOTAL}s)"

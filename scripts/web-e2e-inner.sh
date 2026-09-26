@@ -74,16 +74,6 @@ mkdir -p "$FVOCI_STORAGE_DIR"
 export FVOCI_E2E_ADMIN_DATABASE_URL="$DATABASE_URL"
 export FVOCI_E2E_SERVER_BIN="$SERVER_BIN"
 export FVOCI_E2E_RESULT_DIR="$RUN_DIR"
-# Document import/export needs the Node convert helper. The prepare script's
-# stderr stays visible and any failure (set -e) stops the run.
-convert_env="$(bash "$ROOT/scripts/prepare-document-convert.sh")"
-FVOCI_DOCUMENT_CONVERT_BIN="${convert_env#FVOCI_DOCUMENT_CONVERT_BIN=}"
-if [[ ! -x "$FVOCI_DOCUMENT_CONVERT_BIN" ]]; then
-  echo "document convert helper was not prepared: $convert_env" >&2
-  exit 1
-fi
-export FVOCI_DOCUMENT_CONVERT_BIN
-
 unset DATABASE_URL FVOCI_MIGRATION_URL
 
 SMTP_CAPTURE="$RUN_DIR/smtp.jsonl"
