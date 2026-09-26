@@ -92,7 +92,8 @@ test("member adds and resolves a wiki document comment", async ({ page }) => {
   await expect(reply).toHaveValue("답글 초안은 본문과 분리");
 
   await page.goto("/w/acme/PDC-1");
-  await expect(page.getByRole("heading", { name: "문서댓글" })).toBeVisible({ timeout: 15_000 });
+  // Project documents open in the full editor view; its title is an input.
+  await expect(page.getByLabel("문서 제목")).toHaveValue("문서댓글", { timeout: 15_000 });
   const projectPanel = page.getByTestId("document-comments");
   await expect(projectPanel.getByRole("heading", { name: "댓글" })).toBeVisible();
   const projectCompose = projectPanel.locator("[data-comment-compose] textarea");

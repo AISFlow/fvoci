@@ -77,6 +77,10 @@ export function ProjectHomeView({
   creating,
   onRetry,
   onCreateDocument,
+  canManage = false,
+  lifecyclePending = false,
+  lifecycleError = null,
+  onLifecycle,
 }: {
   slug: string;
   project: Project;
@@ -86,6 +90,10 @@ export function ProjectHomeView({
   creating: boolean;
   onRetry: () => void;
   onCreateDocument: () => void;
+  canManage?: boolean;
+  lifecyclePending?: boolean;
+  lifecycleError?: string | null;
+  onLifecycle?: (action: "archive" | "unarchive" | "delete") => void;
 }) {
   const childNodes = nodes.filter(
     (node) => node.parentId === project.rootDocumentId && node.projectId === project.id,
@@ -128,6 +136,43 @@ export function ProjectHomeView({
           actionLabel={canWrite ? t("nav.newDocument") : undefined}
           onAction={canWrite ? onCreateDocument : undefined}
         />
+      ) : null}
+      {canManage && onLifecycle ? (
+        <div className="project-home__lifecycle flex flex-wrap gap-2" data-testid="project-lifecycle">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={lifecyclePending}
+            onClick={() => {
+              if (archived) {
+                onLifecycle("unarchive");
+                return;
+              }
+              if (window.confirm(`${t("project.archive.confirm.title")}\n${t("project.archive.confirm.body")}`)) {
+                onLifecycle("archive");
+              }
+            }}
+          >
+            {archived ? t("project.unarchive") : t("project.archive")}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={lifecyclePending}
+            onClick={() => {
+              if (window.confirm(`${t("project.delete.confirm.title")}\n${t("project.delete.confirm.body")}`)) {
+                onLifecycle("delete");
+              }
+            }}
+          >
+            {t("project.delete")}
+          </Button>
+          {lifecycleError ? (
+            <p role="alert" className="task-form__alert">{lifecycleError}</p>
+          ) : null}
+        </div>
       ) : null}
       {!loading && !error && childNodes.length > 0 ? (
         <ul className="wiki-tree">
