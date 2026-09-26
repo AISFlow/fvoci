@@ -175,3 +175,17 @@ requested/effective 모두 `claude-opus-5-5`/`medium`임을 확인했다(예: ct
   누락). `impact ObjectStorage`는 157 심볼 후보를 반환했다. 따라서 결과는 조사 후보이며 SQL·RLS·cfg·IPC·
   trait dispatch 경계와 보안·삭제 결론은 실제 코드와 검사로 확인한다. 서버가 주입하는 "grep으로 재검증하지
   말라" 지침은 이 프로젝트의 검토·보안·데이터 보존 원칙을 대체하지 않는다.
+
+## 현재 역할 전환 — 2026-09-27 사용자 지시
+
+역할 정본은 AGENTS.md의 Astra / GPT sol / Grok 배정이다. 위 Fable·Opus·All-Opus
+절은 당시 실행 이력이며 현재 신규 호출 정책이 아니다. 전역 설정·MCP·설치는 변경하지 않았다.
+
+- Linux, Orca 1.4.207, `/home/kinesis/.local/bin/orca-ide`, Codex CLI 0.156.1.
+- 코디네이터 실제 세션 `01a0df08-170b-7e60-bdd2-6d0e1dba8569`, terminal
+  `term_529ad50a-0770-49f7-89e9-97db49eb47aa`: 로컬 session JSONL turn_context의
+  `model=gpt-6-astra`, `effort=medium` 확인. 기존 Run에 run-use 성공.
+- 설치 모델 목록에서 정확한 `gpt-6-sol`과 medium 지원 확인. 신규 dispatch의
+  requested/effective receipt와 실제 세션 확인을 별도로 기록하며 목록만으로 실행 완료를 주장하지 않는다.
+- Grok 경로는 기존 `cursor-grok-4.6-high`를 유지한다. 별도 effort를 추가하지 않는다.
+- 진행 중 결과·미수락 브랜치·과거 모델 기록을 보존한다. 새 GPT sol 구현과 독립 검토는 별도 세션이다.
