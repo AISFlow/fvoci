@@ -11,8 +11,8 @@ mod verify;
 
 pub use backend::{ObjectBody, ObjectStorage};
 pub use extract_job::{
-    read_extract_input, spawn_extract_job, validate_extractor_bin, ExtractJobHandle,
-    ExtractJobSettings,
+    read_extract_input, spawn_extract_job, spawn_extract_job_with_embedder, validate_extractor_bin,
+    ExtractJobHandle, ExtractJobSettings,
 };
 
 pub use disposition::content_disposition_attachment;

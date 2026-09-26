@@ -45,6 +45,10 @@ const MIGRATIONS: &[(&str, i32)] = &[
         30,
     ),
     (
+        include_str!("../../migrations/031_attachment_embeddings.sql"),
+        31,
+    ),
+    (
         include_str!("../../migrations/032_admin_user_erase.sql"),
         32,
     ),
@@ -499,6 +503,10 @@ mod tests {
         (
             30,
             "c5fb3f817fb536b10dd9ab68b626b9cd598c2a4198eded19b2dd8d58c385d1e8",
+        ),
+        (
+            31,
+            "c098b60993d173feb3c7f2f4c33a7c4df7a90c6515aa656a1e96400e871ec643",
         ),
         (
             32,
