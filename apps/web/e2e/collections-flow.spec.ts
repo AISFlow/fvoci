@@ -152,9 +152,16 @@ test("document tags, project collection fields/views and saved task views round-
   ).toHaveValue(buildOption.id);
 
   // 5. Board grouped by the select field shows the task under "구현".
+  // Cards use aria-label "그룹 기준 · COL-n"; match the toolbar control exactly.
   await page.getByRole("link", { name: "보드", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${slug}/COL/board$`));
-  await page.getByLabel("그룹 기준").selectOption({ label: "단계" });
+  const boardPanel = page.locator('section[data-testid="collection-board"]');
+  await expect(boardPanel).toBeVisible();
+  await expect(boardPanel.getByTestId(`collection-card-${displayId}`)).toBeVisible();
+  await boardPanel
+    .locator(":scope > .collection-toolbar")
+    .getByLabel("그룹 기준", { exact: true })
+    .selectOption({ label: "단계" });
   const buildColumn = page.getByRole("region", { name: "구현" });
   await expect(buildColumn.getByTestId(`collection-card-${displayId}`)).toBeVisible();
   await expect(buildColumn.getByTestId(`collection-card-${displayId}`)).toContainText("단계: 구현");
