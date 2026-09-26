@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::auth::token::hash_token;
+use crate::collab::admission::warn_join_db_error;
 use crate::collab::config::CollabConfig;
 use crate::collab::hub::CollabHub;
 use crate::collab::origin::{validate_collab_origin, CollabOriginError};
@@ -878,8 +879,18 @@ async fn try_authenticate(
         // closes 1011 (or 1012 while shutting down) instead. Intentional
         // difference; the two `JoinError::DbError` call sites cannot be split
         // without a new variant in room.rs.
-        Err(_) if hub.is_shutting_down() => return AuthAttempt::Restarting,
-        Err(_) => return AuthAttempt::Unavailable,
+        Err(err) => {
+            warn_join_db_error(
+                "transport.authenticate.admission",
+                room.workspace_id,
+                room.resource_id,
+                &err,
+            );
+            if hub.is_shutting_down() {
+                return AuthAttempt::Restarting;
+            }
+            return AuthAttempt::Unavailable;
+        }
     };
     let read_only = admission.read_only;
     let join = RoomJoin {
@@ -932,7 +943,13 @@ async fn try_authenticate(
         {
             AuthAttempt::Restarting
         }
-        Err(JoinError::EngineUnavailable | JoinError::WriterStale | JoinError::DbError) => {
+        Err(err @ (JoinError::EngineUnavailable | JoinError::WriterStale | JoinError::DbError)) => {
+            tracing::warn!(
+                workspace_id = %room.workspace_id,
+                document_id = %room.resource_id,
+                error = ?err,
+                "collab join unavailable before auth"
+            );
             AuthAttempt::Unavailable
         }
     }

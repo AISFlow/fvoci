@@ -14,7 +14,7 @@ use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore}
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::collab::admission::memory_budget_exceeded;
+use crate::collab::admission::{memory_budget_exceeded, warn_join_db_error};
 use crate::collab::config::CollabConfig;
 use crate::collab::guard::RoomGuard;
 use crate::collab::room::{
@@ -694,7 +694,10 @@ impl CollabHub {
             key.1,
         )
         .await
-        .map_err(|_| JoinError::DbError)?;
+        .map_err(|err| {
+            warn_join_db_error("hub.join_room.admission", key.0, key.1, &err);
+            JoinError::DbError
+        })?;
         admission.map_err(|_| JoinError::AdmissionDenied)?;
 
         let mut retries = 0u8;
@@ -1173,7 +1176,8 @@ impl CollabHub {
             biased;
             result = self.pool.acquire() => match result {
                 Ok(pooled) => pooled,
-                Err(_) => {
+                Err(err) => {
+                    warn_join_db_error("hub.start_room.acquire", key.0, key.1, &err);
                     self.fail_starting(key, &slot).await;
                     return Err(JoinError::DbError);
                 }
@@ -1191,7 +1195,8 @@ impl CollabHub {
         let persisted_bytes = match estimate_persisted_collab_bytes(&mut pooled, key.0, key.1).await
         {
             Ok(bytes) => bytes,
-            Err(_) => {
+            Err(err) => {
+                warn_join_db_error("hub.start_room.estimate_bytes", key.0, key.1, &err);
                 drop(pooled);
                 self.fail_starting(key, &slot).await;
                 return Err(JoinError::DbError);
@@ -1208,7 +1213,8 @@ impl CollabHub {
                 self.fail_starting(key, &slot).await;
                 return Err(JoinError::WriterStale);
             }
-            Err(_) => {
+            Err(err) => {
+                warn_join_db_error("hub.start_room.room_guard", key.0, key.1, &err);
                 self.fail_starting(key, &slot).await;
                 return Err(JoinError::DbError);
             }

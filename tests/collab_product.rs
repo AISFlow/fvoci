@@ -208,8 +208,22 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
         .expect("grant");
 }
 
+/// Route server `tracing` output (e.g. the underlying sqlx error behind a 1011
+/// "collab unavailable" join) into the libtest-captured output of the test that
+/// produced it. Default `warn`; override with `RUST_LOG`.
+fn init_test_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_test_writer()
+        .try_init();
+}
+
 impl TestDb {
     async fn bootstrap() -> Self {
+        init_test_tracing();
         let admin_base = std::env::var("TEST_DATABASE_URL")
             .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
             .expect("TEST_DATABASE_URL missing; native helper tests require real PostgreSQL");
@@ -2100,10 +2114,10 @@ async fn collab_estimate_fail_frees_room_slot() {
         let wiki = setup_wiki_doc(&harness).await;
         let (hub, _helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 200), wiki.session.pool.clone(), 1).await;
-        arm_force_estimate_fail();
+        arm_force_estimate_fail(wiki.document_id);
         let mut leases = DirectHubLeases::new();
         let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
-        disarm_force_estimate_fail();
+        disarm_force_estimate_fail(wiki.document_id);
         assert!(matches!(denied, Err(JoinError::DbError)));
         assert_eq!(hub.available_room_slots(), 4);
         hub.shutdown().await;

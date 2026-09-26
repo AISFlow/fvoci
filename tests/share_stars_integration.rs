@@ -636,6 +636,9 @@ async fn document_share_scope_rechecks_state_on_every_request() {
     );
     assert_eq!(headers["cache-control"], "private, no-store");
     assert!(csp.contains("img-src 'self' data: blob:"), "{csp}");
+    // The global security layer adds its other headers but keeps this CSP.
+    assert_eq!(headers["x-frame-options"], "SAMEORIGIN");
+    assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
     assert_eq!(headers["referrer-policy"], "no-referrer");
     assert!(
         html.contains("<meta name=\"referrer\" content=\"no-referrer\"/>"),
@@ -731,6 +734,7 @@ async fn document_share_scope_rechecks_state_on_every_request() {
     assert_eq!(headers["content-security-policy"], "sandbox");
     assert_eq!(headers["x-content-type-options"], "nosniff");
     assert_eq!(headers["content-type"], "application/octet-stream");
+    assert_eq!(headers["cross-origin-resource-policy"], "same-origin");
     for id in [sibling_att, infected, uploading, Uuid::now_v7()] {
         let (status, _) = public_json(app.clone(), &format!("{base}/attachments/{id}")).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "meta {id}");
@@ -1802,7 +1806,12 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
     assert_eq!(headers["cache-control"], "private, no-store");
     assert_eq!(headers["x-robots-tag"], "noindex");
     assert_eq!(headers["referrer-policy"], "no-referrer");
-    assert!(!headers.contains_key("content-security-policy"));
+    // The global security layer adds the application CSP; the shell keeps its
+    // own no-referrer policy because the layer only fills missing headers.
+    assert!(headers["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .starts_with("default-src 'self'"));
     let html = String::from_utf8(bytes).unwrap();
     assert_eq!(body_part(&html), body_part(SHELL_INDEX), "body untouched");
     // Inline blocks are unchanged, so build-time CSP hashes of the shell hold.

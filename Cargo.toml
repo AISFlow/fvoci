@@ -13,6 +13,10 @@ name = "fvoci-migrate"
 path = "src/bin/fvoci-migrate.rs"
 
 [[bin]]
+name = "fvoci-mcp"
+path = "src/bin/fvoci-mcp/main.rs"
+
+[[bin]]
 name = "fvoci-export-openapi"
 path = "src/bin/export-openapi.rs"
 required-features = ["api-schema"]
@@ -48,7 +52,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "uuid", "chrono"] }
 thiserror = "2"
 time = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "fs", "io-util", "process", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "fs", "io-util", "io-std", "process", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "fs", "limit"] }

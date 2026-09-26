@@ -13,6 +13,7 @@ pub mod digest;
 pub mod templates;
 
 mod smtp;
+pub use smtp::probe_smtp;
 
 use std::fmt;
 use std::sync::Arc;

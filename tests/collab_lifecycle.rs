@@ -37,6 +37,7 @@ const SAMPLE_HI_UPDATE: &str = "0101e8eda5a2070004010b70726f73656d6972726f720268
 struct LifecycleRun {
     inner: TestRun,
     hubs: Vec<Arc<CollabHub>>,
+    hub_slots: Vec<tokio::sync::OwnedSemaphorePermit>,
     leases: Vec<ConnectionLease>,
 }
 
@@ -45,11 +46,17 @@ impl LifecycleRun {
         Self {
             inner: TestRun::new(harness),
             hubs: Vec::new(),
+            hub_slots: Vec::new(),
             leases: Vec::new(),
         }
     }
 
-    fn register_hub(&mut self, hub: Arc<CollabHub>) -> Arc<CollabHub> {
+    /// Every hub built here counts against the process-wide engine child cap
+    /// like a `spawn_server` server does, so take the same slot and hold it
+    /// until `finish` has shut the hub down.
+    async fn register_hub(&mut self, hub: Arc<CollabHub>) -> Arc<CollabHub> {
+        self.hub_slots
+            .push(support::acquire_test_server_slot().await);
         self.hubs.push(hub.clone());
         hub
     }
@@ -63,6 +70,8 @@ impl LifecycleRun {
         for hub in self.hubs {
             hub.shutdown().await;
         }
+        // Children are reaped by shutdown; only now may other tests take the slots.
+        drop(self.hub_slots);
         if let Err(error) = self.inner.finish().await {
             errors.push(error);
         }
@@ -444,10 +453,12 @@ async fn collab_lifecycle_blocked_join_does_not_hold_phase() {
         Box::pin(async {
             let wiki = setup_wiki_doc(&run.inner.harness).await;
             let doc_b = setup_second_doc(run, &wiki).await;
-            let hub = run.register_hub(Arc::new(CollabHub::new(
-                test_collab_config(4, 200),
-                wiki.session.pool.clone(),
-            )));
+            let hub = run
+                .register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )))
+                .await;
             let key_a = room_key(wiki.session.workspace_id, wiki.document_id);
             let key_b = room_key(doc_b.session.workspace_id, doc_b.document_id);
 
@@ -509,10 +520,12 @@ async fn collab_lifecycle_aborted_join_clears_actor_ownership() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 const ABORTED_CLIENT_ID: u32 = 42;
 
@@ -569,7 +582,7 @@ async fn collab_lifecycle_abort_after_actor_reply_clears_connection() {
                 let hub = run.register_hub(Arc::new(CollabHub::new(
                     test_collab_config(4, 200),
                     wiki.session.pool.clone(),
-                )));
+                ))).await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 const ABORTED_CLIENT_ID: u32 = 51;
 
@@ -636,10 +649,12 @@ async fn collab_lifecycle_drop_lease_without_leave_clears_connection() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
 
                 let (_conn_id, lease) = hub_join_with_lease(&hub, &wiki, 1).await.expect("join");
@@ -667,10 +682,12 @@ async fn collab_lifecycle_joining_blocks_idle_eviction_then_rejoin_safe() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
 
                 let member = hub_join(run, &hub, &wiki, 1).await.expect("seed join");
@@ -732,10 +749,12 @@ async fn collab_lifecycle_joining_lease_blocks_eviction_while_paused_before_acto
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 50),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 50),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
 
                 hub.force_room_idle_eligible(key).await;
@@ -784,10 +803,12 @@ async fn collab_lifecycle_abort_queued_reply_reclaims_lease() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 hub_join(run, &hub, &wiki, 1).await.expect("seed member");
                 let conn_id = Uuid::now_v7();
@@ -835,10 +856,12 @@ async fn collab_lifecycle_actor_panic_teardown_closes_peer_and_releases_resource
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let admin = admin_pool(&run.inner.harness.admin_url).await;
                 let engine_stop_witness = arm_engine_stop_witness(wiki.document_id).await;
@@ -886,7 +909,7 @@ async fn collab_lifecycle_actor_panic_queued_join_gets_engine_unavailable() {
                 let hub = run.register_hub(Arc::new(CollabHub::new(
                     test_collab_config(4, 200),
                     wiki.session.pool.clone(),
-                )));
+                ))).await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
 
                 let (_member_a, lease_a, mut events_a) =
@@ -950,10 +973,12 @@ async fn collab_lifecycle_actor_panic_guard_held_until_teardown_barrier() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let admin = admin_pool(&run.inner.harness.admin_url).await;
                 let engine_stop_witness = arm_engine_stop_witness(wiki.document_id).await;
@@ -1007,10 +1032,12 @@ async fn collab_lifecycle_actor_panic_preserves_committed_state_without_uncommit
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let admin = admin_pool(&run.inner.harness.admin_url).await;
 
@@ -1064,10 +1091,12 @@ async fn collab_lifecycle_panic_rejoin_restores_committed_bytes_and_allows_edit(
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let admin = admin_pool(&run.inner.harness.admin_url).await;
                 let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
@@ -1149,10 +1178,12 @@ async fn collab_lifecycle_old_guard_held_until_teardown_then_next_owner() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let admin = admin_pool(&run.inner.harness.admin_url).await;
                 let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
@@ -1223,10 +1254,12 @@ async fn collab_lifecycle_concurrent_first_rejoin_starts_one_actor() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
@@ -1279,10 +1312,12 @@ async fn collab_lifecycle_cancel_joiner_cleanup_continues() {
     run_lifecycle_test("collab_lifecycle_cancel_joiner_cleanup_continues", |run| {
         Box::pin(async {
             let wiki = setup_wiki_doc(&run.inner.harness).await;
-            let hub = run.register_hub(Arc::new(CollabHub::new(
-                test_collab_config(4, 200),
-                wiki.session.pool.clone(),
-            )));
+            let hub = run
+                .register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )))
+                .await;
             let key = room_key(wiki.session.workspace_id, wiki.document_id);
             let admin = admin_pool(&run.inner.harness.admin_url).await;
             let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
@@ -1363,10 +1398,12 @@ async fn collab_lifecycle_closing_between_slot_return_and_phase_lock_retries() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
@@ -1442,8 +1479,9 @@ async fn collab_lifecycle_queue_full_is_not_stale_reclamation() {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
                 let mut cfg = test_collab_config(4, 200);
                 cfg.max_queued_room_ops = 1;
-                let hub =
-                    run.register_hub(Arc::new(CollabHub::new(cfg, wiki.session.pool.clone())));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(cfg, wiki.session.pool.clone())))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
 
                 hub_join(run, &hub, &wiki, 1).await.expect("seed");
@@ -1503,10 +1541,12 @@ async fn collab_lifecycle_noreply_is_not_retried_for_same_conn() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
 
@@ -1566,10 +1606,12 @@ async fn collab_lifecycle_shutdown_waits_for_reclaim() {
     run_lifecycle_test("collab_lifecycle_shutdown_waits_for_reclaim", |run| {
         Box::pin(async {
             let wiki = setup_wiki_doc(&run.inner.harness).await;
-            let hub = run.register_hub(Arc::new(CollabHub::new(
-                test_collab_config(4, 200),
-                wiki.session.pool.clone(),
-            )));
+            let hub = run
+                .register_hub(Arc::new(CollabHub::new(
+                    test_collab_config(4, 200),
+                    wiki.session.pool.clone(),
+                )))
+                .await;
             let key = room_key(wiki.session.workspace_id, wiki.document_id);
             let admin = admin_pool(&run.inner.harness.admin_url).await;
             let _idle_hold = IdleEvictionHold::arm(wiki.document_id);
@@ -1681,10 +1723,12 @@ async fn collab_lifecycle_idle_timer_reclaims_dead_slot_after_hold_release() {
         |run| {
             Box::pin(async {
                 let wiki = setup_wiki_doc(&run.inner.harness).await;
-                let hub = run.register_hub(Arc::new(CollabHub::new(
-                    test_collab_config(4, 200),
-                    wiki.session.pool.clone(),
-                )));
+                let hub = run
+                    .register_hub(Arc::new(CollabHub::new(
+                        test_collab_config(4, 200),
+                        wiki.session.pool.clone(),
+                    )))
+                    .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
                 let admin = admin_pool(&run.inner.harness.admin_url).await;
                 let idle_hold = IdleEvictionHold::arm(wiki.document_id);
