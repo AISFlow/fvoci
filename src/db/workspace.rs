@@ -618,8 +618,7 @@ pub async fn ensure_personal_workspace(
 }
 
 pub async fn set_member_role(
-    pool: &PgPool,
-    license: &crate::license::Entitlements,
+    db: &crate::db::Db,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -627,6 +626,8 @@ pub async fn set_member_role(
     next_role: WorkspaceRole,
     client_ip: Option<&str>,
 ) -> Result<Result<MemberRow, WorkspaceDbError>, sqlx::Error> {
+    let pool = &db.pool;
+    let license = &db.license;
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;
     set_tenant(&mut tx, workspace_id).await?;

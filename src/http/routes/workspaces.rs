@@ -272,8 +272,7 @@ async fn patch_member(
     let actor_user_id = parse_user_id(&user.user_id)?;
     let ip = peer_ip(peer.ip());
     let result = crate::db::workspace::set_member_role(
-        &state.auth.db.pool,
-        &state.auth.db.license,
+        &state.auth.db,
         workspace_id,
         actor_user_id,
         session_id,

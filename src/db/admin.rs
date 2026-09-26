@@ -470,21 +470,11 @@ pub async fn patch_instance_user(
         tx.rollback().await?;
         return Ok(None);
     }
-    let Some((is_admin, suspended_at)) = current else {
+    let Some(current) = current else {
         tx.rollback().await?;
         return Ok(Some(PatchUserOutcome::NotFound));
     };
-    let outcome = patch_locked(
-        &mut tx,
-        actor,
-        target,
-        patch,
-        is_admin,
-        suspended_at,
-        ip,
-        license,
-    )
-    .await?;
+    let outcome = patch_locked(&mut tx, actor, target, patch, current, ip, license).await?;
     match outcome {
         PatchUserOutcome::Ok { .. } => tx.commit().await?,
         _ => tx.rollback().await?,
@@ -497,11 +487,11 @@ async fn patch_locked(
     actor: Uuid,
     target: Uuid,
     patch: InstanceUserPatch,
-    is_admin: bool,
-    suspended_at: Option<DateTime<Utc>>,
+    current: (bool, Option<DateTime<Utc>>),
     ip: Option<&str>,
     license: &crate::license::Entitlements,
 ) -> Result<PatchUserOutcome, sqlx::Error> {
+    let (is_admin, suspended_at) = current;
     if patch.instance_admin == Some(false) && is_admin && count_live_instance_admins(tx).await? <= 1
     {
         return Ok(PatchUserOutcome::LastInstanceAdmin);

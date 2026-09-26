@@ -90,6 +90,13 @@ struct NewAccount {
     defaults: crate::settings::DefaultsUserSettings,
 }
 
+struct GrantDetails<'a> {
+    new_account: Option<NewAccount>,
+    link: Option<&'a crate::db::oidc::NewLink<'a>>,
+    client_ip: Option<&'a str>,
+    consents: &'a [(String, i32)],
+}
+
 pub async fn remove_pending_by_inviter(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -330,10 +337,12 @@ pub async fn accept_invitation(
         license,
         &invitation,
         user_id,
-        new_account,
-        None,
-        request.client_ip,
-        request.consents,
+        GrantDetails {
+            new_account,
+            link: None,
+            client_ip: request.client_ip,
+            consents: request.consents,
+        },
     )
     .await?
     {
@@ -403,10 +412,12 @@ pub async fn accept_invitation_with_identity(
             license,
             &invitation,
             user_id,
-            None,
-            None,
-            request.client_ip,
-            request.consents,
+            GrantDetails {
+                new_account: None,
+                link: None,
+                client_ip: request.client_ip,
+                consents: request.consents,
+            },
         )
         .await?
         .map(|()| user_id));
@@ -444,10 +455,12 @@ pub async fn accept_invitation_with_identity(
         license,
         &invitation,
         user_id,
-        Some(new_account),
-        Some(&link),
-        request.client_ip,
-        request.consents,
+        GrantDetails {
+            new_account: Some(new_account),
+            link: Some(&link),
+            client_ip: request.client_ip,
+            consents: request.consents,
+        },
     )
     .await?
     .map(|()| user_id))
@@ -463,11 +476,14 @@ async fn grant_membership(
     license: &crate::license::Entitlements,
     invitation: &InvitationRow,
     user_id: Uuid,
-    new_account: Option<NewAccount>,
-    link: Option<&crate::db::oidc::NewLink<'_>>,
-    client_ip: Option<&str>,
-    consents: &[(String, i32)],
+    details: GrantDetails<'_>,
 ) -> Result<Result<(), InvitationDbError>, sqlx::Error> {
+    let GrantDetails {
+        new_account,
+        link,
+        client_ip,
+        consents,
+    } = details;
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;
     set_tenant(&mut tx, invitation.workspace_id).await?;
