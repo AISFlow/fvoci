@@ -321,10 +321,13 @@ impl MarkdownHelper {
 // ---------------------------------------------------------------------------
 // Child side
 
+#[derive(Debug)]
 enum ChildResult {
     Output(Vec<u8>),
     InvalidInput(String),
     OutputTooLarge,
+    /// The converter itself failed on valid input (exit 2, routes: 500).
+    Failed(String),
 }
 
 #[derive(serde::Deserialize)]
@@ -341,10 +344,28 @@ fn tiptap_to_docx(input: &[u8]) -> ChildResult {
     if !is_tiptap_doc(&req.content_json) {
         return ChildResult::InvalidInput("not a tiptap doc".into());
     }
-    match write_docx(&export_doc(&req.title, &req.content_json)) {
+    docx_result(write_docx(&export_doc(&req.title, &req.content_json)))
+}
+
+/// The body is a valid Tiptap doc by now: a pack (zip/IO) error is the
+/// writer's fault, not the input's (the Node export answered 500).
+fn docx_result(written: Result<Vec<u8>, DocxError>) -> ChildResult {
+    match written {
         Ok(bytes) => ChildResult::Output(bytes),
         Err(DocxError::TooLarge) => ChildResult::OutputTooLarge,
-        Err(DocxError::Pack(detail)) => ChildResult::InvalidInput(detail),
+        Err(err @ DocxError::Pack(_)) => ChildResult::Failed(err.to_string()),
+    }
+}
+
+/// Exit code of a converter panic. Markdown ops refuse the input that broke
+/// the parser (400); the DOCX op's input is a stored, validated body, so a
+/// writer panic is a server fault (500).
+fn panic_exit_code(op: MarkdownOp) -> i32 {
+    match op {
+        MarkdownOp::TiptapToDocx => EXIT_FAILURE,
+        MarkdownOp::MdToTiptap | MarkdownOp::MdToSafeHtml | MarkdownOp::TiptapToMd => {
+            EXIT_INVALID_INPUT
+        }
     }
 }
 
@@ -427,10 +448,9 @@ pub fn maybe_run_helper() -> Option<i32> {
         .spawn(move || convert(op, input));
     let result = match worker.map(|w| w.join()) {
         Ok(Ok(result)) => result,
-        // The input broke the parser: refuse it like any other bad input.
         Ok(Err(_)) => {
             let _ = writeln!(std::io::stderr(), "converter panicked");
-            return Some(EXIT_INVALID_INPUT);
+            return Some(panic_exit_code(op));
         }
         Err(err) => return Some(child_fail(&format!("worker thread: {err}"))),
     };
@@ -441,6 +461,7 @@ pub fn maybe_run_helper() -> Option<i32> {
             return Some(EXIT_INVALID_INPUT);
         }
         ChildResult::OutputTooLarge => return Some(EXIT_OUTPUT_TOO_LARGE),
+        ChildResult::Failed(detail) => return Some(child_fail(&detail)),
     };
     if out.len() as u64 > max_output {
         return Some(EXIT_OUTPUT_TOO_LARGE);
@@ -455,4 +476,41 @@ pub fn maybe_run_helper() -> Option<i32> {
 fn child_fail(msg: &str) -> i32 {
     let _ = writeln!(std::io::stderr(), "{msg}");
     EXIT_FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docx_writer_faults_are_failures_not_invalid_input() {
+        assert!(matches!(
+            docx_result(Err(DocxError::Pack("zip: io".into()))),
+            ChildResult::Failed(m) if m.contains("zip: io")
+        ));
+        assert!(matches!(
+            docx_result(Err(DocxError::TooLarge)),
+            ChildResult::OutputTooLarge
+        ));
+        assert_eq!(panic_exit_code(MarkdownOp::TiptapToDocx), EXIT_FAILURE);
+        for op in [
+            MarkdownOp::MdToTiptap,
+            MarkdownOp::MdToSafeHtml,
+            MarkdownOp::TiptapToMd,
+        ] {
+            assert_eq!(panic_exit_code(op), EXIT_INVALID_INPUT, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn docx_child_input_errors_stay_invalid_input() {
+        assert!(matches!(
+            tiptap_to_docx(b"not json"),
+            ChildResult::InvalidInput(_)
+        ));
+        assert!(matches!(
+            tiptap_to_docx(br#"{"title":"t","contentJson":{"type":"paragraph"}}"#),
+            ChildResult::InvalidInput(_)
+        ));
+    }
 }

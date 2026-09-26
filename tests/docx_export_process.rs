@@ -30,8 +30,8 @@ fn fixtures() -> Vec<(String, Value)> {
     out.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
         out.len(),
-        63,
-        "53 markdown-oracle + 10 export-docx fixtures"
+        65,
+        "53 markdown-oracle + 12 export-docx fixtures"
     );
     out
 }

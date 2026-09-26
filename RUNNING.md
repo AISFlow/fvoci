@@ -422,7 +422,15 @@ become hyperlinks. The package is deflated after docx-rs writes it.
 Contract as before: `application/vnd.openxmlformats-officedocument.wordprocessingml.document`,
 `Content-Disposition` with an RFC 5987 `filename*`, `private, no-store`, `nosniff`; a stored body
 over 1 MiB or a file over 20,000,000 bytes is `413`, a body that is not a Tiptap doc `400`, and a
-child killed by the watchdog or a resource limit `500` (as the Node export's timeout).
+child killed by the watchdog or a resource limit, or a writer failure, `500` (as the Node
+export's timeout and serializer errors). Exports share the two-per-process conversion slots with
+Markdown imports and body conversions and wait for a free one.
+
+Differences a user can notice against the Node export (full list with fixtures in
+`compat/fixtures/export-docx/README.md`): task items show a ☑/☐ glyph instead of a clickable Word
+checkbox, empty list items are kept as empty items, file attachments are their name without the
+in-app `attachment:` link, relative in-app links (`/docs/1`) are plain text, and underline and
+highlight are kept.
 
 Measured (release, 1 MiB stored bodies, one child each): mixed corpus 0.15 s / 83 MB RSS / 85 KB
 file; Korean text 0.03 s / 26 MB / 19 KB; 67 tables of 20×8 cells 0.16 s / 97 MB / 42 KB; tiny marked

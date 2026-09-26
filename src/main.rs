@@ -96,6 +96,12 @@ struct DrainOutcome {
     import: Result<(), String>,
 }
 
+// Remembers a null allocation so the office child can report a panic caused
+// by its address-space ceiling as a resource limit (`alloc_guard`).
+#[global_allocator]
+static GLOBAL: fvoci_server::alloc_guard::RecordingAlloc =
+    fvoci_server::alloc_guard::RecordingAlloc;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The image preview, office and Markdown children are this binary in hidden modes: decide before
     // a runtime, logger or config exists, so the child holds nothing else.

@@ -8,9 +8,9 @@
 //! callouts (with the `[!KIND]` label) as left-bordered paragraphs,
 //! attachments and embeds as their text placeholders. Fonts are named only
 //! (`Consolas`, as `@m2d/core`); nothing is embedded and no attachment bytes
-//! are read. Intentional differences from the TS output are listed in the
-//! export DOCX report (e.g. underline/highlight are kept, unsafe link schemes
-//! are not turned into hyperlinks).
+//! are read. Intentional differences from the TS output (D1–D16, e.g.
+//! underline/highlight are kept, unsafe link schemes are not turned into
+//! hyperlinks) are listed in `compat/fixtures/export-docx/README.md`.
 //!
 //! Runs in the `--internal-markdown` child only (`tiptap-to-docx`).
 
@@ -99,6 +99,12 @@ fn deflate_package(stored: &[u8]) -> docx_zip::result::ZipResult<Vec<u8>> {
         SimpleFileOptions::default().compression_method(docx_zip::CompressionMethod::Deflated);
     for i in 0..archive.len() {
         let mut part = archive.by_index(i)?;
+        // OPC has no directory parts; copied with `start_file`, docx-rs's
+        // directory entries would become empty files named `word/` and break
+        // extraction with `unzip`. Most DOCX producers omit them.
+        if part.is_dir() {
+            continue;
+        }
         out.start_file(part.name().to_string(), options)?;
         std::io::copy(&mut part, &mut out)?;
     }
@@ -413,7 +419,9 @@ impl Writer {
                 if let Some(src) = row.cells.get(c) {
                     self.blocks(&src.blocks, Cx::default(), &mut body, nums);
                 }
-                if !body.iter().any(|b| matches!(b, Child::P(_))) {
+                // A cell must end with a paragraph (ECMA-376 §17.4.66); Word
+                // rejects a `w:tc` whose last child is a nested table.
+                if !matches!(body.last(), Some(Child::P(_))) {
                     body.push(Child::P(Paragraph::new()));
                 }
                 for child in body {
@@ -560,11 +568,34 @@ fn hyperlink_target(href: &str) -> Option<String> {
         return None;
     }
     let plain = href.bytes().all(|b| b.is_ascii_graphic());
-    Some(if plain {
+    let candidate = if plain {
         href.to_string()
     } else {
         url.to_string()
-    })
+    };
+    Some(rfc3986_uri(&candidate))
+}
+
+/// Percent-encodes every byte RFC 3986 does not allow in a URI (outside
+/// unreserved, reserved and `%` starting a valid escape). The WHATWG
+/// serialization leaves some of them (`|`, `^`, `"` in a fragment) and a stored
+/// ASCII href can carry any of them; the relationship target must be a URI.
+fn rfc3986_uri(uri: &str) -> String {
+    let bytes = uri.as_bytes();
+    let mut out = String::with_capacity(uri.len());
+    for (i, &b) in bytes.iter().enumerate() {
+        let allowed = b.is_ascii_alphanumeric()
+            || b"-._~:/?#[]@!$&'()*+,;=".contains(&b)
+            || (b == b'%'
+                && bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit));
+        if allowed {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Text of one run. XML 1.0 forbids most C0 controls (and U+FFFE/U+FFFF)
@@ -644,6 +675,52 @@ mod tests {
         )
         .unwrap();
         assert!(rels.contains("https://e.com/?a=1&amp;b=2\""), "{rels}");
+        // OPC parts only: a directory entry would extract as an empty file.
+        for i in 0..zip.len() {
+            let name = zip.by_index(i).unwrap().name().to_string();
+            assert!(!name.ends_with('/'), "{name}");
+        }
+    }
+
+    /// ECMA-376: `w:tc` ends with a `w:p`, also after a nested table.
+    #[test]
+    fn cell_ending_in_a_table_gets_a_trailing_paragraph() {
+        let inner = json!({"type": "table", "content": [{"type": "tableRow", "content": [
+            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "in"}]}]}]}]});
+        let doc = json!({"type": "doc", "content": [{"type": "table", "content": [
+            {"type": "tableRow", "content": [
+                {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "a"}]}, inner]},
+                {"type": "tableCell", "content": [inner]}]}]}]});
+        let xml = document_xml(&write_docx(&export_doc("", &doc)).unwrap());
+        assert_eq!(xml.matches("<w:tbl>").count(), 3, "{xml}");
+        let squashed: String = xml.split_whitespace().collect();
+        assert!(!squashed.contains("</w:tbl></w:tc>"), "{xml}");
+    }
+
+    #[test]
+    fn hyperlink_targets_are_rfc3986_uris() {
+        let cases = [
+            ("https://e.com/a b?q=x y", "https://e.com/a%20b?q=x%20y"),
+            (
+                "https://e.com/문서?제목=회의",
+                "https://e.com/%EB%AC%B8%EC%84%9C?%EC%A0%9C%EB%AA%A9=%ED%9A%8C%EC%9D%98",
+            ),
+            (
+                "https://e.com/a\"b<c>d&e='f'",
+                "https://e.com/a%22b%3Cc%3Ed&e='f'",
+            ),
+            (
+                "https://e.com/p|q^r`s{t}?w=%zz&x=%41#h|i",
+                "https://e.com/p%7Cq%5Er%60s%7Bt%7D?w=%25zz&x=%41#h%7Ci",
+            ),
+            ("https://e.com/?a=1&b=2", "https://e.com/?a=1&b=2"),
+        ];
+        for (href, want) in cases {
+            assert_eq!(hyperlink_target(href).as_deref(), Some(want), "{href}");
+        }
+        for href in ["javascript:alert('x y')", "/docs/1 2", "data:text/html,<b>"] {
+            assert_eq!(hyperlink_target(href), None, "{href}");
+        }
     }
 
     #[test]
