@@ -19,6 +19,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -27,8 +28,10 @@ use tokio::sync::Semaphore;
 
 use crate::collab::derived_body::DOCUMENT_MAX_BODY_BYTES;
 use crate::documents::docx::{write_docx, DocxError, DOCX_MAX_OUTPUT_BYTES};
+use crate::documents::export::ExportRenderError;
 use crate::documents::export_model::export_doc;
 use crate::documents::markdown::{md_to_safe_html, md_to_tiptap};
+use crate::documents::pdf::{write_pdf, PdfError, PDF_MAX_OUTPUT_BYTES};
 use crate::share_render::{is_tiptap_doc, tiptap_doc_to_md};
 
 /// Hidden argv[1] that turns this binary into the Markdown child.
@@ -56,6 +59,8 @@ pub enum MarkdownOp {
     TiptapToMd,
     /// Source `export_docx`: `{"title", "contentJson"}` -> DOCX bytes.
     TiptapToDocx,
+    /// Source `export_pdf`: `{"title", "contentJson"}` -> PDF bytes.
+    TiptapToPdf,
 }
 
 impl MarkdownOp {
@@ -65,6 +70,7 @@ impl MarkdownOp {
             Self::MdToSafeHtml => "md-to-safe-html",
             Self::TiptapToMd => "tiptap-to-md",
             Self::TiptapToDocx => "tiptap-to-docx",
+            Self::TiptapToPdf => "tiptap-to-pdf",
         }
     }
 
@@ -74,6 +80,7 @@ impl MarkdownOp {
             Self::MdToSafeHtml,
             Self::TiptapToMd,
             Self::TiptapToDocx,
+            Self::TiptapToPdf,
         ]
         .into_iter()
         .find(|op| op.as_str() == value)
@@ -102,6 +109,7 @@ enum RunError {
     Failed(String),
     /// Watchdog, RLIMIT_CPU or an abort under RLIMIT_AS / stack overflow.
     Killed(String),
+    Busy,
 }
 
 impl From<RunError> for MarkdownError {
@@ -111,6 +119,8 @@ impl From<RunError> for MarkdownError {
             RunError::InvalidInput(m) | RunError::Killed(m) => Self::InvalidInput(m),
             RunError::TooLarge => Self::TooLarge,
             RunError::Failed(m) => Self::Failed(m),
+            // Only the public PDF pool refuses; it maps its own errors.
+            RunError::Busy => Self::Failed("helper busy".into()),
         }
     }
 }
@@ -144,6 +154,10 @@ impl Default for MarkdownLimits {
 pub struct MarkdownHelper {
     program: PathBuf,
     limits: MarkdownLimits,
+    /// Public share PDFs: their own pool of one that never waits (source
+    /// `ConvertClient::for_public`), so anonymous requests cannot queue
+    /// ahead of members. Shared by clones (the app state's one helper).
+    public_permits: Arc<Semaphore>,
 }
 
 impl MarkdownHelper {
@@ -151,6 +165,7 @@ impl MarkdownHelper {
         Self {
             program: program.into(),
             limits: MarkdownLimits::default(),
+            public_permits: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -210,31 +225,110 @@ impl MarkdownHelper {
             "contentJson": content_json,
         }))
         .map_err(|e| MarkdownError::Failed(e.to_string()))?;
-        match self.run_child(MarkdownOp::TiptapToDocx, input).await {
+        match self
+            .run_child(MarkdownOp::TiptapToDocx, input, Pool::Shared)
+            .await
+        {
             Ok(out) => Ok(out),
             Err(RunError::Killed(m)) => Err(MarkdownError::Failed(m)),
             Err(err) => Err(err.into()),
         }
     }
 
+    /// Source `export_pdf` (`tiptapDocToPdf(titledDocument(title, doc))`):
+    /// PDF bytes of at most [`PDF_MAX_OUTPUT_BYTES`]. Waits for a shared
+    /// permit (members). A body that is not a Tiptap doc is `InvalidInput`
+    /// without a child; a child killed by the watchdog or a resource limit is
+    /// `Failed` (logged), as for DOCX.
+    pub async fn tiptap_to_pdf(
+        &self,
+        title: &str,
+        content_json: &Value,
+    ) -> Result<Vec<u8>, ExportRenderError> {
+        self.pdf(title, content_json, Pool::Shared).await
+    }
+
+    /// The same PDF for an anonymous share request: its own pool of one that
+    /// answers `Busy` instead of waiting (source `ConvertClient::for_public`).
+    pub async fn tiptap_to_pdf_public(
+        &self,
+        title: &str,
+        content_json: &Value,
+    ) -> Result<Vec<u8>, ExportRenderError> {
+        self.pdf(title, content_json, Pool::PublicFailFast).await
+    }
+
+    async fn pdf(
+        &self,
+        title: &str,
+        content_json: &Value,
+        pool: Pool,
+    ) -> Result<Vec<u8>, ExportRenderError> {
+        if !is_tiptap_doc(content_json) {
+            return Err(ExportRenderError::InvalidInput);
+        }
+        let input = serde_json::to_vec(&serde_json::json!({
+            "title": title,
+            "contentJson": content_json,
+        }))
+        .map_err(|_| ExportRenderError::InvalidInput)?;
+        match self.run_child(MarkdownOp::TiptapToPdf, input, pool).await {
+            Ok(out) => Ok(out),
+            Err(RunError::InvalidInput(_)) => Err(ExportRenderError::InvalidInput),
+            Err(RunError::TooLarge) => Err(ExportRenderError::TooLarge),
+            Err(RunError::Busy) => Err(ExportRenderError::Busy),
+            Err(RunError::Failed(detail) | RunError::Killed(detail)) => {
+                tracing::error!(%detail, "pdf export child failed");
+                Err(ExportRenderError::Failed)
+            }
+        }
+    }
+
     /// Runs one operation in a fresh child. The child is killed on timeout
     /// and when this future is dropped (`kill_on_drop`).
     pub async fn run(&self, op: MarkdownOp, input: Vec<u8>) -> Result<Vec<u8>, MarkdownError> {
-        Ok(self.run_child(op, input).await?)
+        Ok(self.run_child(op, input, Pool::Shared).await?)
     }
 
-    async fn run_child(&self, op: MarkdownOp, input: Vec<u8>) -> Result<Vec<u8>, RunError> {
+    async fn run_child(
+        &self,
+        op: MarkdownOp,
+        input: Vec<u8>,
+        pool: Pool,
+    ) -> Result<Vec<u8>, RunError> {
         let mut limits = self.limits;
-        if op == MarkdownOp::TiptapToDocx {
-            limits.max_output_bytes = limits.max_output_bytes.min(DOCX_MAX_OUTPUT_BYTES);
+        match op {
+            MarkdownOp::TiptapToDocx => {
+                limits.max_output_bytes = limits.max_output_bytes.min(DOCX_MAX_OUTPUT_BYTES);
+            }
+            MarkdownOp::TiptapToPdf => {
+                limits.max_output_bytes = limits.max_output_bytes.min(PDF_MAX_OUTPUT_BYTES);
+            }
+            _ => {}
         }
         if input.len() > limits.max_input_bytes {
             return Err(RunError::TooLarge);
         }
-        let _permit = PERMITS
-            .acquire()
-            .await
-            .map_err(|_| RunError::Failed("markdown helper closed".into()))?;
+        let (_shared, _public) = match pool {
+            Pool::Shared => (
+                Some(
+                    PERMITS
+                        .acquire()
+                        .await
+                        .map_err(|_| RunError::Failed("markdown helper closed".into()))?,
+                ),
+                None,
+            ),
+            Pool::PublicFailFast => (
+                None,
+                Some(
+                    self.public_permits
+                        .clone()
+                        .try_acquire_owned()
+                        .map_err(|_| RunError::Busy)?,
+                ),
+            ),
+        };
         let mut command = tokio::process::Command::new(&self.program);
         #[cfg(target_os = "linux")]
         {
@@ -260,6 +354,10 @@ impl MarkdownHelper {
             .arg("--cpu-secs")
             .arg(limits.timeout.as_secs().max(1).to_string())
             .env_clear()
+            .envs(
+                std::env::var_os(crate::documents::pdf::FONT_DIR_ENV)
+                    .map(|v| (crate::documents::pdf::FONT_DIR_ENV, v)),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -318,6 +416,12 @@ impl MarkdownHelper {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Pool {
+    Shared,
+    PublicFailFast,
+}
+
 // ---------------------------------------------------------------------------
 // Child side
 
@@ -362,10 +466,25 @@ fn docx_result(written: Result<Vec<u8>, DocxError>) -> ChildResult {
 /// writer panic is a server fault (500).
 fn panic_exit_code(op: MarkdownOp) -> i32 {
     match op {
-        MarkdownOp::TiptapToDocx => EXIT_FAILURE,
+        MarkdownOp::TiptapToDocx | MarkdownOp::TiptapToPdf => EXIT_FAILURE,
         MarkdownOp::MdToTiptap | MarkdownOp::MdToSafeHtml | MarkdownOp::TiptapToMd => {
             EXIT_INVALID_INPUT
         }
+    }
+}
+
+fn tiptap_to_pdf(input: &[u8]) -> ChildResult {
+    let Ok(req) = serde_json::from_slice::<DocxRequest>(input) else {
+        return ChildResult::InvalidInput("input is not a pdf request".into());
+    };
+    if !is_tiptap_doc(&req.content_json) {
+        return ChildResult::InvalidInput("not a tiptap doc".into());
+    }
+    match write_pdf(&export_doc(&req.title, &req.content_json)) {
+        Ok(bytes) => ChildResult::Output(bytes),
+        Err(PdfError::TooLarge) => ChildResult::OutputTooLarge,
+        // As for DOCX: the body is valid by now, a writer error is a fault.
+        Err(err @ PdfError::Write(_)) => ChildResult::Failed(err.to_string()),
     }
 }
 
@@ -392,6 +511,7 @@ fn convert(op: MarkdownOp, input: Vec<u8>) -> ChildResult {
                 }
             }),
         MarkdownOp::TiptapToDocx => return tiptap_to_docx(&input),
+        MarkdownOp::TiptapToPdf => return tiptap_to_pdf(&input),
     };
     match result {
         Ok(out) => ChildResult::Output(out),

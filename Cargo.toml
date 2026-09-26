@@ -90,6 +90,16 @@ docx-rs = { version = "=0.4.22", default-features = false }
 # docx-rs stores its parts uncompressed; the writer re-deflates the package
 # with the zip version docx-rs already links (no further crates). MIT.
 docx-zip = { package = "zip", version = "=8.6.0", default-features = false, features = ["deflate"] }
+# Tiptap -> PDF (source @react-pdf/renderer), written only in the rlimited
+# `--internal-markdown` child (`tiptap-to-pdf`): krilla writes the PDF and
+# subsets the embedded Noto fonts, rustybuzz shapes each run, and
+# unicode-linebreak (UAX #14) gives the break opportunities; FVOCI does the
+# page flow. No default features: no raster images while exports carry
+# attachment names only. krilla MIT OR Apache-2.0, rustybuzz MIT,
+# unicode-linebreak Apache-2.0.
+krilla = { version = "=0.8.2", default-features = false }
+rustybuzz = { version = "=0.20.1", default-features = false, features = ["std"] }
+unicode-linebreak = "=0.1.5"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
@@ -122,6 +132,11 @@ required-features = ["db-tests"]
 [[test]]
 name = "document_export_docx_integration"
 path = "tests/document_export_docx_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "document_export_pdf_integration"
+path = "tests/document_export_pdf_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]

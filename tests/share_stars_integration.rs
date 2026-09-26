@@ -11,7 +11,7 @@ use fvoci_server::db::context::{set_system, set_tenant};
 use fvoci_server::db::share::hydrate_share_hits;
 use project_harness::{
     add_workspace_user, admin_pool, app_pool, create_project, http_request, json_request,
-    setup_session, setup_session_with_convert, TestDb,
+    setup_session, setup_session_with_markdown, TestDb,
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -1635,13 +1635,12 @@ async fn stars_and_recent_gate_on_current_access() {
     harness.cleanup().await;
 }
 
+/// Rendered by the Rust `--internal-markdown` child (no Node helper in this
+/// state): the member export's writer, on the public fail-fast pool.
 #[tokio::test]
-async fn share_pdf_renders_shared_scope_through_convert_helper() {
-    let convert = fvoci_server::documents::convert::ConvertClient::from_env().expect(
-        "FVOCI_DOCUMENT_CONVERT_BIN is required; run scripts/prepare-document-convert.sh first",
-    );
+async fn share_pdf_renders_shared_scope_in_rust() {
     let harness = TestDb::bootstrap().await;
-    let (app, cookie, _owner_id, ws) = setup_session_with_convert(&harness, Some(convert)).await;
+    let (app, cookie, _owner_id, ws) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
     let root = create_wiki_doc(&app, &cookie, ws, None, "공유 PDF").await;
     let child = create_wiki_doc(&app, &cookie, ws, Some(&root), "하위 PDF").await;
@@ -1675,6 +1674,23 @@ async fn share_pdf_renders_shared_scope_through_convert_helper() {
         "{disposition}"
     );
     assert!(bytes.starts_with(b"%PDF-"), "not a PDF");
+    assert_eq!(headers["content-security-policy"], "sandbox");
+    let text = pdf_extract::extract_text_from_mem(&bytes).unwrap();
+    assert!(text.contains("한글 본문 PDF"), "{text}");
+    // Same bytes as the member export of the same document.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/workspaces/{ws}/documents/{root}/pdf"))
+        .header("cookie", format!("fvoci_session={cookie}"))
+        .extension(axum::extract::ConnectInfo(project_harness::test_peer()))
+        .body(Body::empty())
+        .unwrap();
+    let member = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(member.status(), StatusCode::OK);
+    let member = axum::body::to_bytes(member.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(member.as_ref(), bytes.as_slice());
 
     let (status, headers, bytes) =
         raw_get(app.clone(), &format!("{base}?documentId={child}"), &[]).await;
@@ -1728,10 +1744,48 @@ async fn share_pdf_renders_shared_scope_through_convert_helper() {
     harness.cleanup().await;
 }
 
+/// Anonymous PDFs never queue: while the public pool's one child runs, a
+/// second request is 503 `share_pdf_busy` with `Retry-After: 5`.
 #[tokio::test]
-async fn share_pdf_without_convert_helper_is_a_server_error_after_scope_checks() {
+async fn share_pdf_busy_is_503_without_waiting() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let root = create_wiki_doc(&app, &cookie, ws, None, "큰 문서").await;
+    let text = "한글 문단과 English text 가 섞인 긴 본문입니다 😀. ".repeat(20);
+    // ~0.75 MB: under the 1 MiB stored-body cap, seconds of work for the child.
+    let content: Vec<Value> = (0..400)
+        .map(|i| json!({"type": "paragraph", "content": [{"type": "text", "text": format!("{i} {text}")}]}))
+        .collect();
+    set_content(&admin, &root, json!({"type": "doc", "content": content})).await;
+    let (_, token) = share_document(&app, &cookie, ws, &root).await;
+    let base = format!("/api/v1/share/{token}/pdf");
+    let (first, second) = tokio::join!(raw_get(app.clone(), &base, &[]), async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        raw_get(app.clone(), &base, &[]).await
+    });
+    // Whichever request takes the one public permit renders; the other is
+    // refused at once.
+    let (ok, busy) = if first.0 == StatusCode::OK {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(ok.0, StatusCode::OK);
+    assert!(ok.2.starts_with(b"%PDF-"));
+    let (status, headers, bytes) = busy;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(headers["retry-after"], "5");
+    let problem: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(problem["code"], "share_pdf_busy");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn share_pdf_without_the_export_child_is_a_server_error_after_scope_checks() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, ws) = setup_session_with_markdown(&harness, None).await;
     let root = create_wiki_doc(&app, &cookie, ws, None, "헬퍼 없음").await;
     let (_, token) = share_document(&app, &cookie, ws, &root).await;
     // Scope checks still run first: an unknown token is 404, not 500.
