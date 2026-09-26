@@ -59,6 +59,7 @@ async fn search_state(app_url: &str, meili: Option<MeiliConfig>) -> AppState {
         },
         collab: None,
         meili,
+        search_embedder: None,
         document_convert: None,
         import_wake: None,
         import_extractor_available: false,
@@ -94,6 +95,7 @@ fn document_source(
         chosung: text.chosung,
         stem: text.stem,
         updated_at: 1,
+        embedding: None,
     }
 }
 
@@ -114,6 +116,7 @@ fn task_source(workspace_id: Uuid, project_id: Uuid, task_id: Uuid, title: &str)
         chosung: text.chosung,
         stem: text.stem,
         updated_at: 1,
+        embedding: None,
     }
 }
 
@@ -145,6 +148,7 @@ fn attachment_source(
         chosung: text.chosung,
         stem: text.stem,
         updated_at: 1,
+        embedding: None,
     }
 }
 
@@ -228,6 +232,7 @@ fn comment_source(
         chosung: text.chosung,
         stem: text.stem,
         updated_at: 1,
+        embedding: None,
     }
 }
 

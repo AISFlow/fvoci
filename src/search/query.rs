@@ -1,8 +1,8 @@
 //! Workspace search query, PG hydrate, and snippets.
 //!
-//! Ports the lexical path of `packages/core/src/search.ts` and
-//! `packages/search/src/snippet.ts` at source SHA
-//! `393795261322b916e588043cf94feca999175843`.
+//! Ports `packages/core/src/search.ts` (lexical and workspace hybrid paths),
+//! `packages/search/src/query.ts` (RRF) and `packages/search/src/snippet.ts` at
+//! source SHA `393795261322b916e588043cf94feca999175843`.
 //!
 //! Scope uses `project_permission` / `document_permission`. The Meili filter
 //! is recall only; hydrate re-checks the current DB state.
@@ -25,9 +25,11 @@ use crate::db::projects::{project_permission, LockedProject};
 use crate::db::workspace::{list_workspaces_for_user, WorkspaceRole};
 use crate::display_id::format_display_id;
 use crate::projects::ProjectPermission;
+use crate::search::embed::Embedder;
 use crate::search::meili::{
-    search_meili, MeiliConfig, MeiliError, MeiliHit, MeiliSearchInput, MeiliSearchScope,
-    ParentKinds, SearchSourceKind, MEILI_MAX_TOTAL_HITS,
+    search_meili, search_meili_vector, MeiliConfig, MeiliError, MeiliHit, MeiliSearchInput,
+    MeiliSearchScope, MeiliVectorSearchInput, ParentKinds, SearchSourceKind, MEILI_MAX_TOTAL_HITS,
+    SEMANTIC_CHUNK_K,
 };
 use crate::search::text::{is_chosung_query, stem_text};
 
@@ -36,6 +38,13 @@ const MEILI_PAGE: u32 = 50;
 const MAX_CANDIDATES: u32 = 400;
 const MAX_MEILI_PAGES: u32 = 8;
 const MAX_SEARCH_MS: u64 = 2_000;
+/// Source: hybrid ranks one finite pool (Meili lexical top 200 + the K=50
+/// attachment chunks, RRF-merged) and pages by offset inside it, so the order
+/// does not shift between pages.
+const HYBRID_LEXICAL_K: u32 = 200;
+/// Source (old pgvector `dist < 0.5`): chunks at or below this cosine are dropped.
+const SEMANTIC_MIN_COSINE: f64 = 0.5;
+const RRF_K: f64 = 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,6 +161,10 @@ pub struct WorkspaceSearchRequest<'a> {
     pub cursor: Option<&'a str>,
     pub limit: u32,
     pub meili: &'a MeiliConfig,
+    /// `mode=hybrid` was requested. It takes effect only with an embedder and
+    /// a successful query embedding; otherwise the search is lexical.
+    pub hybrid: bool,
+    pub embedder: Option<&'a Embedder>,
     /// API-token scope narrowing (source `allowedContentKinds`); `None` for sessions.
     pub allowed_kinds: Option<ParentKinds>,
 }
@@ -278,14 +291,19 @@ pub async fn query_workspace_search(
         }));
     }
 
-    let filters = search_filters(&input, &acl);
+    let embedding = query_embedding(&input, &prepared).await;
+    let filters = search_filters(&input, &acl, embedding.is_some());
     if let Some(cursor) = input.cursor {
         if !cursor_matches(cursor, &filters) {
             return Ok(Err(SearchQueryError::InvalidCursor));
         }
     }
 
-    let scanned = match scan_lexical(pool, input.meili, &input, &acl, &prepared).await {
+    let scanned = match embedding {
+        Some(vector) => hybrid_scan(pool, input.meili, &input, &acl, &prepared, vector).await,
+        None => scan_lexical(pool, input.meili, &input, &acl, &prepared).await,
+    };
+    let scanned = match scanned {
         Ok(page) => page,
         // Meili failures are the 503 problem; a database failure stays an error.
         Err(ScanError::Meili(error)) => {
@@ -630,7 +648,40 @@ async fn load_visible_acls(
     Ok(visible)
 }
 
-fn search_filters(input: &WorkspaceSearchRequest<'_>, acl: &SearchAcl) -> CursorFingerprint {
+/// Source route: embed the raw `q` for `mode=hybrid`; a provider failure is
+/// logged and the search answers lexically. FVOCI embeds only after the
+/// membership/ACL check (the source embeds first) and skips chosung queries,
+/// which the source never runs as hybrid.
+async fn query_embedding(
+    input: &WorkspaceSearchRequest<'_>,
+    prepared: &PreparedQuery,
+) -> Option<Vec<f32>> {
+    let embedder = input
+        .embedder
+        .filter(|_| input.hybrid && !prepared.chosung)?;
+    // An interactive search waits at most QUERY_EMBED_TIMEOUT for the
+    // provider, then answers lexically (indexing keeps the 30 s deadline).
+    match tokio::time::timeout(QUERY_EMBED_TIMEOUT, embedder.embed(&[input.q.to_string()])).await {
+        Ok(Ok(mut vectors)) => vectors.pop(),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "search.embed_failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("search.embed_timeout");
+            None
+        }
+    }
+}
+
+/// Query-path provider deadline; the lexical result is returned after it.
+const QUERY_EMBED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn search_filters(
+    input: &WorkspaceSearchRequest<'_>,
+    acl: &SearchAcl,
+    hybrid: bool,
+) -> CursorFingerprint {
     let qh_src = match input.tag {
         Some(tag) => format!("{}\0tag:{tag}", input.q),
         None => input.q.to_string(),
@@ -640,7 +691,8 @@ fn search_filters(input: &WorkspaceSearchRequest<'_>, acl: &SearchAcl) -> Cursor
         r#type: input.r#type,
         ws: Some(input.workspace_id.to_string()),
         pj: input.project_id.map(|id| id.to_string()),
-        mode: "lexical".to_string(),
+        // Source `execMode`: hybrid only when a query embedding exists.
+        mode: if hybrid { "hybrid" } else { "lexical" }.to_string(),
         sh: fnv1a(&format!(
             "{}{}",
             scope_key(acl),
@@ -976,6 +1028,179 @@ async fn scan_lexical(
         None
     };
     Ok(ScannedPage { items, next_off })
+}
+
+/// Source `rrfMerge`: lexical ranks and cosine distances do not share a scale,
+/// so only ranks count; an id in both lists sums both terms. Ties keep first
+/// appearance order (lexical first).
+pub fn rrf_merge(lexical: &[String], semantic: &[String]) -> Vec<(String, f64)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    for ids in [lexical, semantic] {
+        for (rank, id) in ids.iter().enumerate() {
+            let score = scores.entry(id.clone()).or_insert_with(|| {
+                order.push(id.clone());
+                0.0
+            });
+            *score += 1.0 / (RRF_K + rank as f64 + 1.0);
+        }
+    }
+    let mut merged: Vec<(String, f64)> = order
+        .into_iter()
+        .map(|id| {
+            let score = scores[&id];
+            (id, score)
+        })
+        .collect();
+    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged
+}
+
+/// Source `semanticHitsFromMeili`: attachment chunks above the cosine floor,
+/// best chunk per attachment, as attachment hits without a chunk number.
+fn semantic_attachment_hits(hits: Vec<MeiliHit>, workspace_ids: &HashSet<String>) -> Vec<MeiliHit> {
+    let mut order: Vec<String> = Vec::new();
+    let mut best: HashMap<String, MeiliHit> = HashMap::new();
+    for raw in hits {
+        if raw.kind != SearchSourceKind::Attachment
+            || raw.score <= SEMANTIC_MIN_COSINE
+            || !accept_hit(&raw, workspace_ids, SearchTypeFilter::Attachment)
+        {
+            continue;
+        }
+        if best
+            .get(&raw.resource_id)
+            .is_some_and(|prev| prev.score >= raw.score)
+        {
+            continue;
+        }
+        if !best.contains_key(&raw.resource_id) {
+            order.push(raw.resource_id.clone());
+        }
+        best.insert(
+            raw.resource_id.clone(),
+            MeiliHit {
+                chunk_no: None,
+                ..raw
+            },
+        );
+    }
+    let mut out: Vec<MeiliHit> = order
+        .into_iter()
+        .filter_map(|id| best.remove(&id))
+        .collect();
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
+/// Source `hybridScan` fusion: without semantic hits the lexical pool keeps
+/// its Meili scores; otherwise the RRF order and scores.
+fn fuse_hybrid(lexical: Vec<MeiliHit>, semantic: Vec<MeiliHit>) -> Vec<MeiliHit> {
+    if semantic.is_empty() {
+        return lexical;
+    }
+    let lexical_ids: Vec<String> = lexical.iter().map(|h| h.resource_id.clone()).collect();
+    let semantic_ids: Vec<String> = semantic.iter().map(|h| h.resource_id.clone()).collect();
+    let mut by_id: HashMap<String, MeiliHit> = HashMap::new();
+    for hit in lexical.into_iter().chain(semantic) {
+        by_id.entry(hit.resource_id.clone()).or_insert(hit);
+    }
+    rrf_merge(&lexical_ids, &semantic_ids)
+        .into_iter()
+        .filter_map(|(id, score)| by_id.remove(&id).map(|hit| MeiliHit { score, ..hit }))
+        .collect()
+}
+
+/// Source `hybridScan` (workspace search only).
+async fn hybrid_scan(
+    pool: &PgPool,
+    meili: &MeiliConfig,
+    input: &WorkspaceSearchRequest<'_>,
+    acl: &SearchAcl,
+    prepared: &PreparedQuery,
+    embedding: Vec<f32>,
+) -> Result<ScannedPage, ScanError> {
+    let workspace_ids = HashSet::from([input.workspace_id.to_string()]);
+    let scope = meili_scope(input.workspace_id, acl);
+    let res = search_meili(
+        meili,
+        &MeiliSearchInput {
+            q: prepared.q.clone(),
+            stem: prepared.stem.clone(),
+            scopes: vec![scope.clone()],
+            kind: prepared.r#type.meili_kind(),
+            parent_kinds: input.allowed_kinds,
+            limit: HYBRID_LEXICAL_K,
+            offset: 0,
+        },
+    )
+    .await?;
+    let mut lexical = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in res.hits {
+        if !accept_hit(&raw, &workspace_ids, prepared.r#type)
+            || !seen.insert(hit_key(raw.kind, &raw.resource_id))
+        {
+            continue;
+        }
+        lexical.push(raw);
+    }
+    let semantic = if matches!(
+        prepared.r#type,
+        SearchTypeFilter::All | SearchTypeFilter::Attachment
+    ) {
+        semantic_attachment_hits(
+            search_meili_vector(
+                meili,
+                &MeiliVectorSearchInput {
+                    vector: embedding,
+                    scopes: vec![scope],
+                    parent_kinds: input.allowed_kinds,
+                    limit: SEMANTIC_CHUNK_K,
+                },
+            )
+            .await?,
+            &workspace_ids,
+        )
+    } else {
+        Vec::new()
+    };
+    let fused = fuse_hybrid(lexical, semantic);
+    let offset = prepared.offset as usize;
+    if offset >= fused.len() {
+        return Ok(ScannedPage {
+            items: Vec::new(),
+            next_off: None,
+        });
+    }
+    let window = &fused[offset..];
+    let rows = hydrate_hits(pool, input, acl, window)
+        .await
+        .map_err(ScanError::Db)?;
+    let mut by_key = HashMap::new();
+    for row in rows {
+        by_key.insert(hit_key(kind_of(row.r#type), &row.id.to_string()), row);
+    }
+    let mut items = Vec::new();
+    let mut i = 0usize;
+    while i < window.len() && items.len() < prepared.limit as usize {
+        let hit = &window[i];
+        i += 1;
+        if let Some(row) = by_key.get(&hit_key(hit.kind, &hit.resource_id)) {
+            if parent_allowed(row, input.allowed_kinds) {
+                items.push((hit.clone(), row.clone()));
+            }
+        }
+    }
+    let next = offset + i;
+    Ok(ScannedPage {
+        items,
+        next_off: (next < fused.len()).then_some(next as u32),
+    })
 }
 
 fn accept_hit(hit: &MeiliHit, workspace_ids: &HashSet<String>, r#type: SearchTypeFilter) -> bool {
@@ -1772,5 +1997,78 @@ mod tests {
         let restricted = restrict_search_acl(acl, Some(Uuid::now_v7()));
         assert!(restricted.project_ids.is_empty());
         assert!(!restricted.include_wiki);
+    }
+
+    fn hit(kind: SearchSourceKind, id: &str, chunk: Option<i64>, score: f64) -> MeiliHit {
+        MeiliHit {
+            id: format!("{}_{id}", kind.as_str()),
+            kind,
+            workspace_id: "11111111-1111-4111-8111-111111111111".into(),
+            resource_id: id.into(),
+            chunk_no: chunk,
+            document_id: None,
+            task_id: None,
+            comment_id: None,
+            attachment_id: None,
+            project_id: None,
+            score,
+        }
+    }
+
+    #[test]
+    fn rrf_sums_ranks_and_keeps_lexical_first_on_ties() {
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let merged = rrf_merge(&ids(&["a", "b", "c"]), &ids(&["x", "b"]));
+        let order: Vec<&str> = merged.iter().map(|(id, _)| id.as_str()).collect();
+        // b: 1/62 + 1/62 beats a: 1/61; a and x tie at 1/61 and a came first.
+        assert_eq!(order, vec!["b", "a", "x", "c"]);
+        assert!((merged[0].1 - 2.0 / 62.0).abs() < 1e-12);
+        assert!((merged[1].1 - 1.0 / 61.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn semantic_hits_keep_best_chunk_above_floor() {
+        let ws = HashSet::from(["11111111-1111-4111-8111-111111111111".to_string()]);
+        let p = "22222222-2222-4222-8222-222222222222";
+        let q = "33333333-3333-4333-8333-333333333333";
+        let low = "44444444-4444-4444-8444-444444444444";
+        let out = semantic_attachment_hits(
+            vec![
+                hit(SearchSourceKind::Attachment, p, Some(0), 0.7),
+                hit(SearchSourceKind::Attachment, p, Some(3), 0.9),
+                hit(SearchSourceKind::Attachment, q, Some(1), 0.8),
+                hit(SearchSourceKind::Attachment, low, Some(0), 0.5),
+                hit(SearchSourceKind::Document, low, None, 0.99),
+            ],
+            &ws,
+        );
+        let got: Vec<(&str, Option<i64>, f64)> = out
+            .iter()
+            .map(|h| (h.resource_id.as_str(), h.chunk_no, h.score))
+            .collect();
+        assert_eq!(got, vec![(p, None, 0.9), (q, None, 0.8)]);
+    }
+
+    #[test]
+    fn fuse_without_semantic_keeps_lexical_scores() {
+        let lexical = vec![
+            hit(SearchSourceKind::Document, "d", None, 0.4),
+            hit(SearchSourceKind::Attachment, "p", Some(2), 0.3),
+        ];
+        assert_eq!(fuse_hybrid(lexical.clone(), Vec::new()), lexical);
+        let fused = fuse_hybrid(
+            lexical,
+            vec![
+                hit(SearchSourceKind::Attachment, "s", None, 0.9),
+                hit(SearchSourceKind::Attachment, "p", None, 0.8),
+            ],
+        );
+        let order: Vec<(&str, Option<i64>)> = fused
+            .iter()
+            .map(|h| (h.resource_id.as_str(), h.chunk_no))
+            .collect();
+        // p is in both lists (kept as the lexical hit with its chunk).
+        assert_eq!(order, vec![("p", Some(2)), ("d", None), ("s", None)]);
+        assert!(fused.iter().all(|h| h.score < 0.05));
     }
 }

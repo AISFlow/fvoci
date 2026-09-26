@@ -56,15 +56,22 @@ export function groupsQuery(workspaceId: string) {
 
 export type SearchTab = "all" | "document" | "task" | "attachment" | "comment";
 
+/**
+ * Source `SearchMode`. `hybrid` also ranks attachment chunks by meaning when the
+ * server has an embedder; without one (or when it fails) the server answers lexically.
+ */
+export type SearchMode = "lexical" | "hybrid";
+
 export function searchQuery(
   workspaceId: string,
   q: string,
   tab: SearchTab,
   projectId?: string,
   cursor?: string,
+  mode: SearchMode = "lexical",
 ) {
   return queryOptions({
-    queryKey: ["search", workspaceId, q, tab, projectId ?? "", cursor ?? ""] as const,
+    queryKey: ["search", workspaceId, q, tab, projectId ?? "", cursor ?? "", mode] as const,
     queryFn: async () =>
       ensureOk(
         await api.GET("/api/v1/workspaces/{workspace_id}/search", {
@@ -73,6 +80,7 @@ export function searchQuery(
             query: {
               q,
               type: tab,
+              mode,
               ...(projectId ? { projectId } : {}),
               ...(cursor ? { cursor } : {}),
             },

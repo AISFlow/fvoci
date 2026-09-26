@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::db::context::{restore_system, set_system, set_tenant};
 use crate::search::chunk::TextChunk;
+use crate::search::embed::embedding_from_json;
 use crate::search::meili::SearchSourceKind;
 use crate::search::text::to_chosung;
 
@@ -29,6 +30,8 @@ pub struct SearchIndexRow {
     pub body: String,
     pub chosung: String,
     pub updated_at: DateTime<Utc>,
+    /// Attachment chunk vector (`attachment_text.embedding`); `None` otherwise.
+    pub embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,6 +96,7 @@ fn map_row(row: sqlx::postgres::PgRow) -> Option<SearchIndexRow> {
         body: row.get("body"),
         chosung: row.get("chosung"),
         updated_at: row.get("ua"),
+        embedding: embedding_from_json(row.get("embedding")),
     })
 }
 
@@ -117,7 +121,7 @@ pub async fn load_sources(
                    d.project_id, d.id AS document_id, NULL::uuid AS task_id,
                    NULL::uuid AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
                    d.title, d.text AS body, d.chosung,
-                   date_trunc('milliseconds', d.updated_at) AS ua
+                   date_trunc('milliseconds', d.updated_at) AS ua, NULL::jsonb AS embedding
             FROM fvoci.documents d
             WHERE d.workspace_id = $1 AND d.id = $2
               AND d.deleted_at IS NULL
@@ -133,7 +137,7 @@ pub async fn load_sources(
                    t.project_id, NULL::uuid AS document_id, t.id AS task_id,
                    NULL::uuid AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
                    t.title, ''::text AS body, ''::text AS chosung,
-                   date_trunc('milliseconds', t.updated_at) AS ua
+                   date_trunc('milliseconds', t.updated_at) AS ua, NULL::jsonb AS embedding
             FROM fvoci.tasks t
             WHERE t.workspace_id = $1 AND t.id = $2
               AND t.deleted_at IS NULL AND t.archived_at IS NULL
@@ -150,7 +154,7 @@ pub async fn load_sources(
                        d.project_id, c.document_id, NULL::uuid AS task_id,
                        c.id AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
                        d.title, c.body, c.chosung,
-                       date_trunc('milliseconds', c.updated_at) AS ua
+                       date_trunc('milliseconds', c.updated_at) AS ua, NULL::jsonb AS embedding
                 FROM fvoci.comments c
                 JOIN fvoci.documents d
                   ON d.workspace_id = c.workspace_id AND d.id = c.document_id
@@ -165,7 +169,7 @@ pub async fn load_sources(
                        t.project_id, NULL::uuid AS document_id, c.task_id,
                        c.id AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
                        t.title, c.body, c.chosung,
-                       date_trunc('milliseconds', c.updated_at) AS ua
+                       date_trunc('milliseconds', c.updated_at) AS ua, NULL::jsonb AS embedding
                 FROM fvoci.comments c
                 JOIN fvoci.tasks t
                   ON t.workspace_id = c.workspace_id AND t.id = c.task_id
@@ -187,7 +191,7 @@ pub async fn load_sources(
                        NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
                        a.name AS title, coalesce(x.text, a.extract_text) AS body,
                        coalesce(x.chosung, '') AS chosung,
-                       date_trunc('milliseconds', a.created_at) AS ua
+                       date_trunc('milliseconds', a.created_at) AS ua, x.embedding
                 FROM fvoci.attachments a
                 JOIN fvoci.documents d
                   ON d.workspace_id = a.workspace_id AND d.id = a.document_id
@@ -207,7 +211,7 @@ pub async fn load_sources(
                        NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
                        a.name AS title, coalesce(x.text, a.extract_text) AS body,
                        coalesce(x.chosung, '') AS chosung,
-                       date_trunc('milliseconds', a.created_at) AS ua
+                       date_trunc('milliseconds', a.created_at) AS ua, x.embedding
                 FROM fvoci.attachments a
                 JOIN fvoci.tasks t
                   ON t.workspace_id = a.workspace_id AND t.id = a.task_id
@@ -315,7 +319,7 @@ async fn query_documents(
                d.project_id, d.id AS document_id, NULL::uuid AS task_id,
                NULL::uuid AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
                d.title, d.text AS body, d.chosung,
-               date_trunc('milliseconds', d.updated_at) AS ua
+               date_trunc('milliseconds', d.updated_at) AS ua, NULL::jsonb AS embedding
         FROM fvoci.documents d
         WHERE d.workspace_id = $1 AND d.deleted_at IS NULL
           AND (d.project_id IS NULL OR EXISTS (
@@ -369,7 +373,7 @@ async fn query_tasks(
                t.project_id, NULL::uuid AS document_id, t.id AS task_id,
                NULL::uuid AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
                t.title, ''::text AS body, ''::text AS chosung,
-               date_trunc('milliseconds', t.updated_at) AS ua
+               date_trunc('milliseconds', t.updated_at) AS ua, NULL::jsonb AS embedding
         FROM fvoci.tasks t
         WHERE t.workspace_id = $1 AND t.deleted_at IS NULL AND t.archived_at IS NULL
           AND EXISTS (
@@ -416,7 +420,7 @@ async fn query_comments(
                    d.project_id, c.document_id, NULL::uuid AS task_id,
                    c.id AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
                    d.title, c.body, c.chosung,
-                   date_trunc('milliseconds', c.updated_at) AS ua
+                   date_trunc('milliseconds', c.updated_at) AS ua, NULL::jsonb AS embedding
             FROM fvoci.comments c
             JOIN fvoci.documents d
               ON d.workspace_id = c.workspace_id AND d.id = c.document_id
@@ -442,7 +446,7 @@ async fn query_comments(
                    t.project_id, NULL::uuid AS document_id, c.task_id,
                    c.id AS comment_id, NULL::uuid AS attachment_id, NULL::int AS chunk_no,
                    t.title, c.body, c.chosung,
-                   date_trunc('milliseconds', c.updated_at) AS ua
+                   date_trunc('milliseconds', c.updated_at) AS ua, NULL::jsonb AS embedding
             FROM fvoci.comments c
             JOIN fvoci.tasks t
               ON t.workspace_id = c.workspace_id AND t.id = c.task_id
@@ -495,7 +499,7 @@ async fn query_attachments(
                    NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
                    a.name AS title, coalesce(x.text, a.extract_text) AS body,
                    coalesce(x.chosung, '') AS chosung,
-                   date_trunc('milliseconds', a.created_at) AS ua
+                   date_trunc('milliseconds', a.created_at) AS ua, x.embedding
             FROM fvoci.attachments a
             JOIN fvoci.documents d
               ON d.workspace_id = a.workspace_id AND d.id = a.document_id
@@ -526,7 +530,7 @@ async fn query_attachments(
                    NULL::uuid AS comment_id, a.id AS attachment_id, x.chunk_no,
                    a.name AS title, coalesce(x.text, a.extract_text) AS body,
                    coalesce(x.chosung, '') AS chosung,
-                   date_trunc('milliseconds', a.created_at) AS ua
+                   date_trunc('milliseconds', a.created_at) AS ua, x.embedding
             FROM fvoci.attachments a
             JOIN fvoci.tasks t
               ON t.workspace_id = a.workspace_id AND t.id = a.task_id
@@ -616,4 +620,155 @@ pub fn cursor_of(row: &SearchIndexRow) -> SearchIndexCursor {
         id: row.resource_id,
         chunk_no: row.chunk_no.unwrap_or(-1),
     }
+}
+
+/// Chunk text still waiting for a vector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingEmbeddingChunk {
+    pub chunk_no: i32,
+    pub text: String,
+}
+
+/// Source `listPendingEmbedding`: text chunks without a vector, in chunk
+/// order. FVOCI also embeds `partial` chunks (they are indexed like `ok`) and
+/// skips attachments the index would drop (infected, trashed parent). Both
+/// parents count: documents and (live, unarchived) tasks, as the index does.
+pub async fn list_pending_embedding(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    limit: i64,
+) -> Result<Vec<PendingEmbeddingChunk>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let rows: Vec<(i32, String)> = sqlx::query_as(
+        r#"
+        SELECT x.chunk_no, x.text
+        FROM fvoci.attachment_text x
+        JOIN fvoci.attachments a
+          ON a.workspace_id = x.workspace_id AND a.id = x.attachment_id
+        LEFT JOIN fvoci.documents d
+          ON d.workspace_id = a.workspace_id AND d.id = a.document_id
+        LEFT JOIN fvoci.tasks t
+          ON t.workspace_id = a.workspace_id AND t.id = a.task_id
+        WHERE x.workspace_id = $1 AND x.attachment_id = $2
+          AND x.embedding IS NULL AND x.text <> '' AND x.status IN ('ok', 'partial')
+          AND a.status = 'stored' AND a.scan_status <> 'infected'
+          AND (
+                (a.document_id IS NOT NULL AND d.deleted_at IS NULL)
+             OR (a.task_id IS NOT NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL)
+          )
+        ORDER BY x.chunk_no
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(attachment_id)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|(chunk_no, text)| PendingEmbeddingChunk { chunk_no, text })
+        .collect())
+}
+
+/// Next attachment with pending chunks, skipping `excluded` (backing off).
+/// Walks live workspaces one tenant at a time: `attachment_text` is tenant-RLS.
+pub async fn next_pending_embedding(
+    pool: &PgPool,
+    excluded: &[Uuid],
+) -> Result<Option<(Uuid, Uuid)>, sqlx::Error> {
+    for workspace_id in list_live_workspace_ids(pool).await? {
+        let mut tx = pool.begin().await?;
+        set_tenant(&mut tx, workspace_id).await?;
+        let found: Option<(Uuid,)> = sqlx::query_as(
+            r#"
+            SELECT x.attachment_id
+            FROM fvoci.attachment_text x
+            JOIN fvoci.attachments a
+              ON a.workspace_id = x.workspace_id AND a.id = x.attachment_id
+            LEFT JOIN fvoci.documents d
+              ON d.workspace_id = a.workspace_id AND d.id = a.document_id
+            LEFT JOIN fvoci.tasks t
+              ON t.workspace_id = a.workspace_id AND t.id = a.task_id
+            WHERE x.workspace_id = $1
+              AND x.embedding IS NULL AND x.text <> '' AND x.status IN ('ok', 'partial')
+              AND a.status = 'stored' AND a.scan_status <> 'infected'
+              AND (
+                    (a.document_id IS NOT NULL AND d.deleted_at IS NULL)
+                 OR (a.task_id IS NOT NULL AND t.deleted_at IS NULL AND t.archived_at IS NULL)
+              )
+              AND NOT (x.attachment_id = ANY($2))
+            ORDER BY x.attachment_id
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(excluded)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        if let Some((attachment_id,)) = found {
+            return Ok(Some((workspace_id, attachment_id)));
+        }
+    }
+    Ok(None)
+}
+
+/// Source `setEmbeddings`. A vector is stored only while the chunk still has
+/// the embedded text and no vector (a re-extract in between replaced the row),
+/// and an `attachment.embedded` event in the same transaction makes the
+/// search-index consumer copy the vectors into Meili. Returns rows written.
+pub async fn store_chunk_embeddings(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    rows: &[(PendingEmbeddingChunk, Vec<f32>)],
+) -> Result<u64, sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let mut written = 0u64;
+    for (chunk, vector) in rows {
+        written += sqlx::query(
+            r#"
+            UPDATE fvoci.attachment_text
+            SET embedding = $5::jsonb, updated_at = now()
+            WHERE workspace_id = $1 AND attachment_id = $2 AND chunk_no = $3
+              AND text = $4 AND embedding IS NULL
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(attachment_id)
+        .bind(chunk.chunk_no)
+        .bind(&chunk.text)
+        .bind(crate::search::embed::embedding_to_json_text(vector))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    }
+    if written > 0 {
+        crate::db::identity::append_event(
+            &mut tx,
+            crate::db::identity::EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace_id),
+                actor_user_id: None,
+                verb: "attachment.embedded".into(),
+                target_type: Some("attachment".into()),
+                target_id: Some(attachment_id),
+                payload: serde_json::json!({
+                    "attachmentId": attachment_id.to_string(),
+                    "chunks": written,
+                }),
+            },
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(written)
 }
