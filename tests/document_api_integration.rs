@@ -870,6 +870,125 @@ async fn project_document_body_block_children_ancestors_and_duplicate() {
     .await;
 }
 
+async fn count_documents(harness: &TestDb, workspace_id: Uuid) -> i64 {
+    let admin = admin_pool(harness).await;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.documents WHERE workspace_id = $1")
+        .bind(workspace_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+    n
+}
+
+/// Review B1: a wiki group editor grant does not confer workspace wiki-create
+/// rights, so a guest cannot duplicate (create) wiki documents.
+#[tokio::test]
+async fn duplicate_requires_workspace_wiki_edit_not_a_group_grant() {
+    run_test("duplicate_requires_wiki_edit", async {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let s = &wiki.session;
+        let (state, hub) = app_state(&run.harness).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let guest = create_member_session(&run.harness, s.workspace_id, WorkspaceRole::Guest).await;
+        let admin = admin_pool(&run.harness).await;
+        let group_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO fvoci.groups (id, workspace_id, name) VALUES ($1, $2, 'wiki-editors')")
+            .bind(group_id)
+            .bind(s.workspace_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO fvoci.group_members (workspace_id, group_id, user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(s.workspace_id)
+        .bind(group_id)
+        .bind(guest.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO fvoci.document_members (id, workspace_id, document_id, group_id, role) VALUES ($1, $2, $3, $4, 'member')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(s.workspace_id)
+        .bind(wiki.document_id)
+        .bind(group_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+
+        // The grant does allow editing the body itself.
+        let (status, meta) = session_call(
+            addr,
+            Method::PUT,
+            &wiki_path(s, wiki.document_id, "/body"),
+            &guest.session_token,
+            Some(json!({"contentMd": "게스트 편집"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{meta}");
+
+        let before = count_documents(&run.harness, s.workspace_id).await;
+        for path in [
+            wiki_path(s, wiki.document_id, "/duplicate"),
+            format!("/api/v1/documents/{}/duplicate", wiki.document_id),
+        ] {
+            let (status, body) = session_call(
+                addr,
+                Method::POST,
+                &path,
+                &guest.session_token,
+                Some(json!({"includeChildren": true})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        }
+        assert_eq!(count_documents(&run.harness, s.workspace_id).await, before);
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+/// Review B2: the project root has no parent; a copy would be a second
+/// parentless project document, which the source refuses (affiliation).
+#[tokio::test]
+async fn duplicate_of_project_root_is_an_affiliation_mismatch() {
+    run_test("duplicate_project_root", async {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let owner = setup_owner_session(&run.harness).await;
+        let (state, hub) = app_state(&run.harness).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let project = create_project_with_doc(&owner, "DOCROOT", "private").await;
+        let before = count_documents(&run.harness, owner.workspace_id).await;
+        for include_children in [false, true] {
+            let (status, problem) = session_call(
+                addr,
+                Method::POST,
+                &project_path(
+                    &owner,
+                    project.project_id,
+                    project.root_document_id,
+                    "/duplicate",
+                ),
+                &owner.session_token,
+                Some(json!({"includeChildren": include_children})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
+        }
+        assert_eq!(
+            count_documents(&run.harness, owner.workspace_id).await,
+            before
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn duplicate_copies_live_state_into_an_independent_room() {
     run_test("duplicate_copies_live_state", async {

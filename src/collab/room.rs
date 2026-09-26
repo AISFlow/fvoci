@@ -3259,15 +3259,24 @@ impl RoomActor {
         let Some(seq) = applied else {
             return Ok(());
         };
+        // The update is durable and broadcast at this point: the write has
+        // happened. A failed derived-body projection is logged and re-derived
+        // by the next update or persist (source `onDeriveFailed`), not
+        // reported as a failed write.
         match self
             .maybe_project_derived_body(seq, actor_user_id, session_id, false)
             .await
         {
-            ProjectDerivedOutcome::Projected | ProjectDerivedOutcome::Unchanged => Ok(()),
-            ProjectDerivedOutcome::DeterministicSkip => Err(BodyWriteError::TooLarge),
-            ProjectDerivedOutcome::PermissionDenied => Err(BodyWriteError::Rejected),
-            _ => Err(BodyWriteError::DeriveFailed),
+            ProjectDerivedOutcome::Projected | ProjectDerivedOutcome::Unchanged => {}
+            other => {
+                tracing::warn!(
+                    document_id = %self.document_id,
+                    outcome = ?other,
+                    "collab.body_write_derive_failed"
+                );
+            }
         }
+        Ok(())
     }
 
     async fn handle_project_live(

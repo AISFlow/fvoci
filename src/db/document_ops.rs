@@ -668,6 +668,17 @@ pub async fn commit_duplicate(
         tx.rollback().await?;
         return Ok(Err(err));
     }
+    // Source `createDocumentIn` for a wiki copy checks the workspace base role
+    // (group grants on the source document do not allow creating documents).
+    if scope.project_id().is_none() {
+        let role =
+            crate::db::documents::membership_role_for_update(&mut tx, workspace_id, actor_user_id)
+                .await?;
+        if !crate::db::documents::wiki_can_edit(role) {
+            tx.rollback().await?;
+            return Ok(Err(DocumentDbError::Forbidden));
+        }
+    }
 
     let mut cache = HashMap::new();
     // source id -> (copy id, copy path)
@@ -695,6 +706,12 @@ pub async fn commit_duplicate(
         }
         let (copy_parent, copy_title, copy_sort_key, parent_path) = match source.parent_in_copy {
             None => {
+                // Source `assertCreateAffiliation`: a project document needs a
+                // parent, so the project root cannot be duplicated.
+                if scope.project_id().is_some() && parent_id.is_none() {
+                    tx.rollback().await?;
+                    return Ok(Err(DocumentDbError::AffiliationMismatch));
+                }
                 let next: Option<(String,)> = sqlx::query_as(
                     r#"
                     SELECT sort_key
