@@ -1,5 +1,8 @@
 #![cfg(feature = "db-tests")]
 
+#[path = "support/office_fixtures.rs"]
+mod office_fixtures;
+
 use fvoci_server::db::attachment_extract::{
     claim_extract, fetch_extract_state, finish_extract, load_extract_input, release_extract,
     FinishExtract, EXTRACT_MAX_ATTEMPTS,
@@ -897,4 +900,192 @@ async fn migration_006_upgrades_to_007_attachment_extract() {
         .execute(&server_pool)
         .await;
     server_pool.close().await;
+}
+
+/// Office / text attachments go through the `--internal-office-extract`
+/// child (source officeparser extract-text); HWP without the native helper
+/// is skipped instead of retried forever.
+#[tokio::test]
+async fn office_and_text_attachments_extract_through_the_office_child() {
+    use fvoci_server::attachments::{spawn_extract_job, ExtractJobSettings, ObjectStorage};
+    use fvoci_server::documents::office::OfficeLimits;
+    use std::time::Duration;
+
+    let harness = TestDb::bootstrap().await;
+    let app = app_pool(&harness.app_url).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (workspace_id, user_id, document_id) = seed_workspace(&admin).await;
+    let root = std::env::temp_dir().join(format!("fvoci-office-extract-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let storage = ObjectStorage::local(root.clone());
+    let mut corrupt_pdf = office_fixtures::pdf(&["x"]);
+    corrupt_pdf.truncate(60);
+    /// (name, mime, bytes, expected status, expected text)
+    type Case<'a> = (&'a str, &'a str, Vec<u8>, &'a str, Option<&'a str>);
+    let cases: Vec<Case<'_>> = vec![
+        (
+            "회의록.docx",
+            "application/zip",
+            office_fixtures::docx("회의", &["첨부 본문 검색어"]),
+            "ok",
+            Some("첨부 본문 검색어"),
+        ),
+        (
+            "slides.pptx",
+            "application/zip",
+            office_fixtures::pptx(&[("Title", "slide words")]),
+            "ok",
+            Some("slide words"),
+        ),
+        (
+            "sheet.ods",
+            "application/zip",
+            office_fixtures::ods("S", &[&["cell words"]]),
+            "ok",
+            Some("cell words"),
+        ),
+        (
+            "paper.pdf",
+            "application/pdf",
+            office_fixtures::pdf(&["pdf words"]),
+            "ok",
+            Some("pdf words"),
+        ),
+        (
+            "notes.txt",
+            "text/plain",
+            "plain 텍스트\0".as_bytes().to_vec(),
+            "ok",
+            Some("plain 텍스트"),
+        ),
+        (
+            "broken.pdf",
+            "application/pdf",
+            corrupt_pdf,
+            "corrupt",
+            None,
+        ),
+        (
+            "renamed.docx",
+            "application/pdf",
+            office_fixtures::pdf(&["x"]),
+            "unsupported",
+            None,
+        ),
+        (
+            "bomb.xlsx",
+            "application/zip",
+            office_fixtures::docx_bomb(),
+            "resource_limit",
+            None,
+        ),
+        (
+            "empty.xlsx",
+            "application/zip",
+            office_fixtures::xlsx("s", &[]),
+            "empty",
+            None,
+        ),
+        (
+            "doc.hwp",
+            "application/x-hwp",
+            b"not really hwp".to_vec(),
+            "skipped",
+            None,
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (name, mime, bytes, _, _) in &cases {
+        let attachment_id = Uuid::now_v7();
+        let key = Uuid::now_v7().to_string();
+        storage.put_bytes(&key, bytes.clone()).await.unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.attachments (
+                id, workspace_id, document_id, uploader_id, status, name, mime,
+                size_bytes, reserved_size_bytes, storage_key, image, scan_status,
+                extract_status, completed_at
+            )
+            VALUES ($1, $2, $3, $4, 'stored', $5, $6, $7, $7, $8, false, 'skipped', $9, now())
+            "#,
+        )
+        .bind(attachment_id)
+        .bind(workspace_id)
+        .bind(document_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(mime)
+        .bind(bytes.len() as i64)
+        .bind(&key)
+        .bind(fvoci_server::attachments::initial_extract_status(
+            name, mime,
+        ))
+        .execute(&admin)
+        .await
+        .unwrap();
+        ids.push(attachment_id);
+    }
+    let job = spawn_extract_job(
+        ExtractJobSettings {
+            extractor_bin: None,
+            limits: document_extract_client::Limits::for_tests(),
+            office_helper: Some(std::path::PathBuf::from(env!("CARGO_BIN_EXE_fvoci-server"))),
+            office_limits: OfficeLimits::attachment(),
+            poll_interval: Duration::from_millis(100),
+            retry_backoff: Duration::from_millis(10),
+            #[cfg(feature = "extract-native-tests")]
+            test_hang_ms: None,
+        },
+        app.clone(),
+        storage,
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    for ((name, _, _, expected, text), attachment_id) in cases.iter().zip(&ids) {
+        let state = loop {
+            let state = fetch_extract_state(&app, workspace_id, *attachment_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if state.extract_status != "pending" {
+                break state;
+            }
+            assert!(std::time::Instant::now() < deadline, "{name} still pending");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert_eq!(state.extract_status, *expected, "{name}");
+        match text {
+            Some(text) => {
+                assert!(
+                    state.extract_text.contains(text),
+                    "{name}: {}",
+                    state.extract_text
+                );
+                assert!(!state.extract_text.contains('\0'));
+                let chunks: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM fvoci.attachment_text WHERE attachment_id = $1 AND status = 'ok' AND text <> ''",
+                )
+                .bind(attachment_id)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+                assert!(chunks >= 1, "{name} has no search chunks");
+            }
+            None => assert_eq!(state.extract_text, "", "{name}"),
+        }
+    }
+    job.request_shutdown();
+    job.join().await.unwrap();
+    // Images are never queued for text extraction.
+    assert_eq!(
+        fvoci_server::attachments::initial_extract_status("photo.png", "image/png"),
+        "skipped"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
 }

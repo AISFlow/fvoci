@@ -173,8 +173,43 @@ pub fn is_hwp_attachment(name: &str, mime: &str) -> bool {
         || name.to_ascii_lowercase().ends_with(".hwpx")
 }
 
-pub fn initial_extract_status(name: &str, mime: &str) -> &'static str {
+/// Source `isExtractableText`: read as UTF-8 without a parser.
+pub fn is_extractable_text(name: &str, mime: &str) -> bool {
+    let mime = mime.to_ascii_lowercase();
+    if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    [".txt", ".md", ".markdown", ".csv", ".json", ".xml", ".log"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+/// Which extractor a stored attachment gets (source `pickExtractor`): the
+/// extension decides first (HWP, then office), then text-like MIME/names.
+/// Images are never extracted (source skips `att.image`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractorKind {
+    Hwp,
+    Office(crate::documents::office::OfficeKind),
+    Utf8,
+}
+
+pub fn pick_extractor(name: &str, mime: &str) -> Option<ExtractorKind> {
+    if is_image_mime(mime) {
+        return None;
+    }
     if is_hwp_attachment(name, mime) {
+        return Some(ExtractorKind::Hwp);
+    }
+    if let Some(kind) = crate::documents::office::OfficeKind::from_name(name) {
+        return Some(ExtractorKind::Office(kind));
+    }
+    is_extractable_text(name, mime).then_some(ExtractorKind::Utf8)
+}
+
+pub fn initial_extract_status(name: &str, mime: &str) -> &'static str {
+    if pick_extractor(name, mime).is_some() {
         "pending"
     } else {
         "skipped"

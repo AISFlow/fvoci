@@ -1,8 +1,9 @@
 import { t } from "@fvoci/i18n";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { projectsQuery } from "@/features/projects/queries";
 import { ProblemError } from "@/lib/api";
 import {
   fetchImportStatus,
@@ -16,13 +17,16 @@ import "../settings/settings-shell.css";
 
 type ImportSource = "markdown-zip" | "office-file" | "notion-zip";
 
-/* WHY: only formats this server converts. PDF/DOCX/PPTX/XLSX/ODF have no
- * parser yet (the server answers import_failed), so they are not offered. */
+/* WHY: the formats the server converts (source list plus Markdown/text). */
 const IMPORT_ACCEPT: Record<ImportSource, string> = {
   "markdown-zip": ".zip,application/zip",
-  "office-file": ".md,.markdown,.txt,.hwp,.hwpx",
+  "office-file": ".pdf,.docx,.pptx,.xlsx,.odt,.odp,.ods,.hwp,.hwpx,.md,.markdown,.txt",
   "notion-zip": ".zip,application/zip",
 };
+
+/* WHY: Notion CSV databases become tasks only in a chosen project (source
+ * `projectId`); without one the import is wiki pages and attachments only. */
+const NO_PROJECT = "none";
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -60,6 +64,8 @@ export function WorkspaceImportSection({
   const inputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<AbortController | null>(null);
   const [source, setSource] = useState<ImportSource>("markdown-zip");
+  const [projectId, setProjectId] = useState<string>(NO_PROJECT);
+  const projects = useQuery({ ...projectsQuery(workspaceId), enabled: canManage && source === "notion-zip" });
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resumeJobId, setResumeJobId] = useState<string | null>(null);
@@ -115,6 +121,7 @@ export function WorkspaceImportSection({
           source,
           zipBase64,
           fileName: file.name,
+          ...(source === "notion-zip" && projectId !== NO_PROJECT ? { projectId } : {}),
         }),
       });
       if (!response.ok) {
@@ -155,6 +162,25 @@ export function WorkspaceImportSection({
           <option value="office-file">{t("workspace.import.source.office-file")}</option>
           <option value="notion-zip">{t("workspace.import.source.notion-zip")}</option>
         </select>
+        {source === "notion-zip" ? (
+          <>
+            <Label htmlFor="import-project">{t("workspace.import.project")}</Label>
+            <select
+              id="import-project"
+              className="settings-input"
+              value={projectId}
+              disabled={pending}
+              onChange={(event) => setProjectId(event.target.value)}
+            >
+              <option value={NO_PROJECT}>{t("workspace.import.project.none")}</option>
+              {(projects.data?.items ?? []).map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+          </>
+        ) : null}
         <input
           ref={inputRef}
           type="file"
