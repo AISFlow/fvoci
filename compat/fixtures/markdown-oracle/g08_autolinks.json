@@ -1,0 +1,62 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "그냥 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://example.com/path"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https://example.com/path",
+          "type": "text"
+        },
+        {
+          "text": " 와 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "http://www.example.com"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "www.example.com",
+          "type": "text"
+        },
+        {
+          "text": " 와 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://safe.example"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https://safe.example",
+          "type": "text"
+        },
+        {
+          "text": " 를 본다.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

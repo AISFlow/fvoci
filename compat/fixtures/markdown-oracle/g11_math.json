@@ -1,0 +1,63 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "인라인 ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "a + b"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " 와 통화 ",
+          "type": "text"
+        },
+        {
+          "text": "$5-$10 그리고 수식 ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "x"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "attrs": {
+        "latex": "E = mc^2"
+      },
+      "type": "math"
+    },
+    {
+      "content": [
+        {
+          "text": "문장 끝 ",
+          "type": "text"
+        },
+        {
+          "attrs": {
+            "latex": "x"
+          },
+          "type": "mathInline"
+        },
+        {
+          "text": " after.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

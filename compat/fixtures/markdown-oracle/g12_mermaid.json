@@ -1,0 +1,11 @@
+{
+  "content": [
+    {
+      "attrs": {
+        "source": "graph TD\n  A-->B"
+      },
+      "type": "mermaid"
+    }
+  ],
+  "type": "doc"
+}

@@ -1,0 +1,119 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "안전한 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "https://example.com/a?x=1&y=\"2\""
+              },
+              "type": "link"
+            }
+          ],
+          "text": "https",
+          "type": "text"
+        },
+        {
+          "text": "와 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "/docs/1#x"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "상대",
+          "type": "text"
+        },
+        {
+          "text": "와 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "mailto:a@b.c"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "메일",
+          "type": "text"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "위험한 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "javascript:alert(1)"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "js",
+          "type": "text"
+        },
+        {
+          "text": "와 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "data:text/html,x"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "data",
+          "type": "text"
+        },
+        {
+          "text": "와 ",
+          "type": "text"
+        },
+        {
+          "marks": [
+            {
+              "attrs": {
+                "href": "//evil.com/x"
+              },
+              "type": "link"
+            }
+          ],
+          "text": "프로토콜상대",
+          "type": "text"
+        },
+        {
+          "text": ".",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}

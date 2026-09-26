@@ -1,0 +1,23 @@
+{
+  "content": [
+    {
+      "content": [
+        {
+          "text": "이모지 😀🎉 그리고 짧은코드가 아닌 리터럴만.",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    },
+    {
+      "content": [
+        {
+          "text": "가족: 👨‍👩‍👧 깃발: 🇰🇷",
+          "type": "text"
+        }
+      ],
+      "type": "paragraph"
+    }
+  ],
+  "type": "doc"
+}
