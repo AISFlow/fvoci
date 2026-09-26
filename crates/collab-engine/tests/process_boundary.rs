@@ -347,6 +347,70 @@ fn limit_plus_one_live_child_is_immediate_resource_limit() {
     drop(live);
 }
 
+#[test]
+fn seed_pool_is_bounded_and_separate_from_primary() {
+    use collab_engine::process::ChildSlotKind;
+    use std::time::{Duration, Instant};
+
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let cap = 2usize;
+    collab_engine::process::set_max_seed_child_concurrency(cap);
+    let seed_req = |wait: Option<Duration>| SpawnRequest {
+        engine_bin: bin(),
+        limits: Limits::for_tests(),
+        slot_kind: ChildSlotKind::Seed,
+        slot_wait: wait,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    };
+    let held: Vec<EngineSession> = (0..cap)
+        .map(|_| EngineSession::spawn(seed_req(None)).unwrap_or_else(|r| panic!("{:?}", r.outcome)))
+        .collect();
+    let wait = Duration::from_millis(300);
+    let started = Instant::now();
+    let over = EngineSession::spawn(seed_req(Some(wait)))
+        .err()
+        .expect("seed cap+1 must be refused");
+    assert!(started.elapsed() >= wait, "refused before the bounded wait");
+    assert!(
+        matches!(
+            over.outcome,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Ops,
+                ..
+            }
+        ),
+        "{:?}",
+        over.outcome
+    );
+    // Saturated seeds leave the primary (room) pool untouched.
+    let mut room = spawn(Limits::for_tests());
+    assert!(matches!(
+        room.call(&Request::Ping).outcome,
+        EngineStatus::Ok { .. }
+    ));
+    drop(room);
+    // A waiting seed takes a slot as soon as one is released.
+    let mut held = held;
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        held.pop();
+        held
+    });
+    let mut waited = EngineSession::spawn(seed_req(Some(Duration::from_secs(5))))
+        .unwrap_or_else(|r| panic!("waiting seed: {:?}", r.outcome));
+    assert!(matches!(
+        waited.call(&Request::Ping).outcome,
+        EngineStatus::Ok { .. }
+    ));
+    drop(release.join().unwrap());
+    collab_engine::process::set_max_seed_child_concurrency(
+        collab_engine::limits::DEFAULT_MAX_SEED_CHILD_CONCURRENCY,
+    );
+}
+
 #[cfg(feature = "test-hang")]
 #[test]
 fn child_sets_oom_score_adj() {

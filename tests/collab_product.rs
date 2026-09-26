@@ -1651,6 +1651,73 @@ async fn collab_concurrent_first_joins_both_succeed() {
     .await;
 }
 
+/// Seeds (body PUT / duplicate / import) have their own bounded pool: a
+/// saturated seed pool refuses the next seed only after `SEED_SLOT_WAIT` and
+/// never takes the primary slot a room open needs.
+#[tokio::test]
+async fn collab_seed_pool_saturation_leaves_room_open_headroom() {
+    use collab_engine::process::ChildSlotKind;
+    use fvoci_server::collab::config::SEED_CHILD_CONCURRENCY;
+    use fvoci_server::collab::seed::{SeedEngine, SeedError, SEED_SLOT_WAIT};
+
+    run_lifecycle_test(
+        "collab_seed_pool_saturation_leaves_room_open_headroom",
+        async {
+            let harness = TestDb::bootstrap().await;
+            let wiki = setup_wiki_doc(&harness).await;
+            let config = test_collab_config(4, 30_000);
+            let (hub, _helper_capacity) =
+                new_test_collab_hub(config.clone(), wiki.session.pool.clone(), 1).await;
+            assert_eq!(
+                collab_engine::process::max_seed_child_concurrency(),
+                SEED_CHILD_CONCURRENCY
+            );
+            let seed = SeedEngine::from_hub(&hub);
+            let doc = serde_json::json!({"type": "doc", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "seed"}]}
+            ]});
+            // Occupy every seed slot with live children.
+            let held: Vec<EngineSession> = (0..SEED_CHILD_CONCURRENCY)
+                .map(|_| {
+                    EngineSession::spawn(SpawnRequest {
+                        engine_bin: config.engine_bin.clone(),
+                        limits: config.limits,
+                        slot_kind: ChildSlotKind::Seed,
+                        slot_wait: None,
+                        test_hang_ms: None,
+                        test_exit_after_read: None,
+                        test_close_stdout_hang_ms: None,
+                        test_exit_after_write: None,
+                    })
+                    .unwrap_or_else(|r| panic!("seed slot: {:?}", r.outcome))
+                })
+                .collect();
+            // N+1: no extra child, 503 class after the bounded wait.
+            let started = std::time::Instant::now();
+            let over = seed.tiptap_to_yjs_update(&doc).await;
+            assert!(matches!(over, Err(SeedError::Unavailable)), "{over:?}");
+            assert!(started.elapsed() >= SEED_SLOT_WAIT);
+            // A room open still gets its primary slot while seeds are saturated.
+            let mut leases = DirectHubLeases::new();
+            assert!(hub_join(&mut leases, &hub, &wiki, 1).await.is_ok());
+            assert_eq!(hub.available_room_slots(), 3);
+            // A seed queued behind the saturation proceeds once a slot frees.
+            let waiting = tokio::spawn({
+                let (seed, doc) = (seed.clone(), doc.clone());
+                async move { seed.tiptap_to_yjs_update(&doc).await }
+            });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(held);
+            let update = waiting.await.unwrap().expect("seed after release");
+            assert!(!update.is_empty());
+            drop(leases);
+            hub.shutdown().await;
+            harness.cleanup().await;
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn collab_lifecycle_failed_start_reuses_slot() {
     run_lifecycle_test("collab_lifecycle_failed_start_reuses_slot", async {

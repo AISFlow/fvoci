@@ -29,9 +29,16 @@ pub fn derive_primary_child_concurrency(max_rooms: usize) -> usize {
     max_rooms.saturating_add(OFFLINE_REVISION_PRIMARY_HEADROOM)
 }
 
-/// Default `FVOCI_COLLAB_MAX_CHILDREN` when unset: primary cap plus validator pool headroom.
+/// One-shot Tiptap → Yjs seed children (body PUT, duplicate, import). Own
+/// pool so seed bursts never take the primary room/revision headroom.
+pub const SEED_CHILD_CONCURRENCY: usize = collab_engine::limits::DEFAULT_MAX_SEED_CHILD_CONCURRENCY;
+
+/// Default `FVOCI_COLLAB_MAX_CHILDREN` when unset: primary cap plus validator
+/// and seed pool headroom.
 pub fn derive_max_child_concurrency(max_rooms: usize) -> usize {
-    derive_primary_child_concurrency(max_rooms) + derive_validator_child_concurrency(max_rooms)
+    derive_primary_child_concurrency(max_rooms)
+        + derive_validator_child_concurrency(max_rooms)
+        + SEED_CHILD_CONCURRENCY
 }
 
 /// Ephemeral validator pool size (compaction and fallback admission paths).
@@ -232,10 +239,13 @@ impl CollabConfig {
     /// Apply process-wide helper limits derived from this configuration.
     pub fn apply_runtime_limits(&self) {
         let primary_cap = derive_primary_child_concurrency(self.max_rooms);
-        let validator_cap = derive_validator_child_concurrency(self.max_rooms)
-            .min(self.max_child_concurrency.saturating_sub(primary_cap));
+        let validator_cap = derive_validator_child_concurrency(self.max_rooms).min(
+            self.max_child_concurrency
+                .saturating_sub(primary_cap + SEED_CHILD_CONCURRENCY),
+        );
         collab_engine::process::set_max_child_concurrency(primary_cap);
         collab_engine::process::set_max_validator_child_concurrency(validator_cap.max(4));
+        collab_engine::process::set_max_seed_child_concurrency(SEED_CHILD_CONCURRENCY);
     }
 }
 
@@ -268,9 +278,9 @@ mod config_tests {
     fn derive_child_concurrency_includes_headroom() {
         assert_eq!(derive_validator_child_concurrency(4), 4);
         assert_eq!(derive_primary_child_concurrency(4), 8);
-        assert_eq!(derive_max_child_concurrency(4), 12);
-        assert_eq!(derive_max_child_concurrency(16), 28);
-        assert_eq!(derive_max_child_concurrency(64), 100);
+        assert_eq!(derive_max_child_concurrency(4), 14);
+        assert_eq!(derive_max_child_concurrency(16), 30);
+        assert_eq!(derive_max_child_concurrency(64), 102);
     }
 
     #[test]

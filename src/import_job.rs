@@ -34,7 +34,8 @@ use crate::db::documents::ImportFence;
 use crate::db::import_jobs::{
     claim_expired_import_job, claim_next_import_job, extend_import_lease, finish_import_job,
     finish_sync_import_job, load_import_payload, purge_imported_document, purge_imported_task,
-    reset_import_refs, ImportClaim, ImportJobRefs, ImportSource, ImportStatus, IMPORT_SWEEP_MAX,
+    release_import_job_for_retry, reset_import_refs, ImportClaim, ImportJobRefs, ImportSource,
+    ImportStatus, IMPORT_MAX_ATTEMPTS, IMPORT_SWEEP_MAX,
 };
 use crate::db::quota::StorageQuota;
 use crate::db::tasks::{create_import_task, project_status_names, CreateTaskInput};
@@ -214,6 +215,9 @@ enum RunError {
     Fenced,
     /// Shutdown between items.
     Aborted,
+    /// Capacity pressure (no collab seed slot / engine did not start):
+    /// retried while attempts remain.
+    Transient(String),
     Failed(String),
 }
 
@@ -221,6 +225,7 @@ impl From<ImportBodyError> for RunError {
     fn from(err: ImportBodyError) -> Self {
         match err {
             ImportBodyError::Fenced => RunError::Fenced,
+            ImportBodyError::Unavailable => RunError::Transient(err.to_string()),
             other => RunError::Failed(other.to_string()),
         }
     }
@@ -271,9 +276,29 @@ async fn run_claimed(
                     "import.compensate_failed"
                 );
             }
+            if let RunError::Transient(detail) = &err {
+                if claim.attempt < IMPORT_MAX_ATTEMPTS {
+                    match release_import_job_for_retry(pool, claim).await {
+                        Ok(true) => warn!(
+                            workspace_id = %claim.workspace_id,
+                            import_job_id = %claim.job_id,
+                            attempt = claim.attempt,
+                            reason = error_hash(detail),
+                            "import.retry_scheduled"
+                        ),
+                        Ok(false) => {
+                            warn!(import_job_id = %claim.job_id, "import.retry_after_fence_lost")
+                        }
+                        Err(e) => {
+                            error!(error = %e, import_job_id = %claim.job_id, "import.retry_failed")
+                        }
+                    }
+                    return;
+                }
+            }
             let reason = match &err {
                 RunError::Aborted => "shutdown".to_string(),
-                RunError::Failed(detail) => error_hash(detail),
+                RunError::Failed(detail) | RunError::Transient(detail) => error_hash(detail),
                 RunError::Fenced => unreachable!(),
             };
             match finish_import_job(pool, claim, ImportStatus::Failed).await {

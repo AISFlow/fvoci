@@ -26,6 +26,9 @@ pub enum ImportBodyError {
     TooLarge,
     #[error("import fenced")]
     Fenced,
+    /// Collab engine had no seed slot or could not start; transient.
+    #[error("collab engine unavailable")]
+    Unavailable,
     #[error("import failed: {0}")]
     Failed(String),
 }
@@ -100,6 +103,7 @@ fn map_seed_error(err: SeedError) -> ImportBodyError {
     match err {
         SeedError::InvalidInput(_) => ImportBodyError::InvalidInput,
         SeedError::TooLarge(_) => ImportBodyError::TooLarge,
+        SeedError::Unavailable => ImportBodyError::Unavailable,
         other => ImportBodyError::Failed(other.to_string()),
     }
 }

@@ -1,7 +1,8 @@
 //! Tiptap JSON → Yjs updateV1 seed (source `tiptapJsonToYUpdate`) in the
 //! isolated `collab-engine` child (`SeedFromTiptap`). Yrs stays out of the
-//! server binary; each call is a one-shot child like
-//! [`crate::collab::revision::project_persisted_offline`].
+//! server binary; each call is a one-shot child in its own
+//! [`ChildSlotKind::Seed`] pool, so seed bursts wait (bounded) for each other
+//! instead of taking the primary room/revision headroom.
 //!
 //! Callers pass JSON that already passed `prepare_derived_body` (Tiptap doc,
 //! ≤ `DOCUMENT_MAX_BODY_BYTES`). The update only seeds a body write: live
@@ -9,12 +10,16 @@
 //! through `append_collab_update`.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use collab_engine::limits::Limits;
 use collab_engine::outcome::{EngineStatus, LimitKind};
 use collab_engine::process::{ChildSlotKind, EngineSession, SpawnRequest};
 use collab_engine::protocol::Request;
 use serde_json::Value;
+
+/// Bounded wait for a seed child slot before `Unavailable` (503).
+pub const SEED_SLOT_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct SeedEngine {
@@ -29,7 +34,7 @@ pub enum SeedError {
     InvalidInput(String),
     #[error("tiptap document or seed update exceeds limits: {0}")]
     TooLarge(String),
-    /// No child slot / engine could not start.
+    /// No seed child slot after [`SEED_SLOT_WAIT`] / engine could not start.
     #[error("collab engine unavailable")]
     Unavailable,
     #[error("seed failed: {0}")]
@@ -68,8 +73,8 @@ fn seed_blocking(
     let mut session = EngineSession::spawn(SpawnRequest {
         engine_bin,
         limits,
-        slot_kind: ChildSlotKind::Primary,
-        slot_wait: None,
+        slot_kind: ChildSlotKind::Seed,
+        slot_wait: Some(SEED_SLOT_WAIT),
         test_hang_ms: None,
         test_exit_after_read: None,
         test_close_stdout_hang_ms: None,
