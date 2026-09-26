@@ -642,16 +642,11 @@ Upgrading to migration 036 (Microsoft tenant issuer): Microsoft
 `common`/`organizations`/`consumers` sign-ins now record the tenant issuer the
 id_token was verified against (the discovery template with the token's `tid`,
 which must be a GUID), so a link is pinned to one tenant and another tenant's
-same `sub` is refused. Links saved earlier hold the literal template
-(`https://login.microsoftonline.com/{tenantid}/v2.0`); such a link still
-matches any tenant of that template and is re-pinned to the tenant of its next
-successful sign-in. Only a stored value equal to the provider's template is
-rewritten, nothing else. The re-pin happens only while the provider is still
-configured with the `{tenantid}` template; if the provider is changed to a
-single tenant first, legacy template links fail closed (`oidc_not_linked`)
-until the user unlinks and links again. Until then the template link does not separate
-tenants (the per-app Microsoft `sub` still does); to review them before
-upgrading, `SELECT id, user_id FROM fvoci.identity_links WHERE provider =
+same `sub` is refused. Earlier links with a NULL issuer or a literal template
+(`https://login.microsoftonline.com/{tenantid}/v2.0`) fail closed with
+`oidc_not_linked` and remain unchanged. The account holder can use an existing
+authenticated session to unlink and reconnect, which stores the verified issuer.
+Review template links with `SELECT id, user_id FROM fvoci.identity_links WHERE provider =
 'microsoft' AND issuer LIKE '%{tenantid}%'`. A JWKS key that names an
 `issuer` (Microsoft's common key set does) only verifies id_tokens from that
 issuer or, for a `{tenantid}` template, from a tenant of it.
@@ -858,4 +853,3 @@ MCP client configuration (for example):
 Tests: `tests/mcp_integration.rs` starts a real `fvoci-server` process (fresh
 database, app role, port 0), mints tokens over HTTP and drives the binary over
 stdio (`cargo test --features db-tests --test mcp_integration`).
-

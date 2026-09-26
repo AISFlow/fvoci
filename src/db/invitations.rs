@@ -361,8 +361,6 @@ pub struct IdentityAcceptRequest<'a> {
     pub subject: &'a str,
     /// Issuer that verified `subject` (see `db::oidc::find_link`).
     pub issuer: &'a str,
-    /// Microsoft `{tenantid}` discovery issuer (see `db::oidc::find_link`).
-    pub issuer_template: Option<&'a str>,
     pub link_email: Option<&'a str>,
     pub given_name: Option<&'a str>,
     pub client_ip: Option<&'a str>,
@@ -387,14 +385,8 @@ pub async fn accept_invitation_with_identity(
         return Ok(Err(InvitationDbError::ConsentRequired));
     }
     let existing = find_user_id_by_email(pool, &invitation.email).await?;
-    let link = crate::db::oidc::find_link(
-        pool,
-        request.provider,
-        request.subject,
-        request.issuer,
-        request.issuer_template,
-    )
-    .await?;
+    let link =
+        crate::db::oidc::find_link(pool, request.provider, request.subject, request.issuer).await?;
     if let Some((user_id, suspended_at)) = existing {
         let owner = match &link {
             crate::db::oidc::LinkLookup::Found(l) => Some(l.user_id),
