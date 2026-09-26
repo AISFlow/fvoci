@@ -26,6 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - name: Collaboration CI runner fixture
+        run: bash scripts/fixtures/rust-ci/run-collaboration-admission-fixture-test.sh
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
