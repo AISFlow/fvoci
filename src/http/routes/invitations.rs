@@ -166,9 +166,13 @@ async fn accept_invitation(
     if let Some(password) = body.password.as_deref() {
         crate::validate::validate_password_setting(&state.auth.db.pool, password).await?;
     }
-    let settings = crate::settings::current_values(&state.auth.db.pool, &state.branding_name)
-        .await
-        .map_err(internal)?;
+    let settings = crate::settings::current_values_with_license(
+        &state.auth.db.pool,
+        &state.branding_name,
+        &state.auth.db.license,
+    )
+    .await
+    .map_err(internal)?;
     let consents: Vec<(String, i32)> = body
         .consents
         .as_deref()
@@ -188,6 +192,7 @@ async fn accept_invitation(
     }
     let result = crate::db::invitations::accept_invitation(
         &state.auth.db.pool,
+        &state.auth.db.license,
         &state.auth.password_keys,
         &token,
         crate::db::invitations::AcceptInvitationRequest {
