@@ -189,3 +189,11 @@ requested/effective 모두 `claude-opus-5-5`/`medium`임을 확인했다(예: ct
   requested/effective receipt와 실제 세션 확인을 별도로 기록하며 목록만으로 실행 완료를 주장하지 않는다.
 - Grok 경로는 기존 `cursor-grok-4.6-high`를 유지한다. 별도 effort를 추가하지 않는다.
 - 진행 중 결과·미수락 브랜치·과거 모델 기록을 보존한다. 새 GPT sol 구현과 독립 검토는 별도 세션이다.
+
+실제 sol 실행 확인: reviewer 세션 `01a0df0c-a742-7423-8c41-68c3340a9c91`과
+구현 세션 `01a0df0d-2167-7340-8536-0beca9fa2068`의 JSONL turn_context 모두
+`gpt-6-sol` / `medium`이다. 별도 terminal과 worktree이며 startup 응답까지 확인했다.
+초기 launch requested/effective도 일치했으나 Orca readiness 감지가 timeout을 냈다.
+따라서 모델 실행 확인과 제품 task 시작·완료를 구분한다. 첫 reviewer launch는
+Codex 자체 업데이트 화면(0.156.1 → 0.157.1) 뒤 shell로 종료됐으며 코디네이터가
+설치 명령을 실행하지 않았다. 제품 task 재시도·검증 결과는 진행 인계에 기록한다.
