@@ -609,7 +609,8 @@ image runs `fvoci-migrate --backup-manifest` and the offline
 `--restore-preflight` with only the key environment, a read-only backup mount
 for restore, and no network. PostgreSQL dump/restore, storage archiving and
 the Rust `--verify-storage`/`--verify-secrets` probes run in the specified
-Compose containers. Python is not required for the operational scripts.
+Compose containers. Python is not required for the operational scripts;
+independent Python compatibility fixtures remain available for testing.
 
 **Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
 functions) and `fvoci`, taken as the PostgreSQL owner role through the
