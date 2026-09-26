@@ -47,7 +47,7 @@ jobs:
       - run: cargo test --locked --offline --lib --bin fvoci-server
       - run: cargo test --locked --offline --test collab_wire
       - run: cargo test --locked --offline --test markdown_process
-      - run: cargo test --locked --offline --manifest-path vendor/markdown/Cargo.toml
+      - run: cargo test --locked --offline --manifest-path vendor/markdown/Cargo.toml --target-dir target/vendor-markdown
   postgres:
     name: ${{ matrix.check }}
     strategy:

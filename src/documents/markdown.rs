@@ -238,6 +238,9 @@ fn match_mention(s: &str, at: usize) -> Option<(Token<'_>, usize)> {
         return None;
     }
     let label_end = run_until(s, id_end + 1, &[']'])?;
+    if !s[label_end..].starts_with(']') {
+        return None;
+    }
     Some((
         Token::Mention {
             kind,
