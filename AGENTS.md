@@ -51,7 +51,7 @@ worktree별 target 디렉터리, 실행별 DB/Redis prefix/검색 index/스토�
 작업 전에 필요한 계약을 찾고, 변경 후 최소 충분한 검사를 실행한다. 실제 RLS·잠금·원자성은 실제 DB와 앱 역할로 검증한다. mock, skip, retry, timeout 증액으로 실패를 숨기지 않는다. 워커의 관련 검사와 통합 SHA의 수락 검사를 구분한다.
 
 표준 처리에는 현재 의존성 또는 유지보수되는 Rust 구현을 우선하고, FVOCI 정책만 얇게 연결한다.
-RFC/공식 명세를 직접 재구현하기 전에 아래 표준 구현 스킬로 적용 범위·보안 설정·교체 비용을 확인한다.
+RFC/공식 명세를 직접 재구현하기 전에 "필요한 스킬만 사용" 표의 표준 구현 스킬로 적용 범위·보안 설정·교체 비용을 확인한다.
 
 ## 도구와 권한
 
@@ -108,7 +108,10 @@ PR 수락·머지는 전체 작업 종료가 아니다. 기능 대응표에서 �
 JS 런타임 번들·외부 변환 서비스로의 우회를 남기지 않는다. 기존 React/Tiptap·브라우저 JS·개발용
 Node/CodeGraph·TS 비교 oracle와 합의한 PostgreSQL·Meilisearch·S3·SMTP는 별개다.
 서버 모드에 migration 소유자 credential이나 기동 시 자동 migration을 넣지 않고, 필요한 parser·CRDT
-process 격리를 유지한다. 대체·바이너리/명령 통합·비용 비교·Node 없는 최종 검증의 절차는
+process 격리를 유지한다.
+같은 실행 파일을 child로 쓰면 내부 모드는 서버 초기화·credential 로딩·listen 전에 분기한다.
+전체 Node 제거 수락은 Node/Bun/Deno·내장 JS 엔진이 없는 최종 제품 환경에서 실제 경로를 실행한
+근거가 필요하다. 대체·바이너리/명령 통합·비용 비교·Node 없는 최종 검증의 절차는
 [실행 경계 스킬](.agents/skills/fvoci-runtime-boundaries/SKILL.md)을 해당 작업에서만 읽는다.
 
 ## 로컬과 원격 검증

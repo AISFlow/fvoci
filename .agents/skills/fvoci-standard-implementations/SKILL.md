@@ -28,7 +28,7 @@ description: FVOCI에서 RFC·공식 프로토콜, 인증 토큰, 파서·직렬
    Tokio/HTTP/TLS 호환, 최소 feature와 전이 의존성을 확인한다. 기본 redirect/proxy/외부 schema 조회,
    입력·응답·시간·메모리 제한, 취소/종료 동작이 기존 보장을 약화하지 않아야 한다. 필요한 경우 지원되는
    custom client를 연결한다. README의 준수 주장·인기·Rust 사용·권고 부재를 감사 완료로 해석하지 않는다.
-5. **한 경계만 교체한다.** manifest/lockfile의 단독 소유권을 받고 배포 버전을 기존 정책과 lockfile로
+5. **한 경계만 교체한다.** manifest/lockfile의 단독 소유권을 코디네이터에게서 받고 배포 버전을 기존 정책과 lockfile로
    고정한다. 무관한 upgrade나 moving-main 의존성을 함께 넣지 않는다. 먼저 작은 adapter와 회귀로
    연결한 뒤 정상 호출을 전환한다. 보안 검증 실패를 기존 느슨한 구현으로 재시도하는 fallback은 금지한다.
 6. **비교하고 중복을 제거한다.** 공식 벡터와 허용/거부 입력, 실제 client/server, 현재 제품의 DB·UI·
