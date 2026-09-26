@@ -65,6 +65,8 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/035_identity_link_issuer.sql"),
         35,
     ),
+    // 036 is reserved by another branch.
+    (include_str!("../../migrations/037_task_collab.sql"), 37),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -553,6 +555,10 @@ mod tests {
         (
             35,
             "9ab2a7432d458d2663e3caa796cf9ac71a6cda1117a94d1ccdeb5c8bc8585b69",
+        ),
+        (
+            37,
+            "4a67badc60a646dc99a7b7698800cb309a3b1bcae76bf8fb5be7531b58e33b81",
         ),
     ];
 
