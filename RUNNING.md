@@ -448,9 +448,9 @@ text, unicode-linebreak 0.1.5 gives the line-break opportunities, and `src/docum
 the flow (A4, 35/65/35 pt paddings, 12 pt text at line height 1.5, the TS heading sizes and block
 margins, pages broken between lines and table rows). The fonts are the files the Node export embeds
 (`packages/editor/src/fonts`: Noto Sans KR, Noto Sans Mono CJK KR, Noto Emoji; SIL OFL 1.1),
-compiled into the server binary (about 33 MB) so the child needs no path; each character uses the
+read at run time by the export child; each character uses the
 first of them that has a glyph, pictographs Noto Emoji first. Only the glyphs used are embedded.
-Attachment bytes are never read and nothing is fetched.
+Attachment bytes are never read and nothing is fetched. The font files are not compiled into `fvoci-server`; the export child reads them from `FVOCI_EXPORT_FONT_DIR` (the image sets `/opt/fvoci/share/fonts`; development and tests fall back to `packages/editor/src/fonts` in the source tree). A missing font file fails the PDF op (500), never a partial PDF.
 
 Contract as before: `application/pdf`, `Content-Disposition` with an RFC 5987 `filename*`,
 `private, no-store`, `nosniff` (share: also `CSP: sandbox` and `Referrer-Policy: no-referrer`);

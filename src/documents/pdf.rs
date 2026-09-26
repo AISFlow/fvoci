@@ -46,18 +46,40 @@ use crate::documents::export_model::{Block, ExportDoc, Inline, ListItem, ListKin
 pub const PDF_MAX_OUTPUT_BYTES: usize = 20_000_000;
 pub const PDF_CONTENT_TYPE: &str = "application/pdf";
 
-static SANS_DATA: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/packages/editor/src/fonts/NotoSansKR.ttf"
-));
-static MONO_DATA: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/packages/editor/src/fonts/NotoSansMonoCJKkr.ttf"
-));
-static EMOJI_DATA: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/packages/editor/src/fonts/NotoEmoji.ttf"
-));
+/// Font files are read at run time (child op only), never compiled into
+/// `fvoci-server`: ~34 MB of `include_bytes!` would count against RLIMIT_AS
+/// in every same-binary child (the image preview child broke at 96 MiB).
+/// `FVOCI_EXPORT_FONT_DIR` points at the shipped directory; the default is
+/// the repository copy for development and tests.
+pub const FONT_DIR_ENV: &str = "FVOCI_EXPORT_FONT_DIR";
+const SANS_FILE: &str = "NotoSansKR.ttf";
+const MONO_FILE: &str = "NotoSansMonoCJKkr.ttf";
+const EMOJI_FILE: &str = "NotoEmoji.ttf";
+
+fn font_dir() -> std::path::PathBuf {
+    std::env::var_os(FONT_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/packages/editor/src/fonts"
+            ))
+        })
+}
+
+/// Reads one font file once per process; the bytes live for the process
+/// (the export child is short-lived) because the shaper borrows them.
+fn font_file(name: &str) -> Option<&'static [u8]> {
+    let path = font_dir().join(name);
+    match std::fs::read(&path) {
+        Ok(bytes) => Some(Box::leak(bytes.into_boxed_slice())),
+        Err(error) => {
+            tracing::error!(path = %path.display(), %error, "pdf export font unavailable");
+            None
+        }
+    }
+}
 
 // Source `pdf.tsx` page and block styles (points).
 const PAGE_W: f32 = 595.28;
@@ -225,15 +247,18 @@ impl Faces {
             let upem = shaper.units_per_em() as f32;
             Some(Face { pdf, shaper, upem })
         }
-        let sans = face(SANS_DATA, Some(400.0))?;
+        let sans_data = font_file(SANS_FILE)?;
+        let mono_data = font_file(MONO_FILE)?;
+        let emoji_data = font_file(EMOJI_FILE)?;
+        let sans = face(sans_data, Some(400.0))?;
         let ascent = f32::from(sans.shaper.ascender()) / sans.upem;
         let descent = -f32::from(sans.shaper.descender()) / sans.upem;
         Some(Self {
             sans,
-            sans_bold: face(SANS_DATA, Some(700.0))?,
-            mono: face(MONO_DATA, None)?,
-            emoji: face(EMOJI_DATA, Some(400.0))?,
-            emoji_bold: face(EMOJI_DATA, Some(700.0))?,
+            sans_bold: face(sans_data, Some(700.0))?,
+            mono: face(mono_data, None)?,
+            emoji: face(emoji_data, Some(400.0))?,
+            emoji_bold: face(emoji_data, Some(700.0))?,
             ascent,
             descent,
         })
