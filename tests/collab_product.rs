@@ -1489,7 +1489,7 @@ async fn collab_ws_true_access_denial_stays_auth_frame() {
 }
 
 #[tokio::test]
-async fn collab_ws_unsupported_kind_stays_auth_frame() {
+async fn collab_ws_task_kind_with_document_id_is_not_found() {
     let harness = TestDb::bootstrap().await;
     let wiki = setup_wiki_doc(&harness).await;
     let server = start_product_test_server(&harness.app_url, true).await;
@@ -1511,8 +1511,8 @@ async fn collab_ws_unsupported_kind_stays_auth_frame() {
         WireFrame::Document {
             message: DocumentMessage::Auth(AuthMessage::PermissionDenied { reason }),
             ..
-        } => assert_eq!(reason, "unsupported kind"),
-        other => panic!("unsupported kind must be PermissionDenied, got {other:?}"),
+        } => assert_eq!(reason, "not found"),
+        other => panic!("a task room naming a document id must be PermissionDenied, got {other:?}"),
     }
     server.shutdown().await;
     harness.cleanup().await;
