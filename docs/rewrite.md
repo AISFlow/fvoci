@@ -16,7 +16,7 @@
 ## 2. 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Orca Run `run_b01d432a9dee`.
-최신 수락 main `90a3df02` (#84까지; 열린 PR은 아래). main CI 성공은
+최신 수락 main `e1319b88` (#94까지; 열린 PR 없음). main CI 성공은
 전체 포팅 완료나 협업 용량 수락을 뜻하지 않는다.
 
 | PR | merge | 범위 | 수락 근거 |
@@ -94,40 +94,47 @@
 | #80 | a69e623 | 첨부 완성(030): 태스크·프로젝트 문서 부모, DELETE(uploader edit/그 외 manage)+정리 journal, 저장 quota(402, 권한 후 quota), 이미지 preview(rlimit·env_clear child) | attachment23·parents13·preview6·S3 16·E2E, 검토 |
 | #83 | 28a86f1 | 문서 API: body GET/PUT(md·json)·block patch(tail 선조건 3회)·children·backlinks(읽기 시 파생)·duplicate·flat routes·PAT 검색 scope; 외부 쓰기는 room actor `ReplaceFromUpdate` 경유 | document_api8·document19·collab 71, 검토 |
 | #84 | 90a3df0 | 관리자 사용자 삭제 예약/취소(032)·공유 대화상자 정책·`/s/:token` head meta·MFA QR(SVG)·branding `--verify-storage` | admin16·share10·identity19·E2E, 검토 |
+| #82 | 926f01d | 의미 검색(031): 첨부 chunk embedding(extract job 안 embed pass)·workspace hybrid 모드·PAT parent-kind 축소 | search_semantic·search_query, 검토+delta |
+| #86 | 069cc4b | 스키마 게이트가 max(version) 대신 전체 migration 집합을 요구(순서 뒤바뀐 031/033/034 대응) | db_integration gate 5, 검토 |
+| #87 | 873e440 | 역할 재배정(Fable 코디네이터/검토, Opus 구현, Grok 조사)·Rust 런타임 규칙·CodeGraph 기록·문서 갱신 | CI |
+| #89 | 84b0481 | install CI 경로 필터에 convert helper·`.codegraph` 제외 | CI |
+| #85 | a6e31dd | 가져오기 잔여(033): office 7종을 같은 바이너리의 격리 child(`--internal-office-extract`)로, Notion CSV 태스크·자산, 지연 import 이벤트; harness stderr 경합 수정 | import 15·formats 8·extract 14·native x64/ARM64, 검토+delta×2 |
+| #92 | 1bd7fb8 | collab join 1011 flake: 삼켜진 join 오류 로깅, db-tests 전용 estimate-fail hook을 문서 키로, 공유 harness의 process-wide engine child cap 슬롯 게이트 | collab_lifecycle 20·projection 19·product, 검토+should-fix 반영 |
+| #91, #93 | b205058, 78d20f5 | e2e 경합: admin erase 확인 dialog unmount 대기, collections board group-by 정확 label | 재실행 5/5, 검토 |
+| #81 | f89e9ea | 전역 보안 헤더(nosecone 동등 CSP·Referrer-Policy 등, 공유 응답 개별 헤더 유지)·제품 MCP 서버(stdio JSON-RPC, PAT)·`fvoci-migrate --doctor/--init-env` | mcp·doctor·share CSP, 검토 |
+| #90 | d0942f1 | 인증·복구 차단 수정(035): identity link `issuer`(NULL 허용, write-once definer backfill, 다른 issuer 같은 sub 거부), link 저장 tx의 `recheck_session`, `ENCRYPTION_KEYS` fingerprint+`--verify-secrets` 복구 probe, `--verify-storage` preview 포함, document-extract child `env_clear` | identity24·admin17·db75·backup-restore-smoke, 검토+should-fix 반영 |
+| #88 | fd0b01b | 태스크 API(034): time entries·clone·backlinks·purge·flat `/tasks/:id`·parents·workspace 태스크/상태 목록·workflow status CRUD·My Tasks/워크플로 설정 UI | task_ops15·task64·formats8·E2E, 검토+delta×2 |
+| #94 | e1319b8 | 스킬: 표준 구현 재사용·Rust 실행 경계 절차, handoff/fast-verify 보강(ChatGPT 준비·사용자 게시) | Fable 검토+should-fix 반영, CI |
 
 검증 기준: 각 PR의 최종 HEAD에서 원격 Rust/Web/Native/Container install 워크플로가 실제 실행되고
 (PG suite는 `--no-fail-fast`), 별도 세션의 독립 검토(#84까지 Opus 5.5 medium, 2026-09-26부터 Fable 5.1 medium)
 차단 사항이 해소된 뒤 기대 HEAD로 squash merge했다. 세부 run id·검토 보고서는 각 PR 코멘트에 있다.
 
-진행 중(미수락, 2026-09-26 12:30 KST 기준; 검토는 별도 Fable 5.1 세션):
-- 열린 PR: #81 전역 보안 헤더·제품 MCP·`fvoci-migrate --doctor/--init-env`(검토 ACCEPT, CI 대기),
-  #82 의미 검색(031, 첨부 chunk embedding·hybrid; 검토 ACCEPT, CI 대기), #85 가져오기 잔여(033, office 7종
-  격리 child·Notion CSV/자산·지연 이벤트; 검토 ACCEPT + delta ACCEPT, CI 대기), #86 스키마 게이트가 전체
-  migration 집합을 요구(검토 ACCEPT, CI 대기), #87 역할 재배정·CodeGraph 기록(문서), #88 태스크 API
-  (034 time entries·clone·backlinks·purge·flat·parents·workspace 목록·workflow status; 검토
-  ACCEPT-with-should-fix → S1/S2 수정 delta ACCEPT, S3 후속), #89 install CI 경로 필터에 convert helper 포함.
-- migration 번호: main 030·032, #82=031, #85=033, #88=034, 인증 차단 수정=035. 순서가 뒤바뀌어 머지되므로 #86의
-  집합 비교 게이트를 먼저 머지한다.
-- 구현 중(Opus 워커): 2026-09-26 감사(`fvoci-evidence/audit-auth-node-binaries-20260926.md`)의 인증·데이터
-  차단 항목 — identity link의 issuer 경계(035, NULL 허용 컬럼·write-once backfill definer), OIDC link 저장 시
-  세션 재검증(recheck_session), ENCRYPTION_KEYS fingerprint·`--verify-secrets` 복구 probe, `--verify-storage`의
-  preview 객체 포함, document-extract child `env_clear`. collab join 1011 flake 원인 수정 워커도 진행 중.
-- 사용자 결정 필요: 원본 `packages/ee` 사용권 확인 미이식. 현재 audit·branding·workspaceSso를 항상 사용 가능으로 둔다
-  (원본 미사용권 인스턴스는 403 `enterprise_license_required`). 저장 quota 기본 무제한도 같은 결정에 묶인다.
-- Node 잔여 포팅(제품 런타임 예외 아님, AGENTS.md): `ConvertClient`(`FVOCI_DOCUMENT_CONVERT_BIN`) 호출 경로 —
-  md↔Tiptap(body PUT/GET md, markdown-zip·office·notion 가져오기), Tiptap→Yjs seed(body PUT·duplicate), md→safe HTML
-  (법률 문서), md/pdf/docx/pptx 내보내기, 공개 공유 PDF, AI 요약(md). 공개 공유 HTML/MD는 이미 Rust
-  `share_render`다. 각 경로는 Rust 대체·계약 검증 후 단위별로 전환하고 마지막에 이미지에서 Node를 제거한다.
-- 미착수·잔여: 태스크 collab room(태스크 revisions·block patch·origin·gantt layout 선행), `task_origins`·
+진행 중(미수락, 2026-09-26 21:00 KST 기준; 검토는 별도 Fable 5.1 세션):
+- Node 변환 대체 1단계(Opus, 브랜치 `fvoci/rust-md-parser`): markdown-rs(micromark port) 기반 md→Tiptap이 TS oracle
+  corpus 31/31 일치. 초선형 입력 때문에 같은 바이너리 `--internal-markdown` child(rlimit·timeout·동시 2·env_clear,
+  서버 초기화 전 분기)로 실행하고, 정상 입력에서도 2차인 EditMap은 상류 수정 릴리스가 없으면 최소 vendoring 패치.
+  PUT body md·가져오기·법률 md→HTML을 전환하고 GET md·AI 요약은 Rust `share_render`로 전환한다.
+- 표준 구현 재사용 1경계(Opus, `fvoci/rust-oidc-standard`): 손으로 쓴 JWT/JWKS 검증·discovery/token 요청을
+  `openidconnect`로 대체(SSRF 가드 fetch.rs를 custom client로 유지, 알고리즘 allow-list·skew·issuer 검사 명시),
+  검증 후 `jwt.rs` 삭제, 변경 비용 전후 측정.
+- migration 번호: main 030–035(034가 035 뒤에 머지됨; #86 집합 게이트가 처리). 다음 번호 036.
+- 사용자 결정 필요: 원본 `packages/ee` 사용권 확인 미이식(audit·branding·workspaceSso 항상 사용 가능, 원본 미사용권
+  인스턴스는 403 `enterprise_license_required`). 저장 quota 기본 무제한도 같은 결정에 묶인다.
+- Node 잔여(제품 런타임 예외 아님): `ConvertClient` 중 md→Tiptap(1단계 진행), Tiptap→Yjs seed(body PUT·duplicate;
+  2단계), md/pdf/docx/pptx 내보내기·공개 공유 PDF(3단계). Tiptap→md·안전 HTML은 Rust `share_render`가 TS와
+  corpus 20/20 일치(`fvoci-evidence/convert-contract-oracle-20260926.md`).
+- 미착수·잔여: 태스크 collab room(태스크 revisions·block patch·origin·gantt 선행), `task_origins`·
   `POST documents/:id/tasks`·task-projects, 템플릿·unfurl·workspace export·events/access-stream/project stream(SSE)·
   push-subscriptions, S3 presigned 계약, settings 소비자(embed·AI·첨부 미리보기·i18n 재정의·security.txt·operator),
   Microsoft 발급자 변형·일부 테스트(#77 S4–S6), 컬렉션 `dueBefore` 시간대·wiki 컬렉션 권한 N+1(#76 S3·S4),
-  board 그룹 paging·drag-and-drop·gantt UI, preview-html의 격리 parse·HWP viewer(rhwp WASM), 추가 DB.
-  후속(비차단): #83 `DeriveFailed` dead arm·patch-block 409 테스트·duplicate node cap·backlinks references
-  table·PAT 테스트; #84 `HEAD /s/:token` noindex 헤더·`BRANDING_ASSET_MAX_BYTES` settings 이동;
-  #82 hybrid lexical leg Meili 필터 차이; #85 S1 HWP skip 없는 helper·S2 stdout cap·EPUB/HTML 추출.
-  의도적 차이: 가져오기 비동기 실행은 가져온 사용자의 세션이 필요하고, 본문 한도는 JSON ≈85 MiB(디코드 64 MiB);
-  #78 purge는 저장소 먼저(원본은 DB 먼저); #80 quota 기본 무제한; #83 backlinks 파생·쓰기 거부 404.
+  board 그룹 paging·drag-and-drop·gantt UI, preview-html 격리 parse·HWP viewer(rhwp WASM), 추가 DB.
+  후속(비차단): #83 `DeriveFailed` dead arm·patch-block 409 테스트·duplicate node cap·backlinks references table;
+  #84 `HEAD /s/:token` noindex·`BRANDING_ASSET_MAX_BYTES` settings; #82 hybrid lexical leg 필터 차이; #85 S1/S2·
+  EPUB/HTML 추출; #88 S3 time_entries 명시 grant 줄; #90 pre-035 첫 로그인 issuer 고정 잔여(RUNNING.md); #91 admin
+  erase ConfirmActionButton key/portal; #92 process-wide engine cap last-write-wins·spawn_room CapacityRetry dead path.
+  의도적 차이: 가져오기 비동기 실행은 가져온 사용자의 세션 필요, 본문 한도 JSON ≈85 MiB(디코드 64 MiB); #78 purge
+  저장소 먼저; #80 quota 기본 무제한; #83 backlinks 파생·쓰기 거부 404; #85 HWP는 helper 없으면 skipped.
 
 범위 결정(사용자 확인 2026-09-25): 기존 TypeScript FVOCI 배포가 없으므로 TS 데이터 이전(스키마 변환·사용자/세션/토큰
 이전·문서 corpus 일괄 이전·dual-write·TS 복귀)은 범위 밖이다. 신규 설치·Rust 스키마 migration·Rust 저장 데이터의
@@ -174,6 +181,11 @@
   받고 기동 시 스키마 버전(`schema_migrations`, 앱 역할 SELECT 전용)이 컴파일 버전과 같아야 한다(#20).
   권한 적용은 단일 트랜잭션이며 수락된 migration 파일은 SHA-256으로 고정한다(#16).
 - 협업은 검증된 opt-in 범위만 수락했다. 신뢰하지 않는 문서 parser는 요청 처리 프로세스와 분리된 helper다.
+- 표준 구현 재사용(2026-09-26 평가, `fvoci-evidence/std-impl-eval-mcp-totp-20260926.md`): 제품 MCP는 손으로 쓴
+  stdio JSON-RPC를 유지한다 — rmcp 3.4.1 기본값이 parse 오류 -32700, tool error 형태, schema draft, 프로토콜 버전
+  집합에서 원본 TS 서버·현재 클라이언트 계약과 달라 통합 테스트가 깨지며 절약이 작다(고정 버전 adapter로 재검토).
+  TOTP는 `src/auth/totp.rs`(RFC 6238 벡터·원본 동등·seal/replay 테스트 보유)를 유지한다 — totp-rs 6.0.0 `to_url()`이
+  #84 QR의 otpauth 문자열과 바이트 호환이 아니고 남는 HMAC/base32가 작다. OIDC/JWT는 `openidconnect`로 대체 진행 중.
 - 의도적 원본 차이: 프로필 변경 감사 기록 추가, 세션 철회 중 쓰기 차단 강화, 429 계약 정합,
   엄격한 ISO 날짜(원본 `z.iso.date()`와 동일 수용 집합).
 - 검색은 사용자 결정으로 원본과 같은 Meilisearch를 쓴다. 서버는 index 범위 scoped key만 받고(마스터 키는
