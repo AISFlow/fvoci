@@ -124,6 +124,43 @@ function sameIdentity(before: ProcMember | null, pid: number): boolean {
   return now != null && now.starttime === before.starttime;
 }
 
+export function memberIdentityGone(recorded: ProcMember): boolean {
+  const now = readProcMember(recorded.pid);
+  return now == null || now.starttime !== recorded.starttime;
+}
+
+/** SIGKILL one recorded PID only when starttime still matches the observation. */
+export function signalOwnedMember(member: ProcMember): void {
+  const now = readProcMember(member.pid);
+  if (now == null) return;
+  if (now.starttime !== member.starttime) {
+    throw new Error(`cannot prove ownership of pid ${member.pid}`);
+  }
+  try {
+    process.kill(member.pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+export function liveCollabHelpers(members: readonly ProcMember[]): ProcMember[] {
+  return members.filter((member) => member.comm === "collab-engine");
+}
+
+async function waitRecordedMembersGone(
+  recorded: readonly ProcMember[],
+  label: string,
+  withinMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + withinMs;
+  while (Date.now() < deadline) {
+    if (recorded.every((member) => memberIdentityGone(member))) return;
+    await delay(50);
+  }
+  const live = recorded.filter((member) => !memberIdentityGone(member));
+  throw new Error(`${label}: ${JSON.stringify(live)}`);
+}
+
 /** Refuse a recycled process-group number unless a recorded member still owns it. */
 export function signalOwnedGroup(pgid: number, owners: readonly ProcMember[]): void {
   const current = processGroupMembers(pgid);
@@ -182,17 +219,38 @@ export class OwnedServer {
     await this.spawnAt(bind, bind);
   }
 
+  private requireObservedLiveHelper(): ProcMember[] {
+    const helpers = liveCollabHelpers(this.observeOwnedMembers());
+    if (helpers.length === 0) {
+      throw new Error("process-tree crash requires an observed live collaboration helper");
+    }
+    return helpers;
+  }
+
+  /** SIGKILL the owned tree while a collab-engine child is still observable. */
+  async crashKillWhenHelperLive(): Promise<void> {
+    if (this.bind === "") {
+      throw new Error("cannot crash-kill before the owned server has bound a port");
+    }
+    const helpersLive = this.requireObservedLiveHelper();
+    await this.killGroupObserved(helpersLive);
+  }
+
+  async rebindAfterCrash(): Promise<void> {
+    if (this.bind === "") {
+      throw new Error("cannot restart before the owned server has bound a port");
+    }
+    await this.spawnAt(this.bind, this.bind);
+  }
+
   /** Process-tree crash durability: SIGKILL the group, then rebind the same port. */
   async crashAndRestart(): Promise<void> {
     if (this.bind === "") {
       throw new Error("cannot restart before the owned server has bound a port");
     }
     const bind = this.bind;
-    const members = this.observeOwnedMembers();
-    if (!members.some((member) => member.comm === "collab-engine")) {
-      throw new Error("process-tree crash requires an observed live collaboration helper");
-    }
-    await this.killGroupObserved();
+    const helpersLive = this.requireObservedLiveHelper();
+    await this.killGroupObserved(helpersLive);
     await this.spawnAt(bind, bind);
   }
 
@@ -340,12 +398,13 @@ export class OwnedServer {
     throw new Error(`fvoci-server did not become ready on ${bind}: ${this.logs.slice(-2000)}`);
   }
 
-  private async killGroupObserved(): Promise<void> {
+  private async killGroupObserved(helpersLive?: readonly ProcMember[]): Promise<void> {
     const child = this.child;
     const pgid = this.pgid;
     const parentPid = this.parentPid;
     const identity = this.parentIdentity;
     const owners = this.observeOwnedMembers();
+    const helpersBefore = helpersLive ?? liveCollabHelpers(owners);
     this.child = null;
     this.pgid = null;
     this.parentPid = null;
@@ -355,6 +414,10 @@ export class OwnedServer {
     if (child && child.exitCode == null && child.signalCode == null) {
       await Promise.race([once(child, "exit"), delay(5_000)]);
     }
+    await waitRecordedMembersGone(
+      helpersBefore,
+      "crash SIGKILL left collaboration helpers",
+    );
     const deadline = Date.now() + 5_000;
     let leftovers = processGroupMembers(pgid);
     while (Date.now() < deadline && leftovers.length > 0) {

@@ -3,10 +3,13 @@ import test from "node:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  liveCollabHelpers,
+  memberIdentityGone,
   ownedServerChildEnv,
   processGroupMembers,
   readProcMember,
   signalOwnedGroup,
+  signalOwnedMember,
   SERVER_BIN_MISSING,
   startOwnedServer,
 } from "./collab-restart.ts";
@@ -88,6 +91,40 @@ test("owned server child env forwards an explicit storage directory", () => {
   });
   assert.equal(env.FVOCI_STORAGE_DIR, "/tmp/owned-storage");
   assert.equal(env.DATABASE_URL, undefined);
+});
+
+test("liveCollabHelpers selects collab-engine members from a group snapshot", () => {
+  const group = [
+    { pid: 1, comm: "fvoci-server", starttime: "1", pgrp: 10 },
+    { pid: 2, comm: "collab-engine", starttime: "2", pgrp: 10 },
+  ];
+  assert.deepEqual(liveCollabHelpers(group), [group[1]]);
+});
+
+test("signalOwnedMember refuses stale starttime and proves identity gone", { timeout: 5_000 }, async () => {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  const exited = once(child, "exit");
+  await once(child, "spawn");
+  const member = readProcMember(child.pid!);
+  assert.ok(member);
+  try {
+    assert.throws(
+      () => signalOwnedMember({ ...member, starttime: "stale" }),
+      /cannot prove ownership/,
+    );
+    signalOwnedMember(member);
+    await exited;
+    assert.equal(memberIdentityGone(member), true);
+    assert.equal(readProcMember(member.pid), null);
+  } finally {
+    if (!memberIdentityGone(member)) {
+      child.kill("SIGKILL");
+      await exited;
+    }
+  }
 });
 
 test("process group observation reads this Node process without pid-file daemons", () => {
