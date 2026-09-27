@@ -71,6 +71,7 @@ export function AttachmentViewPage() {
       ) : null}
       {query.data ? (
         <AttachmentViewer
+          key={id}
           name={query.data.name}
           mime={query.data.mime}
           image={query.data.image}
