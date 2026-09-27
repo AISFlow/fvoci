@@ -257,13 +257,14 @@ Optional tuning:
 | `FVOCI_COLLAB_REVOKE_POLL_MS` | 5000 | ACL revoke poll |
 
 Automatic revision history (session snapshots on last collab disconnect; scheduled
-GC not wired in this slice yet):
+snapshots and automatic retention in the hourly maintenance sweep):
 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `REVISION_SESSION_SNAPSHOT` | `1` | When enabled, the room appends a `session` revision (`created_by` null) after the last real collab WebSocket leaves, using durable committed collab state only. Set `0` to disable. |
-| `REVISION_KEEP` | 200 | Retention cap for automatic revision rows once pruning is implemented. |
-| `REVISION_SNAPSHOT_INTERVAL_HOURS` | 24 | Scheduled stale-target snapshots (`0` disables); job port not wired yet. |
+| `REVISION_KEEP` | 200 | Per target, keeps the newest `session`/`scheduled` rows; `manual` rows are never deleted. |
+| `REVISION_SNAPSHOT_INTERVAL_HOURS` | 24 | Scheduled stale-target snapshots (`0` disables). Runs in the maintenance loop (`FVOCI_REVISION_SWEEP_INTERVAL_SECS`, default 1h). |
+| `FVOCI_REVISION_SWEEP_INTERVAL_SECS` | 3600 | Cadence of scheduled revision snapshots + automatic retention batches. |
 
 Capacity refusals close WebSocket clients with **1013** “try again later” (retryable).
 Per-child limits stay unchanged (AS 1 GiB, observed RSS kill 512 MiB, 8 s wall, 256-op recycle).

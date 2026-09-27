@@ -23,9 +23,9 @@ pub const DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS: u32 = 24;
 pub struct RevisionSettings {
     /// `REVISION_SESSION_SNAPSHOT` — snapshot when the last collab client leaves (default on).
     pub session_snapshot_enabled: bool,
-    /// `REVISION_KEEP` — retention cap for automatic rows (scheduled GC not wired yet).
+    /// `REVISION_KEEP` — retention cap for automatic rows (`session`/`scheduled` only).
     pub keep: u32,
-    /// `REVISION_SNAPSHOT_INTERVAL_HOURS` — scheduled snapshot interval (`0` disables).
+    /// `REVISION_SNAPSHOT_INTERVAL_HOURS` — scheduled snapshot interval (`0` disables snapshots).
     pub snapshot_interval_hours: u32,
 }
 

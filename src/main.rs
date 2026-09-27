@@ -21,7 +21,10 @@ use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router_with_settings, state::AppState};
 use fvoci_server::import_job::{spawn_import_job, ImportJobHandle, ImportJobSettings};
 use fvoci_server::integrations::webhooks::WebhookSenderHandle;
-use fvoci_server::jobs::{spawn_maintenance, MaintenanceHandle, MaintenanceSettings};
+use fvoci_server::jobs::{
+    spawn_maintenance, MaintenanceHandle, MaintenanceSettings, RevisionMaintenanceEngine,
+    RevisionMaintenanceParams,
+};
 use fvoci_server::outbox::{
     spawn_outbox_dispatcher, OutboxDispatcherHandle, OutboxDispatcherSettings,
 };
@@ -352,11 +355,33 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("outbox dispatcher idle (no consumers registered)");
     }
-    let maintenance_settings = MaintenanceSettings::from_env(config.upload_incomplete_ttl);
+    let revision_engine = collab.as_ref().map(|hub| RevisionMaintenanceEngine {
+        engine_bin: hub.engine_bin(),
+        limits: hub.limits(),
+    });
+    let revision_engine = revision_engine.or_else(|| {
+        CollabConfig::from_env().map(|cfg| RevisionMaintenanceEngine {
+            engine_bin: cfg.engine_bin,
+            limits: cfg.limits,
+        })
+    });
+    let maintenance_settings = MaintenanceSettings::from_env(
+        config.upload_incomplete_ttl,
+        RevisionMaintenanceParams {
+            settings: config.revision,
+            engine: revision_engine,
+        },
+    );
     tracing::info!(
         ttl_secs = maintenance_settings.upload_incomplete_ttl.as_secs(),
         interval_secs = maintenance_settings.upload_gc_interval.as_secs(),
-        "abandoned upload cleanup scheduled in maintenance"
+        revision_sweep_secs = maintenance_settings.revision_sweep_interval.as_secs(),
+        revision_snapshot_hours = maintenance_settings
+            .revision
+            .settings
+            .snapshot_interval_hours,
+        revision_keep = maintenance_settings.revision.settings.keep,
+        "maintenance scheduler configured"
     );
     let maintenance = Some(spawn_maintenance(
         maintenance_settings,
