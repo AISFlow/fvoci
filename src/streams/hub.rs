@@ -8,6 +8,12 @@ pub struct StreamHub {
     shutting_down: AtomicBool,
 }
 
+impl Default for StreamHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamHub {
     pub fn new() -> Self {
         Self {
@@ -41,9 +47,7 @@ impl StreamHub {
             self.active.fetch_sub(1, Ordering::AcqRel);
             return Err(StreamAcquireError::Capacity);
         }
-        Ok(StreamGuard {
-            hub: self.clone(),
-        })
+        Ok(StreamGuard { hub: self.clone() })
     }
 }
 
