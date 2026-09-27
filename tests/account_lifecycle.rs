@@ -247,6 +247,7 @@ impl Harness {
             import_wake: None,
             import_extractor_available: false,
             quota: Default::default(),
+            streams: fvoci_server::http::state::AppState::fresh_streams(),
         };
         let app = router(state, None);
         let admin = admin_pool(&db).await;

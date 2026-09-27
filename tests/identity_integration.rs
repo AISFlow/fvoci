@@ -131,6 +131,7 @@ impl Harness {
             collab: None,
             meili: None,
             search_embedder: None,
+            streams: fvoci_server::http::state::AppState::fresh_streams(),
             mailer: Arc::new(Mailer::from_smtp(None)),
             quota: Default::default(),
             markdown: Some(

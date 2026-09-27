@@ -420,6 +420,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         oidc_providers = identity.oidc.providers.len(),
         "identity settings loaded"
     );
+    let stream_hub = AppState::fresh_streams();
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::with_license(pool.clone(), license.clone()),
@@ -439,6 +440,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         import_wake,
         import_extractor_available,
         quota: fvoci_server::db::quota::StorageQuota::from_license(license),
+        streams: stream_hub.clone(),
     };
 
     let deadline = config.shutdown_deadline;
@@ -458,6 +460,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let webhook_task_for_signal = webhook_task.clone();
     let maintenance_task_for_signal = maintenance_task.clone();
     let import_task_for_signal = import_task.clone();
+    let streams_for_signal = stream_hub.clone();
 
     let serve = announce_after_first_pending_poll(
         axum::serve(
@@ -492,6 +495,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     "maintenance scheduler shutdown started concurrently with HTTP drain"
                 );
             }
+            streams_for_signal.begin_shutdown();
             if let Some(hub) = collab_for_signal {
                 hub.begin_shutdown();
                 let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
