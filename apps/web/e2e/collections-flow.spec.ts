@@ -600,6 +600,10 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   expect(
     (await page.request.patch(`${base}/tasks/${stale.id}`, { data: { dueDate: "2027-05-13" } })).ok(),
   ).toBe(true);
+  // The task stream refreshes the calendar mid-drag: the preview moves to 05-13, so the
+  // drag-source element in 05-12 is unmounted before the drop.
+  await expect(cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
+  await expect(cell("2027-05-12").getByTestId(`collection-preview-${stale.displayId}`)).toHaveCount(0);
   const staleMove = page.waitForResponse(
     (res) => res.request().method() === "PATCH" && new URL(res.url()).pathname === `${base}/tasks/${stale.id}`,
   );
