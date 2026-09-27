@@ -11,6 +11,11 @@ const PdfViewer = lazy(async () => {
   return { default: mod.PdfViewer };
 });
 
+const DocxViewer = lazy(async () => {
+  const mod = await import("./docx-viewer");
+  return { default: mod.DocxViewer };
+});
+
 export type AttachmentViewerProps = {
   name: string;
   mime: string;
@@ -19,6 +24,8 @@ export type AttachmentViewerProps = {
   error?: string | null;
   onMetadataRetry?: () => void;
   chunk?: number;
+  /** Session-only `preview-html` URL for the search-chunk supplement; share views omit it. */
+  previewHtmlUrl?: string;
 };
 
 function ChunkText({ text, chunk }: { text: string; chunk?: number }) {
@@ -78,6 +85,77 @@ function TextBytesPane({ downloadUrl, chunk }: { downloadUrl: string; chunk?: nu
   );
 }
 
+type SupplementState =
+  | { status: "loading" }
+  | { status: "unavailable" }
+  | { status: "error" }
+  | { status: "text"; text: string };
+
+/**
+ * Search hit context for a laid-out document (source `SearchChunkSupplement`):
+ * the stored extract text from `preview-html`, shown as plain text with the
+ * hit highlighted above the layout viewer. It never replaces the layout, and
+ * its failure never hides it.
+ */
+function SearchChunkSupplement({ previewHtmlUrl, chunk }: { previewHtmlUrl: string; chunk: number }) {
+  const [state, setState] = useState<SupplementState>({ status: "loading" });
+  useEffect(() => {
+    const controller = new AbortController();
+    let alive = true;
+    setState({ status: "loading" });
+    void (async () => {
+      try {
+        const response = await fetch(previewHtmlUrl, {
+          credentials: "include",
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          await response.body?.cancel();
+          if (alive) {
+            setState({
+              status: response.status === 404 || response.status === 413 ? "unavailable" : "error",
+            });
+          }
+          return;
+        }
+        const payload: unknown = await response.json();
+        const html =
+          typeof payload === "object" && payload !== null && "html" in payload ? payload.html : null;
+        if (!alive) return;
+        if (typeof html !== "string") {
+          setState({ status: "error" });
+          return;
+        }
+        // The server escapes the text into one <pre>; only its text is used, never markup.
+        const text = new DOMParser().parseFromString(html, "text/html").body.textContent ?? "";
+        setState({ status: "text", text });
+      } catch (error) {
+        if (!alive || (error instanceof Error && error.name === "AbortError")) return;
+        setState({ status: "error" });
+      }
+    })();
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [previewHtmlUrl]);
+
+  return (
+    <section className="attachment-viewer__pane attachment-viewer__pane--supplement" data-chunk-supplement="">
+      <p className="attachment-viewer__status">{t("attachment.viewer.layoutNone")}</p>
+      {state.status === "loading" ? (
+        <p className="attachment-viewer__status">{t("attachment.preview.loading")}</p>
+      ) : state.status === "text" ? (
+        <ChunkText text={state.text} chunk={chunk} />
+      ) : (
+        <p className="attachment-viewer__status">
+          {state.status === "unavailable" ? t("attachment.viewer.previewUnavailable") : t("load.failed")}
+        </p>
+      )}
+    </section>
+  );
+}
+
 export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
   const kind = viewerKind({ name: props.name, mime: props.mime, image: props.image });
   const chrome = (
@@ -121,6 +199,17 @@ export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
       <Suspense fallback={<ViewerLoadingPane />}>
         <PdfViewer downloadUrl={props.downloadUrl} />
       </Suspense>
+    );
+  } else if (kind === "docx") {
+    body = (
+      <>
+        {props.chunk !== undefined && props.previewHtmlUrl !== undefined ? (
+          <SearchChunkSupplement previewHtmlUrl={props.previewHtmlUrl} chunk={props.chunk} />
+        ) : null}
+        <Suspense fallback={<ViewerLoadingPane />}>
+          <DocxViewer key={props.downloadUrl} downloadUrl={props.downloadUrl} />
+        </Suspense>
+      </>
     );
   } else {
     body = <TextBytesPane downloadUrl={props.downloadUrl} chunk={props.chunk} />;

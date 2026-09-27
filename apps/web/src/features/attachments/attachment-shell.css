@@ -115,3 +115,22 @@
   height: auto;
   box-shadow: 0 1px 3px color-mix(in oklab, var(--foreground) 12%, transparent);
 }
+
+.attachment-viewer__docx-mount {
+  flex-direction: column;
+  background: var(--muted);
+  border-radius: 0.375rem;
+}
+
+.attachment-viewer__docx-frame {
+  display: block;
+  width: 100%;
+  min-height: 20rem;
+  border: 0;
+  background: transparent;
+}
+
+.attachment-viewer__pane--supplement {
+  flex: none;
+  border-bottom: 1px solid var(--border);
+}
