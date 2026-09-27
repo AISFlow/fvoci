@@ -470,12 +470,12 @@ test("membership revoke while connected stops further edits", async ({
 
     // Membership loss is reconciled via workspace access-stream → home eviction, not
     // the in-document collab unauthorized badge (see task-stream-resync / workspace-flow).
-    await expect(memberPage).toHaveURL(/\?denied=workspace/, { timeout: 25_000 });
+    await expect(memberPage).toHaveURL(/\?denied=workspace$/, { timeout: 20_000 });
     await expect(memberPage.getByRole("alert")).toContainText("접근 권한");
     await expect(editorLocator(memberPage)).toHaveCount(0);
 
     await memberPage.goto(doc.url);
-    await expect(memberPage).toHaveURL(/\?denied=workspace/);
+    await expect(memberPage).toHaveURL(/\?denied=workspace$/);
     await expect(editorLocator(memberPage)).toHaveCount(0);
   } finally {
     await ownerCtx.close();
