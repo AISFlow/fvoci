@@ -377,8 +377,7 @@ fn vimeo_id(url: &Url) -> Option<String> {
     let id = url
         .path()
         .split('/')
-        .filter(|p| !p.is_empty())
-        .next_back()
+        .rfind(|p| !p.is_empty())
         .unwrap_or("");
     id.chars()
         .all(|c| c.is_ascii_digit())
@@ -466,10 +465,14 @@ mod tests {
         }
     }
 
+    type ScriptedHop = Result<PinnedGet, OutboundError>;
+    type ScriptedHops = HashMap<String, VecDeque<ScriptedHop>>;
+    type ScriptedSeenEntry = (String, u16, Vec<(String, String)>);
+
     #[derive(Clone)]
     struct Scripted {
-        hops: Arc<Mutex<HashMap<String, VecDeque<Result<PinnedGet, OutboundError>>>>>,
-        seen: Arc<Mutex<Vec<(String, u16, Vec<(String, String)>)>>>,
+        hops: Arc<Mutex<ScriptedHops>>,
+        seen: Arc<Mutex<Vec<ScriptedSeenEntry>>>,
         fetched: Arc<Mutex<u32>>,
     }
 
@@ -806,7 +809,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_body_is_truncated_before_parse() {
         let mut body = br#"<meta property="og:title" content="keep">"#.to_vec();
-        body.extend(std::iter::repeat(b'x').take(RESPONSE_READ_CAP + 8));
+        body.extend(std::iter::repeat_n(b'x', RESPONSE_READ_CAP + 8));
         let client = Scripted::new(&[(
             "https://example.com/big",
             PinnedGet {
