@@ -11,7 +11,7 @@ import {
 
 test("source load caps and page sizes", () => {
   assert.equal(XLSX_MAX_BYTES, 32 * 1024 * 1024);
-  assert.deepEqual(XLSX_LIMITS, { maxExpandedBytes: 32 * 1024 * 1024, maxCells: 100_000, maxRows: 20_000 });
+  assert.deepEqual(XLSX_LIMITS, { maxExpandedBytes: 32 * 1024 * 1024, maxCells: 100_000, maxRows: 20_000, maxEntries: 10_000 });
   assert.equal(XLSX_ROWS_PER_PAGE, 200);
   assert.equal(XLSX_COLS_PER_PAGE, 64);
 });

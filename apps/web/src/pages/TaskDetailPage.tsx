@@ -12,6 +12,7 @@ import {
   type PatchTaskBody,
 } from "@/features/tasks/task-edit-payload";
 import { taskFieldValidationMessage, taskMutationErrorMessage } from "@/features/tasks/task-errors";
+import { settleTaskPatch } from "@/features/tasks/task-patch-cache";
 import { TaskDetailView } from "@/features/tasks/task-detail";
 import { lookupQuery, resolveLookupTarget } from "@/features/tasks/lookup";
 import { taskListQuery, taskQuery, projectLabelsQuery, projectMilestonesQuery } from "@/features/tasks/queries";
@@ -82,10 +83,10 @@ export function TaskDetailPage() {
           body,
         }),
       ),
-    onSuccess: async () => {
+    onSuccess: async (meta) => {
       setFieldError(null);
       setActionError(null);
-      await afterMutation();
+      await settleTaskPatch(queryClient, workspaceId, projectId, meta);
     },
     onError: (err) => {
       setActionError(taskMutationErrorMessage(err));

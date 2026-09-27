@@ -3,13 +3,27 @@ export const XLSX_MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * Source `LOAD_OPTS`: inflated bytes across the whole package, and the cells
- * and rows the parser may model. @office-kit/xlsx enforces all three while it
- * reads (declared sizes, then every inflated chunk; each cell and row before it
- * is built), so nothing is inflated or parsed ahead of these checks.
+ * and rows the parser may model. `openXlsx` checks the package's declared part
+ * sizes and part count first (see `checkXlsxPackage`), because
+ * @office-kit/xlsx's `unzipSync` fallback for a malformed central directory
+ * inflates every part before the library's own post-hoc check. The library's
+ * strict reader then enforces the byte cap on every inflated chunk and the cell
+ * and row caps before each cell and row is built.
  */
 export const XLSX_MAX_EXPANDED_BYTES = 32 * 1024 * 1024;
 export const XLSX_MAX_CELLS = 100_000;
 export const XLSX_MAX_ROWS = 20_000;
+
+/** Package part count cap, as for DOCX (a real workbook has tens of parts). */
+export const XLSX_MAX_ENTRIES = 10_000;
+
+/**
+ * Wall-clock bounds for the parse worker (`xlsx-client.ts`). The declared-size
+ * check cannot bound how long a hostile DEFLATE stream takes to decode, so the
+ * worker is terminated when opening or one page takes longer.
+ */
+export const XLSX_OPEN_TIMEOUT_MS = 20_000;
+export const XLSX_PAGE_TIMEOUT_MS = 10_000;
 
 /** Source paging: one table shows at most 200 rows × 64 columns. */
 export const XLSX_ROWS_PER_PAGE = 200;
@@ -19,12 +33,14 @@ export type XlsxLimits = {
   maxExpandedBytes: number;
   maxCells: number;
   maxRows: number;
+  maxEntries: number;
 };
 
 export const XLSX_LIMITS: XlsxLimits = {
   maxExpandedBytes: XLSX_MAX_EXPANDED_BYTES,
   maxCells: XLSX_MAX_CELLS,
   maxRows: XLSX_MAX_ROWS,
+  maxEntries: XLSX_MAX_ENTRIES,
 };
 
 /** Inclusive 1-based cell box, as @office-kit/xlsx `getValueExtent` returns it. */

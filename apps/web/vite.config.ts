@@ -15,6 +15,7 @@ import {
   rhwpWasmNoticeTitle,
 } from "./src/features/attachments/rhwp-notice.ts";
 import {
+  collectWorkerModuleIds,
   fvociWebLicenseAdapt,
   VITE_LICENSE_DATA_FILE,
 } from "./vite-plugin-fvoci-web-licenses.ts";
@@ -84,7 +85,7 @@ function pdfjsAssets(): Plugin {
   };
 }
 
-/** Upstream crate table for the Rust code compiled into @rhwp/core's wasm. */
+/** Pinned full license texts for the Rust dependencies of @rhwp/core's wasm. */
 function rhwpWasmNotice() {
   const coreDir = path.dirname(createRequire(import.meta.url).resolve("@rhwp/core"));
   const { version } = JSON.parse(
@@ -127,6 +128,9 @@ function officeKitXlsxNotice() {
   };
 }
 
+/** Modules of every web-worker bundle, for the license notice. */
+const workerModuleIds = new Set<string>();
+
 const apiProxyTarget =
   process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
@@ -138,6 +142,7 @@ export default defineConfig({
       repoRoot,
       manifestPath: browserLicenseManifest,
       assetNotices: () => [...pdfjsAssetNotices(), officeKitXlsxNotice(), rhwpWasmNotice()],
+      workerModuleIds: () => workerModuleIds,
     }),
     pdfjsAssets(),
   ],
@@ -163,6 +168,9 @@ export default defineConfig({
         ws: true,
       },
     },
+  },
+  worker: {
+    plugins: () => [collectWorkerModuleIds(workerModuleIds)],
   },
   build: {
     outDir: "dist",
