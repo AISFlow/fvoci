@@ -1,5 +1,8 @@
 #![cfg(feature = "db-tests")]
 
+#[path = "support/office_fixtures.rs"]
+mod office_fixtures;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1918,5 +1921,103 @@ async fn s3_image_preview_is_stored_served_and_reclaimed() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(storage.head(&original).await.unwrap(), None);
     assert_eq!(storage.head(&preview).await.unwrap(), None);
+    harness.cleanup().await;
+}
+
+/// `preview-html` for an office file the extract job has not reached reads
+/// the original back from S3 and parses it in the isolated office child;
+/// nothing is written to the extract columns.
+#[tokio::test]
+async fn s3_preview_html_parses_a_not_yet_extracted_office_file_on_demand() {
+    let harness = TestDb::bootstrap().await;
+    let mut state = app_state_with_part_size(
+        &harness.app_url,
+        s3_backend().await,
+        fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+    )
+    .await;
+    state.preview_extract = Some(fvoci_server::attachments::PreviewExtractor::new(
+        None,
+        Some(std::path::PathBuf::from(env!("CARGO_BIN_EXE_fvoci-server"))),
+    ));
+    let (app, cookie, workspace_id) = setup_session_with_state(&harness, state).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let docx = office_fixtures::docx("S3 회의록", &["<b>S3 즉석 본문</b> & 끝"]);
+
+    let (status, created, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/uploads"),
+        Some(json!({ "name": "memo.docx", "sizeBytes": docx.len() })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create: {created:?}");
+    let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+    let part_url = created["parts"][0]["url"].as_str().unwrap();
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        part_url,
+        Some(docx.clone()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .expect("etag")
+        .to_string();
+    let (status, completed, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete"),
+        Some(json!({ "parts": [{ "partNumber": 1, "etag": etag }] })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "complete: {completed:?}");
+
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let extract_state = |admin: sqlx::PgPool| {
+        let id = Uuid::parse_str(&attachment_id).unwrap();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT row(extract_text, extract_status, extract_attempts, extract_warnings,
+                            extract_lease_token, extract_lease_expires_at, extract_rhwp_rev)::text
+                 FROM fvoci.attachments WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    };
+    let before = extract_state(admin.clone()).await;
+    assert!(before.starts_with("(\"\",pending,0,"), "{before}");
+
+    let (status, body, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/preview-html"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let html = body["html"].as_str().unwrap();
+    assert!(html.starts_with("<pre>S3 회의록"), "{html}");
+    assert!(
+        html.contains("&lt;b&gt;S3 즉석 본문&lt;/b&gt; &amp; 끝"),
+        "{html}"
+    );
+    assert_eq!(extract_state(admin.clone()).await, before);
+    admin.close().await;
     harness.cleanup().await;
 }
