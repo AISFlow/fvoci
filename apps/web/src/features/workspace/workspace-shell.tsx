@@ -7,6 +7,8 @@ import { Label } from "@/components/ui/label";
 import { AuthenticatedLegalNav } from "@/features/legal/operator-info";
 import { SearchCommand } from "@/features/workspace/search-command";
 import { NotificationBell } from "@/features/notifications/notification-bell";
+import { logout as logoutRequest } from "@/features/notifications/push-logout";
+import { usePushSessionRebind } from "@/features/notifications/push-toggle";
 import {
   myTasksPath,
   projectsPath,
@@ -16,7 +18,7 @@ import {
   notificationsPath,
   workspaceHomePath,
 } from "@/lib/href";
-import { api, ProblemError, problemMessage } from "@/lib/api";
+import { ProblemError, problemMessage } from "@/lib/api";
 import { workspacesQuery } from "@/lib/queries";
 import "@/features/workspace/workspace-aux.css";
 
@@ -59,12 +61,13 @@ export function WorkspaceShell({
   const workspaces = useQuery(workspacesQuery);
   const items = workspaces.data?.items ?? [];
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  usePushSessionRebind(workspaceId);
 
   async function logout() {
     setLogoutError(null);
     let result;
     try {
-      result = await api.POST("/api/v1/auth/logout");
+      result = await logoutRequest();
     } catch {
       setLogoutError(t("error.network"));
       return;

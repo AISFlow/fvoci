@@ -412,6 +412,18 @@ pub async fn revoke_session(
     token_hash: &str,
     actor_user_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
+    revoke_session_with_push(pool, token_hash, actor_user_id, None).await
+}
+
+/// Logout: revokes the session and, in the same transaction, disconnects this
+/// browser's Web Push subscription for the session's user (rows registered by
+/// this session plus `push_endpoint` reported by the browser).
+pub async fn revoke_session_with_push(
+    pool: &PgPool,
+    token_hash: &str,
+    actor_user_id: Option<Uuid>,
+    push_endpoint: Option<&str>,
+) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     let session = sqlx::query_as::<_, (Option<Uuid>,)>(
         "SELECT user_id FROM fvoci.app_session_by_token_hash($1)",
@@ -435,15 +447,18 @@ pub async fn revoke_session(
             .bind(session_id)
             .execute(&mut *tx)
             .await?;
-        true
+        Some(session_id)
     } else {
-        false
+        None
     };
 
-    if revoked {
+    if let Some(session_id) = revoked {
         sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
             .execute(&mut *tx)
             .await?;
+        if let Some(user_id) = session.and_then(|s| s.0) {
+            crate::push::disconnect_browser(&mut tx, user_id, session_id, push_endpoint).await?;
+        }
 
         let event_id = Uuid::now_v7();
         append_event(

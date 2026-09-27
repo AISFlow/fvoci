@@ -106,6 +106,7 @@ krilla = { version = "=0.8.2", default-features = false }
 rustybuzz = { version = "=0.20.1", default-features = false, features = ["std"] }
 unicode-linebreak = "=0.1.5"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
+web-push-native = { version = "0.5.0", default-features = false, features = ["vapid"] }
 
 [dev-dependencies]
 tokio-tungstenite = "=0.29.0"
@@ -277,6 +278,11 @@ required-features = ["db-tests"]
 [[test]]
 name = "notification_integration"
 path = "tests/notification_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "push_integration"
+path = "tests/push_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]

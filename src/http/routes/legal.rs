@@ -250,6 +250,9 @@ async fn get_instance(
     )
     .await
     .map_err(internal)?;
+    let vapid_public = crate::push::load_vapid_public_key(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
     let values = snapshot.values;
     let body = InstanceSettingsOutput {
         version: snapshot.revision,
@@ -265,7 +268,7 @@ async fn get_instance(
             features: values.features,
             attachment_preview: values.attachment_preview,
             operator: values.operator,
-            web_push_public_key: None,
+            web_push_public_key: vapid_public,
         },
     };
     let bytes = serde_json::to_vec(&body).map_err(|_| AppError::internal())?;

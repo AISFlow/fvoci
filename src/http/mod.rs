@@ -153,6 +153,7 @@ pub fn router_with_settings(
         .merge(routes::groups::router())
         .merge(routes::lookup::router())
         .merge(routes::notifications::router())
+        .merge(routes::push::router())
         .merge(routes::search::router())
         .merge(routes::unfurl::router(integrations.clone()))
         .merge(routes::tasks::router())

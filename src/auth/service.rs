@@ -7,8 +7,8 @@ use crate::auth::token::hash_token;
 use crate::auth::token::{new_token, SESSION_TTL_SECS};
 use crate::db::identity::{
     authenticate_password, count_users, find_live_session, live_to_session_user,
-    maybe_slide_session, new_setup_input, revoke_session, setup_first_owner, update_profile,
-    ProfilePatch, SetupFirstOwnerResult, SetupSessionParams,
+    maybe_slide_session, new_setup_input, revoke_session_with_push, setup_first_owner,
+    update_profile, ProfilePatch, SetupFirstOwnerResult, SetupSessionParams,
 };
 use crate::db::mfa::{issue_session_or_challenge, IssueOptions, Issued};
 use crate::db::Db;
@@ -104,12 +104,21 @@ impl AuthService {
         Ok(None)
     }
 
+    /// `push_endpoint`: this browser's Web Push endpoint, disconnected with
+    /// the session (see `revoke_session_with_push`).
     pub async fn logout(
         &self,
         token: &str,
         actor_user_id: Option<Uuid>,
+        push_endpoint: Option<&str>,
     ) -> Result<(), sqlx::Error> {
-        revoke_session(&self.db.pool, &hash_token(token), actor_user_id).await
+        revoke_session_with_push(
+            &self.db.pool,
+            &hash_token(token),
+            actor_user_id,
+            push_endpoint,
+        )
+        .await
     }
 
     pub async fn patch_profile(

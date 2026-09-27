@@ -2,6 +2,7 @@ import { t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { Label } from "@/components/ui/label";
+import { PushToggle } from "@/features/notifications/push-toggle";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { notificationPrefsQuery } from "@/lib/queries";
 import "@/features/settings/settings-shell.css";
@@ -74,6 +75,7 @@ export function NotificationPrefsSection({ workspaceId }: { workspaceId: string 
         />
         <Label htmlFor="prefs-mail-digest">{t("notif.prefs.mailDigest")}</Label>
       </label>
+      <PushToggle workspaceId={workspaceId} />
       {save.error ? (
         <p role="alert" className="settings-notice">
           {save.error instanceof ProblemError ? save.error.title : t("settings.save.failed")}

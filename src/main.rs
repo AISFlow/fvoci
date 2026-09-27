@@ -321,12 +321,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("smtp mailer disabled (SMTP_HOST/SMTP_PORT/SMTP_FROM unset)");
     }
-    let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
-    consumers.push(fvoci_server::notifications::notifications_consumer());
-    consumers.push(fvoci_server::mail::mail_consumer(mailer.clone()));
-    if let Some(meili) = config.meili.clone() {
-        consumers.push(fvoci_server::search::index::search_index_consumer(meili));
-    }
     let integrations = Arc::new(fvoci_server::integrations::Integrations::from_env()?);
     tracing::info!(
         webhook_keys = integrations.encryption_keys.is_some(),
@@ -335,6 +329,33 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         ai = integrations.ai.is_some(),
         "integrations configured"
     );
+    let identity = Arc::new(fvoci_server::identity::Identity::from_env(&public_origin)?);
+    if let Err(err) =
+        fvoci_server::push::ensure_vapid_keys(&pool, identity.encryption_keys.as_deref()).await
+    {
+        tracing::warn!(%err, event = "push.skipped", reason = "vapid_keys_missing");
+    }
+    tracing::info!(
+        encryption_keys = identity.encryption_keys.is_some(),
+        oidc_providers = identity.oidc.providers.len(),
+        "identity settings loaded"
+    );
+    let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
+    consumers.push(fvoci_server::notifications::notifications_consumer());
+    consumers.push(fvoci_server::mail::mail_consumer(mailer.clone()));
+    let push_sender = fvoci_server::push::spawn_push_sender(
+        pool.clone(),
+        integrations.outbound.without_allow_list(),
+        identity.encryption_keys.clone(),
+        public_origin.clone(),
+        fvoci_server::push::PushSenderSettings::default(),
+    );
+    consumers.push(fvoci_server::push::push_consumer(Some(
+        push_sender.wake.clone(),
+    )));
+    if let Some(meili) = config.meili.clone() {
+        consumers.push(fvoci_server::search::index::search_index_consumer(meili));
+    }
     consumers.push(fvoci_server::integrations::webhooks::webhooks_consumer());
     let webhook_sender = Some(fvoci_server::integrations::webhooks::spawn_webhook_sender(
         pool.clone(),
@@ -414,12 +435,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let import_job =
         import_settings.map(|settings| spawn_import_job(pool.clone(), settings, storage.clone()));
     let import_wake = import_job.as_ref().map(|job| job.wake.clone());
-    let identity = Arc::new(fvoci_server::identity::Identity::from_env(&public_origin)?);
-    tracing::info!(
-        encryption_keys = identity.encryption_keys.is_some(),
-        oidc_providers = identity.oidc.providers.len(),
-        "identity settings loaded"
-    );
     let stream_hub = AppState::fresh_streams();
     let state = AppState {
         auth: Arc::new(AuthService {
@@ -450,6 +465,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let preview_task = Arc::new(tokio::sync::Mutex::new(preview_job));
     let outbox_task = Arc::new(tokio::sync::Mutex::new(outbox_dispatcher));
     let webhook_task = Arc::new(tokio::sync::Mutex::new(webhook_sender));
+    let push_task = Arc::new(tokio::sync::Mutex::new(Some(push_sender)));
     let maintenance_task = Arc::new(tokio::sync::Mutex::new(maintenance));
     let import_task = Arc::new(tokio::sync::Mutex::new(import_job));
     let collab_for_signal = collab.clone();
@@ -458,6 +474,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let preview_task_for_signal = preview_task.clone();
     let outbox_task_for_signal = outbox_task.clone();
     let webhook_task_for_signal = webhook_task.clone();
+    let push_task_for_signal = push_task.clone();
     let maintenance_task_for_signal = maintenance_task.clone();
     let import_task_for_signal = import_task.clone();
     let streams_for_signal = stream_hub.clone();
@@ -483,6 +500,9 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 tracing::info!("outbox dispatcher shutdown started concurrently with HTTP drain");
             }
             if let Some(job) = webhook_task_for_signal.lock().await.as_ref() {
+                job.request_shutdown();
+            }
+            if let Some(job) = push_task_for_signal.lock().await.as_ref() {
                 job.request_shutdown();
             }
             if let Some(job) = import_task_for_signal.lock().await.as_ref() {
@@ -533,7 +553,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                 async {
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task, &preview_task).await;
-                    let outbox = join_outbox_finished(&outbox_task, &webhook_task).await;
+                    let outbox = join_outbox_finished(&outbox_task, &webhook_task, &push_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
                     let import = join_import_finished(&import_task).await;
                     drain_pool.close().await;
@@ -566,7 +586,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
                     let serve = map_serve_result(serve_task.await);
                     let hub = join_hub_finished(&hub_task, collab.clone()).await;
                     let extract = join_extract_finished(&extract_task, &preview_task).await;
-                    let outbox = join_outbox_finished(&outbox_task, &webhook_task).await;
+                    let outbox = join_outbox_finished(&outbox_task, &webhook_task, &push_task).await;
                     let maintenance = join_maintenance_finished(&maintenance_task).await;
                     let import = join_import_finished(&import_task).await;
                     drain_pool.close().await;
@@ -616,8 +636,13 @@ async fn join_extract_finished(
 async fn join_outbox_finished(
     outbox_task: &tokio::sync::Mutex<Option<OutboxDispatcherHandle>>,
     webhook_task: &tokio::sync::Mutex<Option<WebhookSenderHandle>>,
+    push_task: &tokio::sync::Mutex<Option<fvoci_server::push::PushSenderHandle>>,
 ) -> Result<(), String> {
     if let Some(job) = webhook_task.lock().await.take() {
+        job.request_shutdown();
+        job.join().await?;
+    }
+    if let Some(job) = push_task.lock().await.take() {
         job.request_shutdown();
         job.join().await?;
     }

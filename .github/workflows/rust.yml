@@ -99,7 +99,7 @@ jobs:
           - runner: ubuntu-24.04
             check: postgres
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili
           - runner: ubuntu-24.04
             check: postgres-b
             shard: b
@@ -107,7 +107,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             check: postgres-arm64
             shard: a
-            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili
           - runner: ubuntu-24.04-arm
             check: postgres-arm64-b
             shard: b
