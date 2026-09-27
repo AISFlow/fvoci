@@ -4443,3 +4443,585 @@ async fn server_exits_when_app_grants_are_missing() {
     let _ = std::fs::remove_dir_all(storage_root);
     drop_ungranted(db).await;
 }
+
+// PostgreSQL 16/17 uuidv7() compatibility (src/db/migrate.rs preflight).
+
+struct EmptyDb {
+    server_url: String,
+    admin_url: String,
+    db_name: String,
+}
+
+impl EmptyDb {
+    async fn create() -> Self {
+        let admin_base = std::env::var("TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
+            .expect("TEST_DATABASE_URL missing");
+        let server_url = server_db_url(&admin_base);
+        let db_name = format!("fvoci_test_{}", Uuid::now_v7().simple());
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&server_url)
+            .await
+            .expect("connect admin");
+        sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+            .execute(&pool)
+            .await
+            .expect("create database");
+        pool.close().await;
+        let admin_url = join_db_url(&server_url, &db_name);
+        Self {
+            server_url,
+            admin_url,
+            db_name,
+        }
+    }
+
+    async fn remove(self, roles: &[&str]) {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.server_url)
+            .await
+            .expect("connect server");
+        sqlx::query(&format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
+            self.db_name
+        ))
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
+            .execute(&pool)
+            .await
+            .expect("drop database");
+        for role in roles {
+            sqlx::query(&format!("DROP ROLE IF EXISTS \"{role}\""))
+                .execute(&pool)
+                .await
+                .expect("drop role");
+        }
+        pool.close().await;
+    }
+}
+
+async fn server_version_num(pool: &PgPool) -> i32 {
+    sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn db_clock_ms(pool: &PgPool) -> u64 {
+    let ms: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::int8")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    u64::try_from(ms).unwrap()
+}
+
+async fn public_uuidv7(pool: &PgPool) -> Option<String> {
+    sqlx::query_scalar("SELECT to_regprocedure('public.uuidv7()')::oid::text")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn fvoci_schema_exists(pool: &PgPool) -> bool {
+    sqlx::query_scalar("SELECT to_regnamespace('fvoci') IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Checks an id against the maintained `uuid` crate: RFC 9562 version 7,
+/// RFC variant, and a Unix-millisecond field inside the DB clock window. The
+/// id must equal the crate's own v7 layout for that millisecond and its
+/// remaining 74 bits.
+fn assert_rfc_uuidv7(id: Uuid, lower_ms: u64, upper_ms: u64) {
+    assert_eq!(
+        id.get_version(),
+        Some(uuid::Version::SortRand),
+        "{id} is not v7"
+    );
+    assert_eq!(id.get_variant(), uuid::Variant::RFC4122, "{id} variant");
+    let (secs, nanos) = id.get_timestamp().expect("v7 timestamp").to_unix();
+    let ms = secs * 1000 + u64::from(nanos / 1_000_000);
+    assert!(
+        (lower_ms..=upper_ms).contains(&ms),
+        "{id} time {ms} outside [{lower_ms}, {upper_ms}]"
+    );
+    let rand: [u8; 10] = id.as_bytes()[6..].try_into().unwrap();
+    assert_eq!(
+        uuid::Builder::from_unix_timestamp_millis(ms, &rand).into_uuid(),
+        id
+    );
+}
+
+async fn id_default_expressions(pool: &PgPool) -> Vec<(String, String)> {
+    let mut tx = pool.begin().await.unwrap();
+    // Only pg_catalog is visible, so a public function prints qualified.
+    sqlx::query("SET LOCAL search_path = pg_catalog")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT c.relname::text, pg_get_expr(d.adbin, d.adrelid)
+         FROM pg_attrdef d
+         JOIN pg_class c ON c.oid = d.adrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+         WHERE n.nspname = 'fvoci' AND a.attname = 'id'
+           AND c.relname IN ('notifications', 'push_subscriptions', 'push_deliveries')
+         ORDER BY c.relname",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    rows
+}
+
+#[tokio::test]
+async fn uuidv7_compat_shim_matches_server_major_and_serves_app_defaults() {
+    let harness = TestDb::bootstrap().await;
+    let (_, _, owner_id) = setup_session(&harness).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let major = server_version_num(&admin).await / 10_000;
+    let expected_default = if major >= 18 {
+        "uuidv7()"
+    } else {
+        "public.uuidv7()"
+    };
+    let defaults = id_default_expressions(&admin).await;
+    assert_eq!(defaults.len(), 3, "{defaults:?}");
+    for (table, expr) in &defaults {
+        assert_eq!(expr, expected_default, "PG{major} {table} id default");
+    }
+
+    if major >= 18 {
+        assert_eq!(
+            public_uuidv7(&admin).await,
+            None,
+            "PG18 must not get a shim"
+        );
+    } else {
+        let (owned, secdef, volatile, parallel, config, result, app_exec): (
+            bool,
+            bool,
+            String,
+            String,
+            Vec<String>,
+            String,
+            bool,
+        ) = sqlx::query_as(
+            "SELECT pg_get_userbyid(p.proowner) = current_user, p.prosecdef,
+                    p.provolatile::text, p.proparallel::text, p.proconfig,
+                    pg_get_function_result(p.oid),
+                    has_function_privilege($1::name, p.oid, 'EXECUTE')
+             FROM pg_proc p WHERE p.oid = 'public.uuidv7()'::regprocedure",
+        )
+        .bind(&harness.role_name)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert!(owned, "shim must be owned by the migration role");
+        assert!(!secdef, "shim must be SECURITY INVOKER");
+        assert_eq!((volatile.as_str(), parallel.as_str()), ("v", "s"));
+        assert_eq!(config, vec!["search_path=pg_catalog, pg_temp".to_string()]);
+        assert_eq!(result, "uuid");
+        assert!(app_exec, "app role must execute the default function");
+    }
+
+    // Direct calls: version, variant, time bounds, uniqueness, and ordering
+    // across a millisecond boundary. Same-millisecond order is not asserted.
+    let lower = db_clock_ms(&admin).await;
+    let first: Vec<Uuid> = sqlx::query_scalar("SELECT uuidv7() FROM generate_series(1, 1000)")
+        .fetch_all(&admin)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_sleep(0.002)")
+        .execute(&admin)
+        .await
+        .unwrap();
+    let second: Vec<Uuid> = sqlx::query_scalar("SELECT uuidv7() FROM generate_series(1, 1000)")
+        .fetch_all(&admin)
+        .await
+        .unwrap();
+    let upper = db_clock_ms(&admin).await;
+    let mut seen = std::collections::HashSet::new();
+    for id in first.iter().chain(&second) {
+        assert_rfc_uuidv7(*id, lower, upper);
+        assert!(seen.insert(*id), "duplicate {id}");
+    }
+    assert!(first.iter().max().unwrap() < second.iter().min().unwrap());
+
+    // DEFAULT inserts through the app role: push rows without an id column.
+    let (session_id, workspace_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT s.id, m.workspace_id FROM fvoci.sessions s
+         JOIN fvoci.memberships m ON m.user_id = s.user_id
+         WHERE s.user_id = $1 LIMIT 1",
+    )
+    .bind(owner_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let app = pool::connect_app(&harness.app_url).await.unwrap();
+    let lower = db_clock_ms(&admin).await;
+    let mut subscriptions = Vec::new();
+    let mut deliveries = Vec::new();
+    for n in 0..3 {
+        let subscription: Uuid = sqlx::query_scalar(
+            "INSERT INTO fvoci.push_subscriptions (user_id, endpoint, p256dh, auth, session_id)
+             VALUES ($1, $2, repeat('A', 87), repeat('B', 22), $3) RETURNING id",
+        )
+        .bind(owner_id)
+        .bind(format!("https://push.example.test/{n}"))
+        .bind(session_id)
+        .fetch_one(&app)
+        .await
+        .unwrap();
+        subscriptions.push(subscription);
+    }
+    for subscription in &subscriptions {
+        let mut tx = app.begin().await.unwrap();
+        sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let delivery: Uuid = sqlx::query_scalar(
+            "INSERT INTO fvoci.push_deliveries (event_id, workspace_id, user_id, subscription_id)
+             VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(owner_id)
+        .bind(subscription)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        deliveries.push(delivery);
+        sqlx::query("SELECT pg_sleep(0.002)")
+            .execute(&app)
+            .await
+            .unwrap();
+    }
+    let notification: Uuid = sqlx::query_scalar(
+        "INSERT INTO fvoci.notifications (workspace_id, user_id, event_id, verb)
+         VALUES ($1, $2, $3, 'uuidv7.compat') RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(owner_id)
+    .bind(Uuid::now_v7())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let upper = db_clock_ms(&admin).await;
+    for id in subscriptions
+        .iter()
+        .chain(&deliveries)
+        .chain(std::iter::once(&notification))
+    {
+        assert_rfc_uuidv7(*id, lower, upper);
+    }
+    // Deliveries inserted at least 2 ms apart are claimed in insertion order.
+    let mut tx = app.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let claim_order: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM fvoci.push_deliveries ORDER BY id")
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(claim_order, deliveries);
+
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn uuidv7_compat_upgrades_pre_016_database_and_reruns_idempotently() {
+    let db = EmptyDb::create().await;
+    migrate::run_migrations_through(&db.admin_url, 15)
+        .await
+        .expect("migrate through 015");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db.admin_url)
+        .await
+        .unwrap();
+    let major = server_version_num(&admin).await / 10_000;
+    if major >= 18 {
+        assert_eq!(public_uuidv7(&admin).await, None);
+    } else {
+        // A 015 database written by a binary without the shim.
+        assert!(public_uuidv7(&admin).await.is_some());
+        sqlx::query("DROP FUNCTION public.uuidv7()")
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    let (user_a, user_b, workspace, project) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    sqlx::query(
+        "INSERT INTO fvoci.users (id, email, given_name)
+         VALUES ($1, 'a@example.test', 'A'), ($2, 'b@example.test', 'B')",
+    )
+    .bind(user_a)
+    .bind(user_b)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, 'uuid-compat', 'U')")
+        .bind(workspace)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role)
+         VALUES ($1, $2, 'owner'), ($1, $3, 'member')",
+    )
+    .bind(workspace)
+    .bind(user_a)
+    .bind(user_b)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.projects (id, workspace_id, key, name, visibility, created_by)
+         VALUES ($1, $2, 'UC', 'U', 'workspace', $3)",
+    )
+    .bind(project)
+    .bind(workspace)
+    .bind(user_a)
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.project_members (workspace_id, project_id, user_id, role)
+         VALUES ($1, $2, $3, 'lead'), ($1, $2, $4, 'member')",
+    )
+    .bind(workspace)
+    .bind(project)
+    .bind(user_a)
+    .bind(user_b)
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    let lower = db_clock_ms(&admin).await;
+    migrate::run_migrations(&db.admin_url)
+        .await
+        .expect("upgrade 015 database");
+    let upper = db_clock_ms(&admin).await;
+    let backfilled: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM fvoci.project_members")
+        .fetch_all(&admin)
+        .await
+        .unwrap();
+    assert_eq!(backfilled.len(), 2);
+    assert_ne!(backfilled[0], backfilled[1]);
+    for id in &backfilled {
+        assert_rfc_uuidv7(*id, lower, upper);
+    }
+    let shim = public_uuidv7(&admin).await;
+    assert_eq!(shim.is_some(), major < 18, "PG{major} shim presence");
+
+    migrate::run_migrations(&db.admin_url).await.expect("rerun");
+    assert_eq!(
+        public_uuidv7(&admin).await,
+        shim,
+        "rerun must keep the shim"
+    );
+    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.schema_migrations")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(versions, migrate::compiled_migration_count() as i64);
+    admin.close().await;
+    db.remove(&[]).await;
+}
+
+#[tokio::test]
+async fn uuidv7_compat_preflight_fails_closed_on_foreign_or_altered_function() {
+    let db = EmptyDb::create().await;
+    let foreign_role = format!("fvoci_foreign_{}", Uuid::now_v7().simple());
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db.admin_url)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE ROLE \"{foreign_role}\" NOLOGIN"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let major = server_version_num(&admin).await / 10_000;
+    let exec = |sql: String| {
+        let admin = admin.clone();
+        async move {
+            sqlx::query(&sql).execute(&admin).await.unwrap();
+        }
+    };
+    let foreign_body = "CREATE FUNCTION public.uuidv7() RETURNS uuid LANGUAGE sql VOLATILE AS 'SELECT gen_random_uuid()'";
+
+    if major >= 18 {
+        // PG18 resolves the built-in first and the preflight never touches public.
+        exec(foreign_body.to_string()).await;
+        exec(format!(
+            "ALTER FUNCTION public.uuidv7() OWNER TO \"{foreign_role}\""
+        ))
+        .await;
+        let before = public_uuidv7(&admin).await;
+        migrate::run_migrations(&db.admin_url)
+            .await
+            .expect("PG18 migrate");
+        assert_eq!(public_uuidv7(&admin).await, before);
+        let owner: String = sqlx::query_scalar(
+            "SELECT pg_get_userbyid(proowner)::text FROM pg_proc WHERE oid = 'public.uuidv7()'::regprocedure",
+        )
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(owner, foreign_role);
+        for (table, expr) in id_default_expressions(&admin).await {
+            assert_eq!(expr, "uuidv7()", "{table} must use the PG18 built-in");
+        }
+        admin.close().await;
+        db.remove(&[foreign_role.as_str()]).await;
+        return;
+    }
+
+    // Each case must fail before any migration runs and leave the offending
+    // object as it was.
+    migrate::run_migrations_through(&db.admin_url, 0)
+        .await
+        .expect("preflight creates shim");
+    let shim_def: String =
+        sqlx::query_scalar("SELECT pg_get_functiondef('public.uuidv7()'::regprocedure)")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let cases: Vec<(&str, Vec<String>, &str, &str)> = vec![
+        (
+            "same body, foreign owner",
+            vec![format!(
+                "ALTER FUNCTION public.uuidv7() OWNER TO \"{foreign_role}\""
+            )],
+            "not the FVOCI shim",
+            "SELECT pg_get_userbyid(proowner)::text FROM pg_proc WHERE oid = to_regprocedure('public.uuidv7()')",
+        ),
+        (
+            "foreign function created before migrations",
+            vec![
+                "DROP FUNCTION public.uuidv7()".into(),
+                foreign_body.into(),
+                format!("ALTER FUNCTION public.uuidv7() OWNER TO \"{foreign_role}\""),
+            ],
+            "not the FVOCI shim",
+            "SELECT pg_get_userbyid(proowner)::text || ':' || prosrc FROM pg_proc WHERE oid = to_regprocedure('public.uuidv7()')",
+        ),
+        (
+            "same owner, volatile uuid, wrong body",
+            vec![
+                "DROP FUNCTION public.uuidv7()".into(),
+                foreign_body.into(),
+            ],
+            "not the FVOCI shim",
+            "SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('public.uuidv7()')",
+        ),
+        (
+            "security definer",
+            vec!["ALTER FUNCTION public.uuidv7() SECURITY DEFINER".into()],
+            "not the FVOCI shim",
+            "SELECT prosecdef::text FROM pg_proc WHERE oid = to_regprocedure('public.uuidv7()')",
+        ),
+        (
+            "search_path reset",
+            vec!["ALTER FUNCTION public.uuidv7() RESET search_path".into()],
+            "not the FVOCI shim",
+            "SELECT coalesce(proconfig::text, 'none') FROM pg_proc WHERE oid = to_regprocedure('public.uuidv7()')",
+        ),
+        (
+            "defaulted overload",
+            vec![
+                "DROP FUNCTION public.uuidv7()".into(),
+                "CREATE FUNCTION public.uuidv7(shift integer DEFAULT 0) RETURNS uuid LANGUAGE sql VOLATILE AS 'SELECT gen_random_uuid()'".into(),
+            ],
+            "public.uuidv7(integer)",
+            "SELECT count(*)::text || ':' || coalesce(to_regprocedure('public.uuidv7()')::text, 'none') FROM pg_proc WHERE proname = 'uuidv7'",
+        ),
+        (
+            "shadowing schema earlier on the search_path",
+            vec![
+                "CREATE SCHEMA uuid_shadow".into(),
+                "CREATE FUNCTION uuid_shadow.uuidv7() RETURNS uuid LANGUAGE sql VOLATILE AS 'SELECT gen_random_uuid()'".into(),
+                format!("ALTER DATABASE \"{}\" SET search_path = uuid_shadow, public", db.db_name),
+            ],
+            "uuid_shadow.uuidv7()",
+            "SELECT count(*)::text FROM pg_proc WHERE proname = 'uuidv7'",
+        ),
+        (
+            "public missing from the search_path",
+            vec![format!("ALTER DATABASE \"{}\" SET search_path = pg_catalog", db.db_name)],
+            "not on the migration search_path",
+            "SELECT coalesce(to_regprocedure('public.uuidv7()')::text, 'none')",
+        ),
+    ];
+    for (name, setup, message, probe) in cases {
+        for sql in setup {
+            exec(sql).await;
+        }
+        let before: String = sqlx::query_scalar(probe).fetch_one(&admin).await.unwrap();
+        let error = migrate::run_migrations(&db.admin_url)
+            .await
+            .expect_err(name)
+            .to_string();
+        assert!(error.contains(message), "{name}: {error}");
+        let after: String = sqlx::query_scalar(probe).fetch_one(&admin).await.unwrap();
+        assert_eq!(after, before, "{name} must not change the object");
+        assert!(
+            !fvoci_schema_exists(&admin).await,
+            "{name} applied a migration"
+        );
+        // Return to the shim-only state.
+        exec(format!(
+            "ALTER DATABASE \"{}\" RESET search_path",
+            db.db_name
+        ))
+        .await;
+        exec("DROP SCHEMA IF EXISTS uuid_shadow CASCADE".into()).await;
+        exec("DROP FUNCTION IF EXISTS public.uuidv7(integer)".into()).await;
+        exec("DROP FUNCTION IF EXISTS public.uuidv7()".into()).await;
+        migrate::run_migrations_through(&db.admin_url, 0)
+            .await
+            .expect("preflight on clean state");
+    }
+    // The shim as pg_dump/pg_get_functiondef recreates it (same owner) is reused.
+    exec("DROP FUNCTION public.uuidv7()".into()).await;
+    exec(shim_def).await;
+    let restored = public_uuidv7(&admin).await;
+
+    migrate::run_migrations(&db.admin_url)
+        .await
+        .expect("clean state migrates");
+    assert_eq!(public_uuidv7(&admin).await, restored);
+    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM fvoci.schema_migrations")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(versions, migrate::compiled_migration_count() as i64);
+    admin.close().await;
+    db.remove(&[foreign_role.as_str()]).await;
+}
