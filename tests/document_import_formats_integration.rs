@@ -14,6 +14,9 @@ mod import_harness;
 #[path = "support/office_fixtures.rs"]
 mod office_fixtures;
 
+#[path = "support/license.rs"]
+mod license_fixture;
+
 use axum::http::StatusCode;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use fvoci_server::db::context::defer_import_events;
@@ -604,10 +607,38 @@ async fn storage_quota_refuses_imported_assets_and_compensates() {
     let docs_before = fx.document_count().await;
     let job_id = notion_import(&fx, notion_zip("x@example.com", None), None).await;
     let settings = ImportJobSettings {
-        quota: StorageQuota {
-            storage_bytes: QuotaLimit::Bytes(8),
-            upload_bytes: QuotaLimit::Unlimited,
-        },
+        quota: StorageQuota::fixed(QuotaLimit::Bytes(8), QuotaLimit::Unlimited),
+        ..fx.settings.clone()
+    };
+    assert!(
+        run_next_import(&fx.pool, &settings, &fx.storage, &CancellationToken::new())
+            .await
+            .unwrap()
+    );
+    assert_eq!(job_state(&fx.admin, job_id).await.0, "failed");
+    assert_eq!(fx.document_count().await, docs_before);
+    assert_eq!(
+        count(
+            &fx.admin,
+            "SELECT count(*) FROM fvoci.attachments WHERE workspace_id = $1",
+            fx.workspace_id
+        )
+        .await,
+        0
+    );
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn signed_license_storage_limit_refuses_imported_asset_and_compensates() {
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let docs_before = fx.document_count().await;
+    let job_id = notion_import(&fx, notion_zip("x@example.com", None), None).await;
+    let settings = ImportJobSettings {
+        quota: StorageQuota::from_license(license_fixture::signed_license_with_limits(
+            json!({"storageBytes": 8}),
+        )),
         ..fx.settings.clone()
     };
     assert!(

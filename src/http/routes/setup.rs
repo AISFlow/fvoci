@@ -28,11 +28,15 @@ async fn setup_status(
     Ok(Json(SetupStatusResponse {
         needed,
         branding: BrandingOutput {
-            name: crate::settings::current_values(&state.auth.db.pool, &state.branding_name)
-                .await
-                .map_err(internal)?
-                .branding
-                .name,
+            name: crate::settings::current_values_with_license(
+                &state.auth.db.pool,
+                &state.branding_name,
+                &state.auth.db.license,
+            )
+            .await
+            .map_err(internal)?
+            .branding
+            .name,
         },
         mail_enabled: state.mailer.enabled(),
     }))

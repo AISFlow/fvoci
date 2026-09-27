@@ -585,7 +585,11 @@ pub struct JitInput<'a> {
 /// Source `tryJitJoin` transaction: under the admission lock, recheck the
 /// workspace, the domain and the free email, admit the seat, then create
 /// the password-less account, its membership and its link together.
-pub async fn jit_join(pool: &PgPool, input: JitInput<'_>) -> Result<JitOutcome, sqlx::Error> {
+pub async fn jit_join(
+    pool: &PgPool,
+    license: &crate::license::Entitlements,
+    input: JitInput<'_>,
+) -> Result<JitOutcome, sqlx::Error> {
     let user_id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;
@@ -610,7 +614,7 @@ pub async fn jit_join(pool: &PgPool, input: JitInput<'_>) -> Result<JitOutcome, 
         tx.rollback().await?;
         return Ok(JitOutcome::Skipped);
     }
-    if require_membership_admission(&mut tx, user_id, WorkspaceRole::Member, None)
+    if require_membership_admission(&mut tx, user_id, WorkspaceRole::Member, None, license)
         .await?
         .is_err()
     {

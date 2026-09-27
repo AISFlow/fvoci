@@ -90,6 +90,13 @@ struct NewAccount {
     defaults: crate::settings::DefaultsUserSettings,
 }
 
+struct GrantDetails<'a> {
+    new_account: Option<NewAccount>,
+    link: Option<&'a crate::db::oidc::NewLink<'a>>,
+    client_ip: Option<&'a str>,
+    consents: &'a [(String, i32)],
+}
+
 pub async fn remove_pending_by_inviter(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -259,6 +266,7 @@ pub async fn get_invitation_public(
 
 pub async fn accept_invitation(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     keys: &Keyring,
     raw_token: &str,
     request: AcceptInvitationRequest<'_>,
@@ -326,12 +334,15 @@ pub async fn accept_invitation(
 
     if let Err(err) = grant_membership(
         pool,
+        license,
         &invitation,
         user_id,
-        new_account,
-        None,
-        request.client_ip,
-        request.consents,
+        GrantDetails {
+            new_account,
+            link: None,
+            client_ip: request.client_ip,
+            consents: request.consents,
+        },
     )
     .await?
     {
@@ -374,6 +385,7 @@ pub struct IdentityAcceptRequest<'a> {
 /// caller issues the session through the MFA gate.
 pub async fn accept_invitation_with_identity(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     request: IdentityAcceptRequest<'_>,
 ) -> Result<Result<Uuid, InvitationDbError>, sqlx::Error> {
     let invitation = match load_invitation_by_hash(pool, request.token_hash).await? {
@@ -397,12 +409,15 @@ pub async fn accept_invitation_with_identity(
         }
         return Ok(grant_membership(
             pool,
+            license,
             &invitation,
             user_id,
-            None,
-            None,
-            request.client_ip,
-            request.consents,
+            GrantDetails {
+                new_account: None,
+                link: None,
+                client_ip: request.client_ip,
+                consents: request.consents,
+            },
         )
         .await?
         .map(|()| user_id));
@@ -437,12 +452,15 @@ pub async fn accept_invitation_with_identity(
     };
     Ok(grant_membership(
         pool,
+        license,
         &invitation,
         user_id,
-        Some(new_account),
-        Some(&link),
-        request.client_ip,
-        request.consents,
+        GrantDetails {
+            new_account: Some(new_account),
+            link: Some(&link),
+            client_ip: request.client_ip,
+            consents: request.consents,
+        },
     )
     .await?
     .map(|()| user_id))
@@ -455,13 +473,17 @@ pub fn email_local_part(email: &str) -> String {
 
 async fn grant_membership(
     pool: &PgPool,
+    license: &crate::license::Entitlements,
     invitation: &InvitationRow,
     user_id: Uuid,
-    new_account: Option<NewAccount>,
-    link: Option<&crate::db::oidc::NewLink<'_>>,
-    client_ip: Option<&str>,
-    consents: &[(String, i32)],
+    details: GrantDetails<'_>,
 ) -> Result<Result<(), InvitationDbError>, sqlx::Error> {
+    let GrantDetails {
+        new_account,
+        link,
+        client_ip,
+        consents,
+    } = details;
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;
     set_tenant(&mut tx, invitation.workspace_id).await?;
@@ -536,7 +558,8 @@ async fn grant_membership(
         .await?
         .is_some();
     if !already_member {
-        if let Err(err) = require_membership_admission(&mut tx, user_id, current.role, None).await?
+        if let Err(err) =
+            require_membership_admission(&mut tx, user_id, current.role, None, license).await?
         {
             tx.rollback().await?;
             return Ok(Err(quota_error(err)));

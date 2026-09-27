@@ -21,6 +21,7 @@ pub enum ProblemCode {
     AssigneeIsNotAMember,
     NotFound,
     InsufficientPermissions,
+    EnterpriseLicenseRequired,
     PersonalWorkspaceImmutable,
     WorkspaceLastOwnerRequired,
     WorkspaceMemberSelfChangeForbidden,
@@ -90,6 +91,7 @@ impl ProblemCode {
             Self::AssigneeIsNotAMember => "assignee_is_not_a_member",
             Self::NotFound => "not_found",
             Self::InsufficientPermissions => "insufficient_permissions",
+            Self::EnterpriseLicenseRequired => "enterprise_license_required",
             Self::PersonalWorkspaceImmutable => "personal_workspace_is_immutable",
             Self::WorkspaceLastOwnerRequired => "workspace_last_owner_required",
             Self::WorkspaceMemberSelfChangeForbidden => "workspace_member_self_change_forbidden",
@@ -165,6 +167,7 @@ impl ProblemCode {
             Self::AssigneeIsNotAMember => "assignee is not a member",
             Self::NotFound => "not found",
             Self::InsufficientPermissions => "insufficient permissions",
+            Self::EnterpriseLicenseRequired => "enterprise license required",
             Self::PersonalWorkspaceImmutable => "personal workspace is immutable",
             Self::WorkspaceLastOwnerRequired => "workspace must retain an owner",
             Self::WorkspaceMemberSelfChangeForbidden => {
@@ -254,6 +257,7 @@ impl ProblemCode {
             | Self::WorkspaceLastOwnerRequired
             | Self::WorkspaceMemberSelfChangeForbidden => StatusCode::CONFLICT,
             Self::InsufficientPermissions
+            | Self::EnterpriseLicenseRequired
             | Self::CannotManageRoleAboveOwn
             | Self::CannotInviteARoleAboveYourOwn
             | Self::OnlyTheUploaderMayContinueThisUpload
