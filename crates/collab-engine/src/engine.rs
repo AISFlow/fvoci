@@ -82,6 +82,9 @@ impl CollabEngine {
             Request::Project { .. } => self.project(),
             Request::RevisionSnapshot => self.revision_snapshot(),
             Request::RevisionSnapshotsEqual { left_b64, right_b64 } => {
+                if let Err(st) = Request::preflight(req, &self.limits) {
+                    return st;
+                }
                 self.revision_snapshots_equal(left_b64, right_b64)
             }
             Request::RestoreFromSnapshot { snap_b64, .. } => self.restore_from_snapshot(snap_b64),
@@ -284,7 +287,24 @@ impl CollabEngine {
         if let Err(st) = self.bump_op() {
             return st;
         }
-        let equal = revision_snapshots_semantically_equal(left, right);
+        if let Err(st) = self.cap_input(left, "left_b64") {
+            return st;
+        }
+        if let Err(st) = self.cap_input(right, "right_b64") {
+            return st;
+        }
+        if left == right {
+            return self.ok_applied(Some(vec![1]));
+        }
+        let left_snap = match Snapshot::decode_v1(left) {
+            Ok(snap) => snap,
+            Err(err) => return classify_decode(err.into(), "left snapshot"),
+        };
+        let right_snap = match Snapshot::decode_v1(right) {
+            Ok(snap) => snap,
+            Err(err) => return classify_decode(err.into(), "right snapshot"),
+        };
+        let equal = left_snap == right_snap;
         self.ok_applied(Some(if equal { vec![1] } else { vec![0] }))
     }
 

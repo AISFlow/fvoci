@@ -28,11 +28,10 @@ use crate::collab::config::CollabConfig;
 use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
-use crate::collab::revision::{
-    capture_revision_offline, prepare_revision_text, revision_snapshots_semantically_equal_offline,
-};
+use crate::collab::revision::prepare_revision_text;
 use crate::db::revisions::{
-    create_system_revision, latest_revision_y_snapshot, CreateRevisionInput, RevisionTarget,
+    create_system_revision, latest_revision_y_snapshot, CreateRevisionInput, RevisionDbError,
+    RevisionTarget, SystemRevisionHead, SYSTEM_REVISION_HEAD_RETRIES,
 };
 use crate::collab::validation::{
     classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
@@ -1116,7 +1115,23 @@ struct RoomActor {
     /// Set when the dedicated fence connection is lost; actor exits once empty.
     fence_lost: bool,
     user_reject_budgets: HashMap<Uuid, UserRejectBudget>,
-    session_revision_in_flight: bool,
+    session_revision: Option<SessionRevisionState>,
+}
+
+enum SessionRevisionPhase {
+    Capture,
+    ReadHead,
+    Compare,
+    Insert,
+}
+
+struct SessionRevisionState {
+    writer_generation: i64,
+    phase: SessionRevisionPhase,
+    captured: Option<CapturedRevision>,
+    prev_snap: Option<Vec<u8>>,
+    head_fence: Option<SystemRevisionHead>,
+    head_retries: u32,
 }
 
 pub async fn spawn_room(
@@ -1174,7 +1189,7 @@ pub async fn spawn_room(
         flushing_awareness: false,
         fence_lost: false,
         user_reject_budgets: HashMap::new(),
-        session_revision_in_flight: false,
+        session_revision: None,
     };
     tokio::spawn(async move {
         let mut actor = actor;
@@ -1319,6 +1334,7 @@ impl RoomActor {
                         }
                         Some(RoomCommand::Shutdown) => {
                             self.shutting_down = true;
+                            self.session_revision = None;
                             break;
                         }
                         #[cfg(feature = "db-tests")]
@@ -1340,6 +1356,9 @@ impl RoomActor {
                 }
             }
             self.publish_live_conns();
+            if self.session_revision.is_some() {
+                let _ = self.advance_session_revision().await;
+            }
             if self.fence_lost && self.connections.is_empty() {
                 break;
             }
@@ -1499,7 +1518,7 @@ impl RoomActor {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
-        self.maybe_session_revision_on_last_disconnect().await;
+        self.try_schedule_session_revision();
     }
 
     async fn close_connection_ordered(&mut self, conn_id: Uuid, code: u16, reason: &str) {
@@ -1507,7 +1526,7 @@ impl RoomActor {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
-        self.maybe_session_revision_on_last_disconnect().await;
+        self.try_schedule_session_revision();
     }
 
     fn revision_target(&self) -> RevisionTarget {
@@ -1517,118 +1536,257 @@ impl RoomActor {
         }
     }
 
-    async fn maybe_session_revision_on_last_disconnect(&mut self) {
+    fn session_revision_aborted(&self) -> bool {
+        self.shutting_down
+            || self.fence_lost
+            || !self.connections.is_empty()
+            || !self.committed_loaded
+    }
+
+    async fn capture_committed_revision_primary(
+        &mut self,
+    ) -> Result<CapturedRevision, RevisionCaptureError> {
+        self.reload_primary_from_committed()
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?;
+        if self.ensure_primary_capacity().await.is_err() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
+        let snap = match self.engine.call(Request::RevisionSnapshot).await {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    update_b64: Some(bytes),
+                    ..
+                } => b64::decode(&bytes).map_err(|_| RevisionCaptureError::Unavailable)?,
+                _ => return Err(RevisionCaptureError::Unavailable),
+            },
+            Err(_) => return Err(RevisionCaptureError::Unavailable),
+        };
+        let content_json = match self.engine.call(Request::Project { encoding: 1 }).await {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    content_json: Some(json),
+                    ..
+                } => json,
+                _ => return Err(RevisionCaptureError::Unavailable),
+            },
+            Err(_) => return Err(RevisionCaptureError::Unavailable),
+        };
+        Ok(CapturedRevision {
+            y_snapshot: snap,
+            content_json,
+        })
+    }
+
+    async fn revision_snapshots_equal_primary(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+    ) -> Result<bool, RevisionCaptureError> {
+        if left == right {
+            return Ok(true);
+        }
+        match self
+            .engine
+            .call(Request::RevisionSnapshotsEqual {
+                left_b64: left.to_vec(),
+                right_b64: right.to_vec(),
+            })
+            .await
+        {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    update_b64: Some(bytes),
+                    ..
+                } => {
+                    let decoded =
+                        b64::decode(&bytes).map_err(|_| RevisionCaptureError::Unavailable)?;
+                    Ok(decoded.first() == Some(&1))
+                }
+                EngineStatus::Malformed { .. } | EngineStatus::ResourceLimit { .. } => {
+                    Err(RevisionCaptureError::Unavailable)
+                }
+                _ => Err(RevisionCaptureError::Unavailable),
+            },
+            Err(_) => Err(RevisionCaptureError::Unavailable),
+        }
+    }
+
+    fn try_schedule_session_revision(&mut self) {
         if !self.config.revision_session_snapshot {
             return;
         }
-        if self.shutting_down || self.fence_lost {
+        if self.session_revision.is_some() {
             return;
         }
-        if !self.connections.is_empty() {
+        if self.session_revision_aborted() {
             return;
         }
-        if !self.committed_loaded {
+        let Some(writer_generation) = self.writer_generation else {
             return;
+        };
+        self.session_revision = Some(SessionRevisionState {
+            writer_generation,
+            phase: SessionRevisionPhase::Capture,
+            captured: None,
+            prev_snap: None,
+            head_fence: None,
+            head_retries: 0,
+        });
+    }
+
+    /// One async step per actor turn so `Shutdown` can preempt between engine/DB I/O.
+    async fn advance_session_revision(&mut self) -> bool {
+        if self.session_revision_aborted() {
+            self.session_revision = None;
+            return true;
         }
-        if self.session_revision_in_flight {
-            return;
-        }
-        self.session_revision_in_flight = true;
+        let Some(mut work) = self.session_revision.take() else {
+            return true;
+        };
         let workspace_id = self.workspace_id;
         let target = self.revision_target();
-        let writer_generation = self.writer_generation;
-        let snapshot = self.committed.snapshot.clone();
-        let tail = self.committed.tail_payloads.clone();
-        let engine_bin = self.config.engine_bin.clone();
-        let limits = self.config.limits;
         let pool = self.pool.clone();
 
-        let captured = tokio::task::spawn_blocking(move || {
-            capture_revision_offline(engine_bin, limits, snapshot, tail)
-        })
-        .await;
-
-        let captured = match captured {
-            Ok(Ok(captured)) => captured,
-            Ok(Err(_)) | Err(_) => {
-                tracing::warn!(
-                    workspace_id = %workspace_id,
-                    target_kind = target.kind_str(),
-                    target_id = %target.id(),
-                    "collab.session_revision_capture_failed"
-                );
-                self.session_revision_in_flight = false;
-                return;
+        let done = match work.phase {
+            SessionRevisionPhase::Capture => {
+                match self.capture_committed_revision_primary().await {
+                    Ok(captured) => {
+                        work.captured = Some(captured);
+                        work.phase = SessionRevisionPhase::ReadHead;
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            workspace_id = %workspace_id,
+                            target_kind = target.kind_str(),
+                            target_id = %target.id(),
+                            "collab.session_revision_capture_failed"
+                        );
+                        true
+                    }
+                }
+            }
+            SessionRevisionPhase::ReadHead => {
+                match latest_revision_y_snapshot(&pool, workspace_id, target).await {
+                    Ok(latest) => {
+                        work.head_fence = Some(SystemRevisionHead::from_latest(latest.clone()));
+                        work.prev_snap = latest.map(|(_, snap)| snap);
+                        work.phase = if work.prev_snap.is_some() {
+                            SessionRevisionPhase::Compare
+                        } else {
+                            SessionRevisionPhase::Insert
+                        };
+                        false
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            workspace_id = %workspace_id,
+                            target_kind = target.kind_str(),
+                            target_id = %target.id(),
+                            error = %err,
+                            "collab.session_revision_head_read_failed"
+                        );
+                        true
+                    }
+                }
+            }
+            SessionRevisionPhase::Compare => {
+                let captured = work.captured.as_ref().expect("capture before compare");
+                let prev = work.prev_snap.as_ref().expect("prev before compare");
+                match self
+                    .revision_snapshots_equal_primary(prev, &captured.y_snapshot)
+                    .await
+                {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        work.phase = SessionRevisionPhase::Insert;
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            workspace_id = %workspace_id,
+                            target_kind = target.kind_str(),
+                            target_id = %target.id(),
+                            "collab.session_revision_compare_failed"
+                        );
+                        true
+                    }
+                }
+            }
+            SessionRevisionPhase::Insert => {
+                let captured = work.captured.as_ref().expect("capture before insert");
+                let head_fence = work
+                    .head_fence
+                    .as_ref()
+                    .expect("head_fence before insert")
+                    .clone();
+                match prepare_revision_text(&captured.content_json) {
+                    Err(_) => {
+                        tracing::warn!(
+                            workspace_id = %workspace_id,
+                            target_kind = target.kind_str(),
+                            target_id = %target.id(),
+                            "collab.session_revision_text_failed"
+                        );
+                        true
+                    }
+                    Ok(text) => {
+                        let input = CreateRevisionInput {
+                            y_snapshot: captured.y_snapshot.clone(),
+                            content_json: captured.content_json.clone(),
+                            text,
+                            reason: "session".into(),
+                        };
+                        match create_system_revision(
+                            &pool,
+                            workspace_id,
+                            target,
+                            input,
+                            work.writer_generation,
+                            head_fence,
+                        )
+                        .await
+                        {
+                            Ok(Ok(_)) => true,
+                            Ok(Err(RevisionDbError::StaleRevisionHead))
+                                if work.head_retries + 1 < SYSTEM_REVISION_HEAD_RETRIES =>
+                            {
+                                work.head_retries += 1;
+                                work.phase = SessionRevisionPhase::ReadHead;
+                                false
+                            }
+                            Ok(Err(_)) => {
+                                tracing::warn!(
+                                    workspace_id = %workspace_id,
+                                    target_kind = target.kind_str(),
+                                    target_id = %target.id(),
+                                    "collab.session_revision_persist_skipped"
+                                );
+                                true
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    workspace_id = %workspace_id,
+                                    target_kind = target.kind_str(),
+                                    target_id = %target.id(),
+                                    error = %err,
+                                    "collab.session_revision_persist_failed"
+                                );
+                                true
+                            }
+                        }
+                    }
+                }
             }
         };
 
-        let text = match prepare_revision_text(&captured.content_json) {
-            Ok(text) => text,
-            Err(_) => {
-                tracing::warn!(
-                    workspace_id = %workspace_id,
-                    target_kind = target.kind_str(),
-                    target_id = %target.id(),
-                    "collab.session_revision_text_failed"
-                );
-                self.session_revision_in_flight = false;
-                return;
-            }
-        };
-
-        if let Ok(Some((_, prev_snap))) =
-            latest_revision_y_snapshot(&pool, workspace_id, target).await
-        {
-            let engine_bin = self.config.engine_bin.clone();
-            let limits = self.config.limits;
-            let left = prev_snap;
-            let right = captured.y_snapshot.clone();
-            let duplicate = tokio::task::spawn_blocking(move || {
-                revision_snapshots_semantically_equal_offline(engine_bin, limits, &left, &right)
-            })
-            .await
-            .unwrap_or(false);
-            if duplicate {
-                self.session_revision_in_flight = false;
-                return;
-            }
+        if done {
+            self.session_revision = None;
+        } else {
+            self.session_revision = Some(work);
         }
-
-        let input = CreateRevisionInput {
-            y_snapshot: captured.y_snapshot,
-            content_json: captured.content_json,
-            text,
-            reason: "session".into(),
-        };
-        match create_system_revision(
-            &pool,
-            workspace_id,
-            target,
-            input,
-            writer_generation,
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) => {
-                tracing::warn!(
-                    workspace_id = %workspace_id,
-                    target_kind = target.kind_str(),
-                    target_id = %target.id(),
-                    "collab.session_revision_persist_skipped"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    workspace_id = %workspace_id,
-                    target_kind = target.kind_str(),
-                    target_id = %target.id(),
-                    error = %err,
-                    "collab.session_revision_persist_failed"
-                );
-            }
-        }
-        self.session_revision_in_flight = false;
+        done
     }
 
     fn signal_cancel(

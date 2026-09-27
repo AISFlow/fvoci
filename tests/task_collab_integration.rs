@@ -1608,3 +1608,78 @@ async fn task_session_revision_on_last_disconnect() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn task_session_revision_skips_when_task_trashed_under_lock() {
+    run_test("task_session_revision_skips_when_task_trashed_under_lock", async {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let (addr, f) = setup_task(&mut run, 5_000).await;
+        let key = task_key(f.owner.workspace_id, f.task_id);
+        let update = seed_update(
+            &run,
+            json!({"type":"doc","content":[para("trash-1", "잠금 중 삭제")]}),
+        )
+        .await;
+
+        let mut ws = connect_member(addr, &f.owner.session_token).await;
+        auth_and_join(&mut ws, &key, 1).await;
+        complete_sync_handshake(&mut ws, &key).await;
+        ws.send(Message::Binary(sync_update_frame(&key, &update).into()))
+            .await
+            .unwrap();
+        assert!(wait_for_sync_applied(&mut ws, Duration::from_secs(8)).await);
+        let request_id = Uuid::now_v7();
+        ws.send(Message::Binary(
+            stateless_frame(&key, &format!("persist:{request_id}")).into(),
+        ))
+        .await
+        .unwrap();
+        assert!(
+            wait_for_stateless_exact(
+                &mut ws,
+                &format!("persisted:{request_id}"),
+                Duration::from_secs(8)
+            )
+            .await
+        );
+
+        let admin = admin_pool(&run.harness).await;
+        let mut barrier = admin.begin().await.unwrap();
+        sqlx::query(
+            "SELECT id FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 FOR NO KEY UPDATE",
+        )
+        .bind(f.owner.workspace_id)
+        .bind(f.task_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+
+        let close = tokio::spawn(async move {
+            let _ = ws.close(None).await;
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        sqlx::query(
+            r#"
+            UPDATE fvoci.tasks SET deleted_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(f.owner.workspace_id)
+        .bind(f.task_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+        barrier.commit().await.unwrap();
+        let _ = close.await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            count_task_session_revisions(&run.harness, f.owner.workspace_id, f.task_id).await,
+            0,
+            "trashed task must not get a session revision row"
+        );
+        admin.close().await;
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}

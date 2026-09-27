@@ -224,6 +224,12 @@ pub fn preflight_wire_json(v: &Value, limits: &Limits) -> Result<(), EngineStatu
         if let Some(s) = obj.get("snap_b64").and_then(Value::as_str) {
             cap_b64_field("snap_b64", s, limits)?;
         }
+        if let Some(s) = obj.get("left_b64").and_then(Value::as_str) {
+            cap_b64_field("left_b64", s, limits)?;
+        }
+        if let Some(s) = obj.get("right_b64").and_then(Value::as_str) {
+            cap_b64_field("right_b64", s, limits)?;
+        }
         return Ok(());
     }
     let snap = obj

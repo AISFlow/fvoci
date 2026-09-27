@@ -413,6 +413,119 @@ fn revision_snapshot_roundtrip_restores_structured_json() {
     );
 }
 
+fn revision_snapshots_equal_applied(engine: &mut CollabEngine, left: &[u8], right: &[u8]) -> bool {
+    match engine.handle(&Request::RevisionSnapshotsEqual {
+        left_b64: left.to_vec(),
+        right_b64: right.to_vec(),
+    }) {
+        EngineStatus::Ok {
+            update_b64: Some(bytes_b64),
+            ..
+        } => collab_engine::b64::decode(&bytes_b64)
+            .map(|bytes| bytes.first() == Some(&1))
+            .unwrap_or(false),
+        other => panic!("RevisionSnapshotsEqual: {other:?}"),
+    }
+}
+
+#[test]
+fn revision_snapshots_equal_matches_and_differs() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("structured.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let snap_a = snapshot_bytes_of(&mut engine);
+    assert!(revision_snapshots_equal_applied(&mut engine, &snap_a, &snap_a));
+    assert_ok_applied(&engine.handle(&Request::Apply {
+        update_b64: load_bytes("followup_edit.v1"),
+        encoding: 1,
+    }));
+    let snap_b = snapshot_bytes_of(&mut engine);
+    assert!(!revision_snapshots_equal_applied(&mut engine, &snap_a, &snap_b));
+}
+
+#[test]
+fn revision_snapshots_equal_garbage_is_malformed() {
+    let mut engine = CollabEngine::new(Limits::for_tests());
+    assert_ok_applied(&engine.handle(&Request::Load {
+        snapshot_b64: Some(load_bytes("structured.v1")),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    }));
+    let snap = snapshot_bytes_of(&mut engine);
+    let garbage = vec![0xFF, 0x01, 0x02, 0x03];
+    match engine.handle(&Request::RevisionSnapshotsEqual {
+        left_b64: garbage,
+        right_b64: snap,
+    }) {
+        EngineStatus::Malformed { .. } => {}
+        other => panic!("garbage snapshot must be Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn revision_snapshots_equal_oversize_is_resource_limit() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut limits = Limits::for_tests();
+    limits.max_input_bytes = 64;
+    limits.max_output_bytes = 64;
+    let mut session = spawn(limits);
+    let oversized = vec![0u8; 128];
+    let report = session.call(&Request::RevisionSnapshotsEqual {
+        left_b64: oversized.clone(),
+        right_b64: oversized,
+    });
+    assert!(
+        matches!(
+            report.outcome,
+            EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                ..
+            }
+        ),
+        "{:?}",
+        report.outcome
+    );
+}
+
+#[test]
+fn revision_snapshots_equal_respects_max_ops() {
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut limits = Limits::for_tests();
+    limits.max_ops = 2;
+    let mut session = spawn(limits);
+    let snap = load_bytes("structured.v1");
+    assert!(matches!(
+        session.call(&Request::RevisionSnapshotsEqual {
+            left_b64: snap.clone(),
+            right_b64: snap.clone(),
+        })
+        .outcome,
+        EngineStatus::Ok { .. }
+    ));
+    assert!(matches!(
+        session.call(&Request::RevisionSnapshotsEqual {
+            left_b64: snap.clone(),
+            right_b64: snap.clone(),
+        })
+        .outcome,
+        EngineStatus::Ok { .. }
+    ));
+    assert!(matches!(
+        session.call(&Request::RevisionSnapshotsEqual {
+            left_b64: snap.clone(),
+            right_b64: snap.clone(),
+        })
+        .outcome,
+        EngineStatus::ResourceLimit {
+            kind: LimitKind::Ops,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn restore_from_snapshot_keeps_marks_and_block_ids() {
     let mut engine = CollabEngine::new(Limits::for_tests());

@@ -1020,3 +1020,240 @@ async fn session_revision_dedupes_unchanged_reconnect() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn session_revision_after_rejected_update_uses_committed_snapshot() {
+    run_test("session_revision_after_rejected_update_uses_committed_snapshot", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let (state, hub) =
+            collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        let valid = engine_fixture("structured.v1");
+        let malformed = support::invalid_utf8_update_candidate();
+
+        let mut writer = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut writer, &key, 1).await;
+        complete_sync_handshake(&mut writer, &key).await;
+        writer
+            .send(Message::Binary(sync_update_frame(&key, &valid).into()))
+            .await
+            .unwrap();
+        assert!(wait_for_sync_applied(&mut writer, Duration::from_secs(8)).await);
+        let request_id = Uuid::now_v7();
+        writer
+            .send(Message::Binary(
+                stateless_frame(&key, &format!("persist:{request_id}")).into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            wait_for_stateless_exact(
+                &mut writer,
+                &format!("persisted:{request_id}"),
+                Duration::from_secs(8)
+            )
+            .await
+        );
+
+        let mut peer = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut peer, &key, 2).await;
+        writer
+            .send(Message::Binary(sync_update_frame(&key, &malformed).into()))
+            .await
+            .unwrap();
+        support::wait_for_policy_rejection_close(
+            &mut writer,
+            &mut peer,
+            &key,
+            &malformed,
+            Duration::from_secs(8),
+        )
+        .await;
+
+        let _ = peer.close(None).await;
+        let _ = writer.close(None).await;
+        wait_session_revision_count(
+            &run.harness,
+            wiki.session.workspace_id,
+            wiki.document_id,
+            1,
+        )
+        .await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        let row: (String,) = sqlx::query_as(
+            r#"
+            SELECT text FROM fvoci.revisions
+            WHERE workspace_id = $1 AND target_id = $2 AND reason = 'session'
+            "#,
+        )
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+        assert!(
+            row.0.contains("안녕 본문"),
+            "session snapshot must reflect durable committed content, not rejected apply: {}",
+            row.0
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn session_revision_skips_when_writer_generation_stale() {
+    run_test("session_revision_skips_when_writer_generation_stale", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let (state, hub) =
+            collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        let update = engine_fixture("structured.v1");
+
+        let mut ws = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut ws, &key, 1).await;
+        complete_sync_handshake(&mut ws, &key).await;
+        ws.send(Message::Binary(sync_update_frame(&key, &update).into()))
+            .await
+            .unwrap();
+        assert!(wait_for_sync_applied(&mut ws, Duration::from_secs(8)).await);
+        let request_id = Uuid::now_v7();
+        ws.send(Message::Binary(
+            stateless_frame(&key, &format!("persist:{request_id}")).into(),
+        ))
+        .await
+        .unwrap();
+        assert!(
+            wait_for_stateless_exact(
+                &mut ws,
+                &format!("persisted:{request_id}"),
+                Duration::from_secs(8)
+            )
+            .await
+        );
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE fvoci.document_states
+            SET writer_generation = writer_generation + 1
+            WHERE workspace_id = $1 AND document_id = $2
+            "#,
+        )
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+
+        let _ = ws.close(None).await;
+        wait_session_revision_count(
+            &run.harness,
+            wiki.session.workspace_id,
+            wiki.document_id,
+            0,
+        )
+        .await;
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn session_revision_skips_when_document_trashed_under_lock() {
+    run_test("session_revision_skips_when_document_trashed_under_lock", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let (state, hub) =
+            collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        let update = engine_fixture("structured.v1");
+
+        let mut ws = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut ws, &key, 1).await;
+        complete_sync_handshake(&mut ws, &key).await;
+        ws.send(Message::Binary(sync_update_frame(&key, &update).into()))
+            .await
+            .unwrap();
+        assert!(wait_for_sync_applied(&mut ws, Duration::from_secs(8)).await);
+        let request_id = Uuid::now_v7();
+        ws.send(Message::Binary(
+            stateless_frame(&key, &format!("persist:{request_id}")).into(),
+        ))
+        .await
+        .unwrap();
+        assert!(
+            wait_for_stateless_exact(
+                &mut ws,
+                &format!("persisted:{request_id}"),
+                Duration::from_secs(8)
+            )
+            .await
+        );
+
+        let admin = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        let mut barrier = admin.begin().await.unwrap();
+        sqlx::query(
+            "SELECT id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+        )
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+
+        let close = tokio::spawn(async move {
+            let _ = ws.close(None).await;
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        sqlx::query(
+            r#"
+            UPDATE fvoci.documents
+            SET deleted_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+        barrier.commit().await.unwrap();
+        let _ = close.await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            count_session_revisions(
+                &run.harness,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await,
+            0,
+            "trashed document must not get a new session revision row"
+        );
+        admin.close().await;
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
