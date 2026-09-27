@@ -458,7 +458,7 @@ fn payload_uuid(payload: &Value, key: &str) -> Option<Uuid> {
         .and_then(|value| Uuid::parse_str(value).ok())
 }
 
-async fn display_id_for(
+pub(crate) async fn display_id_for(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     target_type: Option<&str>,

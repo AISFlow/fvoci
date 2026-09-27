@@ -21,6 +21,7 @@ pub mod oidc;
 pub mod project_documents;
 pub mod project_views;
 pub mod projects;
+pub mod push;
 pub mod revisions;
 pub mod search;
 pub mod setup;

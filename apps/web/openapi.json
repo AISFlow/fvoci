@@ -18651,6 +18651,82 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/push-subscriptions": {
+      "put": {
+        "tags": [
+          "notifications"
+        ],
+        "operationId": "put_push_subscription",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushSubscriptionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Subscription stored for the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/recent": {
       "get": {
         "tags": [
@@ -28178,6 +28254,43 @@
             ]
           }
         }
+      },
+      "PushSubscriptionBody": {
+        "type": "object",
+        "description": "`PushSubscription.toJSON()` without `expirationTime`.",
+        "required": [
+          "endpoint",
+          "keys"
+        ],
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "Push service URL (https)."
+          },
+          "keys": {
+            "$ref": "#/components/schemas/PushSubscriptionKeysBody"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PushSubscriptionKeysBody": {
+        "type": "object",
+        "description": "`PushSubscription.toJSON()` keys: unpadded base64url.",
+        "required": [
+          "p256dh",
+          "auth"
+        ],
+        "properties": {
+          "auth": {
+            "type": "string",
+            "description": "Auth secret (16 bytes)."
+          },
+          "p256dh": {
+            "type": "string",
+            "description": "P-256 public key (65 bytes)."
+          }
+        },
+        "additionalProperties": false
       },
       "PutAttachmentPartResponse": {
         "type": "object",

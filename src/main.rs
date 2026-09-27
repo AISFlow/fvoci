@@ -321,12 +321,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     } else {
         tracing::info!("smtp mailer disabled (SMTP_HOST/SMTP_PORT/SMTP_FROM unset)");
     }
-    let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
-    consumers.push(fvoci_server::notifications::notifications_consumer());
-    consumers.push(fvoci_server::mail::mail_consumer(mailer.clone()));
-    if let Some(meili) = config.meili.clone() {
-        consumers.push(fvoci_server::search::index::search_index_consumer(meili));
-    }
     let integrations = Arc::new(fvoci_server::integrations::Integrations::from_env()?);
     tracing::info!(
         webhook_keys = integrations.encryption_keys.is_some(),
@@ -335,6 +329,28 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         ai = integrations.ai.is_some(),
         "integrations configured"
     );
+    let identity = Arc::new(fvoci_server::identity::Identity::from_env(&public_origin)?);
+    if let Err(err) =
+        fvoci_server::push::ensure_vapid_keys(&pool, identity.encryption_keys.as_deref()).await
+    {
+        tracing::warn!(%err, event = "push.skipped", reason = "vapid_keys_missing");
+    }
+    tracing::info!(
+        encryption_keys = identity.encryption_keys.is_some(),
+        oidc_providers = identity.oidc.providers.len(),
+        "identity settings loaded"
+    );
+    let mut consumers: Vec<std::sync::Arc<dyn fvoci_server::outbox::OutboxConsumer>> = Vec::new();
+    consumers.push(fvoci_server::notifications::notifications_consumer());
+    consumers.push(fvoci_server::mail::mail_consumer(mailer.clone()));
+    consumers.push(fvoci_server::push::push_consumer(
+        integrations.outbound.without_allow_list(),
+        identity.encryption_keys.clone(),
+        public_origin.clone(),
+    ));
+    if let Some(meili) = config.meili.clone() {
+        consumers.push(fvoci_server::search::index::search_index_consumer(meili));
+    }
     consumers.push(fvoci_server::integrations::webhooks::webhooks_consumer());
     let webhook_sender = Some(fvoci_server::integrations::webhooks::spawn_webhook_sender(
         pool.clone(),
@@ -414,12 +430,6 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let import_job =
         import_settings.map(|settings| spawn_import_job(pool.clone(), settings, storage.clone()));
     let import_wake = import_job.as_ref().map(|job| job.wake.clone());
-    let identity = Arc::new(fvoci_server::identity::Identity::from_env(&public_origin)?);
-    tracing::info!(
-        encryption_keys = identity.encryption_keys.is_some(),
-        oidc_providers = identity.oidc.providers.len(),
-        "identity settings loaded"
-    );
     let state = AppState {
         auth: Arc::new(AuthService {
             db: Db::with_license(pool.clone(), license.clone()),

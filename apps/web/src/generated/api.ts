@@ -3012,6 +3012,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/push-subscriptions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["put_push_subscription"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/recent": {
         parameters: {
             query?: never;
@@ -5055,6 +5071,19 @@ export interface components {
             operator: components["schemas"]["OperatorSettings"];
             share: components["schemas"]["SharePolicy"];
             webPushPublicKey?: string | null;
+        };
+        /** @description `PushSubscription.toJSON()` without `expirationTime`. */
+        PushSubscriptionBody: {
+            /** @description Push service URL (https). */
+            endpoint: string;
+            keys: components["schemas"]["PushSubscriptionKeysBody"];
+        };
+        /** @description `PushSubscription.toJSON()` keys: unpadded base64url. */
+        PushSubscriptionKeysBody: {
+            /** @description Auth secret (16 bytes). */
+            auth: string;
+            /** @description P-256 public key (65 bytes). */
+            p256dh: string;
         };
         PutAttachmentPartResponse: {
             etag: string;
@@ -18512,6 +18541,60 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkflowOutput"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    put_push_subscription: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PushSubscriptionBody"];
+            };
+        };
+        responses: {
+            /** @description Subscription stored for the caller */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
             /** @description Not found or forbidden */

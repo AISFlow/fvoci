@@ -434,6 +434,27 @@ pub struct NotificationPrefsBody {
     pub mail_digest: bool,
 }
 
+/// `PushSubscription.toJSON()` keys: unpadded base64url.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PushSubscriptionKeysBody {
+    /// P-256 public key (65 bytes).
+    pub p256dh: String,
+    /// Auth secret (16 bytes).
+    pub auth: String,
+}
+
+/// `PushSubscription.toJSON()` without `expirationTime`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct PushSubscriptionBody {
+    /// Push service URL (https).
+    pub endpoint: String,
+    pub keys: PushSubscriptionKeysBody,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]

@@ -67,6 +67,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         [flag] if flag == "--verify-secrets" => {
             verify_secrets().await?;
         }
+        [flag] if flag == "--rotate-vapid" => {
+            rotate_vapid().await?;
+        }
         [flag] if flag == "--doctor" => {
             let report = fvoci_server::doctor::run_doctor().await;
             println!("{}", serde_json::to_string(&report)?);
@@ -87,7 +90,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
+                "usage: fvoci-migrate [--grant-app-role <role> | --ensure-meili-key <file> | --rebuild-search [workspace-id] | --verify-storage | --verify-secrets | --rotate-vapid | --doctor | --init-env --public-origin <url> --out <path> [--yes] | --recover-outbox --since <utc> --snapshot-at <utc> [--apply --reason <text> --ack-external-replay] | --backup-manifest <manifest> <project> <created-utc> <pg-version> <dump> <storage-tar> | --restore-preflight <manifest> <dump> <storage-tar> <target-project>]".into(),
             );
         }
     }
@@ -142,7 +145,7 @@ async fn verify_storage() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Post-restore check: every secret sealed with `ENCRYPTION_KEYS` (MFA,
-/// workspace SSO, webhooks) opens with the configured keyring. Runs with the
+/// workspace SSO, webhooks, VAPID) opens with the configured keyring. Runs with the
 /// server's environment (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`); the app role
 /// reads the ciphertext columns in the system context, like the server.
 /// Prints counts and failing row ids, never secret values.
@@ -162,6 +165,27 @@ async fn verify_secrets() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    Ok(())
+}
+
+/// Source `fvoci secrets rotate-vapid`: new Web Push keypair, every browser
+/// subscription revoked, `instance.vapid_rotated` event + audit in one system
+/// transaction. Runs as the app role like `--verify-secrets`. Prints the new
+/// public key and the revoked count, never the private key.
+async fn rotate_vapid() -> Result<(), Box<dyn std::error::Error>> {
+    let url = app_url("--rotate-vapid")?;
+    let keys =
+        encryption_keys_from_env()?.ok_or("ENCRYPTION_KEYS is required for --rotate-vapid")?;
+    let pool = fvoci_server::db::pool::connect_app(&url).await?;
+    let outcome = fvoci_server::push::rotate_vapid_keys(&pool, &keys).await?;
+    pool.close().await;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "publicKey": outcome.public_key,
+            "revokedSubscriptions": outcome.revoked_subscriptions,
+        }))?
+    );
     Ok(())
 }
 

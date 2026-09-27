@@ -50,7 +50,8 @@ use crate::api::dto::{
     PatchProjectBody, PatchTaskBody, PatchWorkspaceBody, ProblemResponse, ProjectGroupGrantBody,
     ProjectGroupGrantListResponse, ProjectGroupGrantOutput, ProjectGroupRevokeBody,
     ProjectListResponse, ProjectMembersResponse, ProjectOutput, PublicBrandingOutput,
-    PublicSettingsValues, PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
+    PublicSettingsValues, PushSubscriptionBody, PushSubscriptionKeysBody,
+    PutAttachmentPartResponse, RecentItemOutput, RecentListResponse,
     ResumeAttachmentUploadResponse, RevisionCreateResponse, RevisionDetailResponse,
     RevisionListResponse, RevisionMetaResponse, RevisionRestoreBody, RevisionRestoreResponse,
     SearchItemOutput, SearchListResponse, SearchSnippetPiece, SessionUserOutput, SetupBody,
@@ -268,6 +269,7 @@ impl Modify for CookieSecurityAddon {
         read_all_notifications,
         get_notification_prefs,
         put_notification_prefs,
+        put_push_subscription,
         list_me_notifications,
         list_workspace_holidays,
         create_workspace_holiday,
@@ -470,6 +472,8 @@ impl Modify for CookieSecurityAddon {
             NotificationPatchBody,
             NotificationReadAllResponse,
             NotificationPrefsBody,
+            PushSubscriptionBody,
+            PushSubscriptionKeysBody,
             CreateDocumentBody,
             PatchDocumentBody,
             DocumentMetaResponse,
@@ -914,6 +918,23 @@ fn get_notification_prefs() {}
     )
 )]
 fn put_notification_prefs() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    put,
+    path = "/api/v1/workspaces/{workspace_id}/push-subscriptions",
+    tag = "notifications",
+    security(("fvoci_session" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = PushSubscriptionBody,
+    responses(
+        (status = 200, description = "Subscription stored for the caller", body = OkResponse),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn put_push_subscription() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(
