@@ -2850,6 +2850,9 @@ impl RoomActor {
 
     async fn fatal_writer_stale(&mut self) {
         self.writer_generation = None;
+        // A newer writer owns durable state; `committed` may lag it, so the next
+        // capture/join must reload instead of trusting the in-memory bundle.
+        self.committed_loaded = false;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
             self.close_connection(conn_id, 1008, "writer stale").await;
         }
@@ -2857,6 +2860,7 @@ impl RoomActor {
 
     async fn fatal_writer_stale_ordered(&mut self) {
         self.writer_generation = None;
+        self.committed_loaded = false;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
             self.close_connection_ordered(conn_id, 1008, "writer stale")
                 .await;
@@ -3589,7 +3593,9 @@ impl RoomActor {
         actor_user_id: Uuid,
         session_id: Uuid,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
-        if !self.committed_loaded {
+        // Without a writer generation nothing fences out-of-room appends
+        // (import, a newer writer), so the committed tail may be behind.
+        if !self.committed_loaded || self.writer_generation.is_none() {
             let load = load_collab_readonly_kind(
                 &self.pool,
                 self.kind,

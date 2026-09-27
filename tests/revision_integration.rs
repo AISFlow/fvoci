@@ -21,9 +21,15 @@ use fvoci_server::collab::room::{
 use fvoci_server::collab::seed::SeedEngine;
 use fvoci_server::collab::wire::{CollabKind, CollabRoomName};
 use fvoci_server::config::RevisionSettings;
+use fvoci_server::db::collab::{
+    append_collab_update, claim_writer_and_load, resolve_collab_admission, AppendCollabInput,
+    AppendCollabResult,
+};
+use fvoci_server::db::documents::CreateDocumentInput;
 use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::pool;
-use fvoci_server::db::projects::{create_project, CreateProjectInput};
+use fvoci_server::db::project_documents::create_project_document;
+use fvoci_server::db::projects::{add_project_member, create_project, CreateProjectInput};
 use fvoci_server::db::revisions::{load_durable_collab_for_system, RevisionTarget};
 use fvoci_server::db::tasks::{create_task, CreateTaskInput};
 use fvoci_server::db::workspace::{self, WorkspaceRole};
@@ -31,6 +37,7 @@ use fvoci_server::jobs::{
     run_revision_maintenance_batch, RevisionMaintenanceEngine, RevisionMaintenanceParams,
     RevisionMaintenanceResume, SCHEDULED_REVISION_TARGET_BATCH, WORKSPACE_SCAN_BATCH,
 };
+use fvoci_server::projects::ProjectMemberRole;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -38,7 +45,7 @@ use support::{
     auth_and_join, collab_app_state, complete_sync_handshake, connect_member, engine_fixture,
     setup_owner_session, setup_wiki_doc, setup_wiki_doc_batch, stateless_frame, sync_update_frame,
     test_collab_config, wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update,
-    SessionFixture, TestRun, WikiDocFixture, PEPPER, PUBLIC_ORIGIN,
+    wait_for_ws_close_code, SessionFixture, TestRun, WikiDocFixture, PEPPER, PUBLIC_ORIGIN,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -1584,6 +1591,313 @@ async fn session_revision_skips_when_writer_generation_stale() {
                 0,
             )
             .await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn manual_revision_after_stale_writer_close_uses_newer_durable_state() {
+    run_test(
+        "manual_revision_after_stale_writer_close_uses_newer_durable_state",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let cfg = test_collab_config(4, 60_000);
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+            let addr = run.spawn_router_state(state, hub.clone()).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+
+            let mut ws = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut ws, &key, 1).await;
+            complete_sync_handshake(&mut ws, &key).await;
+            ws.send(Message::Binary(
+                sync_update_frame(&key, &engine_fixture("structured.v1")).into(),
+            ))
+            .await
+            .unwrap();
+            assert!(wait_for_sync_applied(&mut ws, Duration::from_secs(8)).await);
+
+            // A newer durable writer takes over and commits past the room's tail.
+            let claim = claim_writer_and_load(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let newer = append_collab_update(
+                &wiki.session.pool,
+                AppendCollabInput {
+                    workspace_id: wiki.session.workspace_id,
+                    actor_user_id: wiki.session.user_id,
+                    session_id: wiki.session.session_id,
+                    document_id: wiki.document_id,
+                    writer_generation: claim.writer_generation,
+                    expected_tail_seq: claim.load.tail_seq,
+                    op_id: Uuid::now_v7(),
+                    payload: &engine_fixture("followup_edit.v1"),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(matches!(newer, AppendCollabResult::Committed { .. }));
+
+            // The room's next append hits the stale generation and closes every connection.
+            ws.send(Message::Binary(
+                sync_update_frame(&key, &engine_fixture("korean_emoji_base.v1")).into(),
+            ))
+            .await
+            .unwrap();
+            wait_for_ws_close_code(
+                &mut ws,
+                1008,
+                Duration::from_secs(8),
+                false,
+                Some("writer stale"),
+            )
+            .await;
+            wait_room_empty(&hub, wiki.session.workspace_id, wiki.document_id).await;
+
+            let expected = expected_committed_session_capture(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                &cfg,
+            )
+            .await;
+            let live = hub
+                .capture_if_live(
+                    (wiki.session.workspace_id, wiki.document_id),
+                    wiki.session.user_id,
+                    wiki.session.session_id,
+                )
+                .await
+                .expect("stale-writer room stays live with no connections")
+                .expect("live capture");
+            assert_eq!(
+                live.content_json, expected.content_json,
+                "live capture after stale-writer close must use newer durable state"
+            );
+            assert_eq!(
+                live.y_snapshot, expected.y_snapshot,
+                "live capture y_snapshot must match newer durable state"
+            );
+
+            let (status, created) = http_json(
+                addr,
+                reqwest::Method::POST,
+                &revision_path(&wiki, ""),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::CREATED, "{created}");
+            let revision_id = created["id"].as_str().expect("id");
+            let (status, detail) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &revision_path(&wiki, &format!("/{revision_id}")),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::OK, "{detail}");
+            assert_eq!(
+                detail["contentJson"], expected.content_json,
+                "manual revision after stale-writer close must use newer durable state"
+            );
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// Commit one durable update outside any live room (the import-job shape).
+async fn append_outside_room(owner: &SessionFixture, document_id: Uuid, fixture: &str) {
+    let claim = claim_writer_and_load(
+        &owner.pool,
+        owner.workspace_id,
+        owner.user_id,
+        owner.session_id,
+        document_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let appended = append_collab_update(
+        &owner.pool,
+        AppendCollabInput {
+            workspace_id: owner.workspace_id,
+            actor_user_id: owner.user_id,
+            session_id: owner.session_id,
+            document_id,
+            writer_generation: claim.writer_generation,
+            expected_tail_seq: claim.load.tail_seq,
+            op_id: Uuid::now_v7(),
+            payload: &engine_fixture(fixture),
+            client_ip: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(appended, AppendCollabResult::Committed { .. }));
+}
+
+#[tokio::test]
+async fn manual_revision_in_viewer_only_room_uses_newer_durable_state() {
+    run_test(
+        "manual_revision_in_viewer_only_room_uses_newer_durable_state",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let owner = setup_owner_session(&run.harness).await;
+            let project = create_project(
+                &owner.pool,
+                owner.workspace_id,
+                owner.user_id,
+                owner.session_id,
+                CreateProjectInput {
+                    key: "VIEWRO",
+                    name: "Viewer-only room project",
+                    visibility: "private",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .expect("create project")
+            .expect("ok");
+            let created = create_project_document(
+                &owner.pool,
+                owner.workspace_id,
+                project.id,
+                owner.user_id,
+                owner.session_id,
+                CreateDocumentInput {
+                    parent_id: project.root_document_id,
+                    title: "imported",
+                    icon: None,
+                },
+                None,
+            )
+            .await
+            .expect("create project doc")
+            .expect("ok");
+            let viewer = create_member_session(
+                &run.harness,
+                owner.workspace_id,
+                "viewer-only-room@example.com",
+            )
+            .await;
+            add_project_member(
+                &owner.pool,
+                owner.workspace_id,
+                project.id,
+                owner.user_id,
+                owner.session_id,
+                viewer.user_id,
+                ProjectMemberRole::Viewer,
+                None,
+            )
+            .await
+            .expect("add viewer")
+            .expect("ok");
+            let admission = resolve_collab_admission(
+                &viewer.pool,
+                viewer.workspace_id,
+                viewer.user_id,
+                viewer.session_id,
+                created.id,
+            )
+            .await
+            .unwrap()
+            .expect("viewer admitted");
+            assert!(admission.read_only, "viewer must join read-only");
+
+            let wiki = WikiDocFixture {
+                session: owner,
+                document_id: created.id,
+            };
+            let cfg = test_collab_config(4, 60_000);
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+            let addr = run.spawn_router_state(state, hub.clone()).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+            let room = (wiki.session.workspace_id, wiki.document_id);
+
+            // The viewer opens the fresh document first: the room loads the empty
+            // durable state without claiming a writer generation.
+            let mut ws = connect_member(addr, &viewer.session_token).await;
+            auth_and_join(&mut ws, &key, 1).await;
+            complete_sync_handshake(&mut ws, &key).await;
+            assert_eq!(hub.room_member_count(room).await, 1);
+
+            // R1: the single out-of-room append (import shape), then a capture while
+            // the viewer-only room stays live with no stale close.
+            append_outside_room(&wiki.session, wiki.document_id, "structured.v1").await;
+            let expected = expected_committed_session_capture(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                &cfg,
+            )
+            .await;
+            assert_ne!(
+                expected.content_json,
+                json!({"type":"doc","content":[]}),
+                "durable state must contain the out-of-room append"
+            );
+            let live = hub
+                .capture_if_live(room, wiki.session.user_id, wiki.session.session_id)
+                .await
+                .expect("viewer-only room is live")
+                .expect("live capture");
+            assert_eq!(
+                live.content_json, expected.content_json,
+                "viewer-only live capture must use newer durable state"
+            );
+            assert_eq!(
+                live.y_snapshot, expected.y_snapshot,
+                "viewer-only live capture y_snapshot must match durable state"
+            );
+
+            // R2: a later out-of-room append after that capture's reload. The
+            // revisions HTTP API is wiki-only, so capture through the hub path
+            // that POST /revisions uses (`capture_for_create`).
+            append_outside_room(&wiki.session, wiki.document_id, "followup_edit.v1").await;
+            let expected = expected_committed_session_capture(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                &cfg,
+            )
+            .await;
+            assert_ne!(
+                expected.content_json, live.content_json,
+                "the later append must change durable state"
+            );
+            let live = hub
+                .capture_if_live(room, wiki.session.user_id, wiki.session.session_id)
+                .await
+                .expect("viewer-only room is live")
+                .expect("live capture");
+            assert_eq!(
+                live.content_json, expected.content_json,
+                "capture after a later out-of-room append must use durable state"
+            );
+            assert_eq!(
+                live.y_snapshot, expected.y_snapshot,
+                "capture y_snapshot after a later out-of-room append must match durable state"
+            );
+            assert_eq!(hub.room_member_count(room).await, 1, "viewer stays joined");
             run.finish().await.expect("cleanup");
         },
     )
