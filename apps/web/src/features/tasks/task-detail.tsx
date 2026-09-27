@@ -1,4 +1,6 @@
-import { t } from "@fvoci/i18n";
+import { formatPersonName, t } from "@fvoci/i18n";
+import { useQuery } from "@tanstack/react-query";
+import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { projectTasksPath } from "@/lib/href";
 import type { WorkflowStatus } from "@/features/projects/queries";
@@ -15,46 +17,18 @@ import { TaskBodyEditor } from "./task-body-editor";
 import { TaskTimeEntries } from "./task-time-entries";
 import { Button } from "@/components/ui/button";
 import { ConfirmActionButton } from "@/components/confirm-action";
+import {
+  CollabRoom,
+  collabUserOf,
+  useCollabSession,
+  type CollabSession,
+  type CollabUser,
+} from "@/features/documents/collab-session";
+import { meQuery } from "@/lib/queries";
+import { runArchiveWithBodyPersist } from "./task-archive-persist";
 import "@/features/projects/projects.css";
 
-export function TaskDetailView({
-  slug,
-  workspaceId,
-  projectId,
-  projectKey,
-  projectName,
-  task,
-  statuses,
-  currentUserId,
-  members,
-  labels,
-  milestones,
-  dependencyCandidates,
-  readOnly,
-  canEdit,
-  pending,
-  fieldError,
-  actionError,
-  archivePending,
-  trashPending,
-  formEpoch,
-  onTitleBlur,
-  onStatusChange,
-  onPriorityChange,
-  onHierarchySave,
-  onDueDateBlur,
-  onAssigneesChange,
-  onLabelsChange,
-  onMilestoneChange,
-  onAddDependency,
-  onRemoveDependency,
-  onArchiveToggle,
-  onTrash,
-  clonePending,
-  deletePending,
-  onClone,
-  onDelete,
-}: {
+export type TaskDetailViewProps = {
   slug: string;
   workspaceId: string;
   projectId: string;
@@ -95,6 +69,133 @@ export function TaskDetailView({
   deletePending?: boolean;
   onClone: () => void | Promise<void>;
   onDelete: () => Promise<void>;
+};
+
+export function TaskDetailView(props: TaskDetailViewProps) {
+  const { workspaceId, task } = props;
+  return (
+    <CollabRoom workspaceId={workspaceId} kind="task" id={task.id}>
+      <TaskDetailCollabConnected {...props} />
+    </CollabRoom>
+  );
+}
+
+function TaskDetailCollabConnected({
+  onArchiveToggle,
+  archivePending,
+  readOnly: pageReadOnly,
+  task,
+  ...rest
+}: TaskDetailViewProps) {
+  const me = useQuery(meQuery);
+  const collabUser = useMemo(() => {
+    if (!me.data) return null;
+    return collabUserOf(me.data.userId, formatPersonName(me.data, me.data.locale));
+  }, [me.data]);
+  const session = useCollabSession(collabUser);
+  const [archivePersisting, setArchivePersisting] = useState(false);
+  const [archivePersistError, setArchivePersistError] = useState<string | null>(null);
+  const archiveInFlight = useRef(false);
+
+  const readOnly = pageReadOnly || (session?.readOnly ?? false);
+  const pageEditable = !pageReadOnly && task.archivedAt == null;
+
+  const handleArchiveToggle = async (archived: boolean) => {
+    if (archiveInFlight.current || archivePending || archivePersisting) return;
+    if (!archived) {
+      setArchivePersistError(null);
+      archiveInFlight.current = true;
+      setArchivePersisting(true);
+      try {
+        await onArchiveToggle(false);
+      } finally {
+        setArchivePersisting(false);
+        archiveInFlight.current = false;
+      }
+      return;
+    }
+    setArchivePersistError(null);
+    archiveInFlight.current = true;
+    setArchivePersisting(true);
+    try {
+      await runArchiveWithBodyPersist({
+        pageEditable,
+        session,
+        collabUser,
+        archive: async () => {
+          await onArchiveToggle(true);
+        },
+      });
+    } catch {
+      setArchivePersistError(t("task.archive.persistFailed"));
+    } finally {
+      setArchivePersisting(false);
+      archiveInFlight.current = false;
+    }
+  };
+
+  return (
+    <>
+      {archivePersistError ? (
+        <p role="alert" className="task-form__alert">
+          {archivePersistError}
+        </p>
+      ) : null}
+      <TaskDetailViewInner
+        {...rest}
+        task={task}
+        readOnly={readOnly}
+        collabUser={collabUser}
+        session={session}
+        archivePending={archivePending || archivePersisting}
+        onArchiveToggle={handleArchiveToggle}
+      />
+    </>
+  );
+}
+
+function TaskDetailViewInner({
+  slug,
+  workspaceId,
+  projectId,
+  projectKey,
+  projectName,
+  task,
+  statuses,
+  currentUserId,
+  members,
+  labels,
+  milestones,
+  dependencyCandidates,
+  readOnly,
+  canEdit,
+  pending,
+  fieldError,
+  actionError,
+  archivePending,
+  trashPending,
+  formEpoch,
+  onTitleBlur,
+  onStatusChange,
+  onPriorityChange,
+  onHierarchySave,
+  onDueDateBlur,
+  onAssigneesChange,
+  onLabelsChange,
+  onMilestoneChange,
+  onAddDependency,
+  onRemoveDependency,
+  onArchiveToggle,
+  onTrash,
+  clonePending,
+  deletePending,
+  onClone,
+  onDelete,
+  session,
+  collabUser,
+}: TaskDetailViewProps & {
+  session: CollabSession | null;
+  collabUser: CollabUser | null;
 }) {
   return (
     <div className="task-home">
@@ -176,6 +277,8 @@ export function TaskDetailView({
         slug={slug}
         taskId={task.id}
         readOnly={readOnly}
+        session={session}
+        collabUser={collabUser}
       />
       <TaskAttachmentsPanel
         workspaceId={workspaceId}
