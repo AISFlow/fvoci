@@ -687,9 +687,100 @@ class WorkflowRegistryTest(unittest.TestCase):
         errors = SEL.verify_workflow_registry()
         self.assertEqual(errors, [], msg="\n".join(errors))
 
+    def test_rust_suite_inventory_matches_repo(self) -> None:
+        errors = SEL.verify_rust_suite_registry(ROOT)
+        self.assertEqual(errors, [], msg="\n".join(errors))
+
     def test_requirements_pin_pyyaml(self) -> None:
         text = (ROOT / "scripts" / "ci_selection_requirements.txt").read_text(encoding="utf-8")
         self.assertIn("PyYAML==6.0.3", text)
+
+
+class RustSuiteRegistryFixture:
+    """Minimal tree with real rust.yml wiring and a trimmed Cargo [[test]] registry."""
+
+    def __init__(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "scripts").mkdir(parents=True, exist_ok=True)
+        shutil.copytree(ROOT / ".github" / "workflows", self.root / ".github" / "workflows")
+        collab_script = self.root / SEL.RUST_COLLAB_CI_SCRIPT
+        collab_script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / SEL.RUST_COLLAB_CI_SCRIPT, collab_script)
+        probe_script = self.root / SEL.RUST_CAPACITY_PROBE_SCRIPT
+        probe_script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / SEL.RUST_CAPACITY_PROBE_SCRIPT, probe_script)
+
+    def close(self) -> None:
+        self.tmp.cleanup()
+
+    def __enter__(self) -> RustSuiteRegistryFixture:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def write_cargo(self, extra_targets: list[str] | None = None) -> None:
+        lines = [
+            "[features]",
+            'db-tests = []',
+            "",
+        ]
+        for name in ("db_integration", *(extra_targets or [])):
+            lines.extend(
+                [
+                    "[[test]]",
+                    f'name = "{name}"',
+                    f'path = "tests/{name}.rs"',
+                    'required-features = ["db-tests"]',
+                    "",
+                ]
+            )
+        (self.root / "Cargo.toml").write_text("\n".join(lines), encoding="utf-8")
+
+
+class RustSuiteRegistryTest(unittest.TestCase):
+    def test_new_cargo_target_without_ci_row_fails(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo(["unfurl_integration"])
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(errors, "expected missing inventory failure")
+        joined = "\n".join(errors)
+        self.assertIn("unfurl_integration", joined)
+        self.assertIn("missing from rust.yml inventory", joined)
+
+    def test_postgres_arm64_row_omission_fails(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            rust = fx.root / ".github" / "workflows" / "rust.yml"
+            text = rust.read_text(encoding="utf-8")
+            arm_line = (
+                "          - runner: ubuntu-24.04-arm\n"
+                "            check: postgres-arm64\n"
+                "            shard: a\n"
+                "            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test schedule_ics_integration --test search_meili\n"
+            )
+            arm_line_short = arm_line.replace(" --test search_meili", "")
+            self.assertIn(arm_line, text)
+            rust.write_text(text.replace(arm_line, arm_line_short), encoding="utf-8")
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(errors)
+        joined = "\n".join(errors)
+        self.assertIn("search_meili", joined)
+        self.assertIn("postgres matrix missing", joined)
+
+    def test_trimmed_inventory_with_real_workflow_passes(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertEqual(errors, [], msg="\n".join(errors))
+
+    def test_verify_workflows_surfaces_rust_inventory_failure(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo(["unfurl_integration"])
+            proc = run_cli(["verify-workflows", "--repo-root", str(fx.root)])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("unfurl_integration", proc.stderr)
 
 
 class RegistryMutationCliTest(unittest.TestCase):

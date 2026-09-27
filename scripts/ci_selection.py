@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -606,6 +607,261 @@ def list_workflow_files(repo_root: Path) -> list[Path]:
     )
 
 
+RUST_WORKFLOW_FILE = "rust.yml"
+RUST_COLLAB_CI_SCRIPT = Path("scripts/run-rust-collaboration-ci-tests.sh")
+RUST_CAPACITY_PROBE_SCRIPT = Path("scripts/collab-capacity-probe.sh")
+RUST_POSTGRES_RUNNER_ARCH: dict[str, str] = {
+    "ubuntu-24.04": "x64",
+    "ubuntu-24.04-arm": "arm64",
+}
+RUST_INTEGRATION_MANUAL_TARGETS: frozenset[str] = frozenset({"collab_capacity_probe"})
+RUST_DB_TESTS_FEATURE = "db-tests"
+CARGO_TEST_FLAG_RE = re.compile(r"(?:^|\s)--test\s+([A-Za-z0-9_-]+)")
+DB_TESTS_FEATURES_RE = re.compile(r"--features\s+[^;\n]*\bdb-tests\b")
+AUTOTEST_DB_TESTS_CFG_PREFIX_LINES = 12
+
+
+def _package_autotests_enabled(cargo_data: dict) -> bool:
+    package = cargo_data.get("package")
+    if isinstance(package, dict) and "autotests" in package:
+        return bool(package["autotests"])
+    return True
+
+
+def _autotest_declares_db_tests_only(path: Path) -> bool:
+    for line in path.read_text(encoding="utf-8").splitlines()[:AUTOTEST_DB_TESTS_CFG_PREFIX_LINES]:
+        stripped = line.strip()
+        if not stripped.startswith("#!["):
+            continue
+        if "extract-native-tests" in stripped:
+            return False
+        if (
+            'feature = "db-tests"' in stripped
+            or "feature=\"db-tests\"" in stripped
+        ):
+            return True
+    return False
+
+
+def root_db_integration_registry_targets(repo_root: Path) -> tuple[set[str] | None, str | None]:
+    cargo_path = repo_root / "Cargo.toml"
+    if not cargo_path.is_file():
+        return None, "rust: missing root Cargo.toml"
+    try:
+        data = tomllib.loads(cargo_path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        return None, f"rust: Cargo.toml parse failed: {exc}"
+    targets: set[str] = set()
+    entries = data.get("test")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return None, "rust: Cargo.toml [[test]] entry must be a table"
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                return None, "rust: Cargo.toml [[test]] missing name"
+            features = entry.get("required-features", [])
+            if features is None:
+                features = []
+            if not isinstance(features, list) or not all(isinstance(item, str) for item in features):
+                return None, f"rust: Cargo.toml [[test]] {name} required-features must be a string list"
+            if RUST_DB_TESTS_FEATURE in features:
+                targets.add(name)
+    if _package_autotests_enabled(data):
+        tests_dir = repo_root / "tests"
+        if tests_dir.is_dir():
+            for path in sorted(tests_dir.glob("*.rs")):
+                if _autotest_declares_db_tests_only(path):
+                    targets.add(path.stem)
+    return targets, None
+
+
+def cargo_test_flags_in_text(text: str) -> set[str]:
+    return set(CARGO_TEST_FLAG_RE.findall(text))
+
+
+def _rust_workflow_jobs(repo_root: Path) -> tuple[dict | None, str | None]:
+    path = repo_root / ".github" / "workflows" / RUST_WORKFLOW_FILE
+    if not path.is_file():
+        return None, f"rust: missing workflow file {RUST_WORKFLOW_FILE}"
+    data, parse_err = _load_yaml_mapping(path)
+    if parse_err:
+        return None, f"rust: {parse_err}"
+    jobs = data.get("jobs")
+    if not isinstance(jobs, dict):
+        return None, "rust: jobs mapping missing"
+    return jobs, None
+
+
+def _postgres_matrix_rows(postgres_job: dict) -> tuple[list[dict] | None, str | None]:
+    strategy = postgres_job.get("strategy")
+    if not isinstance(strategy, dict):
+        return None, "rust: postgres job strategy missing"
+    matrix = strategy.get("matrix")
+    if not isinstance(matrix, dict):
+        return None, "rust: postgres job matrix missing"
+    include = matrix.get("include")
+    if not isinstance(include, list) or not include:
+        return None, "rust: postgres job matrix.include missing"
+    rows: list[dict] = []
+    for row in include:
+        if not isinstance(row, dict):
+            return None, "rust: postgres matrix.include row must be a mapping"
+        rows.append(row)
+    return rows, None
+
+
+def postgres_matrix_inventory(repo_root: Path) -> tuple[dict[str, set[str]], str | None]:
+    jobs, err = _rust_workflow_jobs(repo_root)
+    if err:
+        return {}, err
+    postgres_job = jobs.get("postgres")
+    if not isinstance(postgres_job, dict):
+        return {}, "rust: postgres job missing"
+    rows, err = _postgres_matrix_rows(postgres_job)
+    if err:
+        return {}, err
+    per_arch: dict[str, set[str]] = {"x64": set(), "arm64": set()}
+    for row in rows:
+        runner = row.get("runner")
+        tests_field = row.get("tests")
+        if not isinstance(runner, str) or runner not in RUST_POSTGRES_RUNNER_ARCH:
+            return {}, f"rust: postgres matrix row has unknown runner {runner!r}"
+        if not isinstance(tests_field, str) or not tests_field.strip():
+            return {}, "rust: postgres matrix row missing tests command fragment"
+        arch = RUST_POSTGRES_RUNNER_ARCH[runner]
+        per_arch[arch].update(cargo_test_flags_in_text(tests_field))
+    return per_arch, None
+
+
+def postgres_s3_inventory(repo_root: Path) -> tuple[set[str], str | None]:
+    jobs, err = _rust_workflow_jobs(repo_root)
+    if err:
+        return set(), err
+    postgres_job = jobs.get("postgres")
+    if not isinstance(postgres_job, dict):
+        return set(), "rust: postgres job missing"
+    steps = postgres_job.get("steps")
+    if not isinstance(steps, list):
+        return set(), "rust: postgres job steps missing"
+    s3_tests: set[str] = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        run = step.get("run")
+        if not isinstance(run, str) or "start-test-minio.sh" not in run:
+            continue
+        s3_tests.update(cargo_test_flags_in_text(run))
+        if not DB_TESTS_FEATURES_RE.search(run):
+            return set(), "rust: S3 integration step must pass --features db-tests"
+    if not s3_tests:
+        return set(), "rust: postgres job missing S3 integration step"
+    return s3_tests, None
+
+
+def postgres_db_tests_feature_checks(repo_root: Path) -> list[str]:
+    jobs, err = _rust_workflow_jobs(repo_root)
+    if err:
+        return [err]
+    postgres_job = jobs.get("postgres")
+    if not isinstance(postgres_job, dict):
+        return ["rust: postgres job missing"]
+    errors: list[str] = []
+    steps = postgres_job.get("steps")
+    if not isinstance(steps, list):
+        return ["rust: postgres job steps missing"]
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        name = step.get("name")
+        run = step.get("run")
+        if name == "PostgreSQL integration tests" and isinstance(run, str):
+            if not DB_TESTS_FEATURES_RE.search(run):
+                errors.append("rust: PostgreSQL integration step must pass --features db-tests")
+    return errors
+
+
+def collaboration_script_inventory(repo_root: Path) -> tuple[set[str], str | None]:
+    script_path = repo_root / RUST_COLLAB_CI_SCRIPT
+    if not script_path.is_file():
+        return set(), f"rust: missing collaboration CI script {RUST_COLLAB_CI_SCRIPT}"
+    text = script_path.read_text(encoding="utf-8")
+    tests = cargo_test_flags_in_text(text)
+    if not tests:
+        return set(), "rust: collaboration CI script declares no --test targets"
+    if not DB_TESTS_FEATURES_RE.search(text):
+        return set(), "rust: collaboration CI script must pass --features db-tests"
+    return tests, None
+
+
+def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
+    """Ensure explicit root [[test]] db-tests targets map to rust.yml execution rows."""
+    rust_workflow = repo_root / ".github" / "workflows" / RUST_WORKFLOW_FILE
+    if not rust_workflow.is_file():
+        return []
+    if not (repo_root / "Cargo.toml").is_file():
+        return []
+
+    errors: list[str] = []
+    cargo_targets, cargo_err = root_db_integration_registry_targets(repo_root)
+    if cargo_err:
+        errors.append(cargo_err)
+        return errors
+    assert cargo_targets is not None
+
+    per_arch, matrix_err = postgres_matrix_inventory(repo_root)
+    if matrix_err:
+        errors.append(matrix_err)
+        return errors
+
+    s3_tests, s3_err = postgres_s3_inventory(repo_root)
+    if s3_err:
+        errors.append(s3_err)
+        return errors
+
+    collab_tests, collab_err = collaboration_script_inventory(repo_root)
+    if collab_err:
+        errors.append(collab_err)
+        return errors
+
+    errors.extend(postgres_db_tests_feature_checks(repo_root))
+
+    if per_arch["x64"] != per_arch["arm64"]:
+        only_x64 = sorted(per_arch["x64"] - per_arch["arm64"])
+        only_arm = sorted(per_arch["arm64"] - per_arch["x64"])
+        if only_x64:
+            errors.append(
+                "rust: postgres matrix missing on arm64: " + ", ".join(only_x64)
+            )
+        if only_arm:
+            errors.append(
+                "rust: postgres matrix missing on x64: " + ", ".join(only_arm)
+            )
+
+    postgres_union = per_arch["x64"]
+    overlap = (postgres_union & collab_tests) | (postgres_union & s3_tests) | (collab_tests & s3_tests)
+    if overlap:
+        errors.append(
+            "rust: integration target assigned to multiple CI buckets: "
+            + ", ".join(sorted(overlap))
+        )
+
+    if RUST_INTEGRATION_MANUAL_TARGETS & cargo_targets:
+        if not RUST_CAPACITY_PROBE_SCRIPT.is_file():
+            errors.append(f"rust: missing manual probe script {RUST_CAPACITY_PROBE_SCRIPT}")
+
+    assigned = postgres_union | collab_tests | s3_tests | RUST_INTEGRATION_MANUAL_TARGETS
+    required = cargo_targets - RUST_INTEGRATION_MANUAL_TARGETS
+    missing = sorted(required - assigned)
+    if missing:
+        errors.append(
+            "rust: Cargo.toml db-tests integration targets missing from rust.yml inventory: "
+            + ", ".join(missing)
+        )
+
+    return errors
+
+
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
@@ -759,6 +1015,7 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         elif reserved_gate in jobs:
             errors.append(f"{workflow}: {reserved_gate} must be a mapping")
 
+    errors.extend(verify_rust_suite_registry(repo_root))
     return errors
 
 
