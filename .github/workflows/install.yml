@@ -6,6 +6,11 @@ on:
     branches: [main]
   merge_group:
   workflow_dispatch:
+    inputs:
+      run_upgrade_smoke_arm:
+        description: Also run the image-to-image upgrade smoke on native ubuntu-24.04-arm (two cold image builds)
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
@@ -25,6 +30,7 @@ jobs:
       plan_json: ${{ steps.plan.outputs.plan_json }}
       select_install_smoke: ${{ steps.plan.outputs.select_install_smoke }}
       select_backup_restore_smoke: ${{ steps.plan.outputs.select_backup_restore_smoke }}
+      select_upgrade_smoke_arm64: ${{ steps.plan.outputs.select_upgrade_smoke_arm64 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -87,9 +93,70 @@ jobs:
       - name: Run container backup/restore smoke
         run: bash scripts/backup-restore-smoke.sh
 
+  # Developer witness, never an ordinary PR/main/merge_group check: selected only by a
+  # manual dispatch with run_upgrade_smoke_arm. It builds two cold historical images
+  # (x64 reference with CARGO_BUILD_JOBS=2: 614 s + 708 s, ~59 s of assertions), so it
+  # has its own VM, disk and 60 min budget instead of sharing install-smoke-arm64's.
+  upgrade-smoke-arm64:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      UPGRADE_OLD: d0942f10f89248b385eeb3f83475dfa4cd441388
+      UPGRADE_NEW: 1e0acbe15f903244ff7479c36dce2a90fa6e783d
+      TESTED_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # git archive of both pinned SHAs and the first-parent check need full history.
+          fetch-depth: 0
+      # The smoke's collab client needs Node's global WebSocket with headers.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.21.0'
+      - name: Check script, pair and disk (plan only)
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          blob="$(git hash-object scripts/upgrade-smoke.sh)"
+          echo "arch=$(uname -m) nproc=$(nproc) tested=$TESTED_SHA old=$UPGRADE_OLD new=$UPGRADE_NEW"
+          echo "upgrade-smoke.sh blob=$blob sha256=$(sha256sum scripts/upgrade-smoke.sh | cut -d' ' -f1)"
+          test "$(uname -m)" = aarch64
+          # The tested checkout's script runs; step two re-checks it is unchanged.
+          test "$blob" = "$(git rev-parse "$TESTED_SHA:scripts/upgrade-smoke.sh")"
+          printf '%s\n' "$blob" >"$RUNNER_TEMP/upgrade-smoke.blob"
+          docker_root="$(docker info -f '{{.DockerRootDir}}')"
+          echo "DockerRootDir=$docker_root"
+          df -P -BG "$docker_root"
+          bash scripts/upgrade-smoke.sh --old "$UPGRADE_OLD" --new "$UPGRADE_NEW" \
+            --main-ref "$TESTED_SHA" --evidence-dir "$RUNNER_TEMP/upgrade-evidence/plan" --plan-only
+      - name: Run image-to-image upgrade smoke
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          test "$(git hash-object scripts/upgrade-smoke.sh)" = "$(cat "$RUNNER_TEMP/upgrade-smoke.blob")"
+          bash scripts/upgrade-smoke.sh --old "$UPGRADE_OLD" --new "$UPGRADE_NEW" \
+            --main-ref "$TESTED_SHA" --evidence-dir "$RUNNER_TEMP/upgrade-evidence/run"
+      # The evidence dirs hold redacted logs only; env files and keys stay in the
+      # script's work dir, which is never printed.
+      - name: Print redacted evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Log lines must not act as workflow commands.
+          token="$(openssl rand -hex 16)"
+          for log in "$RUNNER_TEMP"/upgrade-evidence/*/*.log; do
+            echo "== $log (last 80 lines)"
+            echo "::stop-commands::$token"
+            tail -n 80 "$log"
+            echo "::$token::"
+          done
+
   install-ci-gate:
     name: install-ci-gate
-    needs: [ci-plan, install-smoke, backup-restore-smoke]
+    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

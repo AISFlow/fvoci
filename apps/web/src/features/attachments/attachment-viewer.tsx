@@ -24,6 +24,11 @@ const HwpViewer = lazy(async () => {
   return { default: mod.HwpViewer };
 });
 
+const PptxViewer = lazy(async () => {
+  const mod = await import("./pptx-viewer");
+  return { default: mod.PptxViewer };
+});
+
 const XlsxViewer = lazy(async () => {
   const mod = await import("./xlsx-viewer");
   return { default: mod.XlsxViewer };
@@ -269,8 +274,8 @@ export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
         {...(props.hwpEdit === undefined ? {} : { edit: props.hwpEdit })}
       />
     );
-  } else if (kind === "docx" || kind === "xlsx") {
-    const Layout = kind === "docx" ? DocxViewer : XlsxViewer;
+  } else if (kind === "docx" || kind === "pptx" || kind === "xlsx") {
+    const Layout = kind === "docx" ? DocxViewer : kind === "pptx" ? PptxViewer : XlsxViewer;
     body = (
       <>
         {props.chunk !== undefined && props.previewHtmlUrl !== undefined ? (

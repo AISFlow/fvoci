@@ -15,6 +15,8 @@
     "@hocuspocus/provider": "4.6.0",
     "@hocuspocus/provider-react": "4.6.0",
     "@hookform/resolvers": "^5.9.1",
+    "@office-kit/pptx": "0.21.0",
+    "@office-kit/pptx-preview": "0.11.0",
     "@office-kit/xlsx": "0.21.1",
     "@rhwp/core": "0.8.6",
     "@tanstack/react-query": "^5.103.2",
@@ -29,6 +31,7 @@
     "react-dom": "^19.3.0",
     "react-hook-form": "^7.88.0",
     "react-router-dom": "^7.9.1",
+    "saxes": "6.0.0",
     "tailwind-merge": "^3.7.0",
     "yjs": "13.6.32",
     "zod": "^3.25.76"

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chunkSearch, isDocx, isExtractableText, isHwp, isXlsx, viewerKind } from "./attachment-kind.ts";
+import { chunkSearch, isDocx, isExtractableText, isHwp, isPptx, isXlsx, viewerKind } from "./attachment-kind.ts";
 
 test("chunkSearch accepts a non-negative integer chunk query", () => {
   assert.deepEqual(chunkSearch(new URLSearchParams("chunk=3")), { chunk: 3 });
@@ -10,7 +10,7 @@ test("chunkSearch accepts a non-negative integer chunk query", () => {
   assert.deepEqual(chunkSearch(new URLSearchParams()), {});
 });
 
-test("viewerKind prefers images, then PDF, then HWP, then DOCX, then XLSX, then extractable text, then download", () => {
+test("viewerKind prefers images, then PDF, then HWP, then DOCX, then PPTX, then XLSX, then extractable text, then download", () => {
   assert.equal(viewerKind({ name: "a.png", mime: "image/png", image: true }), "image");
   assert.equal(viewerKind({ name: "a.pdf", mime: "application/pdf", image: false }), "pdf");
   assert.equal(viewerKind({ name: "A.PDF", mime: "application/octet-stream", image: false }), "pdf");
@@ -33,6 +33,14 @@ test("viewerKind prefers images, then PDF, then HWP, then DOCX, then XLSX, then 
   // A spreadsheet MIME wins over a text-looking name, as in the source.
   assert.equal(viewerKind({ name: "export.csv", mime: xlsxMime, image: false }), "xlsx");
   assert.equal(viewerKind({ name: "data.csv", mime: "text/csv", image: false }), "text");
+  const pptxMime = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  assert.equal(viewerKind({ name: "deck.pptx", mime: pptxMime, image: false }), "pptx");
+  assert.equal(viewerKind({ name: "DECK.PPTX", mime: "application/octet-stream", image: false }), "pptx");
+  assert.equal(viewerKind({ name: "upload", mime: pptxMime.toUpperCase(), image: false }), "pptx");
+  // Source order: DOCX, then PPTX, then XLSX.
+  assert.equal(viewerKind({ name: "report.docx", mime: pptxMime, image: false }), "docx");
+  assert.equal(viewerKind({ name: "deck.pptx", mime: xlsxMime, image: false }), "pptx");
+  assert.equal(viewerKind({ name: "notes.txt", mime: pptxMime, image: false }), "pptx");
   // HWP/HWPX by name or the source `application/x-hwp*` MIME prefix, before Office and text.
   assert.equal(viewerKind({ name: "form.hwp", mime: "application/octet-stream", image: false }), "hwp");
   assert.equal(viewerKind({ name: "FORM.HWPX", mime: "", image: false }), "hwp");
@@ -41,11 +49,13 @@ test("viewerKind prefers images, then PDF, then HWP, then DOCX, then XLSX, then 
   assert.equal(viewerKind({ name: "form.docx", mime: "application/x-hwp", image: false }), "hwp");
   assert.equal(isHwp("form.hwpml", "application/xml"), false);
   assert.equal(isHwp("form.docx", "application/hwpx"), false);
-  // Other Office kinds have no layout viewer yet: they stay download, never text.
-  // No new ODS/XLS/XLSM support: only the source "xlsx" kind opens the grid.
-  for (const name of ["deck.pptx", "memo.odt", "old.doc", "calc.ods", "old.xls", "macro.xlsm"]) {
+  // Other Office kinds have no layout viewer: they stay download, never text.
+  // No new ODS/XLS/XLSM or PPT/PPSX/POTX/ODP support: only the source kinds open.
+  for (const name of ["memo.odt", "old.doc", "calc.ods", "old.xls", "macro.xlsm", "old.ppt", "show.ppsx", "tpl.potx", "deck.odp", "macro.pptm"]) {
     assert.equal(viewerKind({ name, mime: "application/octet-stream", image: false }), "download", name);
   }
   assert.equal(isDocx("template.dotx", ""), false);
   assert.equal(isXlsx("template.xltx", ""), false);
+  assert.equal(isPptx("template.potx", ""), false);
+  assert.equal(isPptx("deck.odp", "application/vnd.oasis.opendocument.presentation"), false);
 });
