@@ -2514,3 +2514,490 @@ async fn trickling_part_put_times_out_and_releases_its_slot() {
     assert_eq!(status, StatusCode::OK);
     harness.cleanup().await;
 }
+
+/// A reverse proxy with a per-request body cap and an origin read timeout,
+/// answering like Cloudflare does (413 before the origin sees the body, 524
+/// when the origin answers too late). A local stand-in only: it does not claim
+/// Cloudflare's buffering or connection behaviour.
+#[derive(Clone)]
+struct CappedProxy {
+    upstream: String,
+    client: reqwest::Client,
+    max_request_bytes: usize,
+    read_timeout: Arc<std::sync::Mutex<Duration>>,
+    /// Forward the next request, let the origin finish it, then answer 524.
+    lose_next_response: Arc<std::sync::atomic::AtomicBool>,
+    upstream_requests: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+fn gateway_page(status: u16) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::from_u16(status).unwrap(),
+        [("content-type", "text/html")],
+        format!("<html><body>error code: {status}</body></html>"),
+    )
+        .into_response()
+}
+
+async fn capped_proxy_handler(
+    axum::extract::State(proxy): axum::extract::State<CappedProxy>,
+    request: Request<Body>,
+) -> axum::response::Response {
+    use std::sync::atomic::Ordering;
+    let (parts, body) = request.into_parts();
+    let declared = parts
+        .headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|len| len > proxy.max_request_bytes) {
+        return gateway_page(413);
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, proxy.max_request_bytes).await else {
+        return gateway_page(413);
+    };
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+    let mut forward = proxy
+        .client
+        .request(parts.method.clone(), format!("{}{path}", proxy.upstream))
+        .timeout(*proxy.read_timeout.lock().unwrap());
+    for name in ["cookie", "content-type"] {
+        if let Some(value) = parts.headers.get(name) {
+            forward = forward.header(name, value.clone());
+        }
+    }
+    if !bytes.is_empty() {
+        forward = forward.body(bytes);
+    }
+    proxy.upstream_requests.fetch_add(1, Ordering::SeqCst);
+    let upstream = match forward.send().await {
+        Ok(res) => res,
+        Err(err) if err.is_timeout() => return gateway_page(524),
+        Err(_) => return gateway_page(502),
+    };
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    let body = match upstream.bytes().await {
+        Ok(body) => body,
+        Err(err) if err.is_timeout() => return gateway_page(524),
+        Err(_) => return gateway_page(502),
+    };
+    if proxy.lose_next_response.swap(false, Ordering::SeqCst) {
+        return gateway_page(524);
+    }
+    let mut response = axum::response::Response::new(Body::from(body));
+    *response.status_mut() = status;
+    for name in ["content-type", "etag", "content-range", "accept-ranges"] {
+        if let Some(value) = headers.get(name) {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+    response
+}
+
+async fn serve_on_loopback(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (format!("http://{addr}"), handle)
+}
+
+async fn via_proxy(
+    client: &reqwest::Client,
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    cookie: &str,
+    body: Option<(Vec<u8>, &str)>,
+) -> (StatusCode, Vec<u8>, reqwest::header::HeaderMap) {
+    let mut req = client
+        .request(method, format!("{base}{path}"))
+        .header("cookie", format!("fvoci_session={cookie}"));
+    if let Some((bytes, content_type)) = body {
+        req = req.header("content-type", content_type).body(bytes);
+    }
+    let res = req.send().await.expect("proxy request");
+    let status = StatusCode::from_u16(res.status().as_u16()).unwrap();
+    let headers = res.headers().clone();
+    let bytes = res.bytes().await.expect("proxy body").to_vec();
+    (status, bytes, headers)
+}
+
+async fn via_proxy_json(
+    client: &reqwest::Client,
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    cookie: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let (status, bytes, _) = via_proxy(
+        client,
+        base,
+        method,
+        path,
+        cookie,
+        body.map(|v| (v.to_string().into_bytes(), "application/json")),
+    )
+    .await;
+    (status, serde_json::from_slice(&bytes).unwrap_or(json!({})))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+#[tokio::test]
+async fn proxy_capped_parts_round_trip_exact_bytes_through_413_and_524() {
+    use rand::SeedableRng;
+    use reqwest::Method;
+    use std::sync::atomic::Ordering;
+
+    const PART: usize = 1024 * 1024;
+    const PROXY_CAP: usize = PART + PART / 2;
+
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let storage_root = std::env::temp_dir().join(format!("fvoci-att-proxy-{}", Uuid::now_v7()));
+    let mut state = app_state_with_storage(&harness.app_url, storage_root.clone()).await;
+    state.upload.part_size_bytes = PART as i64;
+    let app = app_router(state);
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let (origin, origin_task) = serve_on_loopback(app).await;
+    let proxy = CappedProxy {
+        upstream: origin,
+        client: reqwest::Client::new(),
+        max_request_bytes: PROXY_CAP,
+        read_timeout: Arc::new(std::sync::Mutex::new(Duration::from_secs(30))),
+        lose_next_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        upstream_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let (edge, edge_task) = serve_on_loopback(
+        axum::Router::new()
+            .fallback(capped_proxy_handler)
+            .with_state(proxy.clone()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Larger than one proxied request can carry; not a multiple of the part size.
+    let mut payload = vec![0u8; 4 * PART + 12_345];
+    rand::rngs::StdRng::seed_from_u64(0x5eed).fill_bytes(&mut payload);
+    assert!(payload.len() > PROXY_CAP);
+
+    let ws = format!("/api/v1/workspaces/{workspace_id}");
+    let (status, created) = via_proxy_json(
+        &client,
+        &edge,
+        Method::POST,
+        &format!("{ws}/documents/{document_id}/uploads"),
+        &cookie,
+        Some(json!({ "name": "big.bin", "sizeBytes": payload.len() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create: {created:?}");
+    let attachment_id = created["attachmentId"].as_str().unwrap().to_string();
+    assert_eq!(created["partSizeBytes"], PART);
+    let part_urls = created["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["url"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(part_urls.len(), 5);
+    let chunk = |n: usize| payload[(n - 1) * PART..(n * PART).min(payload.len())].to_vec();
+    for n in 1..=part_urls.len() {
+        assert!(
+            chunk(n).len() <= PROXY_CAP,
+            "part {n} fits one proxied request"
+        );
+    }
+    let put = |n: usize, bytes: Vec<u8>| {
+        let (client, edge, cookie, url) = (&client, &edge, &cookie, part_urls[n - 1].clone());
+        async move {
+            via_proxy(
+                client,
+                edge,
+                Method::PUT,
+                &url,
+                cookie,
+                Some((bytes, "application/octet-stream")),
+            )
+            .await
+        }
+    };
+    let resume = || async {
+        via_proxy_json(
+            &client,
+            &edge,
+            Method::GET,
+            &format!("{ws}/attachments/{attachment_id}/upload"),
+            &cookie,
+            None,
+        )
+        .await
+    };
+
+    // The whole file in one request is refused at the edge; the origin never
+    // sees it and the session stays usable. The edge answers 413 without
+    // draining the body, so the client may instead see the connection reset
+    // while it is still sending (a browser `fetch` then rejects).
+    let before = proxy.upstream_requests.load(Ordering::SeqCst);
+    let whole = client
+        .put(format!("{edge}{}", part_urls[0]))
+        .header("cookie", format!("fvoci_session={cookie}"))
+        .header("content-type", "application/octet-stream")
+        .body(payload.clone())
+        .send()
+        .await;
+    match whole {
+        Ok(res) => {
+            assert_eq!(res.status().as_u16(), 413);
+            eprintln!("edge refusal: 413 response");
+            let page = res.text().await.unwrap_or_default();
+            assert!(page.is_empty() || page.contains("413"), "{page}");
+        }
+        Err(err) => {
+            eprintln!("edge refusal: connection error {err:?}");
+            assert!(err.is_request() || err.is_body(), "{err:?}");
+        }
+    }
+    assert_eq!(proxy.upstream_requests.load(Ordering::SeqCst), before);
+    let (status, resumed) = resume().await;
+    assert_eq!(status, StatusCode::OK, "resume: {resumed:?}");
+    assert_eq!(resumed["uploadedParts"], json!([]));
+
+    // Part 2 is stored but its response is lost (524): resume shows it, and
+    // re-sending it is idempotent (same content hash).
+    proxy.lose_next_response.store(true, Ordering::SeqCst);
+    let (status, _, _) = put(2, chunk(2)).await;
+    assert_eq!(status.as_u16(), 524);
+    let (_, resumed) = resume().await;
+    let listed = resumed["uploadedParts"].as_array().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["partNumber"], 2);
+    let (status, _, headers) = put(2, chunk(2)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get("etag").unwrap().to_str().unwrap(),
+        listed[0]["etag"].as_str().unwrap()
+    );
+
+    // Out of order, with a duplicate.
+    for n in [5usize, 3, 1, 3, 4] {
+        let (status, body, _) = put(n, chunk(n)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "part {n}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let (_, resumed) = resume().await;
+    assert_eq!(resumed["parts"], json!([]));
+    let mut uploaded = resumed["uploadedParts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["partNumber"].as_u64().unwrap() as usize,
+                p["etag"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    uploaded.sort();
+    assert_eq!(uploaded.len(), 5);
+    let complete_body = json!({
+        "parts": uploaded
+            .iter()
+            .map(|(n, etag)| json!({ "partNumber": n, "etag": etag }))
+            .collect::<Vec<_>>()
+    });
+
+    // Complete outlives the proxy read timeout: 524, and nothing is published.
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    let mut barrier = test_barrier::arm_pre_mark_stored(attachment_uuid);
+    *proxy.read_timeout.lock().unwrap() = Duration::from_millis(500);
+    let complete_path = format!("{ws}/attachments/{attachment_id}/complete");
+    let (status, _) = via_proxy_json(
+        &client,
+        &edge,
+        Method::POST,
+        &complete_path,
+        &cookie,
+        Some(complete_body.clone()),
+    )
+    .await;
+    assert_eq!(status.as_u16(), 524);
+    tokio::time::timeout(Duration::from_secs(5), barrier.wait_entered())
+        .await
+        .expect("complete reached the pre-mark barrier")
+        .expect("barrier entered");
+    test_barrier::disarm_pre_mark_stored(attachment_uuid);
+    *proxy.read_timeout.lock().unwrap() = Duration::from_secs(30);
+    let (status, _) = via_proxy_json(
+        &client,
+        &edge,
+        Method::GET,
+        &format!("{ws}/attachments/{attachment_id}"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "not published after the 524");
+    let (status, _, _) = via_proxy(
+        &client,
+        &edge,
+        Method::GET,
+        &format!("{ws}/attachments/{attachment_id}/download"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The origin dropped the abandoned complete with the proxy connection
+    // (the barrier is never released), so only a re-sent complete can finish.
+    let (status, completed) = via_proxy_json(
+        &client,
+        &edge,
+        Method::POST,
+        &complete_path,
+        &cookie,
+        Some(complete_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-sent complete: {completed:?}");
+    assert_eq!(completed["sizeBytes"], payload.len());
+    barrier.proceed();
+
+    // Exact bytes back through the proxy (the cap applies to request bodies).
+    let (status, downloaded, _) = via_proxy(
+        &client,
+        &edge,
+        Method::GET,
+        &format!("{ws}/attachments/{attachment_id}/download"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(downloaded.len(), payload.len());
+    assert_eq!(sha256_hex(&downloaded), sha256_hex(&payload));
+
+    // A complete whose response is lost after commit: the stored metadata is
+    // visible and a re-sent complete returns the same row without a second
+    // completion event.
+    let small = payload[..PART + 7].to_vec();
+    let (status, created) = via_proxy_json(
+        &client,
+        &edge,
+        Method::POST,
+        &format!("{ws}/documents/{document_id}/uploads"),
+        &cookie,
+        Some(json!({ "name": "small.bin", "sizeBytes": small.len() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let small_id = created["attachmentId"].as_str().unwrap().to_string();
+    let mut small_parts = Vec::new();
+    for (i, part) in created["parts"].as_array().unwrap().iter().enumerate() {
+        let bytes = small[i * PART..((i + 1) * PART).min(small.len())].to_vec();
+        let (status, _, headers) = via_proxy(
+            &client,
+            &edge,
+            Method::PUT,
+            part["url"].as_str().unwrap(),
+            &cookie,
+            Some((bytes, "application/octet-stream")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        small_parts.push(json!({
+            "partNumber": i + 1,
+            "etag": headers.get("etag").unwrap().to_str().unwrap(),
+        }));
+    }
+    let small_complete = format!("{ws}/attachments/{small_id}/complete");
+    proxy.lose_next_response.store(true, Ordering::SeqCst);
+    let (status, _) = via_proxy_json(
+        &client,
+        &edge,
+        Method::POST,
+        &small_complete,
+        &cookie,
+        Some(json!({ "parts": small_parts })),
+    )
+    .await;
+    assert_eq!(status.as_u16(), 524);
+    let (status, meta) = via_proxy_json(
+        &client,
+        &edge,
+        Method::GET,
+        &format!("{ws}/attachments/{small_id}"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(meta["completedAt"].is_string());
+    let (status, again) = via_proxy_json(
+        &client,
+        &edge,
+        Method::POST,
+        &small_complete,
+        &cookie,
+        Some(json!({ "parts": small_parts })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["id"], meta["id"]);
+    assert_eq!(again["sizeBytes"], small.len());
+    let (_, downloaded, _) = via_proxy(
+        &client,
+        &edge,
+        Method::GET,
+        &format!("{ws}/attachments/{small_id}/download"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(sha256_hex(&downloaded), sha256_hex(&small));
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    for (id, name) in [(&attachment_id, "big"), (&small_id, "small")] {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM fvoci.events WHERE verb = 'attachment.completed' AND target_id = $1",
+        )
+        .bind(Uuid::parse_str(id).unwrap())
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(count.0, 1, "{name}: one completion event");
+    }
+    admin.close().await;
+    assert_eq!(writing_temps(&storage_root).await, 0);
+
+    edge_task.abort();
+    origin_task.abort();
+    let _ = std::fs::remove_dir_all(&storage_root);
+    harness.cleanup().await;
+}
