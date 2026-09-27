@@ -66,6 +66,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "=0.1.25"
 url = "2"
+# WHATWG HTML tokenizer for OG meta extraction (unfurl). MIT. Tokenizer only:
+# default jetscii SIMD and the html5ever tree-builder feature stay off.
+html5gum = { version = "=0.8.4", default-features = false }
 uuid = { version = "1", features = ["v7", "serde"] }
 bytes = "1"
 infer = "0.19"
@@ -314,6 +317,11 @@ required-features = ["db-tests"]
 [[test]]
 name = "identity_integration"
 path = "tests/identity_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
+name = "unfurl_integration"
+path = "tests/unfurl_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]

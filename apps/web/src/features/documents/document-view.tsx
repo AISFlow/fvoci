@@ -7,6 +7,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { UrlEmbedProvider } from "@/features/workspace/document-editor";
 import {
   documentPath,
   formatDisplayId,
@@ -585,18 +586,20 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
         {!ready && collabSession?.status !== "unauthorized" ? <QueryLoading /> : null}
         {ready && collabSession && collabUser ? (
           <AttachmentBlockContext.Provider value={attachmentBridge}>
-            <FvociEditor
-              ydoc={collabSession.doc}
-              provider={collabSession.provider}
-              user={collabUser}
-              editable={!readOnly}
-              ariaLabel={t("doc.body.a11y")}
-              workspaceSlug={slug}
-              gutterAddLabel={t("editor.gutter.add")}
-              gutterMoveLabel={t("editor.gutter.move")}
-              insertLabel={t("editor.mobile.insert")}
-              onReady={setEditor}
-            />
+            <UrlEmbedProvider workspaceId={workspaceId}>
+              <FvociEditor
+                ydoc={collabSession.doc}
+                provider={collabSession.provider}
+                user={collabUser}
+                editable={!readOnly}
+                ariaLabel={t("doc.body.a11y")}
+                workspaceSlug={slug}
+                gutterAddLabel={t("editor.gutter.add")}
+                gutterMoveLabel={t("editor.gutter.move")}
+                insertLabel={t("editor.mobile.insert")}
+                onReady={setEditor}
+              />
+            </UrlEmbedProvider>
           </AttachmentBlockContext.Provider>
         ) : null}
       </section>
