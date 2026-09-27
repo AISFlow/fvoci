@@ -326,10 +326,41 @@ test("grouped board pages each column and moves cards by drag or select through 
   await expect(page.getByTestId(`collection-card-${movedId}`)).toHaveCount(1);
   await expect(columnA.locator(".collection-board__head")).toContainText("59");
 
+  // 2b. Ordinary 1280×720 viewport: scroll a second-page card into view and drag it with the
+  //     real pointer onto the visible part of the destination column. Columns stretch to the
+  //     tallest one, so the target column is under the pointer without scrolling mid-drag.
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.reload();
+  await columnA.getByRole("button", { name: `${statusA!.name} · 더 보기` }).click();
+  await expect(cards(columnA)).toHaveCount(59);
+  const pointerId = (await cardIds(columnA))[55]!;
+  const pointerCard = columnA.getByTestId(`collection-card-${pointerId}`);
+  await pointerCard.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  const from = (await pointerCard.boundingBox())!;
+  const to = (await columnB.boundingBox())!;
+  expect(from.y + 4).toBeGreaterThanOrEqual(0);
+  expect(from.y + 4).toBeLessThan(720);
+  expect(to.y).toBeLessThan(from.y);
+  expect(to.y + to.height).toBeGreaterThan(from.y + 4);
+  await page.mouse.move(from.x + 4, from.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 40, from.y + 4, { steps: 4 });
+  await page.mouse.move(to.x + 20, from.y + 4, { steps: 8 });
+  await page.mouse.up();
+  await expect(columnB.getByTestId(`collection-card-${pointerId}`)).toBeVisible();
+  await expect(cards(columnA)).toHaveCount(58);
+  await expect.poll(async () => (await itemRow(pointerId)).statusId).toBe(statusB!.id);
+  await page.reload();
+  await expect(columnB.getByTestId(`collection-card-${pointerId}`)).toBeVisible();
+  await expect(page.getByTestId(`collection-card-${pointerId}`)).toHaveCount(1);
+  await expect(cards(columnB)).toHaveCount(4);
+  await page.setViewportSize({ width: 1600, height: 7000 });
+
   // 3. A rejected move (WIP limit) shows the server error and leaves the card in place.
   const wipRes = await page.request.patch(
     `${base}/workflows/${workflow.id}/statuses/${statusB!.id}`,
-    { data: { wipLimit: 3 } },
+    { data: { wipLimit: 4 } },
   );
   expect(wipRes.ok()).toBe(true);
   const blockedId = (await cardIds(columnA))[0]!;
