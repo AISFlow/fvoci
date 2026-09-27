@@ -2045,3 +2045,116 @@ async fn upgrade_to_028_backfills_as_a_non_superuser_schema_owner() {
         .expect("drop owner role");
     server.close().await;
 }
+
+/// Titles `dueBefore` 2026-01-01 selects on one task query path.
+async fn due_before_titles(
+    app: &axum::Router,
+    cookie: &str,
+    ws: Uuid,
+    project: &str,
+    collection: &str,
+    path: &str,
+) -> Vec<String> {
+    let query =
+        r#"{"filters":{"dueBefore":"2026-01-01"},"sort":[{"field":"title","direction":"asc"}]}"#;
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    let (status, body) = match path {
+        "project" => {
+            let path = format!("/api/v1/workspaces/{ws}/projects/{project}/tasks?query={encoded}");
+            call(app, "GET", &path, None, cookie).await
+        }
+        "workspace" => {
+            let path = format!("/api/v1/workspaces/{ws}/tasks?query={encoded}");
+            call(app, "GET", &path, None, cookie).await
+        }
+        "layout" => {
+            let path = format!(
+                "/api/v1/workspaces/{ws}/projects/{project}/task-layout?year=2026&month=1&query={encoded}"
+            );
+            call(app, "GET", &path, None, cookie).await
+        }
+        _ => {
+            let config: Value = serde_json::from_str(query).unwrap();
+            let body = json!({"config": {"query": config}, "limit": 100});
+            self::query(app, cookie, ws, collection, body).await
+        }
+    };
+    assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    let mut titles: Vec<String> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["title"].as_str().unwrap().to_string())
+        .collect();
+    titles.sort();
+    titles
+}
+
+#[tokio::test]
+async fn due_before_uses_each_actor_time_zone_on_every_task_query_path() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner, owner_id, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, ws, "member", "west").await;
+    let project = create_project(app.clone(), &owner, ws, "TZ", "workspace").await;
+    let project_id = project["id"].as_str().unwrap().to_string();
+    let collection = project_collection(&app, &owner, ws, &project_id).await;
+    let cid = collection["id"].as_str().unwrap().to_string();
+    // Evening UTC on 2026-01-01 is 2026-01-02 in Seoul (+09:00); early UTC on
+    // 2026-01-02 is still 2026-01-01 in Los Angeles (-08:00). Date-only dues
+    // are calendar dates in every zone.
+    for (title, due_date, due_at) in [
+        ("at-evening", None, Some("2026-01-01T20:00:00Z")),
+        ("at-early-next", None, Some("2026-01-02T03:00:00Z")),
+        ("date-on", Some("2026-01-01"), None),
+        ("date-after", Some("2026-01-02"), None),
+    ] {
+        let task = create_task(&app, &owner, ws, &project_id, json!({"title": title})).await;
+        sqlx::query(
+            "UPDATE fvoci.tasks SET start_date = NULL, due_date = $2::date, due_at = $3::timestamptz WHERE id = $1::uuid",
+        )
+        .bind(&task)
+        .bind(due_date)
+        .bind(due_at)
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
+    for (user, zone) in [
+        (owner_id, "Asia/Seoul"),
+        (member.user_id, "America/Los_Angeles"),
+    ] {
+        sqlx::query("UPDATE fvoci.users SET timezone = $2 WHERE id = $1")
+            .bind(user)
+            .bind(zone)
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+
+    for (cookie, expected) in [
+        (owner.as_str(), vec!["date-on"]),
+        (
+            member.cookie.as_str(),
+            vec!["at-early-next", "at-evening", "date-on"],
+        ),
+    ] {
+        for path in ["project", "workspace", "layout", "collection"] {
+            let titles = due_before_titles(&app, cookie, ws, &project_id, &cid, path).await;
+            assert_eq!(titles, expected, "{path}");
+        }
+    }
+
+    sqlx::query("UPDATE fvoci.users SET timezone = 'UTC' WHERE id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    for path in ["project", "workspace", "layout", "collection"] {
+        let titles = due_before_titles(&app, &owner, ws, &project_id, &cid, path).await;
+        assert_eq!(titles, vec!["at-evening", "date-on"], "{path}");
+    }
+
+    admin.close().await;
+    harness.cleanup().await;
+}

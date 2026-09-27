@@ -18,8 +18,8 @@ use crate::db::projects::{
 };
 use crate::db::task_activity::{record_task_activity, task_activity_snapshot};
 use crate::db::view_query::{
-    compile_view_query, scalar_value_sql, value_column, CompileOptions, RootKind, SqlArgs,
-    ViewScope,
+    compile_view_query, due_date_sql, scalar_value_sql, value_column, CompileOptions, CompiledView,
+    RootKind, SqlArgs, ViewScope,
 };
 use crate::projects::ProjectPermission;
 use crate::tasks::activity::{patch_activity_fields, ActivitySnapshot};
@@ -1286,7 +1286,6 @@ type TaskListCursorAnchor = (
     String,
     Uuid,
     Option<NaiveDate>,
-    Option<DateTime<Utc>>,
     String,
 );
 
@@ -1331,7 +1330,8 @@ async fn list_tasks_in_scope(
     session_id: Uuid,
     query: &ParsedTaskListQuery,
 ) -> Result<Result<TaskListPage, ProjectDbError>, sqlx::Error> {
-    let fingerprint = filter_fingerprint(workspace_id, project_id, query);
+    let time_zone = crate::db::dashboard::user_time_zone(pool, actor_user_id).await?;
+    let fingerprint = filter_fingerprint(workspace_id, project_id, &time_zone, query);
     if let Some(cursor) = &query.cursor {
         if cursor.f != fingerprint {
             return Ok(Err(ProjectDbError::InvalidCursor));
@@ -1438,7 +1438,7 @@ async fn list_tasks_in_scope(
         &query.view,
         &CompileOptions {
             actor_user_id,
-            time_zone: "UTC",
+            time_zone: &time_zone,
             standard_filters: false,
         },
         "t",
@@ -1454,18 +1454,11 @@ async fn list_tasks_in_scope(
     };
     base_conditions.extend(compiled.conditions.iter().cloned());
     base_binds.extend(compiled_args.values.iter().cloned());
-    let custom_sorts: HashMap<Uuid, String> = compiled
-        .order
-        .iter()
-        .filter_map(|term| match term.field {
-            SortField::Field(id) => Some((id, term.sql("{root}"))),
-            _ => None,
-        })
-        .collect();
+    let compiled_sorts = compiled_sort_terms(&compiled);
     let custom_fields: Vec<(Uuid, &'static str)> = compiled
         .catalog
         .iter()
-        .filter(|field| custom_sorts.contains_key(&field.id))
+        .filter(|field| compiled_sorts.contains_key(&SortField::Field(field.id)))
         .filter_map(|field| value_column(&field.field_type).map(|column| (field.id, column)))
         .collect();
     let mut conditions = base_conditions.clone();
@@ -1478,7 +1471,7 @@ async fn list_tasks_in_scope(
         let anchor_sql = format!(
             r#"
             SELECT t.created_at, t.updated_at, t.id, t.number, t.title, t.sort_key, t.priority, t.status_id,
-                   t.due_date, t.due_at,
+                   {due_sql} AS due,
                    (
                        SELECT st.sort_key
                        FROM fvoci.statuses st
@@ -1491,12 +1484,14 @@ async fn list_tasks_in_scope(
               AND {scope_condition}
               AND t.id = $3
               AND t.deleted_at IS NULL
-            "#
+            "#,
+            due_sql = due_date_sql("t", "$4"),
         );
         let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(&anchor_sql)
             .bind(workspace_id)
             .bind(scope_bind)
             .bind(cursor.id)
+            .bind(&time_zone)
             .fetch_optional(&mut *tx)
             .await?;
         let Some((
@@ -1508,8 +1503,7 @@ async fn list_tasks_in_scope(
             sort_key,
             priority,
             _status_id,
-            due_date,
-            due_at,
+            due,
             status_sort_key,
         )) = anchor
         else {
@@ -1528,8 +1522,7 @@ async fn list_tasks_in_scope(
             &sort_key,
             &priority,
             &status_sort_key,
-            due_date,
-            due_at,
+            due,
             &anchor_tokens,
         );
         if key != cursor.key {
@@ -1537,7 +1530,7 @@ async fn list_tasks_in_scope(
             return Ok(Err(ProjectDbError::InvalidCursor));
         }
         let bind_start = binds.len() + 3;
-        conditions.push(cursor_clause(&sort, bind_start, &custom_sorts));
+        conditions.push(cursor_clause(&sort, bind_start, &compiled_sorts));
         for entry in &sort {
             binds.push(cursor_bind_value(
                 entry.field,
@@ -1548,8 +1541,7 @@ async fn list_tasks_in_scope(
                 &sort_key,
                 &priority,
                 &status_sort_key,
-                due_date,
-                due_at,
+                due,
             ));
         }
         binds.push(id.to_string());
@@ -1557,7 +1549,8 @@ async fn list_tasks_in_scope(
 
     let list_where_sql = conditions.join(" AND ");
     let count_where_sql = base_conditions.join(" AND ");
-    let order_sql = order_clause(&sort, &custom_sorts);
+    let order_sql = order_clause(&sort, &compiled_sorts);
+    let due_sort_sql = term_sql(SortField::Due, &compiled_sorts);
     let limit = query.limit + 1;
     let list_sql = format!(
         r#"
@@ -1565,6 +1558,7 @@ async fn list_tasks_in_scope(
                t.start_date, t.due_date, t.due_at, t.estimate::text AS estimate,
                t.parent_id, t.milestone_id, t.sort_key, t.schema_version, t.version,
                t.archived_at, t.created_by, t.created_at, t.updated_at, t.recurrence,
+               {due_sort_sql}::date AS sort_due,
                (
                    SELECT st.sort_key
                    FROM fvoci.statuses st
@@ -1625,8 +1619,7 @@ async fn list_tasks_in_scope(
         let record = map_task_row(last)?;
         let created_at: DateTime<Utc> = last.try_get("created_at")?;
         let updated_at: DateTime<Utc> = last.try_get("updated_at")?;
-        let due_date: Option<NaiveDate> = last.try_get("due_date")?;
-        let due_at: Option<DateTime<Utc>> = last.try_get("due_at")?;
+        let due: Option<NaiveDate> = last.try_get("sort_due")?;
         let status_sort_key: String = last.try_get("status_sort_key")?;
         let tokens =
             load_custom_sort_tokens(&mut tx, workspace_id, record.id, &custom_fields).await?;
@@ -1640,8 +1633,7 @@ async fn list_tasks_in_scope(
             &record.sort_key,
             &record.priority,
             &status_sort_key,
-            due_date,
-            due_at,
+            due,
             &tokens,
         );
         Some(encode_cursor(&TaskListCursor {
@@ -1811,24 +1803,33 @@ async fn load_custom_sort_tokens(
     Ok(out)
 }
 
-fn term_sql(field: SortField, custom: &HashMap<Uuid, String>) -> String {
+/// Field and due sort terms from the shared compiler, keyed by sort field. The
+/// due term reads `due_at` in the actor zone bound by the compiler.
+pub(crate) fn compiled_sort_terms(compiled: &CompiledView) -> HashMap<SortField, String> {
+    compiled
+        .order
+        .iter()
+        .filter(|term| matches!(term.field, SortField::Field(_) | SortField::Due))
+        .map(|term| (term.field, term.sql("{root}")))
+        .collect()
+}
+
+fn term_sql(field: SortField, compiled: &HashMap<SortField, String>) -> String {
     match field {
-        SortField::Field(id) => custom
-            .get(&id)
+        SortField::Field(_) | SortField::Due => compiled
+            .get(&field)
             .map(|template| template.replace("{root}", "t"))
             .unwrap_or_else(|| "NULL".to_string()),
         other => sort_expression_sql(other).to_string(),
     }
 }
 
-/// Due-date sort uses UTC; the source uses the request time zone.
 fn sort_expression_sql(field: SortField) -> &'static str {
     match field {
-        SortField::Field(_) => "NULL",
+        SortField::Field(_) | SortField::Due => "NULL",
         SortField::Priority => {
             "CASE t.priority WHEN 'none' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'urgent' THEN 4 END"
         }
-        SortField::Due => "COALESCE(t.due_date, (t.due_at AT TIME ZONE 'UTC')::date)",
         SortField::Updated => "t.updated_at",
         SortField::Created => "t.created_at",
         SortField::Rank => r#"t.sort_key COLLATE "C""#,
@@ -1851,7 +1852,7 @@ fn sort_anchor_ref(field: SortField, bind_index: usize) -> String {
     }
 }
 
-pub(crate) fn order_clause(sort: &[ViewSort], custom: &HashMap<Uuid, String>) -> String {
+pub(crate) fn order_clause(sort: &[ViewSort], custom: &HashMap<SortField, String>) -> String {
     let mut parts = Vec::new();
     for entry in sort {
         let column = term_sql(entry.field, custom);
@@ -1866,7 +1867,11 @@ pub(crate) fn order_clause(sort: &[ViewSort], custom: &HashMap<Uuid, String>) ->
     parts.join(", ")
 }
 
-fn cursor_clause(sort: &[ViewSort], bind_start: usize, custom: &HashMap<Uuid, String>) -> String {
+fn cursor_clause(
+    sort: &[ViewSort],
+    bind_start: usize,
+    custom: &HashMap<SortField, String>,
+) -> String {
     let id_bind = bind_start + sort.len();
     let mut branches = Vec::with_capacity(sort.len() + 1);
     for (index, entry) in sort.iter().enumerate() {
@@ -1904,10 +1909,10 @@ fn anchor_sql(
     field: SortField,
     bind_index: usize,
     id_bind: usize,
-    custom: &HashMap<Uuid, String>,
+    custom: &HashMap<SortField, String>,
 ) -> String {
     match field {
-        SortField::Field(id) => match custom.get(&id) {
+        SortField::Field(_) => match custom.get(&field) {
             Some(template) => format!(
                 "(SELECT {} FROM fvoci.tasks a WHERE a.workspace_id = $1 AND a.id = ${id_bind}::uuid)",
                 template.replace("{root}", "a")
@@ -1922,7 +1927,7 @@ fn sort_equality_sql(
     field: SortField,
     bind_index: usize,
     id_bind: usize,
-    custom: &HashMap<Uuid, String>,
+    custom: &HashMap<SortField, String>,
 ) -> String {
     let expr = term_sql(field, custom);
     let anchor = anchor_sql(field, bind_index, id_bind, custom);
@@ -1934,7 +1939,7 @@ fn sort_strict_after_sql(
     bind_index: usize,
     direction: SortDirection,
     id_bind: usize,
-    custom: &HashMap<Uuid, String>,
+    custom: &HashMap<SortField, String>,
 ) -> String {
     let expr = term_sql(field, custom);
     let anchor = anchor_sql(field, bind_index, id_bind, custom);
@@ -1956,8 +1961,7 @@ fn cursor_bind_value(
     sort_key: &str,
     priority: &str,
     status_sort_key: &str,
-    due_date: Option<NaiveDate>,
-    due_at: Option<DateTime<Utc>>,
+    due: Option<NaiveDate>,
 ) -> String {
     sort_value_token(
         field,
@@ -1968,8 +1972,7 @@ fn cursor_bind_value(
         sort_key,
         priority,
         status_sort_key,
-        due_date,
-        due_at,
+        due,
     )
 }
 

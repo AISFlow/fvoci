@@ -121,7 +121,7 @@ async fn known_time_zones(pool: &PgPool) -> Result<&'static HashSet<String>, sql
         .await
 }
 
-async fn user_time_zone(pool: &PgPool, user_id: Uuid) -> Result<String, sqlx::Error> {
+pub(crate) async fn user_time_zone(pool: &PgPool, user_id: Uuid) -> Result<String, sqlx::Error> {
     let tz: Option<String> = sqlx::query_scalar("SELECT timezone FROM fvoci.users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(pool)

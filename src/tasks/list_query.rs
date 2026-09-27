@@ -74,7 +74,7 @@ pub struct ViewSort {
     pub direction: SortDirection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SortField {
     Priority,
     Due,
@@ -433,9 +433,12 @@ fn reject_unknown_keys(
 }
 
 /// `project_id` is `None` for the workspace-wide list.
+/// `time_zone` is the actor zone that `dueBefore` and the due sort read dates
+/// in, so a cursor never continues under a different date interpretation.
 pub fn filter_fingerprint(
     workspace_id: Uuid,
     project_id: Option<Uuid>,
+    time_zone: &str,
     query: &ParsedTaskListQuery,
 ) -> String {
     let assignee_id = match &query.view.filters.assignee_id {
@@ -446,6 +449,7 @@ pub fn filter_fingerprint(
     let payload = serde_json::json!({
         "workspaceId": workspace_id.to_string(),
         "projectId": project_id.map(|id| id.to_string()),
+        "timeZone": time_zone,
         "query": {
             "filters": {
                 "type": query.view.filters.task_type,
@@ -631,8 +635,7 @@ pub fn cursor_key_for_row(
     sort_key: &str,
     priority: &str,
     status_sort_key: &str,
-    due_date: Option<NaiveDate>,
-    due_at: Option<DateTime<Utc>>,
+    due: Option<NaiveDate>,
     custom_tokens: &[(Uuid, Option<String>)],
 ) -> String {
     let sort = effective_sort_entries(sort);
@@ -654,8 +657,7 @@ pub fn cursor_key_for_row(
                 sort_key,
                 priority,
                 status_sort_key,
-                due_date,
-                due_at,
+                due,
             ),
         };
         parts.push(format!("{}:{}", sort_field_key(entry.field), token));
@@ -679,13 +681,6 @@ pub fn effective_sort_entries(sort: &[ViewSort]) -> Vec<ViewSort> {
     }
 }
 
-pub fn effective_due_date(
-    due_date: Option<NaiveDate>,
-    due_at: Option<DateTime<Utc>>,
-) -> Option<NaiveDate> {
-    due_date.or_else(|| due_at.map(|value| value.date_naive()))
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn sort_value_token(
     field: SortField,
@@ -696,8 +691,8 @@ pub fn sort_value_token(
     sort_key: &str,
     priority: &str,
     status_sort_key: &str,
-    due_date: Option<NaiveDate>,
-    due_at: Option<DateTime<Utc>>,
+    // Effective due date in the actor zone (`due_date_sql`).
+    due: Option<NaiveDate>,
 ) -> String {
     match field {
         SortField::Created => created_at.to_rfc3339(),
@@ -707,7 +702,7 @@ pub fn sort_value_token(
         SortField::Rank => sort_key.to_string(),
         SortField::Priority => priority_rank(priority).to_string(),
         SortField::Status => status_sort_key.to_string(),
-        SortField::Due => effective_due_date(due_date, due_at)
+        SortField::Due => due
             .map(|date| date.to_string())
             .unwrap_or_else(|| "null".to_string()),
         // Field tokens come from the row's collection value (see cursor_key_for_row).
@@ -843,8 +838,8 @@ mod tests {
         )
         .unwrap();
         assert_ne!(
-            filter_fingerprint(workspace, Some(project), &base),
-            filter_fingerprint(workspace, Some(project), &filtered)
+            filter_fingerprint(workspace, Some(project), "UTC", &base),
+            filter_fingerprint(workspace, Some(project), "UTC", &filtered)
         );
         let with_milestone = parse_task_list_query(
             Some(r#"{"filters":{"milestoneId":"550e8400-e29b-41d4-a716-446655440000"}}"#),
@@ -856,8 +851,26 @@ mod tests {
         )
         .unwrap();
         assert_ne!(
-            filter_fingerprint(workspace, Some(project), &base),
-            filter_fingerprint(workspace, Some(project), &with_milestone)
+            filter_fingerprint(workspace, Some(project), "UTC", &base),
+            filter_fingerprint(workspace, Some(project), "UTC", &with_milestone)
+        );
+    }
+
+    #[test]
+    fn fingerprint_includes_time_zone() {
+        let workspace = Uuid::nil();
+        let query = parse_task_list_query(
+            Some(r#"{"filters":{"dueBefore":"2026-01-01"}}"#),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            filter_fingerprint(workspace, None, "UTC", &query),
+            filter_fingerprint(workspace, None, "Asia/Seoul", &query)
         );
     }
 

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use sqlx::{PgPool, Row, Transaction};
 use uuid::Uuid;
@@ -7,7 +5,9 @@ use uuid::Uuid;
 use crate::db::context::{session_is_live, set_tenant};
 use crate::db::holidays::list_holiday_dates;
 use crate::db::projects::{project_permission_by_id, ProjectDbError};
-use crate::db::tasks::{load_task_refs, order_clause, task_list_filter_conditions};
+use crate::db::tasks::{
+    compiled_sort_terms, load_task_refs, order_clause, task_list_filter_conditions,
+};
 use crate::db::view_query::{compile_view_query, CompileOptions, RootKind, SqlArgs, ViewScope};
 use crate::gantt::month_range;
 use crate::gantt::{
@@ -17,7 +17,7 @@ use crate::gantt::{
 use crate::projects::ProjectPermission;
 use crate::tasks::dependency::finish_date;
 use crate::tasks::layout_query::ParsedTaskLayoutQuery;
-use crate::tasks::list_query::{effective_sort_entries, ParsedTaskListQuery, SortField};
+use crate::tasks::list_query::{effective_sort_entries, ParsedTaskListQuery};
 
 pub struct TaskLayoutRow {
     pub id: Uuid,
@@ -43,6 +43,7 @@ pub async fn get_project_task_layout(
         .ok_or_else(|| sqlx::Error::RowNotFound)?;
     let scale_start = range.0.clone();
     let to = range.1.clone();
+    let time_zone = crate::db::dashboard::user_time_zone(pool, actor_user_id).await?;
 
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -85,7 +86,7 @@ pub async fn get_project_task_layout(
         &list_query.view,
         &CompileOptions {
             actor_user_id,
-            time_zone: "UTC",
+            time_zone: &time_zone,
             standard_filters: false,
         },
         "t",
@@ -101,16 +102,9 @@ pub async fn get_project_task_layout(
     };
     base_conditions.extend(compiled.conditions.iter().cloned());
     base_binds.extend(compiled_args.values.iter().cloned());
-    let custom_sorts: HashMap<Uuid, String> = compiled
-        .order
-        .iter()
-        .filter_map(|term| match term.field {
-            SortField::Field(id) => Some((id, term.sql("{root}"))),
-            _ => None,
-        })
-        .collect();
+    let compiled_sorts = compiled_sort_terms(&compiled);
     let sort = effective_sort_entries(&list_query.view.sort);
-    let order_sql = order_clause(&sort, &custom_sorts);
+    let order_sql = order_clause(&sort, &compiled_sorts);
     let where_sql = base_conditions.join(" AND ");
     let list_sql = format!(
         r#"
