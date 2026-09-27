@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { workspacesQuery } from "@/lib/queries";
 import { watchWorkspaceAccess } from "@/lib/workspace-access-stream";
 
 /**
@@ -17,7 +18,7 @@ export function useWorkspaceAccessWatch(workspaceId: string | undefined) {
       onAccessChange: async () => {
         try {
           const list = await queryClient.fetchQuery({
-            queryKey: ["me", "workspaces"],
+            ...workspacesQuery,
             staleTime: 0,
           });
           const stillMember = list.items.some((ws) => ws.id === workspaceId);

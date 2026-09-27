@@ -49,7 +49,7 @@ export function TaskDetailPage() {
     lookupTarget?.kind === "project-document" ? lookupTarget.item : null;
   const task = useQuery(taskQuery(workspace?.id ?? "", lookupTask?.id ?? ""));
   const streamProjectId = project?.id ?? lookupTask?.projectId;
-  useTaskStream(workspace?.id, streamProjectId);
+  useTaskStream(workspace?.id, streamProjectId ?? undefined);
   const workflow = useQuery(
     workflowQuery(workspace?.id ?? "", project?.id ?? lookupTask?.projectId ?? ""),
   );
