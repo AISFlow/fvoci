@@ -5,7 +5,8 @@ import { OperatorInfoView } from "@/features/legal/operator-info";
 import { publicInstanceQuery } from "@/lib/queries/admin";
 
 export function ServiceInfoPage() {
-  const instance = useQuery(publicInstanceQuery);
+  // Fail once and show QueryError + manual retry; avoid TanStack retry delay on this public page.
+  const instance = useQuery({ ...publicInstanceQuery, retry: false });
 
   if (instance.data === undefined) {
     return (

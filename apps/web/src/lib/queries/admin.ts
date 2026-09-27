@@ -36,9 +36,10 @@ export const adminAuditQuery = queryOptions({
 
 export const publicInstanceQuery = queryOptions({
   queryKey: ["instance"] as const,
+  // Server sends Cache-Control max-age=60 + ETag; after admin updates, the browser
+  // can reuse a pre-patch empty body within that window (see service-info-flow e2e).
   queryFn: async () =>
     ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
-  retry: false,
 });
 
 /**

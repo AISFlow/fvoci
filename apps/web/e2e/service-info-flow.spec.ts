@@ -181,3 +181,31 @@ test("service-info surfaces load failure for public instance errors", async ({ p
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page.getByRole("button", { name: "다시 시도" })).toBeVisible();
 });
+
+test("service-info recovers after manual retry when instance fetch initially fails", async ({ page }) => {
+  test.setTimeout(60_000);
+  let failRequests = true;
+  await page.route("**/api/v1/instance", async (route) => {
+    if (failRequests) {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/problem+json",
+        body: JSON.stringify({
+          type: "about:blank",
+          title: "Internal Server Error",
+          status: 500,
+          code: "internal",
+        }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto("/service-info");
+  await expect(page.getByRole("alert")).toBeVisible();
+  failRequests = false;
+  await page.getByRole("button", { name: "다시 시도" }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "서비스 정보" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "다시 시도" })).toHaveCount(0);
+});
