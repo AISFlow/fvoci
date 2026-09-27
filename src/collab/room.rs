@@ -30,8 +30,9 @@ use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineB
 use crate::collab::guard::RoomGuard;
 use crate::collab::revision::prepare_revision_text;
 use crate::db::revisions::{
-    create_system_revision, latest_revision_y_snapshot, CreateRevisionInput, RevisionDbError,
-    RevisionTarget, SystemRevisionHead, SYSTEM_REVISION_HEAD_RETRIES,
+    create_system_revision, latest_revision_y_snapshot, load_durable_collab_for_system,
+    CreateRevisionInput, RevisionDbError, RevisionTarget, SystemRevisionHead,
+    SYSTEM_REVISION_HEAD_RETRIES,
 };
 use crate::collab::validation::{
     classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
@@ -1115,22 +1116,13 @@ struct RoomActor {
     /// Set when the dedicated fence connection is lost; actor exits once empty.
     fence_lost: bool,
     user_reject_budgets: HashMap<Uuid, UserRejectBudget>,
+    /// Session snapshot work in progress (`captured` filled after committed reload).
     session_revision: Option<SessionRevisionState>,
-}
-
-enum SessionRevisionPhase {
-    Capture,
-    ReadHead,
-    Compare,
-    Insert,
 }
 
 struct SessionRevisionState {
     writer_generation: i64,
-    phase: SessionRevisionPhase,
     captured: Option<CapturedRevision>,
-    prev_snap: Option<Vec<u8>>,
-    head_fence: Option<SystemRevisionHead>,
     head_retries: u32,
 }
 
@@ -1356,7 +1348,7 @@ impl RoomActor {
                 }
             }
             self.publish_live_conns();
-            if self.session_revision.is_some() {
+            if self.session_revision.is_some() && !self.shutting_down {
                 let _ = self.advance_session_revision().await;
             }
             if self.fence_lost && self.connections.is_empty() {
@@ -1543,13 +1535,36 @@ impl RoomActor {
             || !self.committed_loaded
     }
 
+    fn session_revision_cancelled(&self) -> bool {
+        self.shutting_down || self.fence_lost
+    }
+
     async fn capture_committed_revision_primary(
         &mut self,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
+        let durable = load_durable_collab_for_system(
+            &self.pool,
+            self.workspace_id,
+            self.revision_target(),
+        )
+        .await
+        .map_err(|_| RevisionCaptureError::Unavailable)?;
+        let durable = durable.map_err(|_| RevisionCaptureError::Unavailable)?;
+        self.committed.snapshot = durable.snapshot;
+        self.committed.tail_payloads = durable.tail;
+        self.committed.tail_seq = durable.tail_seq;
+        self.committed.snapshot_cutoff_seq = durable.snapshot_cutoff_seq;
+        self.committed_loaded = true;
         self.reload_primary_from_committed()
             .await
             .map_err(|_| RevisionCaptureError::Unavailable)?;
+        if self.session_revision_cancelled() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
         if self.ensure_primary_capacity().await.is_err() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
+        if self.session_revision_cancelled() {
             return Err(RevisionCaptureError::Unavailable);
         }
         let snap = match self.engine.call(Request::RevisionSnapshot).await {
@@ -1562,6 +1577,9 @@ impl RoomActor {
             },
             Err(_) => return Err(RevisionCaptureError::Unavailable),
         };
+        if self.session_revision_cancelled() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
         let content_json = match self.engine.call(Request::Project { encoding: 1 }).await {
             Ok(report) => match report.outcome {
                 EngineStatus::Ok {
@@ -1627,17 +1645,14 @@ impl RoomActor {
         };
         self.session_revision = Some(SessionRevisionState {
             writer_generation,
-            phase: SessionRevisionPhase::Capture,
             captured: None,
-            prev_snap: None,
-            head_fence: None,
             head_retries: 0,
         });
     }
 
-    /// One async step per actor turn so `Shutdown` can preempt between engine/DB I/O.
+    /// One async step per actor turn: capture once, then head/compare/insert (`StaleRevisionHead` retries head only).
     async fn advance_session_revision(&mut self) -> bool {
-        if self.session_revision_aborted() {
+        if self.session_revision_aborted() || self.session_revision_cancelled() {
             self.session_revision = None;
             return true;
         }
@@ -1648,143 +1663,129 @@ impl RoomActor {
         let target = self.revision_target();
         let pool = self.pool.clone();
 
-        let done = match work.phase {
-            SessionRevisionPhase::Capture => {
-                match self.capture_committed_revision_primary().await {
-                    Ok(captured) => {
-                        work.captured = Some(captured);
-                        work.phase = SessionRevisionPhase::ReadHead;
-                        false
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            workspace_id = %workspace_id,
-                            target_kind = target.kind_str(),
-                            target_id = %target.id(),
-                            "collab.session_revision_capture_failed"
-                        );
-                        true
-                    }
+        if work.captured.is_none() {
+            match self.capture_committed_revision_primary().await {
+                Ok(captured) => {
+                    work.captured = Some(captured);
+                    self.session_revision = Some(work);
+                    return false;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        workspace_id = %workspace_id,
+                        target_kind = target.kind_str(),
+                        target_id = %target.id(),
+                        "collab.session_revision_capture_failed"
+                    );
+                    return true;
                 }
             }
-            SessionRevisionPhase::ReadHead => {
-                match latest_revision_y_snapshot(&pool, workspace_id, target).await {
-                    Ok(latest) => {
-                        work.head_fence = Some(SystemRevisionHead::from_latest(latest.clone()));
-                        work.prev_snap = latest.map(|(_, snap)| snap);
-                        work.phase = if work.prev_snap.is_some() {
-                            SessionRevisionPhase::Compare
-                        } else {
-                            SessionRevisionPhase::Insert
-                        };
-                        false
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            workspace_id = %workspace_id,
-                            target_kind = target.kind_str(),
-                            target_id = %target.id(),
-                            error = %err,
-                            "collab.session_revision_head_read_failed"
-                        );
-                        true
-                    }
-                }
-            }
-            SessionRevisionPhase::Compare => {
-                let captured = work.captured.as_ref().expect("capture before compare");
-                let prev = work.prev_snap.as_ref().expect("prev before compare");
-                match self
-                    .revision_snapshots_equal_primary(prev, &captured.y_snapshot)
-                    .await
-                {
-                    Ok(true) => true,
-                    Ok(false) => {
-                        work.phase = SessionRevisionPhase::Insert;
-                        false
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            workspace_id = %workspace_id,
-                            target_kind = target.kind_str(),
-                            target_id = %target.id(),
-                            "collab.session_revision_compare_failed"
-                        );
-                        true
-                    }
-                }
-            }
-            SessionRevisionPhase::Insert => {
-                let captured = work.captured.as_ref().expect("capture before insert");
-                let head_fence = work
-                    .head_fence
-                    .as_ref()
-                    .expect("head_fence before insert")
-                    .clone();
-                match prepare_revision_text(&captured.content_json) {
-                    Err(_) => {
-                        tracing::warn!(
-                            workspace_id = %workspace_id,
-                            target_kind = target.kind_str(),
-                            target_id = %target.id(),
-                            "collab.session_revision_text_failed"
-                        );
-                        true
-                    }
-                    Ok(text) => {
-                        let input = CreateRevisionInput {
-                            y_snapshot: captured.y_snapshot.clone(),
-                            content_json: captured.content_json.clone(),
-                            text,
-                            reason: "session".into(),
-                        };
-                        match create_system_revision(
-                            &pool,
-                            workspace_id,
-                            target,
-                            input,
-                            work.writer_generation,
-                            head_fence,
-                        )
-                        .await
-                        {
-                            Ok(Ok(_)) => true,
-                            Ok(Err(RevisionDbError::StaleRevisionHead))
-                                if work.head_retries + 1 < SYSTEM_REVISION_HEAD_RETRIES =>
-                            {
-                                work.head_retries += 1;
-                                work.phase = SessionRevisionPhase::ReadHead;
-                                false
-                            }
-                            Ok(Err(_)) => {
-                                tracing::warn!(
-                                    workspace_id = %workspace_id,
-                                    target_kind = target.kind_str(),
-                                    target_id = %target.id(),
-                                    "collab.session_revision_persist_skipped"
-                                );
-                                true
-                            }
-                            Err(err) => {
-                                tracing::warn!(
-                                    workspace_id = %workspace_id,
-                                    target_kind = target.kind_str(),
-                                    target_id = %target.id(),
-                                    error = %err,
-                                    "collab.session_revision_persist_failed"
-                                );
-                                true
-                            }
-                        }
-                    }
-                }
+        }
+
+        let captured = work.captured.as_ref().expect("captured");
+        if self.session_revision_cancelled() {
+            return true;
+        }
+
+        let latest = match latest_revision_y_snapshot(&pool, workspace_id, target).await {
+            Ok(row) => row,
+            Err(err) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    error = %err,
+                    "collab.session_revision_head_read_failed"
+                );
+                return true;
             }
         };
+        let head_fence = SystemRevisionHead::from_latest(latest.clone());
 
+        if let Some((_, prev_snap)) = &latest {
+            if self.session_revision_cancelled() {
+                return true;
+            }
+            match self
+                .revision_snapshots_equal_primary(prev_snap, &captured.y_snapshot)
+                .await
+            {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        workspace_id = %workspace_id,
+                        target_kind = target.kind_str(),
+                        target_id = %target.id(),
+                        "collab.session_revision_compare_failed"
+                    );
+                    return true;
+                }
+            }
+        }
+
+        if self.session_revision_cancelled() {
+            return true;
+        }
+
+        let text = match prepare_revision_text(&captured.content_json) {
+            Ok(text) => text,
+            Err(_) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    "collab.session_revision_text_failed"
+                );
+                return true;
+            }
+        };
+        let input = CreateRevisionInput {
+            y_snapshot: captured.y_snapshot.clone(),
+            content_json: captured.content_json.clone(),
+            text,
+            reason: "session".into(),
+        };
+        let done = match create_system_revision(
+            &pool,
+            workspace_id,
+            target,
+            input,
+            work.writer_generation,
+            head_fence,
+        )
+        .await
+        {
+            Ok(Ok(_)) => true,
+            Ok(Err(RevisionDbError::StaleRevisionHead))
+                if work.head_retries + 1 < SYSTEM_REVISION_HEAD_RETRIES =>
+            {
+                work.head_retries += 1;
+                self.session_revision = Some(work);
+                return false;
+            }
+            Ok(Err(_)) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    "collab.session_revision_persist_skipped"
+                );
+                true
+            }
+            Err(err) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    error = %err,
+                    "collab.session_revision_persist_failed"
+                );
+                true
+            }
+        };
         if done {
             self.session_revision = None;
-        } else {
-            self.session_revision = Some(work);
         }
         done
     }

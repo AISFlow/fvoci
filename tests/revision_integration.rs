@@ -1022,6 +1022,75 @@ async fn session_revision_dedupes_unchanged_reconnect() {
 }
 
 #[tokio::test]
+async fn session_revision_y_snapshot_matches_durable_db_collab() {
+    run_test("session_revision_y_snapshot_matches_durable_db_collab", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let (state, hub) =
+            collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        apply_and_persist(
+            addr,
+            &wiki.session.session_token,
+            &key,
+            1,
+            &engine_fixture("structured.v1"),
+        )
+        .await;
+        wait_session_revision_count(
+            &run.harness,
+            wiki.session.workspace_id,
+            wiki.document_id,
+            1,
+        )
+        .await;
+
+        let durable = fvoci_server::db::revisions::load_durable_collab_for_system(
+            &wiki.session.pool,
+            wiki.session.workspace_id,
+            fvoci_server::db::revisions::RevisionTarget::Document(wiki.document_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let cfg = test_collab_config(4, 60_000);
+        let expected = fvoci_server::collab::revision::capture_revision_offline(
+            cfg.engine_bin,
+            cfg.limits,
+            durable.snapshot,
+            durable.tail,
+        )
+        .expect("offline capture of durable DB collab");
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        let row: (Vec<u8>,) = sqlx::query_as(
+            r#"
+            SELECT y_snapshot FROM fvoci.revisions
+            WHERE workspace_id = $1 AND target_id = $2 AND reason = 'session'
+            "#,
+        )
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+        assert_eq!(
+            row.0,
+            expected.y_snapshot,
+            "session capture must match durable DB collab, not optimistic in-memory tail"
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn session_revision_after_rejected_update_uses_committed_snapshot() {
     run_test("session_revision_after_rejected_update_uses_committed_snapshot", async {
         let mut run = TestRun::new(support::TestDb::bootstrap().await);

@@ -122,6 +122,65 @@ pub struct PersistedCollabSource {
     pub tail: Vec<Vec<u8>>,
 }
 
+/// Durable collab snapshot + tail from DB (session revision capture; no user gate).
+#[derive(Debug, Clone)]
+pub struct DurableCollabSnapshot {
+    pub snapshot: Vec<u8>,
+    pub tail: Vec<Vec<u8>>,
+    pub tail_seq: i64,
+    pub snapshot_cutoff_seq: i64,
+}
+
+/// Load persisted collab bytes for automatic session snapshots (tenant-scoped, live target only).
+pub async fn load_durable_collab_for_system(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    target: RevisionTarget,
+) -> Result<Result<DurableCollabSnapshot, RevisionDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let (state_sql, tail_sql) = match target {
+        RevisionTarget::Document(_) => (
+            "SELECT state, encoding, snapshot_cutoff_seq, tail_seq FROM fvoci.document_states WHERE workspace_id = $1 AND document_id = $2",
+            "SELECT payload FROM fvoci.document_collab_updates WHERE workspace_id = $1 AND document_id = $2 AND seq > $3 ORDER BY seq ASC",
+        ),
+        RevisionTarget::Task(_) => (
+            "SELECT state, encoding, snapshot_cutoff_seq, tail_seq FROM fvoci.task_states WHERE workspace_id = $1 AND task_id = $2",
+            "SELECT payload FROM fvoci.task_collab_updates WHERE workspace_id = $1 AND task_id = $2 AND seq > $3 ORDER BY seq ASC",
+        ),
+    };
+    let state: Option<(Vec<u8>, i16, i64, i64)> = sqlx::query_as(state_sql)
+        .bind(workspace_id)
+        .bind(target.id())
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((snapshot, encoding, snapshot_cutoff_seq, tail_seq)) = state else {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    };
+    if encoding != 1 {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let tail: Vec<(Vec<u8>,)> = sqlx::query_as(tail_sql)
+        .bind(workspace_id)
+        .bind(target.id())
+        .bind(snapshot_cutoff_seq)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Ok(DurableCollabSnapshot {
+        snapshot,
+        tail: tail.into_iter().map(|(payload,)| payload).collect(),
+        tail_seq,
+        snapshot_cutoff_seq,
+    }))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RevisionCursor {
     pub created_at: DateTime<Utc>,
