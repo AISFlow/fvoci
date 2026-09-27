@@ -11,8 +11,10 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::attachments::ObjectStorage;
 use fvoci_server::auth::token::hash_token;
+use fvoci_server::db::documents::{create_wiki_document, CreateDocumentInput};
 use fvoci_server::db::magic::issue_password_reset_token;
 use fvoci_server::db::outbox::mark_processed;
+use fvoci_server::db::revisions::{create_manual_revision, CreateRevisionInput, RevisionTarget};
 use fvoci_server::jobs::{
     run_daily_sweep, run_document_trash_purge, run_document_trash_purge_with, run_ics_token_gc,
     run_magic_token_gc, run_notification_gc, run_processed_gc, run_stale_upload_gc,
@@ -20,7 +22,9 @@ use fvoci_server::jobs::{
     MaintenanceSettings, JOB_KEY_DAILY, JOB_KEY_UPLOADS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
-use project_harness::{admin_pool, app_pool, create_project, json_request, setup_session, TestDb};
+use project_harness::{
+    admin_pool, app_pool, create_project, json_request, session_id_for_user, setup_session, TestDb,
+};
 use serde_json::json;
 use sqlx::{Connection, PgPool};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1441,6 +1445,189 @@ async fn document_trash_purge_advances_past_failing_documents() {
     }
 
     let _ = std::fs::remove_dir_all(&root);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn manual_revision_promotes_document_session_head_without_body_change() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let doc = create_wiki_document(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "promote-doc",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("create wiki")
+    .expect("created");
+    let y_snapshot = vec![0x0a, 0x0b, 0x0c];
+    let session_json = json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"s1"},"content":[{"type":"text","text":"session"}]}]});
+    let session_text = "session";
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(&admin)
+    .await
+    .expect("document state");
+    let revision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by
+        ) VALUES ($1, $2, 'document', $3, $4, 1, $5, $6, 'session', NULL)
+        "#,
+    )
+    .bind(revision_id)
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .bind(&session_json)
+    .bind(session_text)
+    .execute(&admin)
+    .await
+    .expect("session revision");
+    let promoted = create_manual_revision(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id,
+        RevisionTarget::Document(doc.id),
+        CreateRevisionInput {
+            y_snapshot: y_snapshot.clone(),
+            content_json: json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"manual-input"}]}]}),
+            text: "manual-input".into(),
+            reason: String::new(),
+        },
+    )
+    .await
+    .expect("manual create")
+    .expect("ok");
+    assert_eq!(promoted, revision_id);
+    let row: (String, Option<Uuid>, Vec<u8>, serde_json::Value, String) = sqlx::query_as(
+        r#"
+        SELECT reason, created_by, y_snapshot, content_json, text
+        FROM fvoci.revisions WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(revision_id)
+    .fetch_one(&admin)
+    .await
+    .expect("row");
+    assert_eq!(row.0, "manual");
+    assert_eq!(row.1, Some(user_id));
+    assert_eq!(row.2, y_snapshot);
+    assert_eq!(row.3, session_json);
+    assert_eq!(row.4, session_text);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn manual_revision_promotes_task_scheduled_head_without_body_change() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "PROMOT", "workspace").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let (status, task) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "promote-task"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{task}");
+    let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+    let y_snapshot = vec![0x1a, 0x1b, 0x1c];
+    let session_json = json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"t1"},"content":[{"type":"text","text":"scheduled"}]}]});
+    let session_text = "scheduled";
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.task_states (workspace_id, task_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(&y_snapshot)
+    .execute(&admin)
+    .await
+    .expect("task state");
+    let revision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by
+        ) VALUES ($1, $2, 'task', $3, $4, 1, $5, $6, 'scheduled', NULL)
+        "#,
+    )
+    .bind(revision_id)
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(&y_snapshot)
+    .bind(&session_json)
+    .bind(session_text)
+    .execute(&admin)
+    .await
+    .expect("scheduled revision");
+    let promoted = create_manual_revision(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id,
+        RevisionTarget::Task(task_id),
+        CreateRevisionInput {
+            y_snapshot: y_snapshot.clone(),
+            content_json: json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"ignored-manual"}]}]}),
+            text: "ignored-manual".into(),
+            reason: String::new(),
+        },
+    )
+    .await
+    .expect("manual create")
+    .expect("ok");
+    assert_eq!(promoted, revision_id);
+    let row: (String, Option<Uuid>, Vec<u8>, serde_json::Value, String) = sqlx::query_as(
+        r#"
+        SELECT reason, created_by, y_snapshot, content_json, text
+        FROM fvoci.revisions WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(revision_id)
+    .fetch_one(&admin)
+    .await
+    .expect("row");
+    assert_eq!(row.0, "manual");
+    assert_eq!(row.1, Some(user_id));
+    assert_eq!(row.2, y_snapshot);
+    assert_eq!(row.3, session_json);
+    assert_eq!(row.4, session_text);
     admin.close().await;
     pool.close().await;
     harness.cleanup().await;

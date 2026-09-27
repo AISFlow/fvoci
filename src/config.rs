@@ -15,6 +15,53 @@ pub const DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS: u32 = 64;
 /// Twice the web client's part parallelism (3).
 pub const DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS_PER_USER: u32 = 6;
 pub const DEFAULT_UPLOAD_INCOMPLETE_TTL_HOURS: u64 = 24;
+pub const DEFAULT_REVISION_KEEP: u32 = 200;
+pub const DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS: u32 = 24;
+
+/// Automatic revision policy (source `packages/config`).
+#[derive(Clone, Copy, Debug)]
+pub struct RevisionSettings {
+    /// `REVISION_SESSION_SNAPSHOT` — snapshot when the last collab client leaves (default on).
+    pub session_snapshot_enabled: bool,
+    /// `REVISION_KEEP` — retention cap for automatic rows (scheduled GC not wired yet).
+    pub keep: u32,
+    /// `REVISION_SNAPSHOT_INTERVAL_HOURS` — scheduled snapshot interval (`0` disables).
+    pub snapshot_interval_hours: u32,
+}
+
+impl Default for RevisionSettings {
+    fn default() -> Self {
+        Self {
+            session_snapshot_enabled: true,
+            keep: DEFAULT_REVISION_KEEP,
+            snapshot_interval_hours: DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS,
+        }
+    }
+}
+
+pub fn revision_settings_from_env() -> RevisionSettings {
+    let session_snapshot_enabled = match env::var("REVISION_SESSION_SNAPSHOT").ok() {
+        None => true,
+        Some(raw) => {
+            let v = raw.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        }
+    };
+    let keep = env::var("REVISION_KEEP")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_REVISION_KEEP);
+    let snapshot_interval_hours = env::var("REVISION_SNAPSHOT_INTERVAL_HOURS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS);
+    RevisionSettings {
+        session_snapshot_enabled,
+        keep,
+        snapshot_interval_hours,
+    }
+}
 
 #[derive(Clone)]
 pub struct S3Settings {
@@ -64,6 +111,7 @@ pub struct Config {
     pub meili: Option<MeiliConfig>,
     /// SMTP_HOST/PORT/FROM all set, or None when mail is disabled.
     pub smtp: Option<crate::mail::SmtpConfig>,
+    pub revision: RevisionSettings,
 }
 
 impl Clone for Config {
@@ -82,6 +130,7 @@ impl Clone for Config {
             shutdown_deadline: self.shutdown_deadline,
             meili: self.meili.clone(),
             smtp: self.smtp.clone(),
+            revision: self.revision,
         }
     }
 }
@@ -101,6 +150,7 @@ impl fmt::Debug for Config {
             .field("shutdown_deadline", &self.shutdown_deadline)
             .field("meili", &self.meili)
             .field("smtp", &self.smtp.as_ref().map(|_| "<configured>"))
+            .field("revision", &self.revision)
             .finish()
     }
 }
@@ -156,6 +206,7 @@ impl Config {
             parse_shutdown_deadline_ms(env::var("FVOCI_SHUTDOWN_DEADLINE_MS").ok().as_deref())?;
         let meili = meili_config_from_env()?;
         let smtp = crate::mail::smtp_from_env()?;
+        let revision = revision_settings_from_env();
 
         Ok(Self {
             bind,
@@ -171,6 +222,7 @@ impl Config {
             shutdown_deadline,
             meili,
             smtp,
+            revision,
         })
     }
 }
@@ -528,6 +580,17 @@ mod tests {
             assert!(check_part_size_for_storage(&s3, &big).is_err());
             assert!(check_part_size_for_storage(&local, &big).is_ok());
         }
+    }
+
+    #[test]
+    fn revision_session_snapshot_defaults_and_parses() {
+        let defaults = revision_settings_from_env();
+        assert!(defaults.session_snapshot_enabled);
+        assert_eq!(defaults.keep, DEFAULT_REVISION_KEEP);
+        assert_eq!(
+            defaults.snapshot_interval_hours,
+            DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS
+        );
     }
 
     #[test]
