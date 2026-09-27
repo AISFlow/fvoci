@@ -3593,7 +3593,9 @@ impl RoomActor {
         actor_user_id: Uuid,
         session_id: Uuid,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
-        if !self.committed_loaded {
+        // Without a writer generation nothing fences out-of-room appends
+        // (import, a newer writer), so the committed tail may be behind.
+        if !self.committed_loaded || self.writer_generation.is_none() {
             let load = load_collab_readonly_kind(
                 &self.pool,
                 self.kind,
