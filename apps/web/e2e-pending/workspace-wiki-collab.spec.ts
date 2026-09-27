@@ -626,6 +626,15 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   let url = "";
   let seeded: Awaited<ReturnType<typeof editorShape>> | undefined;
   let seedBodyFailed = false;
+  let seedContextsOpen = true;
+  const ensureSeedContextsClosed = async () => {
+    if (!seedContextsOpen) return;
+    seedContextsOpen = false;
+    await Promise.all([
+      closeCollabContext(seedA, seedBodyFailed),
+      closeCollabContext(seedB, seedBodyFailed),
+    ]);
+  };
   try {
     await test.step("authenticate independent seed clients", () => Promise.all([
       login(pageA, member.email, member.password),
@@ -673,24 +682,25 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     await expectConverged(pageA, pageB);
   } catch (error) {
     seedBodyFailed = true;
-    await Promise.all([
-      closeCollabContext(seedA, true),
-      closeCollabContext(seedB, true),
-    ]);
     throw error;
+  } finally {
+    if (seedBodyFailed) {
+      await ensureSeedContextsClosed();
+    }
   }
-  await test.step(
-    "SIGKILL owned process tree while collaboration helper is live",
-    () => collabApp.crashKillWhenHelperLive(),
-  );
-  phase("process tree crashed with live helper");
-  await Promise.all([
-    closeCollabContext(seedA, false),
-    closeCollabContext(seedB, false),
-  ]);
-  phase("persist acknowledged and old clients closed");
-  await test.step("restart owned server from DB", () => collabApp.rebindAfterCrash());
-  phase("server restarted");
+  try {
+    await test.step(
+      "SIGKILL owned process tree while collaboration helper is live",
+      () => collabApp.crashKillWhenHelperLive(),
+    );
+    phase("process tree crashed with live helper");
+    await ensureSeedContextsClosed();
+    phase("persist acknowledged and old clients closed");
+    await test.step("restart owned server from DB", () => collabApp.rebindAfterCrash());
+    phase("server restarted");
+  } finally {
+    await ensureSeedContextsClosed();
+  }
 
   const freshA = await newCollabContext(browser, collabApp.baseUrl);
   const freshB = await newCollabContext(browser, collabApp.baseUrl);

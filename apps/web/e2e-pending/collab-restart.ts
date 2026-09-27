@@ -86,55 +86,6 @@ export function readProcMember(pid: number): ProcMember | null {
   }
 }
 
-export function isCollabEngineComm(comm: string): boolean {
-  return comm.startsWith("collab-engine");
-}
-
-export function directChildren(pid: number): number[] {
-  const pids: number[] = [];
-  let taskNames: string[] = [];
-  try {
-    taskNames = readdirSync(`/proc/${pid}/task`);
-  } catch {
-    return pids;
-  }
-  for (const tid of taskNames) {
-    if (!/^\d+$/.test(tid)) continue;
-    try {
-      const children = readFileSync(`/proc/${pid}/task/${tid}/children`, "utf8");
-      for (const token of children.split(/\s+/)) {
-        if (token === "") continue;
-        const child = Number(token);
-        if (Number.isFinite(child)) pids.push(child);
-      }
-    } catch {
-      /* task exited while scanning */
-    }
-  }
-  pids.sort((a, b) => a - b);
-  return [...new Set(pids)];
-}
-
-/** Walk the fvoci-server process tree the same way collab_process_server.rs does. */
-export function collabEngineDescendants(root: number): ProcMember[] {
-  const found: ProcMember[] = [];
-  const stack = [root];
-  const seen = new Set<number>();
-  while (stack.length > 0) {
-    const pid = stack.pop()!;
-    if (seen.has(pid)) continue;
-    seen.add(pid);
-    for (const child of directChildren(pid)) {
-      stack.push(child);
-      const member = readProcMember(child);
-      if (member != null && isCollabEngineComm(member.comm)) {
-        found.push(member);
-      }
-    }
-  }
-  return found;
-}
-
 export function processGroupMembers(pgid: number): ProcMember[] {
   const members: ProcMember[] = [];
   let names: string[] = [];
@@ -171,6 +122,43 @@ function sameIdentity(before: ProcMember | null, pid: number): boolean {
   if (before == null) return false;
   const now = readProcMember(pid);
   return now != null && now.starttime === before.starttime;
+}
+
+export function memberIdentityGone(recorded: ProcMember): boolean {
+  const now = readProcMember(recorded.pid);
+  return now == null || now.starttime !== recorded.starttime;
+}
+
+/** SIGKILL one recorded PID only when starttime still matches the observation. */
+export function signalOwnedMember(member: ProcMember): void {
+  const now = readProcMember(member.pid);
+  if (now == null) return;
+  if (now.starttime !== member.starttime) {
+    throw new Error(`cannot prove ownership of pid ${member.pid}`);
+  }
+  try {
+    process.kill(member.pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+export function liveCollabHelpers(members: readonly ProcMember[]): ProcMember[] {
+  return members.filter((member) => member.comm === "collab-engine");
+}
+
+async function waitRecordedMembersGone(
+  recorded: readonly ProcMember[],
+  label: string,
+  withinMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + withinMs;
+  while (Date.now() < deadline) {
+    if (recorded.every((member) => memberIdentityGone(member))) return;
+    await delay(50);
+  }
+  const live = recorded.filter((member) => !memberIdentityGone(member));
+  throw new Error(`${label}: ${JSON.stringify(live)}`);
 }
 
 /** Refuse a recycled process-group number unless a recorded member still owns it. */
@@ -232,11 +220,11 @@ export class OwnedServer {
   }
 
   private requireObservedLiveHelper(): ProcMember[] {
-    const members = this.observeOwnedMembers();
-    if (!members.some((member) => isCollabEngineComm(member.comm))) {
+    const helpers = liveCollabHelpers(this.observeOwnedMembers());
+    if (helpers.length === 0) {
       throw new Error("process-tree crash requires an observed live collaboration helper");
     }
-    return members;
+    return helpers;
   }
 
   /** SIGKILL the owned tree while a collab-engine child is still observable. */
@@ -324,14 +312,7 @@ export class OwnedServer {
   private observeOwnedMembers(): ProcMember[] {
     if (this.parentPid != null && this.pgid != null &&
       sameIdentity(this.parentIdentity, this.parentPid)) {
-      const byPid = new Map<number, ProcMember>();
-      for (const member of processGroupMembers(this.pgid)) {
-        byPid.set(member.pid, member);
-      }
-      for (const helper of collabEngineDescendants(this.parentPid)) {
-        byPid.set(helper.pid, helper);
-      }
-      this.ownedMembers = [...byPid.values()];
+      this.ownedMembers = processGroupMembers(this.pgid);
     }
     return this.ownedMembers;
   }
@@ -423,6 +404,7 @@ export class OwnedServer {
     const parentPid = this.parentPid;
     const identity = this.parentIdentity;
     const owners = this.observeOwnedMembers();
+    const helpersBefore = liveCollabHelpers(owners);
     this.child = null;
     this.pgid = null;
     this.parentPid = null;
@@ -432,6 +414,10 @@ export class OwnedServer {
     if (child && child.exitCode == null && child.signalCode == null) {
       await Promise.race([once(child, "exit"), delay(5_000)]);
     }
+    await waitRecordedMembersGone(
+      helpersBefore,
+      "crash SIGKILL left collaboration helpers",
+    );
     const deadline = Date.now() + 5_000;
     let leftovers = processGroupMembers(pgid);
     while (Date.now() < deadline && leftovers.length > 0) {
