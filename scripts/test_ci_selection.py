@@ -775,11 +775,11 @@ class RustSuiteRegistryFixture:
 class RustSuiteRegistryTest(unittest.TestCase):
     def test_new_cargo_target_without_ci_row_fails(self) -> None:
         with RustSuiteRegistryFixture() as fx:
-            fx.write_cargo(["unfurl_integration"])
+            fx.write_cargo(["missing_db_target_probe"])
             errors = SEL.verify_rust_suite_registry(fx.root)
         self.assertTrue(errors, "expected missing inventory failure")
         joined = "\n".join(errors)
-        self.assertIn("unfurl_integration", joined)
+        self.assertIn("missing_db_target_probe", joined)
         self.assertIn("missing from rust.yml inventory", joined)
 
     def test_postgres_arm64_row_omission_fails(self) -> None:
@@ -806,10 +806,10 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
     def test_verify_workflows_surfaces_rust_inventory_failure(self) -> None:
         with RustSuiteRegistryFixture() as fx:
-            fx.write_cargo(["unfurl_integration"])
+            fx.write_cargo(["missing_db_target_probe"])
             proc = run_cli(["verify-workflows", "--repo-root", str(fx.root)])
         self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertIn("unfurl_integration", proc.stderr)
+        self.assertIn("missing_db_target_probe", proc.stderr)
 
     def test_missing_cargo_fails_instead_of_silent_pass(self) -> None:
         with RustSuiteRegistryFixture() as fx:
@@ -821,9 +821,9 @@ class RustSuiteRegistryTest(unittest.TestCase):
     def test_autodiscovered_root_test_without_ci_row_fails(self) -> None:
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
-            fx.write_autotest_rs("unfurl_integration")
+            fx.write_autotest_rs("missing_db_target_probe")
             errors = SEL.verify_rust_suite_registry(fx.root)
-        self.assertTrue(any("unfurl_integration" in err for err in errors))
+        self.assertTrue(any("missing_db_target_probe" in err for err in errors))
 
     def test_postgres_decoy_test_string_without_matrix_execution_fails(self) -> None:
         with RustSuiteRegistryFixture() as fx:
@@ -868,19 +868,19 @@ class RustSuiteRegistryTest(unittest.TestCase):
     def test_late_crate_cfg_autotest_is_registered(self) -> None:
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
-            fx.write_autotest_rs("unfurl_integration", pad_lines=12)
+            fx.write_autotest_rs("missing_db_target_probe", pad_lines=12)
             errors = SEL.verify_rust_suite_registry(fx.root)
-        self.assertTrue(any("unfurl_integration" in err for err in errors))
+        self.assertTrue(any("missing_db_target_probe" in err for err in errors))
 
     def test_item_level_cfg_only_root_test_fails(self) -> None:
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
-            path = fx.root / "tests" / "unfurl_integration.rs"
+            path = fx.root / "tests" / "missing_db_target_probe.rs"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('#[cfg(feature = "db-tests")]\nmod suite {}\n', encoding="utf-8")
             errors = SEL.verify_rust_suite_registry(fx.root)
         joined = "\n".join(errors)
-        self.assertIn("unfurl_integration", joined)
+        self.assertIn("missing_db_target_probe", joined)
         self.assertIn("no crate", joined)
 
     def test_postgres_integration_step_if_false_fails(self) -> None:
