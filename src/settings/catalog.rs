@@ -176,11 +176,13 @@ fn security_contact(value: String) -> Option<String> {
     if utf16_len(&trimmed) > 320 || !no_control(&trimmed) || trimmed.is_empty() {
         return None;
     }
-    let ok = match trimmed.strip_prefix("mailto:") {
-        Some(address) => is_zod_email(address),
-        None => trimmed.starts_with("https://") && trimmed.len() > "https://".len(),
-    };
-    ok.then_some(trimmed)
+    match trimmed.strip_prefix("mailto:") {
+        Some(address) => is_zod_email(address).then_some(trimmed),
+        None => {
+            let parsed = url::Url::parse(&trimmed).ok()?;
+            (parsed.scheme() == "https" && parsed.host().is_some()).then_some(trimmed)
+        }
+    }
 }
 
 /// Raster formats only: SVG is a script-bearing document and is never served
@@ -745,7 +747,9 @@ mod tests {
         assert!(parse_patch_value(SettingsKey::Security, &c("mailto:sec@example.com")).is_some());
         assert!(parse_patch_value(SettingsKey::Security, &c("https://example.com/sec")).is_some());
         assert!(parse_patch_value(SettingsKey::Security, &c("https://")).is_none());
+        assert!(parse_patch_value(SettingsKey::Security, &c("https://example.com")).is_some());
         assert!(parse_patch_value(SettingsKey::Security, &c("mailto:nope")).is_none());
+        assert!(parse_patch_value(SettingsKey::Security, &c("mailto:sec\r@example.com")).is_none());
         assert!(parse_patch_value(SettingsKey::Security, &c("http://example.com")).is_none());
         let mut op = serde_json::to_value(OperatorSettings::default()).unwrap();
         op["businessInfoUrl"] = json!("javascript:alert(1)");
