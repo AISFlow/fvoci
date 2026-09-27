@@ -2638,4 +2638,14 @@ pub struct AiGenerateTasksOutput {
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct AiSuggestLinksOutput {
     pub document_ids: Vec<String>,
+    /// The same documents as `documentIds`, in the same order, with their titles.
+    pub documents: Vec<AiSuggestedDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct AiSuggestedDocument {
+    pub id: String,
+    pub title: String,
 }

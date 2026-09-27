@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { Navigate, useParams } from "react-router-dom";
-import { DocumentAiMenu } from "@/features/documents/document-ai-menu";
 import { DocumentView } from "@/features/documents/document-view";
 import { CollabRoom } from "@/features/documents/collab-session";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
@@ -51,7 +50,6 @@ export function DocumentPage() {
       <CollabRoom workspaceId={workspace.id} kind="document" id={node.id}>
         <DocumentView workspaceId={workspace.id} slug={slug} documentId={node.id} />
       </CollabRoom>
-      <DocumentAiMenu workspaceId={workspace.id} slug={slug} documentId={node.id} />
     </WorkspaceShell>
   );
 }

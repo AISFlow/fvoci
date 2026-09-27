@@ -184,18 +184,20 @@ pub async fn viewable_document(
 }
 
 /// Source `suggestDocumentLinks` over `visibleTreeFor`: live documents other
-/// than `document_id` (wiki and project) that the user can view, in tree order.
-pub async fn visible_document_ids(
+/// than `document_id` (wiki and project) that the user can view, in tree order,
+/// with their stored titles. Ids and titles come from the same permission-filtered
+/// rows, so a title is never returned for a document the caller cannot view.
+pub async fn visible_documents(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
     document_id: Uuid,
-) -> Result<Vec<Uuid>, sqlx::Error> {
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+    let rows: Vec<(Uuid, Option<Uuid>, String)> = sqlx::query_as(
         r#"
-        SELECT id, project_id FROM fvoci.documents
+        SELECT id, project_id, title FROM fvoci.documents
         WHERE workspace_id = $1 AND deleted_at IS NULL AND id <> $2
         ORDER BY project_id NULLS FIRST, sort_key COLLATE "C", id
         "#,
@@ -206,7 +208,7 @@ pub async fn visible_document_ids(
     .await?;
     let mut projects = HashMap::new();
     let mut visible = Vec::new();
-    for (id, project_id) in rows {
+    for (id, project_id, title) in rows {
         if can_view(
             &mut tx,
             workspace_id,
@@ -217,7 +219,7 @@ pub async fn visible_document_ids(
         )
         .await?
         {
-            visible.push(id);
+            visible.push((id, title));
         }
     }
     tx.commit().await?;

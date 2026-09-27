@@ -5163,7 +5163,7 @@
         },
         "responses": {
           "200": {
-            "description": "Visible document ids",
+            "description": "Visible document ids and titles",
             "content": {
               "application/json": {
                 "schema": {
@@ -23660,7 +23660,8 @@
       "AiSuggestLinksOutput": {
         "type": "object",
         "required": [
-          "documentIds"
+          "documentIds",
+          "documents"
         ],
         "properties": {
           "documentIds": {
@@ -23668,6 +23669,28 @@
             "items": {
               "type": "string"
             }
+          },
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AiSuggestedDocument"
+            },
+            "description": "The same documents as `documentIds`, in the same order, with their titles."
+          }
+        }
+      },
+      "AiSuggestedDocument": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
           }
         }
       },

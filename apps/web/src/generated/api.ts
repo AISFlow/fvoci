@@ -3836,6 +3836,12 @@ export interface components {
         };
         AiSuggestLinksOutput: {
             documentIds: string[];
+            /** @description The same documents as `documentIds`, in the same order, with their titles. */
+            documents: components["schemas"]["AiSuggestedDocument"][];
+        };
+        AiSuggestedDocument: {
+            id: string;
+            title: string;
         };
         AiSummarizeOutput: {
             summary: string;
@@ -9798,7 +9804,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Visible document ids */
+            /** @description Visible document ids and titles */
             200: {
                 headers: {
                     [name: string]: unknown;

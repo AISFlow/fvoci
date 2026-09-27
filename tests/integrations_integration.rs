@@ -2074,6 +2074,10 @@ async fn ai_routes_are_member_gated_and_use_the_document_markdown() {
     .await;
     assert_eq!(status, StatusCode::OK, "{out}");
     assert_eq!(out["documentIds"], json!([docs[1]]));
+    assert_eq!(
+        out["documents"],
+        json!([{ "id": docs[1], "title": "다른 문서" }])
+    );
 
     let (status, _, _) = call(
         &app,
@@ -2891,6 +2895,28 @@ async fn ai_routes_follow_document_permission_and_rate_limit() {
     let mut expected: Vec<String> = project_docs.iter().map(Uuid::to_string).collect();
     expected.sort();
     assert_eq!(suggested, expected);
+    // `documents` mirrors `documentIds` in order, with each title as stored.
+    let titles: HashMap<String, String> = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, title FROM fvoci.documents WHERE project_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(project_id)
+    .fetch_all(&admin)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|(id, title)| (id.to_string(), title))
+    .collect();
+    let expected_documents: Vec<Value> = out["documentIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            let id = id.as_str().unwrap();
+            json!({ "id": id, "title": titles[id] })
+        })
+        .collect();
+    assert_eq!(out["documents"], json!(expected_documents));
+    assert_eq!(titles[&project_doc.to_string()], "Project doc");
 
     // A member outside the private project neither reads nor sees it.
     let member = add_workspace_user(&admin, workspace_id, "member", "ai-m").await;
@@ -2913,6 +2939,7 @@ async fn ai_routes_follow_document_permission_and_rate_limit() {
     .await;
     assert_eq!(status, StatusCode::OK, "{out}");
     assert_eq!(out["documentIds"], json!([]));
+    assert_eq!(out["documents"], json!([]));
     let (status, _, _) = call(
         &app,
         "POST",
@@ -2922,6 +2949,50 @@ async fn ai_routes_follow_document_permission_and_rate_limit() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Joining the private project reveals its titles; leaving it revokes them.
+    sqlx::query(
+        "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) \
+         VALUES ($1, $2, $3, $4, 'viewer')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(member.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let (status, out, _) = call(
+        &app,
+        "POST",
+        &path("suggest-links"),
+        Some(json!({ "documentId": wiki_id })),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let documents = out["documents"].as_array().unwrap();
+    assert_eq!(documents.len(), project_docs.len(), "{out}");
+    assert!(documents
+        .iter()
+        .any(|d| d["id"] == json!(project_doc.to_string()) && d["title"] == json!("Project doc")));
+    sqlx::query("DELETE FROM fvoci.project_members WHERE project_id = $1 AND user_id = $2")
+        .bind(project_id)
+        .bind(member.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, out, _) = call(
+        &app,
+        "POST",
+        &path("suggest-links"),
+        Some(json!({ "documentId": wiki_id })),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["documentIds"], json!([]));
+    assert_eq!(out["documents"], json!([]));
 
     // A guest has no wiki permission: the wiki document is hidden too.
     let guest = add_workspace_user(&admin, workspace_id, "guest", "ai-g").await;
