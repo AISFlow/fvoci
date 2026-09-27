@@ -13,10 +13,15 @@ export function isExtractableText(name: string, mime: string): boolean {
   return /\.(txt|md|markdown|csv|json|xml|log)$/i.test(name);
 }
 
-export type ViewerKind = "image" | "text" | "download";
+export function isPdf(name: string, mime: string): boolean {
+  return mime.toLowerCase() === "application/pdf" || /\.pdf$/i.test(name);
+}
+
+export type ViewerKind = "image" | "pdf" | "text" | "download";
 
 export function viewerKind(att: { name: string; mime: string; image: boolean }): ViewerKind {
   if (att.image) return "image";
+  if (isPdf(att.name, att.mime)) return "pdf";
   if (isExtractableText(att.name, att.mime)) return "text";
   return "download";
 }

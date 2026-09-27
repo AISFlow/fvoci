@@ -272,7 +272,12 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
             "semantic search embeddings disabled (FVOCI_AI_ENABLED=1 and FVOCI_AI_EMBEDDINGS_BASE_URL unset)"
         ),
     }
-    let extract_job = match ExtractJobSettings::from_env()? {
+    let extract_settings = ExtractJobSettings::from_env()?;
+    // `preview-html` parses a not-yet-extracted file with the same helpers.
+    let preview_extract = extract_settings
+        .as_ref()
+        .map(fvoci_server::attachments::PreviewExtractor::from_extract_settings);
+    let extract_job = match extract_settings {
         Some(settings) => {
             match &settings.extractor_bin {
                 Some(bin) => tracing::info!(
@@ -454,6 +459,7 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         markdown,
         import_wake,
         import_extractor_available,
+        preview_extract,
         quota: fvoci_server::db::quota::StorageQuota::from_license(license),
         streams: stream_hub.clone(),
     };

@@ -30,6 +30,9 @@ pub struct AppState {
     pub import_wake: Option<Arc<tokio::sync::Notify>>,
     /// Whether the HWP/HWPX extractor is configured for office-file imports.
     pub import_extractor_available: bool,
+    /// Request-time parse for `preview-html` of a not-yet-extracted
+    /// attachment; `None` = such a request answers 413.
+    pub preview_extract: Option<crate::attachments::PreviewExtractor>,
     /// Workspace storage and per-upload limits (source `QuotaProvider`).
     pub quota: crate::db::quota::StorageQuota,
     pub mailer: std::sync::Arc<crate::mail::Mailer>,

@@ -165,6 +165,7 @@ async fn app_state(app_url: &str) -> AppState {
         ),
         import_wake: None,
         import_extractor_available: false,
+        preview_extract: None,
         quota: Default::default(),
         streams: fvoci_server::http::state::AppState::fresh_streams(),
         mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),

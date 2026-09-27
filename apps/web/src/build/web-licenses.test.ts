@@ -83,3 +83,14 @@ test("finalizeBrowserOpenSourceNotice appends FVOCI LICENSE and editor font OFL 
     assert.doesNotMatch(notice, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
+
+test("finalizeBrowserOpenSourceNotice appends notices for copied runtime assets", () => {
+  const sampleJson = JSON.stringify([
+    { name: "react", version: "19.3.0", identifier: "MIT", text: "Permission is hereby granted" },
+  ]);
+  const notice = finalizeBrowserOpenSourceNotice(sampleJson, repoRoot, manifestPath, [
+    { title: "pdfjs-dist 6.3.289 runtime data: standard_fonts/LICENSE_FOXIT", text: "Foxit notice text" },
+  ]);
+  assert.match(notice, /## FVOCI source: LICENSE/);
+  assert.match(notice, /## pdfjs-dist 6\.3\.289 runtime data: standard_fonts\/LICENSE_FOXIT\n\nFoxit notice text\n/);
+});

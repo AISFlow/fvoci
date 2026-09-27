@@ -141,6 +141,7 @@ impl Harness {
             ),
             import_wake: None,
             import_extractor_available: false,
+            preview_extract: None,
         };
         let clock = Arc::new(AtomicI64::new(T0_MS));
         let clock_read = clock.clone();
