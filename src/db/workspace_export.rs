@@ -25,6 +25,83 @@ pub const EXPORT_MAX_ATTACHMENTS: usize = 60_000;
 /// Serialized JSON metadata (documents/tasks/comments/attachments listings) per export.
 pub const EXPORT_MAX_JSON_BYTES: u64 = 32 * 1024 * 1024;
 
+#[cfg(feature = "db-tests")]
+static FORCE_LOAD_SNAPSHOT_DB_ERROR: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<Uuid>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(feature = "db-tests")]
+struct AttachmentPayloadBarrier {
+    reached_tx: tokio::sync::oneshot::Sender<()>,
+    proceed_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "db-tests")]
+static ATTACHMENT_PAYLOAD_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, AttachmentPayloadBarrier>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Fail `load_export_snapshot` with a database error so PG tests can assert inflight release.
+#[cfg(feature = "db-tests")]
+pub fn arm_workspace_export_snapshot_db_error(workspace_id: Uuid) {
+    FORCE_LOAD_SNAPSHOT_DB_ERROR
+        .lock()
+        .expect("workspace export snapshot fail set")
+        .insert(workspace_id);
+}
+
+#[cfg(feature = "db-tests")]
+pub fn disarm_workspace_export_snapshot_db_error(workspace_id: Uuid) {
+    if let Ok(mut set) = FORCE_LOAD_SNAPSHOT_DB_ERROR.lock() {
+        set.remove(&workspace_id);
+    }
+}
+
+/// Pause attachment byte delivery after storage open and before the post-open auth recheck.
+#[cfg(feature = "db-tests")]
+pub fn arm_attachment_payload_barrier(
+    attachment_id: Uuid,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    ATTACHMENT_PAYLOAD_BARRIERS
+        .lock()
+        .expect("attachment payload barriers")
+        .insert(
+            attachment_id,
+            AttachmentPayloadBarrier {
+                reached_tx,
+                proceed_rx,
+            },
+        );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub fn disarm_attachment_payload_barrier(attachment_id: Uuid) {
+    if let Ok(mut barriers) = ATTACHMENT_PAYLOAD_BARRIERS.lock() {
+        barriers.remove(&attachment_id);
+    }
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn pause_attachment_payload_barrier_if_armed(attachment_id: Uuid) {
+    let barrier = ATTACHMENT_PAYLOAD_BARRIERS
+        .lock()
+        .ok()
+        .and_then(|mut barriers| barriers.remove(&attachment_id));
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
+#[cfg(not(feature = "db-tests"))]
+pub async fn pause_attachment_payload_barrier_if_armed(_attachment_id: Uuid) {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceExportDbError {
     NotFound,
@@ -273,13 +350,16 @@ pub async fn recheck_comment_delivery(
     task_id: Option<Uuid>,
 ) -> Result<Result<(), WorkspaceExportDbError>, sqlx::Error> {
     if let Some(document_id) = document_id {
+        let mut tx = pool.begin().await?;
+        set_tenant(&mut tx, workspace_id).await?;
         let project_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+            "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
         )
         .bind(workspace_id)
         .bind(document_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        tx.commit().await?;
         return recheck_document_delivery(
             pool,
             workspace_id,
@@ -291,13 +371,16 @@ pub async fn recheck_comment_delivery(
         .await;
     }
     if let Some(task_id) = task_id {
+        let mut tx = pool.begin().await?;
+        set_tenant(&mut tx, workspace_id).await?;
         let project_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT project_id FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
         )
         .bind(workspace_id)
         .bind(task_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        tx.commit().await?;
         let Some(project_id) = project_id else {
             return Ok(Err(WorkspaceExportDbError::Forbidden));
         };
@@ -356,6 +439,17 @@ pub async fn load_export_snapshot(
     actor_user_id: Uuid,
     session_id: Uuid,
 ) -> Result<Result<WorkspaceExportSnapshot, WorkspaceExportDbError>, sqlx::Error> {
+    #[cfg(feature = "db-tests")]
+    if FORCE_LOAD_SNAPSHOT_DB_ERROR
+        .lock()
+        .expect("workspace export snapshot fail set")
+        .contains(&workspace_id)
+    {
+        return Err(sqlx::Error::Configuration(
+            "workspace_export forced snapshot db error".into(),
+        ));
+    }
+
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     match require_manage(&mut tx, workspace_id, actor_user_id, session_id).await? {

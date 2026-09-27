@@ -170,6 +170,54 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
   expect(cspViolations).toEqual([]);
 });
 
+test("member does not see workspace export in settings", async ({ page, browser }) => {
+  test.setTimeout(90_000);
+  const member = {
+    email: "member-zip@example.com",
+    password: "supersecret1",
+    familyName: "멤",
+    givenName: "버",
+  };
+  const memberContext = await browser.newContext();
+  const memberPage = await memberContext.newPage();
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+  await page.getByLabel("성").fill(owner.familyName);
+  await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
+  await page.getByLabel("이메일").fill(owner.email);
+  await page.getByLabel("비밀번호").fill(owner.password);
+  await page.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
+  await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
+  await page.getByRole("button", { name: "시작하기" }).click();
+  await expect(page).toHaveURL(/\/$/);
+
+  await page.goto("/w/acme/settings");
+  await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
+  await page.getByLabel("초대할 이메일").fill(member.email);
+  await page.getByRole("button", { name: "초대", exact: true }).click();
+  const inviteLink = page.getByRole("link").filter({ hasText: "/invite/" });
+  const href = await inviteLink.getAttribute("href");
+  const token = href?.split("/invite/")[1];
+  expect(token).toBeTruthy();
+  await page.getByRole("button", { name: "로그아웃" }).click();
+
+  await memberPage.goto(`/invite/${token}`);
+  await memberPage.getByLabel("이메일").fill(member.email);
+  await memberPage.getByLabel("성").fill(member.familyName);
+  await memberPage.getByLabel("이름", { exact: true }).fill(member.givenName);
+  await memberPage.getByLabel("비밀번호").fill(member.password);
+  await memberPage.getByRole("button", { name: "수락" }).click();
+  await expect(memberPage).toHaveURL(/\/$/);
+
+  await memberPage.goto("/w/acme/settings");
+  await expect(memberPage.getByRole("button", { name: /워크스페이스.*보내기/ })).toHaveCount(0);
+  const exportRes = await memberPage.request.get(
+    `/api/v1/workspaces/${await workspaceId(memberPage, "acme")}/export`,
+  );
+  expect(exportRes.status()).toBe(404);
+  await memberContext.close();
+});
+
 test("owner downloads workspace zip from settings", async ({ page }) => {
   test.setTimeout(60_000);
   await page.goto("/");

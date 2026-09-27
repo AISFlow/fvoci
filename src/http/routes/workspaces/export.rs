@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -13,7 +13,6 @@ use axum_extra::extract::CookieJar;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde::Serialize;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::attachments::ObjectStorage;
@@ -34,6 +33,42 @@ const EXPORT_CHANNEL_DEPTH: usize = 4;
 
 static EXPORT_INFLIGHT: LazyLock<Mutex<HashSet<Uuid>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+
+struct ExportInflightGuard {
+    user_id: Uuid,
+    released: bool,
+}
+
+impl ExportInflightGuard {
+    fn acquire(user_id: Uuid) -> Result<Self, AppError> {
+        let mut inflight = EXPORT_INFLIGHT
+            .lock()
+            .expect("workspace export inflight mutex poisoned");
+        if !inflight.insert(user_id) {
+            return Err(AppError::rate_limited(WS_EXPORT_WINDOW.as_secs() as u32));
+        }
+        Ok(Self {
+            user_id,
+            released: false,
+        })
+    }
+
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        if let Ok(mut inflight) = EXPORT_INFLIGHT.lock() {
+            inflight.remove(&self.user_id);
+        }
+        self.released = true;
+    }
+}
+
+impl Drop for ExportInflightGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 
 #[derive(Debug)]
 enum ExportFailure {
@@ -167,7 +202,6 @@ async fn write_json_element(
     first: &mut bool,
     element: String,
 ) -> Result<(), ExportFailure> {
-    budget.charge(element.len())?;
     let chunk = if *first {
         *first = false;
         format!("{element}\n")
@@ -197,9 +231,10 @@ async fn write_workspace_zip(
         excluded_private_project_count: snapshot.workspace.excluded_private_project_count,
     })
     .map_err(|_| ExportFailure::Encode)?;
-    json_budget.charge(workspace_json.len())?;
+    let workspace_payload = format!("{workspace_json}\n");
+    json_budget.charge(workspace_payload.len())?;
     writer
-        .file("workspace.json", Bytes::from(format!("{workspace_json}\n")))
+        .file("workspace.json", Bytes::from(workspace_payload))
         .await?;
 
     writer.begin("documents.json").await?;
@@ -234,9 +269,9 @@ async fn write_workspace_zip(
         })?;
         write_json_element(writer, &mut json_budget, &mut first_doc, element).await?;
     }
-    writer
-        .data(Bytes::from_static(if first_doc { b"]\n" } else { b"\n]\n" }))
-        .await?;
+    let doc_close: &[u8] = if first_doc { b"]\n" } else { b"\n]\n" };
+    json_budget.charge(doc_close.len())?;
+    writer.data(Bytes::copy_from_slice(doc_close)).await?;
     writer.end().await?;
 
     writer.begin("tasks.json").await?;
@@ -266,9 +301,9 @@ async fn write_workspace_zip(
         })?;
         write_json_element(writer, &mut json_budget, &mut first_task, element).await?;
     }
-    writer
-        .data(Bytes::from_static(if first_task { b"]\n" } else { b"\n]\n" }))
-        .await?;
+    let task_close: &[u8] = if first_task { b"]\n" } else { b"\n]\n" };
+    json_budget.charge(task_close.len())?;
+    writer.data(Bytes::copy_from_slice(task_close)).await?;
     writer.end().await?;
 
     ensure_still_authorized(pool, workspace_id, user_id, session_id).await?;
@@ -302,13 +337,9 @@ async fn write_workspace_zip(
         })?;
         write_json_element(writer, &mut json_budget, &mut first_comment, element).await?;
     }
-    writer
-        .data(Bytes::from_static(if first_comment {
-            b"]\n"
-        } else {
-            b"\n]\n"
-        }))
-        .await?;
+    let comment_close: &[u8] = if first_comment { b"]\n" } else { b"\n]\n" };
+    json_budget.charge(comment_close.len())?;
+    writer.data(Bytes::copy_from_slice(comment_close)).await?;
     writer.end().await?;
 
     writer.begin("attachments.json").await?;
@@ -334,9 +365,9 @@ async fn write_workspace_zip(
         })?;
         write_json_element(writer, &mut json_budget, &mut first_att, element).await?;
     }
-    writer
-        .data(Bytes::from_static(if first_att { b"]\n" } else { b"\n]\n" }))
-        .await?;
+    let att_close: &[u8] = if first_att { b"]\n" } else { b"\n]\n" };
+    json_budget.charge(att_close.len())?;
+    writer.data(Bytes::copy_from_slice(att_close)).await?;
     writer.end().await?;
 
     for row in &snapshot.attachments {
@@ -381,6 +412,16 @@ async fn write_workspace_zip(
                 }
             },
         };
+        workspace_export::pause_attachment_payload_barrier_if_armed(row.id).await;
+        ensure_attachment_delivery(
+            pool,
+            workspace_id,
+            user_id,
+            session_id,
+            row.document_id,
+            row.task_id,
+        )
+        .await?;
         writer.begin(&name).await?;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|err| {
@@ -424,12 +465,7 @@ pub async fn workspace_export(
         .await
         .map_err(AppError::rate_limited)?;
 
-    {
-        let mut inflight = EXPORT_INFLIGHT.lock().await;
-        if !inflight.insert(user_id) {
-            return Err(AppError::rate_limited(WS_EXPORT_WINDOW.as_secs() as u32));
-        }
-    }
+    let inflight_guard = ExportInflightGuard::acquire(user_id)?;
 
     let pool = state.auth.db.pool.clone();
     let loaded = workspace_export::load_export_snapshot(&pool, workspace_id, user_id, session_id)
@@ -438,11 +474,9 @@ pub async fn workspace_export(
     let snapshot = match loaded {
         Ok(snapshot) => snapshot,
         Err(WorkspaceExportDbError::NotFound | WorkspaceExportDbError::Forbidden) => {
-            EXPORT_INFLIGHT.lock().await.remove(&user_id);
             return Err(map_workspace_error(WorkspaceDbError::Forbidden, false));
         }
         Err(WorkspaceExportDbError::Truncated) => {
-            EXPORT_INFLIGHT.lock().await.remove(&user_id);
             tracing::error!(workspace_id = %workspace_id, "workspace_export.truncated");
             return Err(AppError::internal());
         }
@@ -457,7 +491,6 @@ pub async fn workspace_export(
     if declared > u64::from(u32::MAX) - 64 * 1024 * 1024
         || snapshot.attachments.len() > workspace_export::EXPORT_MAX_ATTACHMENTS
     {
-        EXPORT_INFLIGHT.lock().await.remove(&user_id);
         tracing::error!(
             attachments = snapshot.attachments.len(),
             "workspace_export.too_large_for_zip32"
@@ -468,6 +501,7 @@ pub async fn workspace_export(
     let (tx, rx) = mpsc::channel(EXPORT_CHANNEL_DEPTH);
     let storage = state.storage.clone();
     tokio::spawn(async move {
+        let _inflight_guard = inflight_guard;
         let mut writer = ExportWriter {
             tx,
             zip: ZipStream::new(),
@@ -482,7 +516,6 @@ pub async fn workspace_export(
             snapshot,
         )
         .await;
-        EXPORT_INFLIGHT.lock().await.remove(&user_id);
         match result {
             Ok(()) | Err(ExportFailure::Closed) => {}
             Err(failure) => {
