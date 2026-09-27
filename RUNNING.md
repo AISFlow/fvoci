@@ -3,7 +3,8 @@
 This slice initializes a new PostgreSQL database. Importing an existing TypeScript FVOCI installation is not supported.
 The Rust server has forward schema migrations (see "Migrate and grant before server" and, for the Compose
 install, "Upgrade"; the developer smoke in "Upgrade validation" exercises one image pair per run with local
-storage, one injected init failure and old-image rollback; S3 upgrade and rollback are not covered and CI does not run it). Downgrading a migrated database is not supported.
+storage or, with `--storage s3`, the documented S3 procedure against a local run-owned bucket, one injected init
+failure and old-image rollback; CI does not run it). Downgrading a migrated database is not supported.
 
 ## Toolchain
 
@@ -733,6 +734,34 @@ checkout's `restore.sh` into a fresh project on the old image. The seeded data
 must be back and the write made after the upgrade must be gone. The old image
 never runs on the migrated database.
 
+`--storage s3` runs the same flow with `infra/rust/compose.s3.yml`. It follows
+"Upgrade" step 2 for S3 and "S3 storage backup", not `backup.sh`/`restore.sh`.
+It uses the project's own pinned silo and a run-owned bucket and credentials.
+It enables bucket versioning before seeding and stores two HWPX attachments.
+
+1. **Backup:** the old `backup.sh` must refuse the S3 install. It must write no
+   output and leave the server running. The smoke then runs the documented
+   `stop -t 45 server`, checks that no other client sessions remain, and takes
+   the same `pg_dump` as `backup.sh`. It records each object's checkpoint
+   version ID.
+2. **Upgrade:** the upgrade and its checks are unchanged. In addition, the new
+   image's `--verify-storage` must report both objects.
+3. **Damage:** the upgrade project's `postgres` and `meilisearch` are stopped,
+   so only its silo runs. Then one object is deleted (a delete marker) and the
+   other is overwritten with other bytes.
+4. **Restore:** the dump is restored into a fresh database on the old image with
+   the old `restore.sh` steps minus the volume archive (app role, `pg_restore`,
+   `init`, `--recover-outbox`, `--rebuild-search`). That project's server joins
+   the upgrade project's local Docker network and points at the same bucket.
+5. **Checks before start:** `--verify-storage` must fail at HeadBucket for a
+   wrong bucket. For the damaged bucket it must exit non-zero with exactly the
+   deleted attachment `missing` and the overwritten one in `sizeMismatch`. No
+   server container may exist and nothing may answer HTTP.
+6. **Version restore:** the smoke removes the delete marker and copies the
+   checkpoint version back. `--verify-storage` and `--verify-secrets` must then
+   pass before the server starts. Both attachments must download with their
+   original sha256.
+
 On success the trap runs `down -v` for each project with the compose file of
 the source tree that started it, then checks that no container, volume or
 network with that project label remains. Only then does it delete the work dir
@@ -746,11 +775,15 @@ reach the redactor through its environment, not argv. The wrong key of the
 negative control does appear in a `docker compose run -e` argument, and the
 fixed test login appears in curl arguments. Use a single-user host.
 
-A run proves only what it ran: one old/new pair, the host architecture, local
-storage, and one injected failure (a pre-created table of the newest migration,
-not an interrupted migrate or a crash). It does not compare search indexes or
-doctor output with the old install. S3 upgrade and rollback are not covered,
-and CI does not run this smoke. Record the pair, image IDs, architecture and
+A run proves only what it ran: one old/new pair, the host architecture, the
+selected storage, and one injected failure (a pre-created table of the newest
+migration, not an interrupted migrate or a crash). It does not compare search
+indexes or doctor output with the old install. The S3 mode proves that restore
+works from versions of the same local silo bucket. It does not cover
+replication, a second region, a cloud provider's versioning or backup service,
+lifecycle rules, or the presigned direct mode, which is not implemented.
+`--verify-storage` compares attachment sizes only, so a same-size overwrite is
+not detected before start. CI does not run this smoke. Record the pair, image IDs, architecture and
 logs of a run with the change it supports; this guide does not.
 
 ## Backup and restore
