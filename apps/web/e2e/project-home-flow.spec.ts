@@ -73,6 +73,38 @@ async function memberUserId(page: Page, wsId: string, email: string): Promise<st
   return userId;
 }
 
+// Refs the project home renders as rows: every document below the project's root.
+async function projectDocRefs(
+  page: Page,
+  wsId: string,
+  project: { id: string; rootDocumentId: string },
+  key: string,
+): Promise<string[]> {
+  const res = await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/documents`);
+  expect(res.ok()).toBe(true);
+  const items = (await res.json()).items as {
+    id: string;
+    parentId: string | null;
+    projectId: string | null;
+    number: number;
+  }[];
+  const below = new Set([project.rootDocumentId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const item of items) {
+      if (item.projectId === project.id && item.parentId && below.has(item.parentId) && !below.has(item.id)) {
+        below.add(item.id);
+        grew = true;
+      }
+    }
+  }
+  return items
+    .filter((item) => item.id !== project.rootDocumentId && below.has(item.id))
+    .map((item) => `${key}-${item.number}`)
+    .sort();
+}
+
 async function ensureSetup(page: Page): Promise<void> {
   await page.goto("/");
   await expect(
@@ -307,7 +339,15 @@ test("viewer and non-member cannot create project documents", async ({ page }) =
   await login(page, viewer.email, viewer.password);
   await page.goto(`/w/${admin.workspaceSlug}/HOME`);
   await expect(page.getByRole("heading", { name: "위키" })).toBeVisible();
-  const beforeCount = await page.getByTestId(/^project-doc-HOME-/).count();
+  // The heading renders with the project; the document list is a separate query, so the
+  // baseline comes from the API and the rendered rows must match it before the click.
+  const beforeRefs = await projectDocRefs(page, wsId, homeProject, "HOME");
+  expect(beforeRefs).toEqual(expect.arrayContaining(["HOME-2", "HOME-3"]));
+  const docRows = page.getByTestId(/^project-doc-HOME-/);
+  await expect(docRows).toHaveCount(beforeRefs.length);
+  for (const ref of beforeRefs) {
+    await expect(page.getByTestId(`project-doc-${ref}`)).toBeVisible();
+  }
   const refused = page.waitForResponse(
     (response) =>
       response.url().includes(`/projects/${homeProject.id}/documents`) &&
@@ -315,7 +355,8 @@ test("viewer and non-member cannot create project documents", async ({ page }) =
   );
   await page.getByRole("button", { name: "새 문서" }).click();
   expect((await refused).status()).toBe(404);
-  await expect(page.getByTestId(/^project-doc-HOME-/)).toHaveCount(beforeCount);
+  await expect(docRows).toHaveCount(beforeRefs.length);
+  expect(await projectDocRefs(page, wsId, homeProject, "HOME")).toEqual(beforeRefs);
 
   const viewerCreate = await page.request.post(
     `/api/v1/workspaces/${wsId}/projects/${homeProject.id}/documents`,

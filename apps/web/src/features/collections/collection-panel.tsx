@@ -1,6 +1,6 @@
 // Adapted from source apps/web/src/features/collections/collection-panel.tsx
 // (`CollectionContents`), collection-cards.tsx and collection-calendar.tsx for a
-// project task collection. Drag-and-drop becomes a per-card group select.
+// project task collection. The grouped board lives in collection-board.tsx.
 import { formatPersonName, t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useState } from "react";
@@ -9,7 +9,6 @@ import { ConfirmActionButton } from "@/components/confirm-action";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { workflowQuery } from "@/features/projects/queries";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import {
   asCollectionValue,
@@ -46,6 +45,8 @@ import {
   setPrimarySort,
   type ViewQuery,
 } from "@/lib/view-query";
+import { moveRequest, type BoardGroup } from "./board-model";
+import { CollectionBoard } from "./collection-board";
 import { CustomFilters } from "./custom-filters";
 import { ValueEditor } from "./value-editor";
 import "./collections.css";
@@ -113,7 +114,6 @@ export function CollectionContents({
   const views = useQuery(collectionViewsQuery(workspaceId, collectionId));
   const members = useQuery(membersQuery(workspaceId));
   const me = useQuery(meQuery);
-  const workflow = useQuery(workflowQuery(workspaceId, projectId));
   const timeZone = me.data?.timezone ?? FALLBACK_TZ;
   const weekStartsOn = me.data?.weekStartsOn === 0 ? 0 : 1;
 
@@ -127,6 +127,7 @@ export function CollectionContents({
   const [month, setMonth] = useState<string>("");
   const [customOpen, setCustomOpen] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
 
   const effectiveMonth = isMonth(month) ? month : todayInTimeZone(timeZone).slice(0, 7);
 
@@ -162,10 +163,13 @@ export function CollectionContents({
     type === "calendar" && config.dateBy
       ? { ...monthWindow(effectiveMonth), timeZone }
       : undefined;
+  // A grouped board pages each column itself; this request only brings the
+  // group catalog and counts, so it asks for a single row.
+  const groupedBoard = type === "board" && config.groupBy !== null;
   const body: CollectionQueryBody = {
     config,
-    limit: PAGE_LIMIT,
-    ...(cursor ? { cursor } : {}),
+    limit: groupedBoard ? 1 : PAGE_LIMIT,
+    ...(cursor && !groupedBoard ? { cursor } : {}),
     ...(type === "calendar" && config.dateBy && day !== undefined ? { day } : {}),
     ...(calendarWindow ? { window: calendarWindow } : {}),
   };
@@ -207,27 +211,37 @@ export function CollectionContents({
     }
   }
 
-  async function moveToGroup(row: CollectionQueryItem, groupId: string | null) {
+  // No optimistic update: the card moves only after the write succeeds and the
+  // board refetches; a rejected move keeps its server error visible.
+  async function moveToGroup(row: CollectionQueryItem, target: BoardGroup) {
+    const request = moveRequest(config.groupBy, row, target);
+    if (!request || moving) return;
     setMoveError(null);
+    setMoving(true);
     try {
-      if (config.groupBy === "status") {
-        if (!groupId || !row.taskId) return;
+      if (request.kind === "status") {
         await ensureOk(
           await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move", {
-            params: { path: { workspace_id: workspaceId, task_id: row.taskId } },
-            body: { statusId: groupId, expectedStatusId: row.statusId ?? groupId },
+            params: { path: { workspace_id: workspaceId, task_id: request.taskId } },
+            body: { statusId: request.statusId, expectedStatusId: request.expectedStatusId },
           }),
         );
         await queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId, projectId] });
-        await refresh();
-        return;
+      } else {
+        const field = fields.data?.items.find((item) => item.id === request.fieldId);
+        if (!field) return;
+        await putCollectionValue(workspaceId, collectionId, row.id, {
+          fieldId: field.id,
+          expectedVersion: row.version,
+          expectedFieldVersion: field.version,
+          value: request.value,
+        });
       }
-      const field = fields.data?.items.find((item) => item.id === config.groupBy);
-      if (!field) return;
-      await setValue(row, field, groupId ? { options: [groupId] } : null);
     } catch (err) {
       setMoveError(problemMessage(err, "collection.saveError"));
+    } finally {
       await refresh();
+      setMoving(false);
     }
   }
 
@@ -312,7 +326,6 @@ export function CollectionContents({
     name: formatPersonName(member),
   }));
   const active = fields.data.items.filter((field) => field.deletedAt === null);
-  const statuses = workflow.data?.statuses ?? [];
   const canSave = views.data.canSave;
   const canManageViews = views.data.canManage;
   const ownsView = view === null || view.ownerId === me.data.userId;
@@ -349,20 +362,6 @@ export function CollectionContents({
       <span className="text-muted-foreground">{row.displayId}</span> {row.title}
     </Link>
   );
-
-  const groupChoices =
-    config.groupBy === "status"
-      ? statuses.map((status) => ({ id: status.id as string | null, name: status.name }))
-      : (() => {
-          const field = active.find((item) => item.id === config.groupBy);
-          if (!field) return [];
-          return [
-            { id: null as string | null, name: t("collection.unassigned") },
-            ...field.options
-              .filter((option) => option.deletedAt === null)
-              .map((option) => ({ id: option.id as string | null, name: option.label })),
-          ];
-        })();
 
   const table = (items: readonly CollectionQueryItem[]) => (
     <div className="data-table-wrap">
@@ -402,8 +401,8 @@ export function CollectionContents({
     </div>
   );
 
-  const card = (row: CollectionQueryItem) => (
-    <li key={row.id} className="collection-card" data-testid={`collection-card-${row.displayId}`}>
+  const cardContent = (row: CollectionQueryItem) => (
+    <>
       {titleLink(row)}
       {active.map((field) => {
         const text = formatValue(field, valueOf(row, field.id));
@@ -413,20 +412,12 @@ export function CollectionContents({
           </p>
         ) : null;
       })}
-      {config.groupBy && row.canEdit && groupChoices.length > 0 ? (
-        <select
-          className="collection-select"
-          aria-label={`${t("collection.group")} · ${row.displayId}`}
-          value={row.group ?? ""}
-          onChange={(event) => void moveToGroup(row, event.target.value || null)}
-        >
-          {groupChoices.map((choice) => (
-            <option key={choice.id ?? "none"} value={choice.id ?? ""}>
-              {choice.name}
-            </option>
-          ))}
-        </select>
-      ) : null}
+    </>
+  );
+
+  const card = (row: CollectionQueryItem) => (
+    <li key={row.id} className="collection-card" data-testid={`collection-card-${row.displayId}`}>
+      {cardContent(row)}
     </li>
   );
 
@@ -831,31 +822,20 @@ export function CollectionContents({
           <p className="text-caption text-muted-foreground" role="status">
             {t("collection.count", { count: rows.data.count })}
           </p>
-          {type === "calendar" && config.dateBy && day === undefined ? null : rows.data.items
-              .length === 0 ? (
+          {type === "calendar" && config.dateBy && day === undefined ? null : (groupedBoard
+              ? rows.data.count
+              : rows.data.items.length) === 0 ? (
             <p className="text-ui text-muted-foreground">{t("collection.empty")}</p>
-          ) : type === "board" && config.groupBy ? (
-            <div className="collection-board" data-testid="collection-board">
-              {rows.data.groups.map((group) => (
-                <section
-                  key={group.id ?? "none"}
-                  className="collection-board__column"
-                  aria-label={group.name || t("collection.unassigned")}
-                  data-testid={`collection-group-${group.name || "none"}`}
-                >
-                  <h3 className="collection-board__head">
-                    <span>
-                      {group.name || t("collection.unassigned")}
-                      {group.deleted ? ` · ${t("collection.archived")}` : ""}
-                    </span>
-                    <span className="text-muted-foreground">{group.count}</span>
-                  </h3>
-                  <ul className="flex flex-col gap-2">
-                    {rows.data.items.filter((row) => group.itemIds.includes(row.id)).map(card)}
-                  </ul>
-                </section>
-              ))}
-            </div>
+          ) : groupedBoard ? (
+            <CollectionBoard
+              workspaceId={workspaceId}
+              collectionId={collectionId}
+              config={config}
+              groups={rows.data.groups}
+              moving={moving}
+              renderContent={cardContent}
+              onMove={moveToGroup}
+            />
           ) : type === "board" ? (
             <ul className="flex flex-col gap-2">{rows.data.items.map(card)}</ul>
           ) : (
@@ -868,7 +848,7 @@ export function CollectionContents({
               {table(rows.data.items)}
             </>
           )}
-          {cursor || rows.data.nextCursor ? (
+          {!groupedBoard && (cursor || rows.data.nextCursor) ? (
             <div className="collection-toolbar">
               <Button
                 type="button"
