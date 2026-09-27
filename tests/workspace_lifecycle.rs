@@ -780,16 +780,28 @@ async fn workspace_zip_omits_private_project_without_membership() {
     harness.cleanup().await;
 }
 
-async fn insert_attachment_with_payload(
-    storage_root: &std::path::Path,
-    admin: &sqlx::PgPool,
+struct StoredAttachmentInsert<'a> {
+    storage_root: &'a std::path::Path,
+    admin: &'a sqlx::PgPool,
     workspace_id: Uuid,
     document_id: Uuid,
     uploader_id: Uuid,
-    name: &str,
-    scan: &str,
-    payload: &[u8],
-) -> Uuid {
+    name: &'a str,
+    scan_status: &'a str,
+    payload: &'a [u8],
+}
+
+async fn insert_attachment_with_payload(insert: StoredAttachmentInsert<'_>) -> Uuid {
+    let StoredAttachmentInsert {
+        storage_root,
+        admin,
+        workspace_id,
+        document_id,
+        uploader_id,
+        name,
+        scan_status,
+        payload,
+    } = insert;
     let id = Uuid::now_v7();
     let key = Uuid::now_v7().to_string();
     write_local_attachment_payload(storage_root, &key, payload);
@@ -808,7 +820,7 @@ async fn insert_attachment_with_payload(
     .bind(name)
     .bind(payload.len() as i64)
     .bind(key)
-    .bind(scan)
+    .bind(scan_status)
     .execute(admin)
     .await
     .expect("insert attachment");
@@ -823,16 +835,16 @@ async fn workspace_zip_skips_infected_attachment_bytes() {
     let admin = admin_pool(&harness).await;
     let wiki = create_wiki(app.clone(), &cookie, workspace_id, "첨부 검사").await;
     let document_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
-    let infected_id = insert_attachment_with_payload(
-        &storage_root,
-        &admin,
+    let infected_id = insert_attachment_with_payload(StoredAttachmentInsert {
+        storage_root: &storage_root,
+        admin: &admin,
         workspace_id,
         document_id,
-        owner_id,
-        "bad.bin",
-        "infected",
-        b"bad",
-    )
+        uploader_id: owner_id,
+        name: "bad.bin",
+        scan_status: "infected",
+        payload: b"bad",
+    })
     .await;
 
     let path = format!("/api/v1/workspaces/{workspace_id}/export");
@@ -1405,16 +1417,16 @@ async fn workspace_zip_includes_project_document_attachment_bytes() {
     let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
     let project_doc = Uuid::now_v7();
     insert_project_document(&admin, workspace_id, project_id, project_doc, owner_id, 2).await;
-    let attachment_id = insert_attachment_with_payload(
-        &storage_root,
-        &admin,
+    let attachment_id = insert_attachment_with_payload(StoredAttachmentInsert {
+        storage_root: &storage_root,
+        admin: &admin,
         workspace_id,
-        project_doc,
-        owner_id,
-        "proj-doc.bin",
-        "clean",
-        PROJECT_DOC_ATTACHMENT_PAYLOAD,
-    )
+        document_id: project_doc,
+        uploader_id: owner_id,
+        name: "proj-doc.bin",
+        scan_status: "clean",
+        payload: PROJECT_DOC_ATTACHMENT_PAYLOAD,
+    })
     .await;
 
     let path = format!("/api/v1/workspaces/{workspace_id}/export");
@@ -1447,16 +1459,16 @@ async fn workspace_zip_aborts_when_attachment_revoked_after_storage_open() {
     let admin = admin_pool(&harness).await;
     let wiki = create_wiki(app.clone(), &cookie, workspace_id, "attach parent").await;
     let document_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
-    let attachment_id = insert_attachment_with_payload(
-        &storage_root,
-        &admin,
+    let attachment_id = insert_attachment_with_payload(StoredAttachmentInsert {
+        storage_root: &storage_root,
+        admin: &admin,
         workspace_id,
         document_id,
-        owner_id,
-        "secret.bin",
-        "clean",
-        ATTACH_EXPORT_SECRET.as_bytes(),
-    )
+        uploader_id: owner_id,
+        name: "secret.bin",
+        scan_status: "clean",
+        payload: ATTACH_EXPORT_SECRET.as_bytes(),
+    })
     .await;
     let (mut reached_rx, proceed_tx) = arm_attachment_payload_barrier(attachment_id);
     let mut proceed_tx = Some(proceed_tx);
