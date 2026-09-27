@@ -40,6 +40,20 @@ export function membersQuery(workspaceId: string) {
   });
 }
 
+export function templatesQuery(workspaceId: string) {
+  return queryOptions({
+    queryKey: ["templates", workspaceId] as const,
+    queryFn: async () =>
+      ensureOk(
+        await api.GET("/api/v1/workspaces/{workspace_id}/templates", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    enabled: Boolean(workspaceId),
+    retry: false,
+  });
+}
+
 export function groupsQuery(workspaceId: string) {
   return queryOptions({
     queryKey: ["workspaces", workspaceId, "groups"] as const,

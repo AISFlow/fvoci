@@ -417,6 +417,353 @@ async fn seed_unavailable_is_retried_then_fails_only_at_the_attempt_limit() {
 }
 
 #[tokio::test]
+async fn failed_compensation_keeps_recovery_refs_until_cleanup_succeeds() {
+    use fvoci_server::collab::seed::SeedEngine;
+    use fvoci_server::import_job::{run_next_import, ImportJobSettings};
+
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let unavailable = ImportJobSettings {
+        seed: Some(SeedEngine::new(
+            std::env::temp_dir().join(format!("fvoci-missing-engine-{}", Uuid::now_v7())),
+            collab_engine::Limits::for_tests(),
+        )),
+        ..fx.settings.clone()
+    };
+    let run = |settings: &ImportJobSettings| {
+        let settings = settings.clone();
+        let (pool, storage) = (fx.pool.clone(), fx.storage.clone());
+        async move {
+            run_next_import(&pool, &settings, &storage, &CancellationToken::new())
+                .await
+                .unwrap()
+        }
+    };
+    let import = || {
+        fx.import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "notion-zip",
+                "zipBase64": B64.encode(zip_bytes(&[
+                    ("Recovery 0123456789abcdef.md", b"# recovery")
+                ]))
+            }),
+        )
+    };
+    let backdate = |job_id: Uuid| {
+        let admin = fx.admin.clone();
+        async move {
+            sqlx::query(
+                "UPDATE fvoci.import_jobs SET updated_at = now() - interval '1 hour' \
+                 WHERE id = $1 AND lease_token IS NULL",
+            )
+            .bind(job_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
+    };
+    // A failed DELETE rolls back the purge transaction and leaves the document live.
+    sqlx::query(
+        r#"CREATE FUNCTION fvoci.test_block_import_purge() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN RAISE EXCEPTION 'injected import purge failure'; END $$"#,
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_block_import_purge BEFORE DELETE ON fvoci.documents \
+         FOR EACH ROW EXECUTE FUNCTION fvoci.test_block_import_purge()",
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+
+    let before = fx.document_count().await;
+    let (status, body) = import().await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert!(run(&unavailable).await);
+    let (state, payload, attempts, refs) = job_row(&fx.admin, job_id).await;
+    assert_eq!((state.as_str(), payload, attempts), ("running", true, 1));
+    assert_eq!(refs["documentIds"].as_array().unwrap().len(), 1);
+    let orphan = refs["documentIds"][0]
+        .as_str()
+        .expect("recovery ref")
+        .to_string();
+    assert!(document_exists(&fx.admin, &orphan).await);
+    assert_eq!(fx.document_count().await, before + 1);
+    let parked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.import_deferred_events WHERE import_job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    assert!(parked > 0, "failed cleanup must retain parked events");
+
+    sqlx::query("DROP TRIGGER test_block_import_purge ON fvoci.documents")
+        .execute(&fx.admin)
+        .await
+        .unwrap();
+    backdate(job_id).await;
+    // The next claim removes the orphan, clears its parked events, then imports once.
+    assert!(run(&fx.settings).await);
+    let (state, payload, attempts, refs_after) = job_row(&fx.admin, job_id).await;
+    assert_eq!((state.as_str(), payload, attempts), ("completed", false, 2));
+    assert!(!document_exists(&fx.admin, &orphan).await);
+    assert_eq!(refs_after["documentIds"].as_array().unwrap().len(), 1);
+    assert_ne!(refs_after, refs);
+    assert_eq!(fx.document_count().await, before + 1);
+    let parked_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.import_deferred_events WHERE import_job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    assert_eq!(parked_after, 0);
+
+    // If cleanup remains unavailable through the attempt limit, keep refs on
+    // the terminal row and never create a replacement.
+    sqlx::query(
+        "CREATE TRIGGER test_block_import_purge BEFORE DELETE ON fvoci.documents \
+         FOR EACH ROW EXECUTE FUNCTION fvoci.test_block_import_purge()",
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    let (status, body) = import().await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let exhausted_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    assert!(run(&unavailable).await);
+    let (state, payload, attempts, exhausted_refs) = job_row(&fx.admin, exhausted_id).await;
+    assert_eq!((state.as_str(), payload, attempts), ("running", true, 1));
+    assert_eq!(exhausted_refs["documentIds"].as_array().unwrap().len(), 1);
+    assert_eq!(fx.document_count().await, before + 2);
+    backdate(exhausted_id).await;
+    assert!(run(&fx.settings).await);
+    let (state, payload, attempts, terminal_refs) = job_row(&fx.admin, exhausted_id).await;
+    assert_eq!((state.as_str(), payload, attempts), ("failed", false, 2));
+    assert_eq!(terminal_refs, exhausted_refs);
+    assert_eq!(fx.document_count().await, before + 2);
+    let terminal_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.import_deferred_events WHERE import_job_id = $1",
+    )
+    .bind(exhausted_id)
+    .fetch_one(&fx.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        terminal_events, 0,
+        "terminal failure never publishes old creates"
+    );
+    assert!(!run(&fx.settings).await, "exhausted job cannot be claimed");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn failed_compensation_keeps_attachment_bytes_when_purge_blocked() {
+    use fvoci_server::db::attachments::{create_import_attachment, mark_import_attachment_stored};
+    use fvoci_server::db::context::defer_import_events;
+    use fvoci_server::db::quota::StorageQuota;
+    use fvoci_server::documents::import_body::create_fenced_wiki_document;
+    use fvoci_server::import_job::run_next_import;
+
+    const ASSET: &[u8] = b"fvoci-import-recovery-asset-bytes";
+    let recovery_zip = || {
+        zip_bytes(&[
+            ("Recovery 0123456789abcdef.md", b""),
+            ("Recovery 0123456789abcdef/recovery.bin", ASSET),
+        ])
+    };
+
+    let harness = TestDb::bootstrap().await;
+    let fx = fixture(&harness).await;
+    let run = || {
+        let (pool, settings, storage) = (fx.pool.clone(), fx.settings.clone(), fx.storage.clone());
+        async move {
+            run_next_import(&pool, &settings, &storage, &CancellationToken::new())
+                .await
+                .unwrap()
+        }
+    };
+    let release_dead_run = |job_id: Uuid| {
+        let admin = fx.admin.clone();
+        async move {
+            sqlx::query(
+                "UPDATE fvoci.import_jobs SET attempts = 0, \
+                 lease_until = now() - interval '1 second' WHERE id = $1",
+            )
+            .bind(job_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
+    };
+    let seed_dead_asset_run = |job_id: Uuid| {
+        let fx = &fx;
+        async move {
+            let claim = claim_next_import_job(&fx.pool)
+                .await
+                .unwrap()
+                .expect("claim dead run");
+            assert_eq!(claim.job_id, job_id);
+            let fence = ImportFence {
+                job_id,
+                lease_token: claim.lease_token,
+            };
+            let page = defer_import_events(job_id, async {
+                create_fenced_wiki_document(
+                    &fx.pool,
+                    fx.workspace_id,
+                    claim.created_by,
+                    claim.session_id,
+                    "recovery asset page",
+                    None,
+                    fence,
+                )
+                .await
+                .expect("fenced page")
+            })
+            .await;
+            let (attachment_id, key) = create_import_attachment(
+                &fx.pool,
+                &StorageQuota::default(),
+                fx.workspace_id,
+                claim.created_by,
+                claim.session_id,
+                page,
+                "recovery.bin",
+                ASSET.len() as i64,
+                fence,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("fenced attachment");
+            fx.storage.put_bytes(&key, ASSET.to_vec()).await.unwrap();
+            assert!(mark_import_attachment_stored(
+                &fx.pool,
+                fx.workspace_id,
+                claim.created_by,
+                attachment_id,
+                "recovery.bin",
+                "application/octet-stream",
+                ASSET.len() as i64,
+                fence,
+            )
+            .await
+            .unwrap());
+            release_dead_run(job_id).await;
+            key
+        }
+    };
+    let import = || {
+        fx.import(
+            &fx.cookie,
+            json!({
+                "workspaceId": fx.workspace_id,
+                "source": "notion-zip",
+                "zipBase64": B64.encode(recovery_zip())
+            }),
+        )
+    };
+    let backdate = |job_id: Uuid| {
+        let admin = fx.admin.clone();
+        async move {
+            sqlx::query(
+                "UPDATE fvoci.import_jobs SET updated_at = now() - interval '1 hour' \
+                 WHERE id = $1 AND lease_token IS NULL",
+            )
+            .bind(job_id)
+            .execute(&admin)
+            .await
+            .unwrap();
+        }
+    };
+    let assert_asset_bytes = |key: String| {
+        let storage = fx.storage.clone();
+        async move {
+            let len = ASSET.len() as u64;
+            let bytes = storage.read_range(&key, 0, len - 1).await.unwrap();
+            assert_eq!(bytes, ASSET);
+            assert_eq!(storage.head(&key).await.unwrap(), Some(len));
+        }
+    };
+
+    sqlx::query(
+        r#"CREATE FUNCTION fvoci.test_block_import_purge() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN RAISE EXCEPTION 'injected import purge failure'; END $$"#,
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_block_import_purge BEFORE DELETE ON fvoci.documents \
+         FOR EACH ROW EXECUTE FUNCTION fvoci.test_block_import_purge()",
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+
+    let before = fx.document_count().await;
+    let (status, body) = import().await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    let key = seed_dead_asset_run(job_id).await;
+    assert_asset_bytes(key.clone()).await;
+    assert!(run().await);
+    let (state, payload, attempts, refs) = job_row(&fx.admin, job_id).await;
+    assert_eq!((state.as_str(), payload, attempts), ("running", true, 1));
+    assert_eq!(refs["storedKeys"][0].as_str().unwrap(), key);
+    assert_asset_bytes(key.clone()).await;
+
+    sqlx::query("DROP TRIGGER test_block_import_purge ON fvoci.documents")
+        .execute(&fx.admin)
+        .await
+        .unwrap();
+    backdate(job_id).await;
+    assert!(run().await);
+    let (state, payload, attempts, refs_after) = job_row(&fx.admin, job_id).await;
+    assert_eq!((state.as_str(), payload, attempts), ("completed", false, 2));
+    assert_eq!(fx.document_count().await, before + 1);
+    let live_key = refs_after["storedKeys"][0]
+        .as_str()
+        .expect("live storage key")
+        .to_string();
+    assert_asset_bytes(live_key).await;
+    assert_eq!(
+        fx.storage.head(&key).await.unwrap(),
+        None,
+        "orphan object bytes must be purged after successful cleanup"
+    );
+
+    sqlx::query(
+        "CREATE TRIGGER test_block_import_purge BEFORE DELETE ON fvoci.documents \
+         FOR EACH ROW EXECUTE FUNCTION fvoci.test_block_import_purge()",
+    )
+    .execute(&fx.admin)
+    .await
+    .unwrap();
+    let (status, body) = import().await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let exhausted_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+    let exhausted_key = seed_dead_asset_run(exhausted_id).await;
+    assert_asset_bytes(exhausted_key.clone()).await;
+    assert!(run().await);
+    backdate(exhausted_id).await;
+    assert!(run().await);
+    let (state, payload, attempts, _) = job_row(&fx.admin, exhausted_id).await;
+    assert_eq!((state.as_str(), payload, attempts), ("failed", false, 2));
+    assert_eq!(fx.document_count().await, before + 2);
+    assert_asset_bytes(exhausted_key).await;
+
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn expired_lease_is_swept_failed_and_compensated() {
     let harness = TestDb::bootstrap().await;
     let fx = fixture(&harness).await;

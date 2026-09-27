@@ -297,6 +297,11 @@ path = "tests/integrations_integration.rs"
 required-features = ["db-tests"]
 
 [[test]]
+name = "templates_integration"
+path = "tests/templates_integration.rs"
+required-features = ["db-tests"]
+
+[[test]]
 name = "background_jobs"
 path = "tests/background_jobs.rs"
 required-features = ["db-tests"]

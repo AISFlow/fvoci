@@ -29,4 +29,5 @@ pub mod stars;
 pub mod task_body;
 pub mod task_ops;
 pub mod tasks;
+pub mod templates;
 pub mod workspaces;
