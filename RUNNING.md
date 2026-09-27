@@ -698,7 +698,9 @@ and the grant commits all or nothing. To go back to the old build, stop the
 upgraded server first; do not start the old image on the migrated database.
 Restore the pre-upgrade backup into a new project with the old image (local
 storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
-loses writes made after that backup; preserve the failed install for diagnosis.
+loses writes made after that backup; preserve the failed install for diagnosis,
+but with S3 keep it stopped and never start it again with the same `S3_*`
+settings, since its sweeps would delete objects the restored install uses.
 CI does not run this image-to-image upgrade; `install-smoke.sh` recreates the
 server on the same image.
 
@@ -939,24 +941,39 @@ with `STORAGE_DRIVER=s3`. The supported model for S3 is:
    are recoverable only from bucket versions.
 3. **Restore:** `scripts/restore.sh` needs a volume archive and a manifest, so
    run its database steps by hand into a **fresh** Compose project. Use the
-   image that took the dump. After a failed upgrade this is the old image; never
-   start it on the migrated database. You need these inputs:
+   image that took the dump (`FVOCI_IMAGE` in the env file set to that tag), and
+   run the commands below from the checkout that built it so `$C` uses its
+   Compose files. After a failed upgrade this is the old image and checkout;
+   never start it on the migrated database.
+
+   Only one install may use a bucket. Its background sweeps (abandoned-upload
+   cleanup, trashed-document and workspace purge) delete bucket objects based on
+   its own database, so two installs whose databases diverged delete objects
+   the other still references, silently and after `--verify-storage` has
+   passed. Before starting the restored server, stop every other install that
+   uses these `S3_*` settings (the source, or a failed or migrated upgrade), and
+   never start that install again with them. A restore drill must use an
+   independent replica or copy of the bucket, never the live one, and must not
+   hold production integration credentials: `--ack-external-replay` below
+   re-sends external events. You need these inputs:
    - the dump;
-   - `<dump-utc>`: the UTC time, in whole seconds, recorded when the dump
-     finished. There is no manifest to recover it from. If it was not recorded,
-     stop instead of guessing;
+   - `<dump-utc>`: the UTC time recorded when the dump finished, truncated to
+     the second (`date -u +%Y-%m-%dT%H:%M:%SZ`). There is no manifest to
+     recover it from. If it was not recorded, stop instead of guessing;
    - an env file with the original `POSTGRES_USER`, `POSTGRES_DB` and
      `FVOCI_APP_ROLE` names;
    - the same `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID`;
    - `ENCRYPTION_KEYS` with every original key id unchanged (a superset is
      fine). Nothing compares a fingerprint here; only `--verify-secrets` below
      checks the keyring;
-   - `S3_*` pointing at the bucket (or the replica).
+   - `S3_*` pointing at the bucket (or the replica), used by no other install.
 
    Then, with `C="docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --project-name <new-project> --env-file <env>"`:
 
    1. Run `$C up -d --wait postgres meilisearch`. Then, as `scripts/restore.sh`
       does:
+      - confirm the database is empty (no user relations outside
+        `pg_catalog`/`information_schema`); stop if it is not;
       - create `FVOCI_APP_ROLE` (`LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, password
         `FVOCI_APP_PASSWORD`);
       - copy the dump into the postgres container;
@@ -988,11 +1005,11 @@ with `STORAGE_DRIVER=s3`. The supported model for S3 is:
    5. Start the server with `$C up -d --wait server`, and only after both
       checks pass.
 
-   `--verify-storage` prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
-   and exits non-zero when any stored attachment is missing or has a different
-   size, when a branding asset referenced by the instance settings
-   (`logo`/`favicon`, uploaded in the admin console) is missing or does not
-   match its recorded SHA-256, or when the bucket cannot be read (credentials,
+   `--verify-storage` prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"previewChecked":P,"previewMissing":[...],"previewSizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
+   and exits non-zero when any stored attachment or published preview is
+   missing or has a different size, when a branding asset referenced by the
+   instance settings (`logo`/`favicon`, uploaded in the admin console) is
+   missing or does not match its recorded SHA-256, or when the bucket cannot be read (credentials,
    wrong bucket, network). Restore the listed objects from bucket versions
    before starting the server. Branding assets are stored like attachments
    (same driver, key from the setting), so the local volume archive and the S3
