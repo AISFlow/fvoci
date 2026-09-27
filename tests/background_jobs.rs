@@ -11,8 +11,13 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::attachments::ObjectStorage;
 use fvoci_server::auth::token::hash_token;
+use fvoci_server::db::documents::{create_wiki_document, CreateDocumentInput};
 use fvoci_server::db::magic::issue_password_reset_token;
 use fvoci_server::db::outbox::mark_processed;
+use fvoci_server::db::revisions::{
+    create_manual_revision, gc_automatic_revisions_batch, CreateRevisionInput, RevisionTarget,
+};
+use fvoci_server::jobs::run_automatic_revision_gc;
 use fvoci_server::jobs::{
     run_daily_sweep, run_document_trash_purge, run_document_trash_purge_with, run_ics_token_gc,
     run_magic_token_gc, run_notification_gc, run_processed_gc, run_stale_upload_gc,
@@ -20,8 +25,6 @@ use fvoci_server::jobs::{
     MaintenanceSettings, JOB_KEY_DAILY, JOB_KEY_UPLOADS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
-use fvoci_server::db::documents::{create_wiki_document, CreateDocumentInput};
-use fvoci_server::db::revisions::{create_manual_revision, CreateRevisionInput, RevisionTarget};
 use project_harness::{
     admin_pool, app_pool, create_project, json_request, session_id_for_user, setup_session, TestDb,
 };
@@ -854,6 +857,7 @@ async fn scheduler_runs_stale_upload_gc_under_its_own_claim() {
             interval: Duration::from_secs(3600),
             upload_gc_interval: Duration::from_secs(3600),
             upload_incomplete_ttl: ttl,
+            ..MaintenanceSettings::default()
         },
         pool.clone(),
         storage.clone(),
@@ -1538,6 +1542,190 @@ async fn manual_revision_promotes_document_session_head_without_body_change() {
     assert_eq!(row.2, y_snapshot);
     assert_eq!(row.3, session_json);
     assert_eq!(row.4, session_text);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn gc_automatic_revisions_keeps_manual_and_newest_autos() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let doc = create_wiki_document(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id_for_user(&admin, user_id).await,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "gc-doc",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let target = doc.id;
+    let snap = |n: u8| vec![n, n, n];
+    for (i, reason) in [
+        (1u8, "manual"),
+        (2, "session"),
+        (3, "session"),
+        (4, "session"),
+    ] {
+        let id = Uuid::now_v7();
+        let created_by = if reason == "manual" {
+            Some(user_id)
+        } else {
+            None
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by, created_at
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 't', $5, $6, $7)
+            "#,
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(target)
+        .bind(snap(i))
+        .bind(reason)
+        .bind(created_by)
+        .bind(Utc::now() + ChronoDuration::milliseconds(i as i64))
+        .execute(&admin)
+        .await
+        .expect("insert");
+    }
+    let deleted = gc_automatic_revisions_batch(&pool, workspace_id, 1, 100)
+        .await
+        .expect("gc batch");
+    assert_eq!(deleted, 2);
+    let rows: Vec<(String,)> = sqlx::query_as(
+        r#"
+        SELECT reason FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target)
+    .fetch_all(&admin)
+    .await
+    .expect("rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "manual");
+    assert_eq!(rows[1].0, "session");
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn gc_skips_row_promoted_to_manual_under_lock() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let doc = create_wiki_document(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "gc-promote",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let y_snapshot = vec![7u8, 8, 9];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(&admin)
+    .await
+    .expect("state");
+    let revision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by
+        ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'auto', 'session', NULL)
+        "#,
+    )
+    .bind(revision_id)
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(&admin)
+    .await
+    .expect("session row");
+    create_manual_revision(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id,
+        RevisionTarget::Document(doc.id),
+        CreateRevisionInput {
+            y_snapshot: y_snapshot.clone(),
+            content_json: json!({}),
+            text: "manual".into(),
+            reason: String::new(),
+        },
+    )
+    .await
+    .expect("promote")
+    .expect("ok");
+    for i in 0..2 {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'extra', 'session', NULL)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(doc.id)
+        .bind(vec![i as u8])
+        .execute(&admin)
+        .await
+        .expect("extra session");
+    }
+    let cancel = CancellationToken::new();
+    let deleted = run_automatic_revision_gc(&pool, 0, &cancel)
+        .await
+        .expect("gc sweep");
+    assert!(deleted >= 2);
+    let manual_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_id = $2 AND reason = 'manual'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .fetch_one(&admin)
+    .await
+    .expect("count");
+    assert_eq!(manual_count, 1);
     admin.close().await;
     pool.close().await;
     harness.cleanup().await;
