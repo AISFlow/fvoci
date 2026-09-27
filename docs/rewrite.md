@@ -16,7 +16,7 @@
 ## 2. 현재 수락 지점
 
 전체 재작성은 **부분 구현**이다. Orca Run `run_b01d432a9dee`.
-이 기록의 수락 기준 main은 `30c52002` (#110, 2026-09-27)이다. 열린 제품·CI PR은 아래에
+이 기록의 수락 기준 main은 `ebca941e` (#104, 2026-09-27)이다. 열린 제품·CI PR은 아래에
 별도로 표시한다. 개별 PR이나 main CI 성공은 전체 포팅 완료를 뜻하지 않는다.
 
 | PR | merge | 범위 | 수락 근거 |
@@ -117,20 +117,22 @@
 | #105, #111 | 07ce70a, 0eeb107 | 현재 모델 역할·실행 설정 갱신(과거 이력 보존) | 별도 검토·원격 CI |
 | #113 | cdd4d47 | 일반 Web E2E 28개 그룹 잡을 8개 shard로 통합, shard당 준비·빌드 1회와 그룹별 상태 격리·신규 spec 자동 발견 | 8개 실제 로그에서 29 spec·51 테스트·빌드 각 1회, 독립 검토·CI |
 | #110 | 30c5200 | 원본 사용권 정책·좌석/저장 quota·audit/branding/SSO gate, 복구의 기존 branding 객체 검증 보존 | 별도 정책·복구 delta 검토, 통합 HEAD의 26 checks; 컴파일된 issuer trust는 원본처럼 비어 있어 발급 토큰 운영 활성화는 미검증 |
+| #104 | ebca941 | 태스크 본문 협업·리비전 기반과 migration 037, 기존 문서/태스크 인가·철회 보존 | 기존 독립 검토와 별도 Grok 통합 delta 검토; HEAD 8ab3dc7f의 26 checks, task 협업 PG 7개·실제 task-body 브라우저 실행; main 후속 CI는 별도 진행 |
 
 검증 기준: 각 PR의 필요한 실제 검사·원격 CI와 별도 세션의 독립 검토를 고정 SHA에서 확인한다.
 과거 Opus/Fable 검토는 당시 범위의 근거로 보존하며, 현재 역할은 AGENTS.md를 따른다.
 최신 실행·소유권·검증 SHA·인계 포인터는 `/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-26.md`에 둔다.
 
 진행 중(아래 항목은 미수락):
-- #104 태스크 협업 기반과 #117 origin UI/API: 최신 main을 통합했다. 기능의 기존 독립 검토는 보존하며, #104 CI 충돌 해소 delta의 독립 검토와 현재 후보 CI가 남았다.
+- #117 origin UI/API: 수락된 #104 위의 후속 기능이다. 기존 독립 검토를 보존하며 현재 후보 CI가 남았다.
 - #112 가져오기 보상 실패 시 복구 참조·기존 저장 객체 보존: 기존 독립 검토를 보존하며 최신 main 통합 후보의 CI가 남았다.
-- #114 Rust 중복 호출 제거와 #115 변경 영향별 CI 선택: 이전 후보의 원격 성공을 보존하며 후속 통합·회귀 변경의 별도 검토가 남았다. #116은 이 진행 기록의 미수락 문서 PR이다.
-- #118 문서·태스크 템플릿: 실제 PG 4개·브라우저 적용 1개 등 로컬 검사를 회수했고, 원격 CI·별도 독립 검토 전 Draft다.
+- #114 Rust 중복 호출 제거와 #115 변경 영향별 CI 선택: 기존 후보 독립 검토를 수락했다. #104 통합 뒤 태스크 협업 suite를 포함한 10개 실행 대상과 통합 delta의 검토·최신 원격 CI를 확인 중이다. #116은 이 진행 기록의 미수락 문서 PR이다.
+- #118 문서·태스크 템플릿: 실제 PG 4개·브라우저 적용 1개와 별도 Grok 검토를 회수했다. #119 공개 운영자 정보 UI도 별도 검토·브라우저 4개를 확인했고, 두 PR의 원격 CI·최신 main 통합은 미수락이다. 배포용 오픈소스 고지 산출물은 잔여 범위다.
+- security.txt: 공개 Rust 경로는 로컬 구현·PG 검사 상태다. URL 파서가 보정한 URI 대신 원문을 출력하는 독립 검토 차단 사항을 수정 중이며 아직 수락하지 않았다.
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
   제품 런타임과 별개다. 필수 백업·복원 자체 검증은 Rust이며 pg_dump/pg_restore·얇은 실행 스크립트는 유지한다.
-- migration 037은 #104가 소유한다. 현재 main의 038과 함께 검증하며 번호를 다시 배정하지 않는다.
-- 잔여 기능(#104·origin 진행 범위 포함): 태스크 revisions·block patch·origin·gantt, 템플릿·unfurl·workspace export·events/access-stream/project stream(SSE)·
+- migration 037·038은 main에 수락됐고, #118의 039는 해당 PR이 소유한다. 번호를 다시 배정하지 않는다.
+- 잔여 기능: 태스크 session/scheduled revisions·block patch·origin·gantt, 템플릿·unfurl·workspace export·events/access-stream/project stream(SSE)·
   push-subscriptions, S3 presigned 계약, settings 소비자(embed·AI·첨부 미리보기·i18n 재정의·security.txt·operator),
   #77 외부 제공자 검증의 미실행 범위, 컬렉션 `dueBefore` 시간대·wiki 컬렉션 권한 N+1(#76 S3·S4),
   board 그룹 paging·drag-and-drop·gantt UI, preview-html 격리 parse·HWP viewer(rhwp WASM), 추가 DB.
