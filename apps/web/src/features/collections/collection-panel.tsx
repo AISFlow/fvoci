@@ -1,9 +1,11 @@
 // Adapted from source apps/web/src/features/collections/collection-panel.tsx
 // (`CollectionContents`), collection-cards.tsx and collection-calendar.tsx for a
-// project task collection. The grouped board lives in collection-board.tsx.
+// project task collection. The grouped board lives in collection-board.tsx;
+// calendar date moves (drag a preview or a day-list row onto a day or the
+// unassigned button) follow calendar-model.ts.
 import { formatPersonName, t } from "@fvoci/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState, type DragEvent } from "react";
 import { Link } from "react-router-dom";
 import { ConfirmActionButton } from "@/components/confirm-action";
 import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-status";
@@ -46,6 +48,12 @@ import {
   type ViewQuery,
 } from "@/lib/view-query";
 import { moveRequest, type BoardGroup } from "./board-model";
+import {
+  CALENDAR_DRAG_TYPE,
+  dateMovable,
+  dateMoveRequest,
+  type CalendarRow,
+} from "./calendar-model";
 import { CollectionBoard } from "./collection-board";
 import { CustomFilters } from "./custom-filters";
 import { ValueEditor } from "./value-editor";
@@ -128,6 +136,9 @@ export function CollectionContents({
   const [customOpen, setCustomOpen] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
   const [moving, setMoving] = useState(false);
+  const draggedDate = useRef<CalendarRow | null>(null);
+  /** Calendar drop target under the pointer: a day, null (unassigned) or none. */
+  const [dropDay, setDropDay] = useState<string | null | undefined>(undefined);
 
   const effectiveMonth = isMonth(month) ? month : todayInTimeZone(timeZone).slice(0, 7);
 
@@ -234,6 +245,42 @@ export function CollectionContents({
           fieldId: field.id,
           expectedVersion: row.version,
           expectedFieldVersion: field.version,
+          value: request.value,
+        });
+      }
+    } catch (err) {
+      setMoveError(problemMessage(err, "collection.saveError"));
+    } finally {
+      await refresh();
+      setMoving(false);
+    }
+  }
+
+  // Same rules as the board: no optimistic update, the server decides (versions
+  // / expectedDates guard concurrent edits) and a rejection stays visible.
+  async function moveToDate(row: CalendarRow, target: string | null) {
+    const request = dateMoveRequest(config.dateBy, row, target, fields.data?.items ?? [], timeZone);
+    if (!request || moving) return;
+    setMoveError(null);
+    if (request.kind === "unavailable") {
+      setMoveError(t("collection.saveError"));
+      return;
+    }
+    setMoving(true);
+    try {
+      if (request.kind === "task") {
+        await ensureOk(
+          await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
+            params: { path: { workspace_id: workspaceId, task_id: request.taskId } },
+            body: request.body,
+          }),
+        );
+        await queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId, projectId] });
+      } else {
+        await putCollectionValue(workspaceId, collectionId, row.id, {
+          fieldId: request.fieldId,
+          expectedVersion: request.expectedVersion,
+          expectedFieldVersion: request.expectedFieldVersion,
           value: request.value,
         });
       }
@@ -357,11 +404,57 @@ export function CollectionContents({
     return (row.values as Record<string, unknown>)[fieldId];
   }
 
-  const titleLink = (row: { displayId: string; title: string }) => (
-    <Link to={itemPath(slug, row.displayId)} className="font-medium hover:underline">
+  const titleLink = (row: { displayId: string; title: string }, draggable?: false) => (
+    <Link
+      to={itemPath(slug, row.displayId)}
+      className="font-medium hover:underline"
+      draggable={draggable}
+    >
       <span className="text-muted-foreground">{row.displayId}</span> {row.title}
     </Link>
   );
+
+  const calendarDrag = type === "calendar" && config.dateBy !== null;
+  const canMoveDate = (row: CalendarRow | null, target: string | null) =>
+    !moving &&
+    row !== null &&
+    dateMoveRequest(config.dateBy, row, target, active, timeZone) !== null;
+  const dragSource = (row: CalendarRow) =>
+    calendarDrag && !moving && dateMovable(config.dateBy, row, active)
+      ? {
+          draggable: true,
+          onDragStart: (event: DragEvent) => {
+            event.dataTransfer.setData(CALENDAR_DRAG_TYPE, row.id);
+            event.dataTransfer.effectAllowed = "move";
+            draggedDate.current = row;
+          },
+          onDragEnd: () => {
+            draggedDate.current = null;
+            setDropDay(undefined);
+          },
+        }
+      : {};
+  const dropTarget = (target: string | null) => ({
+    "data-drop-over": dropDay === target ? "true" : undefined,
+    onDragOver: (event: DragEvent) => {
+      if (!canMoveDate(draggedDate.current, target)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      if (dropDay !== target) setDropDay(target);
+    },
+    onDragLeave: (event: DragEvent) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropDay(undefined);
+    },
+    onDrop: (event: DragEvent) => {
+      const row = draggedDate.current;
+      draggedDate.current = null;
+      setDropDay(undefined);
+      if (!row || !canMoveDate(row, target)) return;
+      if (event.dataTransfer.getData(CALENDAR_DRAG_TYPE) !== row.id) return;
+      event.preventDefault();
+      void moveToDate(row, target);
+    },
+  });
 
   const table = (items: readonly CollectionQueryItem[]) => (
     <div className="data-table-wrap">
@@ -379,7 +472,14 @@ export function CollectionContents({
         <tbody>
           {items.map((row) => (
             <tr key={row.id} data-testid={`collection-row-${row.displayId}`}>
-              <td className="min-w-40">{titleLink(row)}</td>
+              <td
+                className="min-w-40"
+                data-testid={calendarDrag ? `collection-drag-${row.displayId}` : undefined}
+                aria-busy={calendarDrag && moving ? true : undefined}
+                {...dragSource(row)}
+              >
+                {titleLink(row, calendarDrag ? false : undefined)}
+              </td>
               {active.map((field) => (
                 <td key={field.id} className="min-w-44">
                   <ValueEditor
@@ -494,6 +594,8 @@ export function CollectionContents({
           size="sm"
           variant="outline"
           aria-pressed={day === null}
+          className="collection-calendar__none"
+          {...dropTarget(null)}
           onClick={() => {
             setDay(day === null ? undefined : null);
             setCursor(undefined);
@@ -519,7 +621,12 @@ export function CollectionContents({
                 const count = dayCounts.get(cell.date) ?? 0;
                 const previews = previewsByDay.get(cell.date) ?? [];
                 return (
-                  <td key={cell.date} data-outside={cell.inMonth ? undefined : "true"}>
+                  <td
+                    key={cell.date}
+                    data-outside={cell.inMonth ? undefined : "true"}
+                    data-date={cell.date}
+                    {...dropTarget(cell.date)}
+                  >
                     {cell.inMonth ? (
                       <>
                         <button
@@ -539,8 +646,17 @@ export function CollectionContents({
                         {previews.length > 0 ? (
                           <ul className="collection-calendar__previews">
                             {previews.map((preview) => (
-                              <li key={preview.id}>
-                                <Link to={itemPath(slug, preview.displayId)} title={preview.title}>
+                              <li
+                                key={preview.id}
+                                data-testid={`collection-preview-${preview.displayId}`}
+                                aria-busy={moving || undefined}
+                                {...dragSource(preview)}
+                              >
+                                <Link
+                                  to={itemPath(slug, preview.displayId)}
+                                  title={preview.title}
+                                  draggable={false}
+                                >
                                   {preview.title}
                                 </Link>
                               </li>

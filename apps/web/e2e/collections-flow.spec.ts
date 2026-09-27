@@ -446,3 +446,215 @@ test("grouped board pages each column and moves cards by drag or select through 
   await expect(columnA.getByTestId(`collection-card-${frozen}`)).toBeVisible();
   expect((await itemRow(frozen)).statusId).toBe(statusA!.id);
 });
+
+test("calendar moves previews and day-list rows to another day or unassigned through the API", async ({
+  page,
+}) => {
+  await ensureSetup(page);
+  const wsId = await workspaceId(page);
+  const slug = admin.workspaceSlug;
+  const base = `/api/v1/workspaces/${wsId}`;
+  const me = (await (await page.request.get("/api/v1/auth/me")).json()) as { timezone: string };
+  const dayIn = (iso: string) => new Intl.DateTimeFormat("en-CA", { timeZone: me.timezone }).format(new Date(iso));
+
+  const projectRes = await page.request.post(`${base}/projects`, {
+    data: { key: "CAL", name: "달력 프로젝트", visibility: "workspace" },
+  });
+  expect(projectRes.status()).toBe(201);
+  const project = (await projectRes.json()) as { id: string };
+  const workflow = (await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json()) as {
+    statuses: { id: string }[];
+  };
+  async function createTask(title: string, dueDate: string | null): Promise<{ id: string; displayId: string }> {
+    const res = await page.request.post(`${base}/projects/${project.id}/tasks`, {
+      // Create rejects an explicit null date; omit the field for an undated task.
+      data: { title, type: "task", statusId: workflow.statuses[0]!.id, ...(dueDate ? { dueDate } : {}) },
+    });
+    expect(res.status()).toBe(201);
+    const body = (await res.json()) as { id: string; number: number };
+    return { id: body.id, displayId: `CAL-${body.number}` };
+  }
+  const previewed = await createTask("미리보기 이동", "2027-05-10");
+  const listed = await createTask("목록 이동", "2027-05-11");
+  const timed = await createTask("시각 마감", null);
+  const stale = await createTask("충돌 이동", "2027-05-12");
+  expect(
+    (await page.request.patch(`${base}/tasks/${timed.id}`, { data: { dueAt: "2027-05-05T03:00:00Z" } })).ok(),
+  ).toBe(true);
+
+  const collection = (await (
+    await page.request.get(`${base}/projects/${project.id}/collection`)
+  ).json()) as { id: string };
+  async function createField(name: string, key: string, type: string) {
+    const res = await page.request.post(`${base}/collections/${collection.id}/fields`, {
+      data: { name, key, type },
+    });
+    expect(res.status()).toBe(201);
+    return (await res.json()) as { id: string; version: number };
+  }
+  const dateField = await createField("기준일", "base_day", "date");
+  const timeField = await createField("시각", "at_time", "datetime");
+
+  type Row = {
+    id: string;
+    displayId: string;
+    dueDate: string | null;
+    dueAt: string | null;
+    values: Record<string, unknown>;
+    version: number;
+  };
+  async function itemRow(displayId: string): Promise<Row> {
+    const res = await page.request.post(`${base}/collections/${collection.id}/query`, {
+      data: { config: { query: { filters: {}, sort: [] }, groupBy: null, dateBy: null }, limit: 100 },
+    });
+    expect(res.ok()).toBe(true);
+    const row = ((await res.json()) as { items: Row[] }).items.find((item) => item.displayId === displayId);
+    expect(row).toBeTruthy();
+    return row!;
+  }
+  async function putValue(displayId: string, fieldId: string, fieldVersion: number, value: unknown) {
+    const row = await itemRow(displayId);
+    const res = await page.request.put(`${base}/collections/${collection.id}/items/${row.id}/values`, {
+      data: { fieldId, expectedVersion: row.version, expectedFieldVersion: fieldVersion, value },
+    });
+    expect(res.ok()).toBe(true);
+  }
+  const instant = "2027-05-08T14:30:00Z";
+  await putValue(previewed.displayId, timeField.id, timeField.version, { datetime: instant });
+  await putValue(listed.displayId, dateField.id, dateField.version, { date: "2027-05-03" });
+
+  // A viewport tall enough for the month and the day list keeps real drags free of scrolling.
+  await page.setViewportSize({ width: 1600, height: 2400 });
+  const calendar = page.getByTestId("collection-calendar");
+  const cell = (date: string) => calendar.locator(`td[data-date="${date}"]`);
+  const preview = (displayId: string) => calendar.getByTestId(`collection-preview-${displayId}`);
+  const unassigned = page.getByRole("button", { name: /^미지정 · \d+$/ });
+  async function openMonth() {
+    await page.goto(`/w/${slug}/CAL/calendar`);
+    await page.locator('input[type="month"]').fill("2027-05");
+    await expect(page.getByLabel("2027년 5월", { exact: true }).first()).toBeVisible();
+  }
+  async function dateBy(label: string) {
+    await page.getByLabel("날짜 기준", { exact: true }).selectOption({ label });
+  }
+
+  // 1. Due basis: drag a preview to another day; dueDate changes and survives reload.
+  await openMonth();
+  await expect(cell("2027-05-10").getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
+  await preview(previewed.displayId).dragTo(cell("2027-05-14"));
+  await expect(cell("2027-05-14").getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
+  await expect(cell("2027-05-10").getByTestId(`collection-preview-${previewed.displayId}`)).toHaveCount(0);
+  await expect.poll(async () => (await itemRow(previewed.displayId)).dueDate).toBe("2027-05-14");
+
+  // A timed due (dueAt) moves to a plain due date, as the source calendar does.
+  await expect(cell(dayIn("2027-05-05T03:00:00Z")).getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
+  await preview(timed.displayId).dragTo(cell("2027-05-20"));
+  await expect(cell("2027-05-20").getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
+  await expect
+    .poll(async () => {
+      const row = await itemRow(timed.displayId);
+      return [row.dueDate, row.dueAt];
+    })
+    .toEqual(["2027-05-20", null]);
+
+  // 2. Day list: drag a row onto the unassigned button, then from unassigned back onto a day.
+  await calendar.getByRole("button", { name: "2027-05-11 · 전체 1개" }).click();
+  await expect(page.getByRole("heading", { name: "2027-05-11 항목" })).toBeVisible();
+  const listedHandle = page.getByTestId(`collection-drag-${listed.displayId}`);
+  await expect(listedHandle).toHaveAttribute("draggable", "true");
+  await listedHandle.dragTo(unassigned);
+  await expect(page.getByTestId(`collection-row-${listed.displayId}`)).toHaveCount(0);
+  await expect.poll(async () => (await itemRow(listed.displayId)).dueDate).toBeNull();
+  await unassigned.click();
+  await expect(page.getByRole("heading", { name: "미지정 항목" })).toBeVisible();
+  await expect(page.getByTestId(`collection-row-${listed.displayId}`)).toBeVisible();
+  // Real pointer drag (mouse down, move, up) from the list onto a day cell above it.
+  const from = (await page.getByTestId(`collection-drag-${listed.displayId}`).boundingBox())!;
+  const to = (await cell("2027-05-25").boundingBox())!;
+  await page.mouse.move(from.x + 4, from.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 40, from.y + 4, { steps: 4 });
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height - 8, { steps: 8 });
+  await page.mouse.up();
+  await expect(cell("2027-05-25").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
+  await expect.poll(async () => (await itemRow(listed.displayId)).dueDate).toBe("2027-05-25");
+
+  await page.reload();
+  await page.locator('input[type="month"]').fill("2027-05");
+  await expect(cell("2027-05-14").getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
+  await expect(cell("2027-05-20").getByTestId(`collection-preview-${timed.displayId}`)).toBeVisible();
+  await expect(cell("2027-05-25").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
+
+  // 3. Stale dates (changed elsewhere): expectedDates rejects the move and the calendar
+  //    shows the server value instead of a false success. The drag starts first so the
+  //    dragged row is the pre-edit snapshot whether or not the task stream refreshes the
+  //    calendar before the drop; the target's drop-over marker shows dragstart ran.
+  await expect(cell("2027-05-12").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
+  const staleFrom = (await preview(stale.displayId).boundingBox())!;
+  const staleTo = (await cell("2027-05-15").boundingBox())!;
+  await page.mouse.move(staleFrom.x + staleFrom.width / 2, staleFrom.y + staleFrom.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(staleFrom.x + staleFrom.width / 2 + 40, staleFrom.y + staleFrom.height / 2, { steps: 4 });
+  await page.mouse.move(staleTo.x + staleTo.width / 2, staleTo.y + staleTo.height - 8, { steps: 8 });
+  await expect(cell("2027-05-15")).toHaveAttribute("data-drop-over", "true");
+  expect(
+    (await page.request.patch(`${base}/tasks/${stale.id}`, { data: { dueDate: "2027-05-13" } })).ok(),
+  ).toBe(true);
+  const staleMove = page.waitForResponse(
+    (res) => res.request().method() === "PATCH" && new URL(res.url()).pathname === `${base}/tasks/${stale.id}`,
+  );
+  await page.mouse.move(staleTo.x + staleTo.width / 2 + 4, staleTo.y + staleTo.height - 8, { steps: 2 });
+  await page.mouse.up();
+  const staleResponse = await staleMove;
+  expect(staleResponse.status()).toBe(409);
+  expect(staleResponse.request().postDataJSON()).toMatchObject({
+    dueDate: "2027-05-15",
+    expectedDates: { dueDate: "2027-05-12" },
+  });
+  await expect(page.getByRole("alert").filter({ hasText: "다른 곳에서 먼저 수정되었습니다" })).toBeVisible();
+  await expect(cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
+  await expect(cell("2027-05-15").getByTestId(`collection-preview-${stale.displayId}`)).toHaveCount(0);
+  expect((await itemRow(stale.displayId)).dueDate).toBe("2027-05-13");
+
+  // 4. Datetime field: the day changes, the wall time in the user's zone stays.
+  await dateBy("시각");
+  const sourceDay = dayIn(instant);
+  await expect(cell(sourceDay).getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
+  const targetDay = `2027-05-${String(Number(sourceDay.slice(8, 10)) + 2).padStart(2, "0")}`;
+  await preview(previewed.displayId).dragTo(cell(targetDay));
+  await expect(cell(targetDay).getByTestId(`collection-preview-${previewed.displayId}`)).toBeVisible();
+  await expect
+    .poll(async () => {
+      const value = (await itemRow(previewed.displayId)).values[timeField.id] as { datetime: string } | undefined;
+      return value ? Date.parse(value.datetime) : null;
+    })
+    .toBe(Date.parse(instant) + 2 * 86_400_000);
+
+  // 5. Date field: stays a plain date; the keyboard editor in the day list still saves.
+  await dateBy("기준일");
+  await preview(listed.displayId).dragTo(cell("2027-05-04"));
+  await expect(cell("2027-05-04").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
+  await expect.poll(async () => (await itemRow(listed.displayId)).values[dateField.id]).toEqual({ date: "2027-05-04" });
+  await calendar.getByRole("button", { name: "2027-05-04 · 전체 1개" }).click();
+  const editor = page.getByLabel(`기준일 · ${listed.displayId}`, { exact: true });
+  await editor.fill("2027-05-06");
+  await page
+    .getByTestId(`collection-row-${listed.displayId}`)
+    .getByTestId("value-editor-base_day")
+    .getByRole("button", { name: "저장" })
+    .click();
+  await expect.poll(async () => (await itemRow(listed.displayId)).values[dateField.id]).toEqual({ date: "2027-05-06" });
+  await expect(cell("2027-05-06").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
+
+  // 6. Archived project: previews and rows are read-only and a drag writes nothing.
+  expect((await page.request.post(`${base}/projects/${project.id}/archive`)).ok()).toBe(true);
+  await openMonth();
+  await expect(preview(stale.displayId)).toBeVisible();
+  await expect(calendar.locator('[data-testid^="collection-preview-"][draggable="true"]')).toHaveCount(0);
+  await preview(stale.displayId).dragTo(cell("2027-05-16"));
+  await expect(cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
+  expect((await itemRow(stale.displayId)).dueDate).toBe("2027-05-13");
+  await calendar.getByRole("button", { name: "2027-05-13 · 전체 1개" }).click();
+  await expect(page.getByTestId(`collection-row-${stale.displayId}`)).toBeVisible();
+  await expect(page.locator('[data-testid^="collection-drag-"][draggable="true"]')).toHaveCount(0);
+});

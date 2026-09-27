@@ -271,3 +271,17 @@
 .collection-card[aria-busy="true"] {
 	opacity: 0.7;
 }
+
+/* Calendar date moves: a day (or the unassigned button) that accepts the dragged item. */
+.collection-calendar td[data-drop-over="true"],
+.collection-calendar__none[data-drop-over="true"] {
+	outline: 2px dashed var(--ring, var(--primary));
+	outline-offset: -2px;
+}
+.collection-calendar__previews li[draggable="true"],
+.data-table td[draggable="true"] {
+	cursor: grab;
+}
+.collection-calendar__previews li[aria-busy="true"] {
+	opacity: 0.7;
+}
