@@ -12,6 +12,8 @@ compat/target
 **/*.md
 !crates/document-extract/README.md
 !crates/collab-engine/README.md
+!packages/editor/src/fonts/README.md
+!third-party/browser-licenses/supplements/is-emoji-supported-0.0.5-LICENSE.md
 docs
 .agents
 scripts/backup.sh
