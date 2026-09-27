@@ -5,6 +5,8 @@
 //! child, the DB lease/journal/publish sequence, member and public-share
 //! `variant=preview` downloads, hostile inputs, and `preview-html`.
 
+#[path = "support/office_fixtures.rs"]
+mod office_fixtures;
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
@@ -14,7 +16,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use fvoci_server::attachments::preview::{run_preview_helper, PreviewError, PreviewLimits};
-use fvoci_server::attachments::{ObjectStorage, PreviewJobSettings};
+use fvoci_server::attachments::{ObjectStorage, PreviewExtractor, PreviewJobSettings};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, create_project, http_request, json_request,
     setup_session, TestDb,
@@ -92,12 +94,17 @@ struct Ctx {
 }
 
 async fn ctx() -> Ctx {
+    ctx_with(None).await
+}
+
+async fn ctx_with(preview_extract: Option<PreviewExtractor>) -> Ctx {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, owner, ws) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
     // The router's storage root is private to its AppState; rebuild the app
     // on one state so the job and the routes share storage.
-    let state = app_state(&harness.app_url).await;
+    let mut state = app_state(&harness.app_url).await;
+    state.preview_extract = preview_extract;
     let pool = state.auth.db.pool.clone();
     let storage = state.storage.clone();
     let app2 = fvoci_server::http::router(state, None);
@@ -1156,4 +1163,276 @@ async fn upgrade_to_030_queues_previews_for_stored_images() {
     );
     admin.close().await;
     db.cleanup().await;
+}
+
+fn preview_html_path(c: &Ctx, id: &str) -> String {
+    format!("/api/v1/workspaces/{}/attachments/{id}/preview-html", c.ws)
+}
+
+/// Every extract column; an on-demand preview must leave all of them alone.
+async fn extract_state(c: &Ctx, id: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT row(extract_text, extract_status, extract_attempts, extract_warnings,
+                    extract_lease_token, extract_lease_expires_at, extract_rhwp_rev)::text
+         FROM fvoci.attachments WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(id).unwrap())
+    .fetch_one(&c.admin)
+    .await
+    .unwrap()
+}
+
+/// An office helper that announces itself, then waits for `go` before it
+/// becomes the real `--internal-office-extract` child. The child runs with a
+/// cleared environment, so every path is absolute.
+struct GatedHelper {
+    dir: PathBuf,
+}
+
+impl GatedHelper {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fvoci-preview-gate-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = format!(
+            "#!/bin/sh\n: > '{dir}/started'\nwhile [ ! -e '{dir}/go' ]; do /bin/sleep 0.05; done\nexec '{bin}' \"$@\"\n",
+            dir = dir.display(),
+            bin = helper().display(),
+        );
+        let path = dir.join("helper.sh");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir }
+    }
+
+    fn path(&self) -> PathBuf {
+        self.dir.join("helper.sh")
+    }
+
+    fn started(&self) -> bool {
+        self.dir.join("started").exists()
+    }
+
+    async fn wait_started(&self) {
+        for _ in 0..400 {
+            if self.started() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("gated helper never started");
+    }
+
+    fn release(&self) {
+        std::fs::write(self.dir.join("go"), b"").unwrap();
+    }
+}
+
+impl Drop for GatedHelper {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.dir.join("go"), b"");
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn spawn_get(c: &Ctx, path: String) -> tokio::task::JoinHandle<(StatusCode, Value)> {
+    let (app, cookie) = (c.app.clone(), c.cookie.clone());
+    tokio::spawn(async move { json_request(app, "GET", &path, None, Some(&cookie)).await })
+}
+
+/// Source `previewHtmlOf`: an office file the extract job has not reached
+/// yet is parsed on demand by the real isolated helper; the text is escaped,
+/// nothing is written back, and a corrupt file answers 413.
+#[tokio::test]
+async fn preview_html_parses_a_not_yet_extracted_office_file_on_demand() {
+    let c = ctx_with(Some(PreviewExtractor::new(None, Some(helper())))).await;
+    let doc = c.wiki_doc().await;
+    let path = format!("/api/v1/workspaces/{}/documents/{doc}/uploads", c.ws);
+    let docx = office_fixtures::docx("회의록", &["<script>alert('x')</script> & 즉석 본문"]);
+    let id = c.upload(&path, "memo.docx", &docx).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before = extract_state(&c, &id).await;
+    assert!(before.starts_with("(\"\",pending,0,"), "{before}");
+
+    let (status, body) = json_request(
+        c.app.clone(),
+        "GET",
+        &preview_html_path(&c, &id),
+        None,
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let html = body["html"].as_str().unwrap();
+    assert!(
+        html.starts_with("<pre>") && html.ends_with("</pre>"),
+        "{html}"
+    );
+    assert!(html.contains("회의록"), "{html}");
+    assert!(
+        html.contains("&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt; &amp; 즉석 본문"),
+        "{html}"
+    );
+    assert!(!html.contains("<script>"), "{html}");
+    assert_eq!(extract_state(&c, &id).await, before);
+
+    let bad = c
+        .upload(&path, "broken.docx", b"PK\x03\x04not a docx")
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = json_request(
+        c.app.clone(),
+        "GET",
+        &preview_html_path(&c, &bad),
+        None,
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "preview_not_available");
+
+    // HWP needs the native extractor; without it the parse is unavailable.
+    sqlx::query(
+        "INSERT INTO fvoci.instance_settings (key, value) VALUES ('attachmentPreview', '{\"mode\":\"server\"}')",
+    )
+    .execute(&c.admin)
+    .await
+    .unwrap();
+    let hwp = c.upload(&path, "memo.hwpx", b"PK\x03\x04hwpx").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = json_request(
+        c.app.clone(),
+        "GET",
+        &preview_html_path(&c, &hwp),
+        None,
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    c.done().await;
+}
+
+/// Size is judged from the metadata before any read, and the credential is
+/// authorized again after the parse: a session revoked while the helper
+/// runs gets no text.
+#[tokio::test]
+async fn preview_html_on_demand_is_size_bounded_and_rechecks_the_session() {
+    let gate = GatedHelper::new();
+    let c = ctx_with(Some(PreviewExtractor::new(None, Some(gate.path())))).await;
+    let doc = c.wiki_doc().await;
+    let path = format!("/api/v1/workspaces/{}/documents/{doc}/uploads", c.ws);
+    let docx = office_fixtures::docx("비밀", &["철회 후에는 보이면 안 되는 본문"]);
+    let id = c.upload(&path, "memo.docx", &docx).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    sqlx::query(
+        "UPDATE fvoci.attachments SET size_bytes = $2, reserved_size_bytes = $2 WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .bind(20 * 1024 * 1024 + 1_i64)
+    .execute(&c.admin)
+    .await
+    .unwrap();
+    let (status, body) = json_request(
+        c.app.clone(),
+        "GET",
+        &preview_html_path(&c, &id),
+        None,
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert!(!gate.started(), "over-limit file must not reach the helper");
+    sqlx::query(
+        "UPDATE fvoci.attachments SET size_bytes = $2, reserved_size_bytes = $2 WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .bind(docx.len() as i64)
+    .execute(&c.admin)
+    .await
+    .unwrap();
+
+    let before = extract_state(&c, &id).await;
+    let pending = spawn_get(&c, preview_html_path(&c, &id));
+    gate.wait_started().await;
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(c.owner)
+        .execute(&c.admin)
+        .await
+        .unwrap();
+    gate.release();
+    let (status, body) = pending.await.unwrap();
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(!body.to_string().contains("철회"), "{body}");
+    assert_eq!(extract_state(&c, &id).await, before);
+    c.done().await;
+}
+
+/// Parses in flight are bounded (a request past the bound is refused at
+/// once with 429), and a parse past its timeout answers 413, kills the
+/// child and frees its slot for the next request.
+#[tokio::test]
+async fn preview_html_on_demand_is_concurrency_and_time_bounded() {
+    let gate = GatedHelper::new();
+    let extractor =
+        PreviewExtractor::with_bounds(None, Some(gate.path()), Duration::from_secs(1), 1);
+    let c = ctx_with(Some(extractor)).await;
+    let doc = c.wiki_doc().await;
+    let path = format!("/api/v1/workspaces/{}/documents/{doc}/uploads", c.ws);
+    let docx = office_fixtures::docx("제한", &["시간 제한 본문"]);
+    let id = c.upload(&path, "memo.docx", &docx).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before = extract_state(&c, &id).await;
+
+    let started = std::time::Instant::now();
+    let first = spawn_get(&c, preview_html_path(&c, &id));
+    gate.wait_started().await;
+    let (status, body) = json_request(
+        c.app.clone(),
+        "GET",
+        &preview_html_path(&c, &id),
+        None,
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "rate_limit_exceeded", "{body}");
+
+    // The gate never opens: the 1 s helper watchdog ends the first parse.
+    let (status, body) = first.await.unwrap();
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "preview_not_available");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // The slot came back; with the gate open the same file previews.
+    gate.release();
+    let (status, body) = json_request(
+        c.app.clone(),
+        "GET",
+        &preview_html_path(&c, &id),
+        None,
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["html"].as_str().unwrap().contains("시간 제한 본문"),
+        "{body}"
+    );
+    assert_eq!(extract_state(&c, &id).await, before);
+    c.done().await;
 }

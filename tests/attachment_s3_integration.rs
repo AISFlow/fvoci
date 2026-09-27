@@ -200,6 +200,7 @@ async fn app_state_with_part_size(
         ),
         import_wake: None,
         import_extractor_available: false,
+        preview_extract: None,
         quota: Default::default(),
     }
 }

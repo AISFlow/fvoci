@@ -23,6 +23,7 @@ use crate::api::dto::{
 };
 use crate::attachments::StorageError;
 use crate::attachments::{content_disposition_attachment, parse_range, ParsedRange};
+use crate::attachments::{PreviewParse, PREVIEW_BUSY_RETRY_AFTER_SECS};
 use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::db::attachments::{
     attachment_edit_context, attachment_parent, authorize_upload_part, commit_upload_part,
@@ -1040,9 +1041,11 @@ fn utf16_prefix(text: &str, max: usize) -> &str {
 
 /// Source `GET /attachments/:id/preview-html`: the search-chunk text of an
 /// office or (server mode) HWP attachment as one escaped `<pre>`. The text
-/// is the one the extract job stored; the source's on-demand parse of a
-/// not-yet-extracted file is not ported, so an empty text answers 413
-/// `preview_not_available` like the source's over-limit case.
+/// is the one the extract job stored; while that is still empty the request
+/// parses the original in the isolated helper (20 MiB, 10 s, bounded
+/// concurrency), and anything but text answers 413 `preview_not_available`.
+/// A parsed text is served only after the credential and the attachment are
+/// authorized again, since the parse can outlast a revocation.
 async fn get_preview_html(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1092,9 +1095,43 @@ async fn get_preview_html(
     .await
     .map_err(internal)?
     .unwrap_or_default();
-    if text.is_empty() {
-        return Err(not_available());
-    }
+    let text = if !text.is_empty() {
+        text
+    } else {
+        let Some(extractor) = state.preview_extract.as_ref() else {
+            return Err(not_available());
+        };
+        let parsed = extractor
+            .parse(
+                &state.storage,
+                &att.storage_key,
+                &att.name,
+                &att.mime,
+                att.size_bytes,
+            )
+            .await;
+        let text = match parsed {
+            PreviewParse::Text(text) => text,
+            PreviewParse::Unavailable => return Err(not_available()),
+            PreviewParse::Busy => {
+                return Err(AppError::rate_limited(PREVIEW_BUSY_RETRY_AFTER_SECS))
+            }
+        };
+        let current = open_download(
+            &state.auth.db.pool,
+            workspace_id,
+            attachment_id,
+            auth.user_id,
+            auth.credential_id,
+        )
+        .await
+        .map_err(internal)?
+        .map_err(map_attachment_error)?;
+        if current.storage_key != att.storage_key {
+            return Err(not_available());
+        }
+        text
+    };
     Ok(Json(crate::api::dto::AttachmentPreviewHtmlOutput {
         html: format!(
             "<pre>{}</pre>",
