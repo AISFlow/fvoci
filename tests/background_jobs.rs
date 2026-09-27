@@ -12,7 +12,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use collab_engine::Limits;
 use fvoci_server::attachments::ObjectStorage;
 use fvoci_server::auth::token::hash_token;
-use fvoci_server::collab::config::require_collab_engine_for_tests;
+use fvoci_server::collab::config::collab_engine_path_for_tests;
 use fvoci_server::config::RevisionSettings;
 use fvoci_server::db::documents::{create_wiki_document, CreateDocumentInput};
 use fvoci_server::db::magic::issue_password_reset_token;
@@ -1827,6 +1827,12 @@ async fn manual_revision_promotes_task_scheduled_head_without_body_change() {
     harness.cleanup().await;
 }
 
+fn revision_maintenance_orchestration_engine_bin() -> PathBuf {
+    collab_engine_path_for_tests().unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/collab-engine")
+    })
+}
+
 fn revision_maintenance_params_zero_snapshots() -> RevisionMaintenanceParams {
     RevisionMaintenanceParams {
         settings: RevisionSettings {
@@ -1834,10 +1840,7 @@ fn revision_maintenance_params_zero_snapshots() -> RevisionMaintenanceParams {
             keep: 200,
             snapshot_interval_hours: 0,
         },
-        engine: Some(RevisionMaintenanceEngine {
-            engine_bin: require_collab_engine_for_tests(),
-            limits: Limits::for_tests(),
-        }),
+        engine: None,
     }
 }
 
@@ -1891,7 +1894,7 @@ fn revision_maintenance_params_with_snapshots() -> RevisionMaintenanceParams {
             snapshot_interval_hours: 24,
         },
         engine: Some(RevisionMaintenanceEngine {
-            engine_bin: require_collab_engine_for_tests(),
+            engine_bin: revision_maintenance_orchestration_engine_bin(),
             limits: Limits::for_tests(),
         }),
     }
