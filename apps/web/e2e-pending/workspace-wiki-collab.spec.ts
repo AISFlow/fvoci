@@ -468,12 +468,15 @@ test("membership revoke while connected stops further edits", async ({
     );
     expect(revoke.ok()).toBe(true);
 
-    await expect(memberPage.locator('[data-collab-status="unauthorized"]')).toBeVisible({
-      timeout: 20_000,
-    });
-    await expect(memberPage.getByRole("alert")).toHaveText("권한 없음 · 다시 로그인");
+    // Membership loss is reconciled via workspace access-stream → home eviction, not
+    // the in-document collab unauthorized badge (see task-stream-resync / workspace-flow).
+    await expect(memberPage).toHaveURL(/\?denied=workspace/, { timeout: 25_000 });
+    await expect(memberPage.getByRole("alert")).toContainText("접근 권한");
     await expect(editorLocator(memberPage)).toHaveCount(0);
-    await expect(memberPage.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+
+    await memberPage.goto(doc.url);
+    await expect(memberPage).toHaveURL(/\?denied=workspace/);
+    await expect(editorLocator(memberPage)).toHaveCount(0);
   } finally {
     await ownerCtx.close();
     await memberCtx.close();
