@@ -30,4 +30,5 @@ pub mod task_body;
 pub mod task_ops;
 pub mod tasks;
 pub mod templates;
+pub mod unfurl;
 pub mod workspaces;
