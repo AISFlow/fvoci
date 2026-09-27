@@ -9,21 +9,29 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use collab_engine::Limits;
 use fvoci_server::attachments::ObjectStorage;
 use fvoci_server::auth::token::hash_token;
+use fvoci_server::config::RevisionSettings;
 use fvoci_server::db::documents::{create_wiki_document, CreateDocumentInput};
 use fvoci_server::db::magic::issue_password_reset_token;
 use fvoci_server::db::outbox::mark_processed;
-use fvoci_server::db::revisions::{create_manual_revision, CreateRevisionInput, RevisionTarget};
+use fvoci_server::db::revisions::{
+    create_manual_revision, gc_automatic_revisions_batch, CreateRevisionInput, RevisionTarget,
+};
+use fvoci_server::jobs::run_automatic_revision_gc;
 use fvoci_server::jobs::{
     run_daily_sweep, run_document_trash_purge, run_document_trash_purge_with, run_ics_token_gc,
-    run_magic_token_gc, run_notification_gc, run_processed_gc, run_stale_upload_gc,
-    run_stale_upload_sweep, run_workspace_purge, spawn_maintenance, DocumentPurgeLimits, JobClaim,
-    MaintenanceSettings, JOB_KEY_DAILY, JOB_KEY_UPLOADS,
+    run_magic_token_gc, run_notification_gc, run_processed_gc, run_revision_maintenance_batch,
+    run_revision_maintenance_sweep, run_stale_upload_gc, run_stale_upload_sweep,
+    run_workspace_purge, spawn_maintenance, DocumentPurgeLimits, JobClaim, MaintenanceSettings,
+    RevisionMaintenanceEngine, RevisionMaintenanceParams, RevisionMaintenanceResume, JOB_KEY_DAILY,
+    JOB_KEY_REVISIONS, JOB_KEY_UPLOADS, REVISION_GC_ROUNDS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{
-    admin_pool, app_pool, create_project, json_request, session_id_for_user, setup_session, TestDb,
+    admin_pool, app_pool, create_project, json_request, session_id_for_user, setup_session,
+    wait_for_blocked_by_holder, wait_for_query_blocked_by, TestDb,
 };
 use serde_json::json;
 use sqlx::{Connection, PgPool};
@@ -854,6 +862,7 @@ async fn scheduler_runs_stale_upload_gc_under_its_own_claim() {
             interval: Duration::from_secs(3600),
             upload_gc_interval: Duration::from_secs(3600),
             upload_incomplete_ttl: ttl,
+            ..MaintenanceSettings::default()
         },
         pool.clone(),
         storage.clone(),
@@ -1544,6 +1553,190 @@ async fn manual_revision_promotes_document_session_head_without_body_change() {
 }
 
 #[tokio::test]
+async fn gc_automatic_revisions_keeps_manual_and_newest_autos() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let doc = create_wiki_document(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id_for_user(&admin, user_id).await,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "gc-doc",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let target = doc.id;
+    let snap = |n: u8| vec![n, n, n];
+    for (i, reason) in [
+        (1u8, "manual"),
+        (2, "session"),
+        (3, "session"),
+        (4, "session"),
+    ] {
+        let id = Uuid::now_v7();
+        let created_by = if reason == "manual" {
+            Some(user_id)
+        } else {
+            None
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by, created_at
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 't', $5, $6, $7)
+            "#,
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(target)
+        .bind(snap(i))
+        .bind(reason)
+        .bind(created_by)
+        .bind(Utc::now() + ChronoDuration::milliseconds(i as i64))
+        .execute(&admin)
+        .await
+        .expect("insert");
+    }
+    let deleted = gc_automatic_revisions_batch(&pool, workspace_id, 1, 100)
+        .await
+        .expect("gc batch");
+    assert_eq!(deleted, 2);
+    let rows: Vec<(String,)> = sqlx::query_as(
+        r#"
+        SELECT reason FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target)
+    .fetch_all(&admin)
+    .await
+    .expect("rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "manual");
+    assert_eq!(rows[1].0, "session");
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn gc_skips_row_promoted_to_manual_under_lock() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let doc = create_wiki_document(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "gc-promote",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let y_snapshot = vec![7u8, 8, 9];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(&admin)
+    .await
+    .expect("state");
+    let revision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by
+        ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'auto', 'session', NULL)
+        "#,
+    )
+    .bind(revision_id)
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(&admin)
+    .await
+    .expect("session row");
+    create_manual_revision(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id,
+        RevisionTarget::Document(doc.id),
+        CreateRevisionInput {
+            y_snapshot: y_snapshot.clone(),
+            content_json: json!({}),
+            text: "manual".into(),
+            reason: String::new(),
+        },
+    )
+    .await
+    .expect("promote")
+    .expect("ok");
+    for i in 0..2 {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'extra', 'session', NULL)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(doc.id)
+        .bind(vec![i as u8])
+        .execute(&admin)
+        .await
+        .expect("extra session");
+    }
+    let cancel = CancellationToken::new();
+    let (deleted, _, _) = run_automatic_revision_gc(&pool, 0, None, &cancel)
+        .await
+        .expect("gc sweep");
+    assert!(deleted >= 2);
+    let manual_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_id = $2 AND reason = 'manual'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .fetch_one(&admin)
+    .await
+    .expect("count");
+    assert_eq!(manual_count, 1);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn manual_revision_promotes_task_scheduled_head_without_body_change() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, user_id, workspace_id) = setup_session(&harness).await;
@@ -1628,6 +1821,646 @@ async fn manual_revision_promotes_task_scheduled_head_without_body_change() {
     assert_eq!(row.2, y_snapshot);
     assert_eq!(row.3, session_json);
     assert_eq!(row.4, session_text);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+/// Non-spawn orchestration tests only: fixed missing helper path (no env discovery).
+/// Native scheduled snapshot capture stays in `revision_integration` (collaboration CI).
+fn revision_maintenance_orchestration_engine_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/fvoci-orchestration-only-collab-engine-absent")
+}
+
+fn revision_maintenance_orchestration_engine() -> RevisionMaintenanceEngine {
+    RevisionMaintenanceEngine {
+        engine_bin: revision_maintenance_orchestration_engine_bin(),
+        limits: Limits::for_tests(),
+    }
+}
+
+fn revision_maintenance_params_zero_snapshots() -> RevisionMaintenanceParams {
+    RevisionMaintenanceParams {
+        settings: RevisionSettings {
+            session_snapshot_enabled: false,
+            keep: 200,
+            snapshot_interval_hours: 0,
+        },
+        engine: Some(revision_maintenance_orchestration_engine()),
+    }
+}
+
+#[tokio::test]
+async fn revision_maintenance_sweep_skips_when_claim_held() {
+    let harness = TestDb::bootstrap().await;
+    let pool = app_pool(&harness).await;
+    let held = JobClaim::try_claim(&pool, JOB_KEY_REVISIONS)
+        .await
+        .unwrap()
+        .expect("claim");
+    let skipped = run_revision_maintenance_sweep(
+        &pool,
+        &revision_maintenance_params_zero_snapshots(),
+        RevisionMaintenanceResume::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(skipped.is_none());
+    held.release().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn revision_maintenance_batch_honors_cancellation() {
+    let harness = TestDb::bootstrap().await;
+    let pool = app_pool(&harness).await;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let (stats, _) = run_revision_maintenance_batch(
+        &pool,
+        &revision_maintenance_params_zero_snapshots(),
+        RevisionMaintenanceResume::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.snapshots_attempted, 0);
+    assert_eq!(stats.revisions_deleted, 0);
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+fn revision_maintenance_params_with_snapshots() -> RevisionMaintenanceParams {
+    RevisionMaintenanceParams {
+        settings: RevisionSettings {
+            session_snapshot_enabled: false,
+            keep: 200,
+            snapshot_interval_hours: 24,
+        },
+        engine: Some(revision_maintenance_orchestration_engine()),
+    }
+}
+
+fn revision_maintenance_params_gc_phase_fixture() -> RevisionMaintenanceParams {
+    RevisionMaintenanceParams {
+        settings: RevisionSettings {
+            session_snapshot_enabled: false,
+            keep: 2,
+            snapshot_interval_hours: 24,
+        },
+        engine: Some(revision_maintenance_orchestration_engine()),
+    }
+}
+
+async fn seed_stale_scheduled_document_candidate(
+    pool: &PgPool,
+    admin: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Uuid {
+    let doc = create_wiki_document(
+        pool,
+        workspace_id,
+        user_id,
+        session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "phase-skip-scheduled",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let y_snapshot = vec![0x31u8, 0x32, 0x33];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(admin)
+    .await
+    .expect("document state");
+    let anchor = Utc::now() - ChronoDuration::hours(30);
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by, created_at
+        ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'anchor', 'session', NULL, $5)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .bind(anchor)
+    .execute(admin)
+    .await
+    .expect("stale anchor revision");
+    sqlx::query(
+        "UPDATE fvoci.document_states SET updated_at = now() WHERE workspace_id = $1 AND document_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .execute(admin)
+    .await
+    .expect("fresh collab anchor");
+    doc.id
+}
+
+async fn count_revisions_by_reason(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    reason: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2 AND reason = $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(reason)
+    .fetch_one(admin)
+    .await
+    .expect("count")
+}
+
+async fn seed_document_with_excess_automatic_revisions(
+    pool: &PgPool,
+    admin: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+    automatic_rows: usize,
+) -> Uuid {
+    let doc = create_wiki_document(
+        pool,
+        workspace_id,
+        user_id,
+        session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "phase-skip-gc",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let y_snapshot = vec![0x41u8, 0x42, 0x43];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(admin)
+    .await
+    .expect("document state");
+    let anchor = Utc::now();
+    for i in 0..automatic_rows {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by, created_at
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'auto', 'session', NULL, $5)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(doc.id)
+        .bind(vec![i as u8])
+        .bind(anchor + ChronoDuration::milliseconds(i as i64))
+        .execute(admin)
+        .await
+        .expect("automatic revision");
+    }
+    doc.id
+}
+
+async fn count_automatic_session_revisions(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> i64 {
+    sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1
+            AND target_kind = 'document'
+            AND target_id = $2
+            AND reason = 'session'
+            AND created_by IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(admin)
+    .await
+    .expect("count")
+}
+
+#[tokio::test]
+async fn revision_maintenance_batch_skips_scheduled_when_gc_phase_pending() {
+    let harness = TestDb::bootstrap().await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let document_id =
+        seed_stale_scheduled_document_candidate(&pool, &admin, workspace_id, user_id, session_id)
+            .await;
+    let params = revision_maintenance_params_with_snapshots();
+    let session_before =
+        count_revisions_by_reason(&admin, workspace_id, document_id, "session").await;
+    let scheduled_before =
+        count_revisions_by_reason(&admin, workspace_id, document_id, "scheduled").await;
+
+    let resume_skip = RevisionMaintenanceResume {
+        workspace_id: None,
+        target: None,
+        gc_workspace_after: Some(workspace_id),
+        scheduled_phase_complete: true,
+        gc_phase_complete: false,
+    };
+    let (stats, next) =
+        run_revision_maintenance_batch(&pool, &params, resume_skip, &CancellationToken::new())
+            .await
+            .unwrap();
+    assert_eq!(stats.snapshots_attempted, 0);
+    assert_eq!(stats.snapshots_failed, 0);
+    assert_eq!(stats.snapshots_created, 0);
+    assert!(next.scheduled_phase_complete);
+    assert_eq!(
+        count_revisions_by_reason(&admin, workspace_id, document_id, "session").await,
+        session_before,
+        "scheduled skip must not touch session revisions"
+    );
+    assert_eq!(
+        count_revisions_by_reason(&admin, workspace_id, document_id, "scheduled").await,
+        scheduled_before,
+        "scheduled skip must not create scheduled rows"
+    );
+
+    let resume_eligible = RevisionMaintenanceResume {
+        workspace_id: None,
+        target: None,
+        gc_workspace_after: None,
+        scheduled_phase_complete: false,
+        gc_phase_complete: true,
+    };
+    let (eligible_stats, _) =
+        run_revision_maintenance_batch(&pool, &params, resume_eligible, &CancellationToken::new())
+            .await
+            .unwrap();
+    assert!(
+        eligible_stats.snapshots_attempted > 0 || eligible_stats.snapshots_failed > 0,
+        "stale live target must attempt scheduled capture when phase flag is false (stats={eligible_stats:?})"
+    );
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn revision_maintenance_batch_skips_gc_when_snapshot_phase_pending() {
+    let harness = TestDb::bootstrap().await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let keep = revision_maintenance_params_gc_phase_fixture().settings.keep;
+    let automatic_rows = (keep as usize) + 2;
+    let document_id = seed_document_with_excess_automatic_revisions(
+        &pool,
+        &admin,
+        workspace_id,
+        user_id,
+        session_id,
+        automatic_rows,
+    )
+    .await;
+    let automatic_before =
+        count_automatic_session_revisions(&admin, workspace_id, document_id).await;
+    assert!(automatic_before > keep as i64);
+
+    let params = revision_maintenance_params_gc_phase_fixture();
+    let resume_skip_gc = RevisionMaintenanceResume {
+        workspace_id: None,
+        target: None,
+        gc_workspace_after: None,
+        scheduled_phase_complete: false,
+        gc_phase_complete: true,
+    };
+    let (stats, next) =
+        run_revision_maintenance_batch(&pool, &params, resume_skip_gc, &CancellationToken::new())
+            .await
+            .unwrap();
+    assert_eq!(stats.revisions_deleted, 0);
+    assert!(next.gc_phase_complete);
+    assert_eq!(
+        count_automatic_session_revisions(&admin, workspace_id, document_id).await,
+        automatic_before,
+        "gc skip must retain automatic revisions beyond keep"
+    );
+
+    let resume_gc_active = RevisionMaintenanceResume {
+        workspace_id: None,
+        target: None,
+        gc_workspace_after: None,
+        scheduled_phase_complete: true,
+        gc_phase_complete: false,
+    };
+    let (gc_stats, _) =
+        run_revision_maintenance_batch(&pool, &params, resume_gc_active, &CancellationToken::new())
+            .await
+            .unwrap();
+    assert!(
+        gc_stats.revisions_deleted > 0,
+        "with gc phase enabled, excess automatic rows must be deleted (stats={gc_stats:?})"
+    );
+    assert!(
+        count_automatic_session_revisions(&admin, workspace_id, document_id).await <= keep as i64,
+        "gc control must enforce keep={keep}"
+    );
+
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn revision_gc_caps_total_delete_rounds_per_batch() {
+    let harness = TestDb::bootstrap().await;
+    let admin = admin_pool(&harness).await;
+    let pool = app_pool(&harness).await;
+    let extra_workspaces = (REVISION_GC_ROUNDS as usize) + 5;
+    let mut workspace_ids = Vec::with_capacity(extra_workspaces);
+    for i in 0..extra_workspaces {
+        let id = Uuid::now_v7();
+        workspace_ids.push(id);
+        sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, 'gc-cap')")
+            .bind(id)
+            .bind(format!("gc{i:04}"))
+            .execute(&admin)
+            .await
+            .expect("workspace");
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'x', 'session', NULL)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(id)
+        .bind(Uuid::now_v7())
+        .bind(vec![1u8])
+        .execute(&admin)
+        .await
+        .expect("revision");
+    }
+    let cancel = CancellationToken::new();
+    let (deleted, resume, complete) = run_automatic_revision_gc(&pool, 0, None, &cancel)
+        .await
+        .expect("gc");
+    assert!(!complete);
+    assert!(resume.is_some());
+    assert_eq!(deleted, REVISION_GC_ROUNDS);
+    let (deleted2, _, complete2) = run_automatic_revision_gc(&pool, 0, resume, &cancel)
+        .await
+        .expect("gc2");
+    assert!(complete2);
+    assert_eq!(deleted + deleted2, extra_workspaces as u32);
+    admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+const GC_PROMOTION_RACE_LOCK_NS: i32 = 0x6676636f; // "fvoc" — test-only advisory gate
+const GC_PROMOTION_RACE_LOCK_KEY: i32 = 0x128;
+
+async fn install_gc_promotion_race_gate(admin: &PgPool) {
+    let sql = format!(
+        r#"
+        CREATE OR REPLACE FUNCTION fvoci.test_gc_promotion_race_gate()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.reason = 'manual'
+               AND OLD.reason IN ('session', 'scheduled')
+               AND NEW.workspace_id = OLD.workspace_id
+               AND NEW.id = OLD.id
+            THEN
+                PERFORM pg_advisory_xact_lock({ns}, {key});
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        "#,
+        ns = GC_PROMOTION_RACE_LOCK_NS,
+        key = GC_PROMOTION_RACE_LOCK_KEY,
+    );
+    sqlx::query(&sql)
+        .execute(admin)
+        .await
+        .expect("promotion gate fn");
+    sqlx::query(
+        r#"
+        CREATE TRIGGER fvoci_test_gc_promotion_race_gate
+        BEFORE UPDATE ON fvoci.revisions
+        FOR EACH ROW EXECUTE FUNCTION fvoci.test_gc_promotion_race_gate()
+        "#,
+    )
+    .execute(admin)
+    .await
+    .expect("promotion gate trigger");
+}
+
+async fn drop_gc_promotion_race_gate(admin: &PgPool) {
+    let _ =
+        sqlx::query("DROP TRIGGER IF EXISTS fvoci_test_gc_promotion_race_gate ON fvoci.revisions")
+            .execute(admin)
+            .await;
+    let _ = sqlx::query("DROP FUNCTION IF EXISTS fvoci.test_gc_promotion_race_gate()")
+        .execute(admin)
+        .await;
+}
+
+#[tokio::test]
+async fn gc_retains_manual_when_promotion_races_row_lock() {
+    let harness = TestDb::bootstrap().await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let pool = app_pool(&harness).await;
+    let admin = admin_pool(&harness).await;
+    install_gc_promotion_race_gate(&admin).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let doc = create_wiki_document(
+        &pool,
+        workspace_id,
+        user_id,
+        session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "gc-race",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let y_snapshot = vec![11u8, 12, 13];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(&admin)
+    .await
+    .expect("state");
+    let anchor = Utc::now();
+    for i in 0..2 {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by, created_at
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'extra', 'session', NULL, $5)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(doc.id)
+        .bind(vec![i as u8])
+        .bind(anchor + ChronoDuration::milliseconds(i as i64))
+        .execute(&admin)
+        .await
+        .expect("older auto");
+    }
+    let revision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by, created_at
+        ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'auto', 'session', NULL, $5)
+        "#,
+    )
+    .bind(revision_id)
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .bind(anchor + ChronoDuration::milliseconds(100))
+    .execute(&admin)
+    .await
+    .expect("head session row");
+    let mut gate = admin.begin().await.expect("gate tx");
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .expect("gate pid");
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(GC_PROMOTION_RACE_LOCK_NS)
+        .bind(GC_PROMOTION_RACE_LOCK_KEY)
+        .execute(&mut *gate)
+        .await
+        .expect("hold promotion gate");
+    let pool_promote = app_pool(&harness).await;
+    let document_id = doc.id;
+    let y_snapshot_promote = y_snapshot.clone();
+    let promote_task = tokio::spawn(async move {
+        create_manual_revision(
+            &pool_promote,
+            workspace_id,
+            user_id,
+            session_id,
+            RevisionTarget::Document(document_id),
+            CreateRevisionInput {
+                y_snapshot: y_snapshot_promote,
+                content_json: json!({}),
+                text: "manual".into(),
+                reason: String::new(),
+            },
+        )
+        .await
+    });
+    let promote_pid = wait_for_blocked_by_holder(&admin, gate_pid, None, 1)
+        .await
+        .into_iter()
+        .next()
+        .expect("promotion blocked in gate");
+    let pool_gc = app_pool(&harness).await;
+    let workspace_id_gc = workspace_id;
+    let gc_task = tokio::spawn(async move {
+        gc_automatic_revisions_batch(&pool_gc, workspace_id_gc, 0, 5_000).await
+    });
+    let gc_pid = wait_for_query_blocked_by(&admin, promote_pid, "%PARTITION BY target_kind%").await;
+    assert_ne!(
+        promote_pid, gc_pid,
+        "promotion and GC must be distinct waiters"
+    );
+    gate.commit().await.expect("release promotion gate");
+    let promoted = promote_task
+        .await
+        .expect("join promote")
+        .expect("promote")
+        .expect("ok");
+    let deleted = gc_task.await.expect("join gc").expect("gc");
+    assert_eq!(
+        promoted, revision_id,
+        "metadata promotion must reuse head row id"
+    );
+    assert_eq!(deleted, 2, "older automatic rows removed");
+    let row: (String, Option<Uuid>) = sqlx::query_as(
+        r#"
+        SELECT reason, created_by FROM fvoci.revisions
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(revision_id)
+    .fetch_one(&admin)
+    .await
+    .expect("promoted row");
+    assert_eq!(row.0, "manual");
+    assert_eq!(row.1, Some(user_id));
+    let remaining: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .fetch_one(&admin)
+    .await
+    .expect("count");
+    assert_eq!(remaining, 1);
+    drop_gc_promotion_race_gate(&admin).await;
     admin.close().await;
     pool.close().await;
     harness.cleanup().await;

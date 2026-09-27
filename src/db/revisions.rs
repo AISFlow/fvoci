@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::db::context::{session_is_live, set_tenant};
+use crate::db::context::{session_is_live, set_system, set_tenant};
 use crate::db::documents::workspace_is_live;
 use crate::db::identity::{append_event, EventAppend};
 
@@ -189,7 +189,7 @@ pub struct RevisionCursor {
 
 const MANUAL_REASON: &str = "manual";
 const SESSION_REASON: &str = "session";
-const SCHEDULED_REASON: &str = "scheduled";
+pub const SCHEDULED_REASON: &str = "scheduled";
 const TARGET_DOCUMENT: &str = "document";
 const TARGET_TASK: &str = "task";
 
@@ -1158,4 +1158,330 @@ pub async fn load_persisted_target_source(
         snapshot,
         tail: tail.into_iter().map(|(payload,)| payload).collect(),
     }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduledRevisionCursor {
+    pub workspace_id: Uuid,
+    /// `0` = document, `1` = task.
+    pub target_kind: u8,
+    pub target_id: Uuid,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduledRevisionCandidate {
+    pub workspace_id: Uuid,
+    pub target: RevisionTarget,
+    pub writer_generation: i64,
+    pub state_updated_at: DateTime<Utc>,
+    pub anchor_at: DateTime<Utc>,
+}
+
+type ScheduledRevisionListingRow = (
+    Uuid,
+    DateTime<Utc>,
+    i64,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
+
+pub async fn list_live_workspace_ids_batch(
+    pool: &PgPool,
+    after: Option<Uuid>,
+    inclusive_after: bool,
+    limit: i64,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_system(&mut tx).await?;
+    let rows: Vec<(Uuid,)> = if let Some(after) = after {
+        if inclusive_after {
+            sqlx::query_as(
+                r#"
+                SELECT id
+                FROM fvoci.workspaces
+                WHERE deleted_at IS NULL AND id >= $1
+                ORDER BY id ASC
+                LIMIT $2
+                "#,
+            )
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_as(
+                r#"
+                SELECT id
+                FROM fvoci.workspaces
+                WHERE deleted_at IS NULL AND id > $1
+                ORDER BY id ASC
+                LIMIT $2
+                "#,
+            )
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?
+        }
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT id
+            FROM fvoci.workspaces
+            WHERE deleted_at IS NULL
+            ORDER BY id ASC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?
+    };
+    tx.commit().await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// Collab targets in one workspace that may need a scheduled snapshot (predicate
+/// applied in Rust: `anchor_at < cutoff` and `state_updated_at > anchor_at`).
+pub async fn list_scheduled_revision_candidates_for_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    after: Option<ScheduledRevisionCursor>,
+    limit: i64,
+) -> Result<Vec<ScheduledRevisionCandidate>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let mut out = Vec::new();
+    let doc_after = match after {
+        None => None,
+        Some(ScheduledRevisionCursor {
+            target_kind: 0,
+            target_id,
+            ..
+        }) => Some(target_id),
+        Some(ScheduledRevisionCursor { .. }) => None,
+    };
+    let doc_rows: Vec<ScheduledRevisionListingRow> = if after.is_none()
+        || after.is_some_and(|c| c.target_kind == 0)
+    {
+        let sql = if doc_after.is_some() {
+            r#"
+                SELECT ds.document_id, ds.updated_at, ds.writer_generation, ds.created_at, lr.created_at
+                FROM fvoci.document_states ds
+                INNER JOIN fvoci.documents d
+                    ON d.workspace_id = ds.workspace_id
+                    AND d.id = ds.document_id
+                    AND d.deleted_at IS NULL
+                LEFT JOIN LATERAL (
+                    SELECT r.created_at
+                    FROM fvoci.revisions r
+                    WHERE r.workspace_id = ds.workspace_id
+                        AND r.target_kind = 'document'
+                        AND r.target_id = ds.document_id
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT 1
+                ) lr ON TRUE
+                WHERE ds.workspace_id = $1 AND ds.document_id > $2
+                ORDER BY ds.document_id ASC
+                LIMIT $3
+                "#
+        } else {
+            r#"
+                SELECT ds.document_id, ds.updated_at, ds.writer_generation, ds.created_at, lr.created_at
+                FROM fvoci.document_states ds
+                INNER JOIN fvoci.documents d
+                    ON d.workspace_id = ds.workspace_id
+                    AND d.id = ds.document_id
+                    AND d.deleted_at IS NULL
+                LEFT JOIN LATERAL (
+                    SELECT r.created_at
+                    FROM fvoci.revisions r
+                    WHERE r.workspace_id = ds.workspace_id
+                        AND r.target_kind = 'document'
+                        AND r.target_id = ds.document_id
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT 1
+                ) lr ON TRUE
+                WHERE ds.workspace_id = $1
+                ORDER BY ds.document_id ASC
+                LIMIT $2
+                "#
+        };
+        if let Some(after_id) = doc_after {
+            sqlx::query_as(sql)
+                .bind(workspace_id)
+                .bind(after_id)
+                .bind(limit)
+                .fetch_all(&mut *tx)
+                .await?
+        } else {
+            sqlx::query_as(sql)
+                .bind(workspace_id)
+                .bind(limit)
+                .fetch_all(&mut *tx)
+                .await?
+        }
+    } else {
+        Vec::new()
+    };
+    for (document_id, state_updated_at, writer_generation, created_at, last_rev_at) in doc_rows {
+        let anchor_at = last_rev_at.unwrap_or(created_at);
+        out.push(ScheduledRevisionCandidate {
+            workspace_id,
+            target: RevisionTarget::Document(document_id),
+            writer_generation,
+            state_updated_at,
+            anchor_at,
+        });
+        if out.len() as i64 >= limit {
+            tx.commit().await?;
+            return Ok(out);
+        }
+    }
+
+    let remaining = limit - out.len() as i64;
+    if remaining > 0 {
+        let task_after = match after {
+            Some(ScheduledRevisionCursor {
+                target_kind: 1,
+                target_id,
+                ..
+            }) => Some(target_id),
+            _ => None,
+        };
+        let task_sql = if task_after.is_some() {
+            r#"
+            SELECT ts.task_id, ts.updated_at, ts.writer_generation, ts.created_at, lr.created_at
+            FROM fvoci.task_states ts
+            INNER JOIN fvoci.tasks t
+                ON t.workspace_id = ts.workspace_id
+                AND t.id = ts.task_id
+                AND t.deleted_at IS NULL
+            LEFT JOIN LATERAL (
+                SELECT r.created_at
+                FROM fvoci.revisions r
+                WHERE r.workspace_id = ts.workspace_id
+                    AND r.target_kind = 'task'
+                    AND r.target_id = ts.task_id
+                ORDER BY r.created_at DESC, r.id DESC
+                LIMIT 1
+            ) lr ON TRUE
+            WHERE ts.workspace_id = $1 AND ts.task_id > $2
+            ORDER BY ts.task_id ASC
+            LIMIT $3
+            "#
+        } else {
+            r#"
+            SELECT ts.task_id, ts.updated_at, ts.writer_generation, ts.created_at, lr.created_at
+            FROM fvoci.task_states ts
+            INNER JOIN fvoci.tasks t
+                ON t.workspace_id = ts.workspace_id
+                AND t.id = ts.task_id
+                AND t.deleted_at IS NULL
+            LEFT JOIN LATERAL (
+                SELECT r.created_at
+                FROM fvoci.revisions r
+                WHERE r.workspace_id = ts.workspace_id
+                    AND r.target_kind = 'task'
+                    AND r.target_id = ts.task_id
+                ORDER BY r.created_at DESC, r.id DESC
+                LIMIT 1
+            ) lr ON TRUE
+            WHERE ts.workspace_id = $1
+            ORDER BY ts.task_id ASC
+            LIMIT $2
+            "#
+        };
+        let task_rows: Vec<ScheduledRevisionListingRow> = if let Some(after_id) = task_after {
+            sqlx::query_as(task_sql)
+                .bind(workspace_id)
+                .bind(after_id)
+                .bind(remaining)
+                .fetch_all(&mut *tx)
+                .await?
+        } else {
+            sqlx::query_as(task_sql)
+                .bind(workspace_id)
+                .bind(remaining)
+                .fetch_all(&mut *tx)
+                .await?
+        };
+        for (task_id, state_updated_at, writer_generation, created_at, last_rev_at) in task_rows {
+            let anchor_at = last_rev_at.unwrap_or(created_at);
+            out.push(ScheduledRevisionCandidate {
+                workspace_id,
+                target: RevisionTarget::Task(task_id),
+                writer_generation,
+                state_updated_at,
+                anchor_at,
+            });
+        }
+    }
+    tx.commit().await?;
+    Ok(out)
+}
+
+pub fn scheduled_revision_cursor(
+    candidate: &ScheduledRevisionCandidate,
+) -> ScheduledRevisionCursor {
+    ScheduledRevisionCursor {
+        workspace_id: candidate.workspace_id,
+        target_kind: match candidate.target {
+            RevisionTarget::Document(_) => 0,
+            RevisionTarget::Task(_) => 1,
+        },
+        target_id: candidate.target.id(),
+    }
+}
+
+/// Delete oldest automatic revision rows beyond `keep` per target (manual never deleted).
+pub async fn gc_automatic_revisions_batch(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    keep: u32,
+    batch: i32,
+) -> Result<u32, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let deleted = sqlx::query(
+        r#"
+        WITH ranked AS (
+            SELECT id,
+                created_at,
+                row_number() OVER (
+                    PARTITION BY target_kind, target_id
+                    ORDER BY created_at DESC, id DESC
+                ) AS rn
+            FROM fvoci.revisions
+            WHERE workspace_id = $1 AND reason IN ('session', 'scheduled')
+        ),
+        doomed AS (
+            SELECT id
+            FROM ranked
+            WHERE rn > $2
+            ORDER BY created_at ASC, id ASC
+            LIMIT $3
+        ),
+        locked AS (
+            SELECT r.id, r.reason
+            FROM fvoci.revisions r
+            INNER JOIN doomed d ON d.id = r.id
+            WHERE r.workspace_id = $1
+            FOR UPDATE OF r
+        )
+        DELETE FROM fvoci.revisions r
+        USING locked l
+        WHERE r.workspace_id = $1
+          AND r.id = l.id
+          AND l.reason IN ('session', 'scheduled')
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(i64::from(keep))
+    .bind(batch)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(deleted as u32)
 }
