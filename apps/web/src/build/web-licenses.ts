@@ -162,6 +162,7 @@ export function finalizeBrowserOpenSourceNotice(
   licenseJson: string,
   repoRoot: string,
   manifestPath: string,
+  assetNotices: BundledSourceNotice[] = [],
 ): string {
   const supplementsRoot = path.dirname(manifestPath);
   const supplements = loadBrowserLicenseManifest(manifestPath);
@@ -169,5 +170,5 @@ export function finalizeBrowserOpenSourceNotice(
   entries = applyBrowserLicenseSupplements(entries, supplements, supplementsRoot);
   assertBundledLicenseTexts(entries, supplements);
   const bundled = readBundledSourceNotices(repoRoot);
-  return licenseEntriesToPublicMarkdown(entries, bundled);
+  return licenseEntriesToPublicMarkdown(entries, [...bundled, ...assetNotices]);
 }

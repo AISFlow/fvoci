@@ -175,6 +175,7 @@ pub async fn fixture_with_runner(harness: &TestDb, spawn_runner: bool) -> Fixtur
         ),
         import_wake: Some(wake),
         import_extractor_available: false,
+        preview_extract: None,
         quota: Default::default(),
     };
     let app = fvoci_server::http::router(state, None);

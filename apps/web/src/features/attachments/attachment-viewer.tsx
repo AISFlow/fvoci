@@ -1,10 +1,15 @@
 import { t } from "@fvoci/i18n";
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Button } from "@/components/ui/button";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { loadErrorMessage } from "@/components/query-status";
 import { chunkPlainText } from "./chunk-plain-text";
 import { viewerKind } from "./attachment-kind";
+import { ViewerDownloadButton, ViewerErrorPane, ViewerLoadingPane } from "./viewer-shell";
 import "./attachment-shell.css";
+
+const PdfViewer = lazy(async () => {
+  const mod = await import("./pdf-viewer");
+  return { default: mod.PdfViewer };
+});
 
 export type AttachmentViewerProps = {
   name: string;
@@ -15,40 +20,6 @@ export type AttachmentViewerProps = {
   onMetadataRetry?: () => void;
   chunk?: number;
 };
-
-function ViewerDownloadButton({ href }: { href: string }) {
-  return (
-    <a href={href} download className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-accent">
-      {t("attachment.download")}
-    </a>
-  );
-}
-
-function ViewerErrorPane({
-  message,
-  downloadUrl,
-  onRetry,
-}: {
-  message: string;
-  downloadUrl: string;
-  onRetry?: () => void;
-}) {
-  return (
-    <div className="attachment-viewer__pane attachment-viewer__pane--center">
-      <p role="alert" className="attachment-viewer__alert">
-        {message}
-      </p>
-      <div className="attachment-viewer__tools">
-        {onRetry ? (
-          <Button type="button" variant="outline" size="sm" onClick={onRetry}>
-            {t("load.retry")}
-          </Button>
-        ) : null}
-        <ViewerDownloadButton href={downloadUrl} />
-      </div>
-    </div>
-  );
-}
 
 function ChunkText({ text, chunk }: { text: string; chunk?: number }) {
   const mark = useRef<HTMLElement>(null);
@@ -95,11 +66,7 @@ function TextBytesPane({ downloadUrl, chunk }: { downloadUrl: string; chunk?: nu
   }, [downloadUrl]);
 
   if (state.status === "loading") {
-    return (
-      <div className="attachment-viewer__pane attachment-viewer__pane--center">
-        <p className="attachment-viewer__status">{t("attachment.preview.loading")}</p>
-      </div>
-    );
+    return <ViewerLoadingPane />;
   }
   if (state.status === "error") {
     return <ViewerErrorPane message={state.message} downloadUrl={downloadUrl} />;
@@ -148,6 +115,12 @@ export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
       <div className="attachment-viewer__pane">
         <img className="attachment-viewer__image" src={props.downloadUrl} alt={props.name} />
       </div>
+    );
+  } else if (kind === "pdf") {
+    body = (
+      <Suspense fallback={<ViewerLoadingPane />}>
+        <PdfViewer downloadUrl={props.downloadUrl} />
+      </Suspense>
     );
   } else {
     body = <TextBytesPane downloadUrl={props.downloadUrl} chunk={props.chunk} />;
