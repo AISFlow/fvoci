@@ -225,3 +225,12 @@ readiness timeout은 복구됐다고 기록하지 않으며 과거 sol 검토 �
 `agent=cursor`, `model=cursor-grok-4.6-high`, `effort=null`이다. 별도 terminal
 `term_74250c16-7eda-49f8-8b51-02dff54b8421`에서 Grok 4.6 High와 대상 worktree를 확인했다.
 이 기록은 실행 배정의 확인이며, 개별 후보의 검토 완료·수락 결과는 진행 인계에 둔다.
+
+## 2026-09-27 worktree별 CodeGraph 활용
+
+현재 사용 원칙은 AGENTS.md를 따른다. 기존 `/home/kinesis/.local/bin/codegraph` 1.6.0의
+CLI를 해당 worktree에서 사용한다. 인덱스가 없으면 `init -y`, 변경 후에는 `sync`를 수행하고
+`status`와 실제 `explore`·`callers`·`impact` 결과의 stale 표시를 함께 확인한다.
+`status`가 최신이어도 개별 파일이 변경됐다는 탐색 경고가 있으면 다시 동기화한다.
+`.codegraph/`는 worktree 로컬 개발 산출물이며 전역 설정·설치·MCP 권한을 변경하지 않는다.
+실제 task의 호출·동기화 근거와 그래프 누락 관찰은 기존 진행·인계 기록에 남긴다.
