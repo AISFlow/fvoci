@@ -220,3 +220,52 @@ test("client and real-wasm session: the Scripts bomb is refused and its worker t
   client.close();
   assert.equal(g.worker.terminated, 1);
 });
+
+test("edits travel through the worker; a revert gets the open deadline, a replace the request deadline", async () => {
+  let pending: ((response: HwpResponse) => void) | null = null;
+  const f = fake((request) => {
+    if (request.op === "open") return { id: request.id, ok: true, op: "open", pageCount: 3 };
+    if (request.op === "replace") {
+      return { id: request.id, ok: true, op: "replace", outcome: request.all ? "changed" : "rejected", pageCount: 4 };
+    }
+    if (request.op === "export") return { id: request.id, ok: true, op: "export", bytes: new Uint8Array([7]) };
+    if (request.op === "revert") {
+      // Answered after the request deadline but within the open deadline.
+      return new Promise((resolve) => setTimeout(() => resolve({ id: request.id, ok: true, op: "revert", pageCount: 3 }), 30));
+    }
+    return new Promise((resolve) => (pending = resolve));
+  });
+  const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, {
+    createWorker: f.createWorker,
+    openTimeoutMs: 1_000,
+    requestTimeoutMs: 10,
+  });
+  assert.deepEqual(await client.replace("a", "b", true), { outcome: "changed", pageCount: 4 });
+  assert.deepEqual(await client.replace("a", "b", false), { outcome: "rejected", pageCount: 4 });
+  assert.deepEqual(f.worker.received[1]!.message, { id: 2, op: "replace", find: "a", replacement: "b", all: true });
+  assert.deepEqual([...(await client.exportDocument("hwpx"))], [7]);
+  assert.deepEqual(f.worker.received[3]!.message, { id: 4, op: "export", format: "hwpx" });
+  assert.equal(await client.revert(), 3);
+  assert.equal(client.closed, false);
+  // A render left unanswered past its deadline takes the document with it.
+  await rejectsWith(client.renderPage(0), "timeout");
+  assert.equal(pending !== null, true);
+  await rejectsWith(client.exportDocument("hwp"), "closed");
+  assert.equal(f.worker.terminated, 1);
+});
+
+test("a failed edit answer rejects only that request", async () => {
+  const f = fake((request) =>
+    request.op === "open"
+      ? { id: request.id, ok: true, op: "open", pageCount: 1 }
+      : request.op === "export"
+        ? { id: request.id, ok: false, error: "tooLarge" }
+        : { id: request.id, ok: false, error: "failed" },
+  );
+  const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker });
+  await rejectsWith(client.exportDocument("hwp"), "tooLarge");
+  await rejectsWith(client.replace("a", "b", true), "failed");
+  assert.equal(client.closed, false);
+  assert.equal(f.worker.terminated, 0);
+  client.close();
+});

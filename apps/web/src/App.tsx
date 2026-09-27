@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { useState } from "react";
+import {
+  createBrowserRouter,
+  createRoutesFromElements,
+  Navigate,
+  Route,
+  RouterProvider,
+} from "react-router-dom";
 import { SetupGuard } from "@/components/setup-guard";
 import { HomePage } from "@/pages/HomePage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -47,10 +54,11 @@ const queryClient = new QueryClient({
 });
 
 export function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routes>
+  // A data router, so pages can hold navigation behind unsaved edits (`useBlocker`).
+  const [router] = useState(() =>
+    createBrowserRouter(
+      createRoutesFromElements(
+        <>
           <Route path="/setup" element={<SetupPage />} />
           {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
           <Route path="/s/:token" element={<PublicSharePage />} />
@@ -175,8 +183,13 @@ export function App() {
             <Route path=":ref" element={<WorkspaceRefPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
+        </>,
+      ),
+    ),
+  );
+  return (
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
     </QueryClientProvider>
   );
 }
