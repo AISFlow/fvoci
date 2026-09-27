@@ -126,22 +126,29 @@
 | #119, #120 | 74ec8fe7, ec5694fc | 공개 운영자 정보 UI·검증된 연락처의 security.txt | 운영자 브라우저 4개·URI 회귀, 별도 검토·각 36 checks |
 | #121 | 14669630 | 태스크 archive 전 협업 본문 영속화, 취소 검사 소유권 경계 고정 | archive 브라우저 3개·기존 body 흐름, 별도 검토·36 checks |
 | #122 | 2fddf5e0 | Vite 번들 기준 브라우저 오픈소스 고지·제품 링크·배포 입력 | 실제 산출물·브라우저, 별도 검토·최신 5개 workflow 모두 성공; 이전 취소 실행과 구분 |
+| #123 | f1d85e9e | 문서·태스크의 committed 본문을 session 종료 시 리비전으로 저장, 자동 리비전의 수동 승격 | PG·협업·브라우저 회귀, 별도 검토·원격 CI |
+| #124 | d7270ecf | 인증된 Rust unfurl·허용 embed를 문서/태스크 편집기에 연결 | 별도 검토·원격 CI; UI 브라우저 검사의 API mock과 실제 외부 사이트 검증은 구분 |
+| #125 | fe47d9e4 | Rust DB suite 등록 누락·실행 억제 탐지 | 선택 규칙 84개·별도 delta 검토·원격 CI |
+| #130 | f159fb55 | Rust project layout과 연결된 Gantt 조회·편집 UI | 관련 API·브라우저 회귀·별도 검토·36 checks |
+| #129 | ba6e3e1c | 협업 idle eviction 검사의 타이머 소유권을 명시적 제어로 고정 | x64/ARM64 협업 실행·별도 검토·36 checks |
+| #127 | 889118c0 | 에이전트별 worktree CodeGraph 동기화·호출 경로 대조 지침 | 별도 검토·동일 트리의 전체 CI 근거, 현재 base의 선택 계획 재확인 |
+| #128 | 6ce8f52d | 문서·태스크 scheduled 리비전과 bounded 자동 보존 정리, 수동 리비전 보존 | background_jobs 25개(x64/ARM64, 승격·GC 경합 포함)·별도 검토·36 checks |
 
 검증 기준: 각 PR의 필요한 실제 검사·원격 CI와 별도 세션의 독립 검토를 고정 SHA에서 확인한다.
 과거 Opus/Fable 검토는 당시 범위의 근거로 보존하며, 현재 역할은 AGENTS.md를 따른다.
 최신 실행·소유권·검증 SHA·인계 포인터는 `/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-26.md`에 둔다.
 
 진행 중(아래 항목은 미수락):
-- #123 문서·태스크 session revision과 자동 리비전의 수동 저장 승격: 제품 검토·PG 회귀를 회수했고 최신 main 통합·CI는 미수락이다. scheduled revision·자동 리비전 보존 개수 제한은 별도 진행 중이다.
-- #124 URL unfurl·허용된 embed의 문서/태스크 편집기 연결: 독립 검토·관련 검사를 회수했고 최신 통합 CI는 미수락이다. 브라우저 검사는 API mock을 사용한 UI 연결 검사이며 실제 외부 사이트 검증과 구분한다.
-- #125 DB suite 등록 누락·실행 억제 탐지: 84개 선택 규칙 검사와 별도 delta 검토를 회수했고 최신 main 통합·전체 CI는 미수락이다.
+- #131 협업 crash 검사의 live helper 관찰·SIGKILL·새 컨텍스트 복구 순서 보강: 기존 수정의 독립 검토와 로컬 24개 브라우저 검사를 회수했다. 최신 main 통합 delta 검토·CI는 진행 중이다.
+- #132 태스크 화면 갱신·workspace 접근 철회 SSE: PG 8개와 실제 UI 브라우저 2개를 회수했으며 최신 통합 SHA의 최종 검토·CI는 진행 중이다.
+- workspace ZIP export: 기존 구현을 보존하며 독립 검토의 인가·tenant·취소/한도 지적을 수정·검증 중이다.
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
   제품 런타임과 별개다. 필수 백업·복원 자체 검증은 Rust이며 pg_dump/pg_restore·얇은 실행 스크립트는 유지한다.
 - migration 037·038·039는 main에 수락됐다. 번호를 다시 배정하지 않는다.
-- 잔여 기능: session/scheduled revisions·gantt, unfurl·workspace export·events/access-stream/project stream(SSE)·
+- 잔여 기능: workspace export·events/access-stream/project stream(SSE)·
   push-subscriptions, S3 presigned 계약, settings 소비자(embed·AI·첨부 미리보기·i18n 재정의),
   #77 외부 제공자 검증의 미실행 범위, 컬렉션 `dueBefore` 시간대·wiki 컬렉션 권한 N+1(#76 S3·S4),
-  board 그룹 paging·drag-and-drop·gantt UI, preview-html 격리 parse·HWP viewer(rhwp WASM), 추가 DB.
+  board 그룹 paging·drag-and-drop, preview-html 격리 parse·HWP viewer(rhwp WASM), 추가 DB.
   후속(비차단): #83 `DeriveFailed` dead arm·patch-block 409 테스트·duplicate node cap·backlinks references table;
   #84 `HEAD /s/:token` noindex·`BRANDING_ASSET_MAX_BYTES` settings; #82 hybrid lexical leg 필터 차이; #85 S1/S2·
   EPUB/HTML 추출; #88 S3 time_entries 명시 grant 줄; #91 admin
@@ -173,10 +180,10 @@
 | 멤버·초대 | invitation.ts, quota.ts, consent.ts | 좌석 한도(모든 billable 경로)·토큰 단일 사용·역할 상한 | 부분 | #21, #53 | 수락: 초대 메일(#53), 초대 수락의 legal consent 428(#72), 탈퇴 시 보낸 pending 초대 정리(#69). 미착수: 수락 시 MFA/OIDC, pending 목록/철회 API, 알림 설정 기본값, 계정 삭제 시 pending 정리, 다른 E2E의 SQL fixture 멤버 |
 | 그룹·권한 통합 | policies.ts effectivePermission, project/document_members(user XOR group) | 리소스별 단일 권한 함수 | 수락 | #23, #39, #50 | 후속: collab 프레임당 권한 재조회 축소·collab_delivery의 그룹 join 사본·설정 UI `canManage` DTO |
 | 프로젝트 | domains/projects | 비공개 접근(workspace admin 제외)·lead/멤버 제거 경합·원자성 | 부분 | #13, #39, #52, #78, #83 | 수락: 프로젝트 문서 협업·trash/restore/sort·archive·30일 purge(#78), 프로젝트 문서 body/children/ancestors/backlinks/duplicate(#83). 미착수: collection/view 복제, 프로젝트 문서 첨부·리비전·그룹·태그 route |
-| 태스크 | domains/tasks, core/task.ts, workflow.ts | 권한·버전·WIP·반복 회차 원자성·키셋 커서 | 부분 | #13, #19, #26, #38, #40, #47, #60 | 수락: activity feed(#60), 본문 협업·block patch·수동 리비전(#104), origin UI/API(#117), archive 전 본문 영속화(#121). 저장 view·board/calendar/gantt의 실제 연결 범위는 다음 작업에서 코드와 대조 중 |
+| 태스크 | domains/tasks, core/task.ts, workflow.ts | 권한·버전·WIP·반복 회차 원자성·키셋 커서 | 부분 | #13, #19, #26, #38, #40, #47, #60 | 수락: activity feed(#60), 본문 협업·block patch·수동 리비전(#104), origin UI/API(#117), archive 전 본문 영속화(#121). Gantt 조회·편집 UI(#130)는 수락. board 그룹 paging·drag-and-drop 등 잔여 UI는 별도 추적 |
 | 일정·ICS·휴일 | routes.ts ics/holidays | 일정 의미 | 부분 | #49 | 수락: 휴일·ICS 피드(담당 태스크). 미착수: views 기반 ICS 분기 |
 | 위키 문서 | domains/documents, core/document.ts | 현재 문서 권한·트리 잠금 순서 | 부분 | #5, #23, #39, #66, #70, #78, #83 | 수락: 가져오기·내보내기(#66), 공유 링크(#70), trash 30일 purge(#78), body/block patch/children/backlinks/duplicate/flat(#83). 수락: office·Notion 가져오기(#85), Rust 변환·내보내기/doctor·Node 없는 제품 이미지(#101·#103·#106·#107). 수락: 가져오기 복구 보상(#112), 문서·태스크 템플릿(#118) |
-| 리비전 | documents/revisions.ts, core/revision.ts, collab applyRestore | 복원은 room actor의 forward system update, durable 후 broadcast | 부분 | #25, #104 | 수동 리비전은 수락. 진행: session revision(#123), scheduled revision·자동 보존 개수 제한. 기존 문서 리비전 인가·writer-stale 후 committed_loaded 재설정은 후속 |
+| 리비전 | documents/revisions.ts, core/revision.ts, collab applyRestore | 복원은 room actor의 forward system update, durable 후 broadcast | 부분 | #25, #104, #123, #128 | 수동·session·scheduled 리비전과 자동 보존 개수 제한은 수락. 기존 문서 리비전 인가·writer-stale 후 committed_loaded 재설정은 후속 |
 | 댓글 | comments/routes.ts, core/comment.ts | 문서 XOR 태스크·부모 활성·권한 | 부분 | #28, #47, #58 | 수락: 그룹 멘션·프로젝트 문서 댓글(#58; 그룹 멘션은 원본 snapshot과 달리 전달 시점 재전개). 후속: 이중 DELETE 중복 이벤트·resolve 경합·동시 trash된 태스크 댓글 |
 | 협업 | domains/collab, React/Tiptap | provider envelope·철회·CRDT 정본·persist barrier·writer generation·재시작 복원 | 부분(opt-in) | #6, #7, #18, #24, #27, #39, #46 | 수락: room 용량(기본 30, 64 검증; §2). 미검증: 실제 OS IME. 미착수: opt-in 해제 조건 |
 | 첨부 | domains/attachments, packages/storage | 부모 권한·원본 bytes·원자 완료·취소 | 부분 | #10, #39, #58, #63, #65, #80 | 수락: viewer route(#58), S3 프록시·중단 업로드 GC(#63, #65), 태스크·프로젝트 문서 부모·DELETE·quota·이미지 preview(#80). 수락: `--verify-storage` preview 객체·크기 확인(#90). 미착수: S3 presigned 계약, preview-html 격리 parse, HWP viewer |
