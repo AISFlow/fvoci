@@ -10,6 +10,7 @@ import { StarToggle } from "@/features/share/star-toggle";
 import { TaskCollectionProperties } from "@/features/collections/task-collection-properties";
 import { TaskAttachmentsPanel } from "./task-attachments";
 import { TaskBacklinks } from "./task-backlinks";
+import { TaskBodyEditor } from "./task-body-editor";
 import { TaskTimeEntries } from "./task-time-entries";
 import { Button } from "@/components/ui/button";
 import { ConfirmActionButton } from "@/components/confirm-action";
@@ -169,9 +170,12 @@ export function TaskDetailView({
         taskId={task.id}
         readOnly={readOnly}
       />
-      <section className="task-detail__body" aria-label={t("doc.body.a11y")}>
-        <p className="task-home__note">{t("task.body.unavailable")}</p>
-      </section>
+      <TaskBodyEditor
+        workspaceId={workspaceId}
+        slug={slug}
+        taskId={task.id}
+        readOnly={readOnly}
+      />
       <TaskAttachmentsPanel
         workspaceId={workspaceId}
         taskId={task.id}

@@ -78,25 +78,87 @@ pub const MAX_COLLAB_LOAD_BYTES: i64 = 32 * 1024 * 1024;
 /// This layer does not parse CRDT payloads.
 const EMPTY_YJS_STATE_V1: &[u8] = &[0, 0];
 
+pub use crate::collab::wire::CollabKind;
+
+/// Per-kind collab tables. The task tables (037) mirror the document tables
+/// (004/005) column for column; the closed [`CollabKind`] selects them.
+#[derive(Debug, Clone, Copy)]
+struct CollabTables {
+    states: &'static str,
+    updates: &'static str,
+    receipts: &'static str,
+    id_col: &'static str,
+    /// Resource table holding `content_json` / `text` / `chosung`.
+    resource: &'static str,
+    /// Event/audit `target_type` and verb prefix.
+    target_type: &'static str,
+    /// Event payload key for the resource id.
+    payload_key: &'static str,
+}
+
+const DOCUMENT_TABLES: CollabTables = CollabTables {
+    states: "fvoci.document_states",
+    updates: "fvoci.document_collab_updates",
+    receipts: "fvoci.document_collab_op_receipts",
+    id_col: "document_id",
+    resource: "fvoci.documents",
+    target_type: "document",
+    payload_key: "documentId",
+};
+
+const TASK_TABLES: CollabTables = CollabTables {
+    states: "fvoci.task_states",
+    updates: "fvoci.task_collab_updates",
+    receipts: "fvoci.task_collab_op_receipts",
+    id_col: "task_id",
+    resource: "fvoci.tasks",
+    target_type: "task",
+    payload_key: "taskId",
+};
+
+impl CollabTables {
+    fn for_kind(kind: CollabKind) -> &'static Self {
+        match kind {
+            CollabKind::Document => &DOCUMENT_TABLES,
+            CollabKind::Task => &TASK_TABLES,
+        }
+    }
+
+    /// Fill the fixed table/column placeholders of a static SQL template.
+    fn sql(&self, template: &str) -> String {
+        template
+            .replace("{states}", self.states)
+            .replace("{updates}", self.updates)
+            .replace("{receipts}", self.receipts)
+            .replace("{id}", self.id_col)
+            .replace("{resource}", self.resource)
+    }
+
+    fn verb(&self, action: &str) -> String {
+        format!("{}.{action}", self.target_type)
+    }
+}
+
 fn payload_sha256(payload: &[u8]) -> Vec<u8> {
     Sha256::digest(payload).to_vec()
 }
 
 async fn tail_budget_allows_append(
     tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
     workspace_id: Uuid,
     document_id: Uuid,
     snapshot_cutoff_seq: i64,
     snapshot_len: i64,
     incoming_len: i64,
 ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    let stats: (i64, i64) = sqlx::query_as(
+    let stats: (i64, i64) = sqlx::query_as(&t.sql(
         r#"
         SELECT count(*)::bigint, coalesce(sum(octet_length(payload)), 0)::bigint
-        FROM fvoci.document_collab_updates
-        WHERE workspace_id = $1 AND document_id = $2 AND seq > $3
+        FROM {updates}
+        WHERE workspace_id = $1 AND {id} = $2 AND seq > $3
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(snapshot_cutoff_seq)
@@ -275,6 +337,8 @@ pub enum ProjectDerivedBodyResult {
 }
 
 type StateRow = (Vec<u8>, i16, i64, i64, i64, DateTime<Utc>);
+/// `project_id, archived_at, deleted_at` of a locked task row.
+type TaskLockRow = (Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
 
 async fn lock_collab_init(
     tx: &mut Transaction<'_, Postgres>,
@@ -288,7 +352,7 @@ async fn lock_collab_init(
     Ok(())
 }
 
-/// Result of the single collab document access check (wiki or project document).
+/// Result of the single collab access check (wiki/project document or task).
 struct CollabDocumentAccess {
     permission: ProjectPermission,
     /// Document status `archived` or the owning project archived: the room is read-only.
@@ -360,20 +424,104 @@ async fn lock_collab_document_access(
     }))
 }
 
+/// Locks and authorizes a live task for collab: the owning project `FOR SHARE`
+/// (effective project permission) and then the task row `FOR NO KEY UPDATE`,
+/// the same project → task order as task mutations. Returns `None` when the
+/// task is missing or trashed, its project is trashed, or the task moved to
+/// another project between the unlocked read and the row lock. An archived
+/// task or project yields a read-only room.
+async fn lock_collab_task_access(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    task_id: Uuid,
+) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
+    let expected: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT project_id FROM fvoci.tasks WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((expected_project_id,)) = expected else {
+        return Ok(None);
+    };
+    let Some((permission, project_archived)) =
+        share_lock_project_permission(tx, workspace_id, actor_user_id, expected_project_id).await?
+    else {
+        return Ok(None);
+    };
+    let row: Option<TaskLockRow> = sqlx::query_as(
+        r#"
+        SELECT project_id, archived_at, deleted_at
+        FROM fvoci.tasks
+        WHERE workspace_id = $1 AND id = $2
+        FOR NO KEY UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((project_id, archived_at, deleted_at)) = row else {
+        return Ok(None);
+    };
+    if deleted_at.is_some() || project_id != expected_project_id {
+        return Ok(None);
+    }
+    Ok(Some(CollabDocumentAccess {
+        permission,
+        archived: project_archived || archived_at.is_some(),
+    }))
+}
+
+async fn lock_collab_access(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    resource_id: Uuid,
+) -> Result<Option<CollabDocumentAccess>, sqlx::Error> {
+    match kind {
+        CollabKind::Document => {
+            lock_collab_document_access(tx, workspace_id, actor_user_id, resource_id).await
+        }
+        CollabKind::Task => {
+            lock_collab_task_access(tx, workspace_id, actor_user_id, resource_id).await
+        }
+    }
+}
+
+async fn load_resource_content(
+    tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
+    workspace_id: Uuid,
+    resource_id: Uuid,
+) -> Result<(Value,), sqlx::Error> {
+    sqlx::query_as(
+        &t.sql("SELECT content_json FROM {resource} WHERE workspace_id = $1 AND id = $2"),
+    )
+    .bind(workspace_id)
+    .bind(resource_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
 async fn ensure_collab_state_row(
     tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
     workspace_id: Uuid,
     document_id: Uuid,
     content_json: &Value,
 ) -> Result<Result<(), CollabDbError>, sqlx::Error> {
-    let existing: Option<(i64,)> = sqlx::query_as(
+    let existing: Option<(i64,)> = sqlx::query_as(&t.sql(
         r#"
         SELECT writer_generation
-        FROM fvoci.document_states
-        WHERE workspace_id = $1 AND document_id = $2
+        FROM {states}
+        WHERE workspace_id = $1 AND {id} = $2
         FOR UPDATE
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut **tx)
@@ -383,14 +531,14 @@ async fn ensure_collab_state_row(
     }
 
     lock_collab_init(tx, document_id).await?;
-    let existing: Option<(i64,)> = sqlx::query_as(
+    let existing: Option<(i64,)> = sqlx::query_as(&t.sql(
         r#"
         SELECT writer_generation
-        FROM fvoci.document_states
-        WHERE workspace_id = $1 AND document_id = $2
+        FROM {states}
+        WHERE workspace_id = $1 AND {id} = $2
         FOR UPDATE
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut **tx)
@@ -403,14 +551,14 @@ async fn ensure_collab_state_row(
         return Ok(Err(CollabDbError::NotFound));
     }
 
-    sqlx::query(
+    sqlx::query(&t.sql(
         r#"
-        INSERT INTO fvoci.document_states (
-            workspace_id, document_id, state, encoding,
+        INSERT INTO {states} (
+            workspace_id, {id}, state, encoding,
             writer_generation, snapshot_cutoff_seq, tail_seq
         ) VALUES ($1, $2, $3, $4, 0, 0, 0)
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(EMPTY_YJS_STATE_V1)
@@ -422,17 +570,18 @@ async fn ensure_collab_state_row(
 
 async fn fetch_state_fence_for_update(
     tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<Option<(i64, i64)>, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(&t.sql(
         r#"
         SELECT writer_generation, tail_seq
-        FROM fvoci.document_states
-        WHERE workspace_id = $1 AND document_id = $2
+        FROM {states}
+        WHERE workspace_id = $1 AND {id} = $2
         FOR UPDATE
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut **tx)
@@ -441,17 +590,18 @@ async fn fetch_state_fence_for_update(
 
 async fn fetch_state_for_update(
     tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<Option<StateRow>, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(&t.sql(
         r#"
         SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at
-        FROM fvoci.document_states
-        WHERE workspace_id = $1 AND document_id = $2
+        FROM {states}
+        WHERE workspace_id = $1 AND {id} = $2
         FOR UPDATE
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut **tx)
@@ -460,18 +610,19 @@ async fn fetch_state_for_update(
 
 async fn load_tail_updates(
     tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
     workspace_id: Uuid,
     document_id: Uuid,
     snapshot_cutoff_seq: i64,
     snapshot_len: i64,
 ) -> Result<Result<Vec<CollabUpdateRow>, CollabDbError>, sqlx::Error> {
-    let stats: (i64, i64) = sqlx::query_as(
+    let stats: (i64, i64) = sqlx::query_as(&t.sql(
         r#"
         SELECT count(*)::bigint, coalesce(sum(octet_length(payload)), 0)::bigint
-        FROM fvoci.document_collab_updates
-        WHERE workspace_id = $1 AND document_id = $2 AND seq > $3
+        FROM {updates}
+        WHERE workspace_id = $1 AND {id} = $2 AND seq > $3
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(snapshot_cutoff_seq)
@@ -480,17 +631,17 @@ async fn load_tail_updates(
     if let Err(err) = load_budget_allows(snapshot_len, stats.0, stats.1) {
         return Ok(Err(err));
     }
-    let rows = sqlx::query_as::<_, (i64, Uuid, Vec<u8>)>(
+    let rows = sqlx::query_as::<_, (i64, Uuid, Vec<u8>)>(&t.sql(
         r#"
         SELECT seq, op_id, payload
-        FROM fvoci.document_collab_updates
+        FROM {updates}
         WHERE workspace_id = $1
-          AND document_id = $2
+          AND {id} = $2
           AND seq > $3
         ORDER BY seq ASC
         LIMIT $4
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(snapshot_cutoff_seq)
@@ -520,6 +671,7 @@ fn state_row_to_load(row: StateRow, tail: Vec<CollabUpdateRow>) -> CollabLoadSta
 
 async fn authorize_collab_write(
     tx: &mut Transaction<'_, Postgres>,
+    kind: CollabKind,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -538,7 +690,7 @@ async fn authorize_collab_write(
     }
     // Existence (tenant, trash, affiliation) decides NotFound before permission decides Forbidden.
     let Some(access) =
-        lock_collab_document_access(tx, workspace_id, actor_user_id, document_id).await?
+        lock_collab_access(tx, kind, workspace_id, actor_user_id, document_id).await?
     else {
         return Ok(Err(CollabDbError::NotFound));
     };
@@ -548,18 +700,14 @@ async fn authorize_collab_write(
     if access.archived {
         return Ok(Err(CollabDbError::Forbidden));
     }
-    let content: (Value,) = sqlx::query_as(
-        "SELECT content_json FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_one(&mut **tx)
-    .await?;
+    let content =
+        load_resource_content(tx, CollabTables::for_kind(kind), workspace_id, document_id).await?;
     Ok(Ok(content))
 }
 
 async fn authorize_collab_read(
     tx: &mut Transaction<'_, Postgres>,
+    kind: CollabKind,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -577,7 +725,7 @@ async fn authorize_collab_read(
         return Ok(Err(CollabDbError::NotFound));
     }
     let Some(access) =
-        lock_collab_document_access(tx, workspace_id, actor_user_id, document_id).await?
+        lock_collab_access(tx, kind, workspace_id, actor_user_id, document_id).await?
     else {
         return Ok(Err(CollabDbError::NotFound));
     };
@@ -587,26 +735,31 @@ async fn authorize_collab_read(
     Ok(Ok(()))
 }
 
-async fn append_system_document_updated_event(
+/// System `document.updated` / `task.updated` event (`collab: true`) after a
+/// derived body projection changed the resource row.
+async fn append_system_updated_event(
     tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let payload = json!({
-        "documentId": document_id.to_string(),
+        t.payload_key: document_id.to_string(),
         "collab": true,
     });
     sqlx::query(
         r#"
         INSERT INTO fvoci.events (
             id, workspace_id, actor_user_id, verb, target_type, target_id, payload, channel
-        ) VALUES ($1, $2, NULL, 'document.updated', 'document', $3, $4, 'system')
+        ) VALUES ($1, $2, NULL, $5, $6, $3, $4, 'system')
         "#,
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(document_id)
     .bind(payload)
+    .bind(t.verb("updated"))
+    .bind(t.target_type)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -614,6 +767,7 @@ async fn append_system_document_updated_event(
 
 async fn record_collab_event_and_audit(
     tx: &mut Transaction<'_, Postgres>,
+    t: &CollabTables,
     record: CollabAuditRecord<'_>,
 ) -> Result<(), sqlx::Error> {
     let CollabAuditRecord {
@@ -626,7 +780,7 @@ async fn record_collab_event_and_audit(
         client_ip,
     } = record;
     let payload = json!({
-        "documentId": document_id.to_string(),
+        t.payload_key: document_id.to_string(),
         "opId": op_id.to_string(),
         "seq": seq,
         "writerGeneration": writer_generation,
@@ -637,8 +791,8 @@ async fn record_collab_event_and_audit(
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
             actor_user_id: Some(actor_user_id),
-            verb: "document.collab_update_appended".to_string(),
-            target_type: Some("document".to_string()),
+            verb: t.verb("collab_update_appended"),
+            target_type: Some(t.target_type.to_string()),
             target_id: Some(document_id),
             payload: payload.clone(),
         },
@@ -650,8 +804,8 @@ async fn record_collab_event_and_audit(
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
             actor_user_id: Some(actor_user_id),
-            verb: "document.collab_update_appended".to_string(),
-            target_type: Some("document".to_string()),
+            verb: t.verb("collab_update_appended"),
+            target_type: Some(t.target_type.to_string()),
             target_id: Some(document_id),
             payload,
             ip: client_ip.map(str::to_string),
@@ -668,10 +822,31 @@ pub async fn claim_writer_and_load(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
+    claim_writer_and_load_kind(
+        pool,
+        CollabKind::Document,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+pub async fn claim_writer_and_load_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<ClaimWriterResult, CollabDbError>, sqlx::Error> {
+    let t = CollabTables::for_kind(kind);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     let content = match authorize_collab_write(
         &mut tx,
+        kind,
         workspace_id,
         actor_user_id,
         session_id,
@@ -685,22 +860,22 @@ pub async fn claim_writer_and_load(
             return Ok(Err(err));
         }
     };
-    match ensure_collab_state_row(&mut tx, workspace_id, document_id, &content.0).await? {
+    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
             return Ok(Err(err));
         }
     }
-    let bumped: Option<(i64,)> = sqlx::query_as(
+    let bumped: Option<(i64,)> = sqlx::query_as(&t.sql(
         r#"
-        UPDATE fvoci.document_states
+        UPDATE {states}
         SET writer_generation = writer_generation + 1,
             updated_at = now()
-        WHERE workspace_id = $1 AND document_id = $2
+        WHERE workspace_id = $1 AND {id} = $2
         RETURNING writer_generation
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut *tx)
@@ -709,7 +884,7 @@ pub async fn claim_writer_and_load(
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
     };
-    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some(state) = state else {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
@@ -720,6 +895,7 @@ pub async fn claim_writer_and_load(
     }
     let tail = match load_tail_updates(
         &mut tx,
+        t,
         workspace_id,
         document_id,
         state.3,
@@ -748,10 +924,31 @@ pub async fn load_collab_document(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    load_collab_document_kind(
+        pool,
+        CollabKind::Document,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+pub async fn load_collab_document_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    let t = CollabTables::for_kind(kind);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     let content = match authorize_collab_write(
         &mut tx,
+        kind,
         workspace_id,
         actor_user_id,
         session_id,
@@ -765,14 +962,14 @@ pub async fn load_collab_document(
             return Ok(Err(err));
         }
     };
-    match ensure_collab_state_row(&mut tx, workspace_id, document_id, &content.0).await? {
+    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
             return Ok(Err(err));
         }
     }
-    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some(state) = state else {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
@@ -783,6 +980,7 @@ pub async fn load_collab_document(
     }
     let tail = match load_tail_updates(
         &mut tx,
+        t,
         workspace_id,
         document_id,
         state.3,
@@ -805,12 +1003,20 @@ pub async fn append_collab_update(
     pool: &PgPool,
     input: AppendCollabInput<'_>,
 ) -> Result<Result<AppendCollabResult, CollabDbError>, sqlx::Error> {
+    append_collab_update_kind(pool, CollabKind::Document, input).await
+}
+
+pub async fn append_collab_update_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    input: AppendCollabInput<'_>,
+) -> Result<Result<AppendCollabResult, CollabDbError>, sqlx::Error> {
     if input.payload.is_empty() || input.payload.len() > MAX_COLLAB_UPDATE_BYTES {
         return Ok(Err(CollabDbError::PayloadTooLarge));
     }
     let timings = CollabDbStageTimings::default();
     let tx = pool.begin().await?;
-    append_collab_update_in_tx(tx, input, timings)
+    append_collab_update_in_tx(tx, kind, input, timings)
         .await
         .map(|(result, _)| result)
 }
@@ -818,6 +1024,7 @@ pub async fn append_collab_update(
 /// Append on a room's dedicated session connection (no pool acquire).
 pub async fn append_collab_update_on_conn_timed(
     conn: &mut PgConnection,
+    kind: CollabKind,
     input: AppendCollabInput<'_>,
 ) -> Result<
     (
@@ -831,11 +1038,12 @@ pub async fn append_collab_update_on_conn_timed(
         return Ok((Err(CollabDbError::PayloadTooLarge), timings));
     }
     let tx = conn.begin().await?;
-    append_collab_update_in_tx(tx, input, timings).await
+    append_collab_update_in_tx(tx, kind, input, timings).await
 }
 
 async fn append_collab_update_in_tx(
     mut tx: Transaction<'_, Postgres>,
+    kind: CollabKind,
     input: AppendCollabInput<'_>,
     mut timings: CollabDbStageTimings,
 ) -> Result<
@@ -856,6 +1064,7 @@ async fn append_collab_update_in_tx(
         payload,
         client_ip,
     } = input;
+    let t = CollabTables::for_kind(kind);
     set_tenant(&mut tx, workspace_id).await?;
     let advisory_started = Instant::now();
     lock_membership_users(&mut tx, &[actor_user_id]).await?;
@@ -875,7 +1084,7 @@ async fn append_collab_update_in_tx(
         return Ok((Err(CollabDbError::Forbidden), timings));
     }
     let Some(access) =
-        lock_collab_document_access(&mut tx, workspace_id, actor_user_id, document_id).await?
+        lock_collab_access(&mut tx, kind, workspace_id, actor_user_id, document_id).await?
     else {
         tx.rollback().await?;
         return Ok((Err(CollabDbError::NotFound), timings));
@@ -888,21 +1097,15 @@ async fn append_collab_update_in_tx(
         tx.rollback().await?;
         return Ok((Err(CollabDbError::Forbidden), timings));
     }
-    let content: (Value,) = sqlx::query_as(
-        "SELECT content_json FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    match ensure_collab_state_row(&mut tx, workspace_id, document_id, &content.0).await? {
+    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
+    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
             return Ok((Err(err), timings));
         }
     }
-    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     timings.row_lock_us = row_started.elapsed().as_micros() as u64;
     let stmt_started = Instant::now();
     let Some(state) = state else {
@@ -916,13 +1119,13 @@ async fn append_collab_update_in_tx(
 
     let incoming_len = payload.len() as i64;
     let incoming_digest = payload_sha256(payload);
-    let existing: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(
+    let existing: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(&t.sql(
         r#"
         SELECT seq, payload_len, payload_sha256, actor_user_id
-        FROM fvoci.document_collab_op_receipts
-        WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
+        FROM {receipts}
+        WHERE workspace_id = $1 AND {id} = $2 AND op_id = $3
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(op_id)
@@ -949,6 +1152,7 @@ async fn append_collab_update_in_tx(
 
     match tail_budget_allows_append(
         &mut tx,
+        t,
         workspace_id,
         document_id,
         state.3,
@@ -963,16 +1167,16 @@ async fn append_collab_update_in_tx(
             return Ok((Err(err), timings));
         }
     }
-    let next_seq: Option<(i64,)> = sqlx::query_as(
+    let next_seq: Option<(i64,)> = sqlx::query_as(&t.sql(
         r#"
-        UPDATE fvoci.document_states
+        UPDATE {states}
         SET tail_seq = tail_seq + 1, updated_at = now()
         WHERE workspace_id = $1
-          AND document_id = $2
+          AND {id} = $2
           AND writer_generation = $3
         RETURNING tail_seq
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(writer_generation)
@@ -983,13 +1187,13 @@ async fn append_collab_update_in_tx(
         return Ok((Err(CollabDbError::StaleWriter), timings));
     };
 
-    sqlx::query(
+    sqlx::query(&t.sql(
         r#"
-        INSERT INTO fvoci.document_collab_updates (
-            workspace_id, document_id, seq, op_id, payload
+        INSERT INTO {updates} (
+            workspace_id, {id}, seq, op_id, payload
         ) VALUES ($1, $2, $3, $4, $5)
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(seq)
@@ -998,13 +1202,13 @@ async fn append_collab_update_in_tx(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
+    sqlx::query(&t.sql(
         r#"
-        INSERT INTO fvoci.document_collab_op_receipts (
-            workspace_id, document_id, op_id, seq, payload_len, payload_sha256, actor_user_id
+        INSERT INTO {receipts} (
+            workspace_id, {id}, op_id, seq, payload_len, payload_sha256, actor_user_id
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(op_id)
@@ -1017,6 +1221,7 @@ async fn append_collab_update_in_tx(
 
     record_collab_event_and_audit(
         &mut tx,
+        t,
         CollabAuditRecord {
             workspace_id,
             actor_user_id,
@@ -1044,10 +1249,13 @@ pub async fn lookup_collab_operation(
     document_id: Uuid,
     op_id: Uuid,
 ) -> Result<Result<Option<CollabOperationLookup>, CollabDbError>, sqlx::Error> {
+    let kind = CollabKind::Document;
+    let t = CollabTables::for_kind(kind);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_collab_read(
         &mut tx,
+        kind,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1061,13 +1269,13 @@ pub async fn lookup_collab_operation(
             return Ok(Err(err));
         }
     }
-    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(
+    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(&t.sql(
         r#"
         SELECT seq, payload_len, payload_sha256, actor_user_id
-        FROM fvoci.document_collab_op_receipts
-        WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
+        FROM {receipts}
+        WHERE workspace_id = $1 AND {id} = $2 AND op_id = $3
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(op_id)
@@ -1088,6 +1296,15 @@ pub async fn verify_collab_operation(
     pool: &PgPool,
     input: VerifyCollabInput<'_>,
 ) -> Result<Result<CollabOperationLookup, CollabDbError>, sqlx::Error> {
+    verify_collab_operation_kind(pool, CollabKind::Document, input).await
+}
+
+pub async fn verify_collab_operation_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    input: VerifyCollabInput<'_>,
+) -> Result<Result<CollabOperationLookup, CollabDbError>, sqlx::Error> {
+    let t = CollabTables::for_kind(kind);
     let VerifyCollabInput {
         workspace_id,
         actor_user_id,
@@ -1102,6 +1319,7 @@ pub async fn verify_collab_operation(
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_collab_read(
         &mut tx,
+        kind,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1115,13 +1333,13 @@ pub async fn verify_collab_operation(
             return Ok(Err(err));
         }
     }
-    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(
+    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(&t.sql(
         r#"
         SELECT seq, payload_len, payload_sha256, actor_user_id
-        FROM fvoci.document_collab_op_receipts
-        WHERE workspace_id = $1 AND document_id = $2 AND op_id = $3
+        FROM {receipts}
+        WHERE workspace_id = $1 AND {id} = $2 AND op_id = $3
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(op_id)
@@ -1149,6 +1367,15 @@ pub async fn compact_collab_snapshot(
     pool: &PgPool,
     input: CompactCollabInput<'_>,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    compact_collab_snapshot_kind(pool, CollabKind::Document, input).await
+}
+
+pub async fn compact_collab_snapshot_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    input: CompactCollabInput<'_>,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    let t = CollabTables::for_kind(kind);
     let CompactCollabInput {
         workspace_id,
         actor_user_id,
@@ -1168,6 +1395,7 @@ pub async fn compact_collab_snapshot(
     set_tenant(&mut tx, workspace_id).await?;
     let content = match authorize_collab_write(
         &mut tx,
+        kind,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1181,14 +1409,14 @@ pub async fn compact_collab_snapshot(
             return Ok(Err(err));
         }
     };
-    match ensure_collab_state_row(&mut tx, workspace_id, document_id, &content.0).await? {
+    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
             return Ok(Err(err));
         }
     }
-    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some(state) = state else {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
@@ -1206,15 +1434,15 @@ pub async fn compact_collab_snapshot(
         return Ok(Err(CollabDbError::InvalidCutoff));
     }
 
-    let newer: Option<(i64,)> = sqlx::query_as(
+    let newer: Option<(i64,)> = sqlx::query_as(&t.sql(
         r#"
         SELECT seq
-        FROM fvoci.document_collab_updates
-        WHERE workspace_id = $1 AND document_id = $2 AND seq > $3
+        FROM {updates}
+        WHERE workspace_id = $1 AND {id} = $2 AND seq > $3
         ORDER BY seq ASC
         LIMIT 1
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(cutoff_seq)
@@ -1225,15 +1453,15 @@ pub async fn compact_collab_snapshot(
         return Ok(Err(CollabDbError::InvalidCutoff));
     }
 
-    sqlx::query(
+    sqlx::query(&t.sql(
         r#"
-        UPDATE fvoci.document_states
+        UPDATE {states}
         SET state = $3,
             snapshot_cutoff_seq = $4,
             updated_at = now()
-        WHERE workspace_id = $1 AND document_id = $2 AND writer_generation = $5
+        WHERE workspace_id = $1 AND {id} = $2 AND writer_generation = $5
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(new_snapshot)
@@ -1242,12 +1470,12 @@ pub async fn compact_collab_snapshot(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
+    sqlx::query(&t.sql(
         r#"
-        DELETE FROM fvoci.document_collab_updates
-        WHERE workspace_id = $1 AND document_id = $2 AND seq <= $3
+        DELETE FROM {updates}
+        WHERE workspace_id = $1 AND {id} = $2 AND seq <= $3
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(cutoff_seq)
@@ -1255,7 +1483,7 @@ pub async fn compact_collab_snapshot(
     .await?;
 
     let payload = json!({
-        "documentId": document_id.to_string(),
+        t.payload_key: document_id.to_string(),
         "cutoffSeq": cutoff_seq,
         "writerGeneration": writer_generation,
     });
@@ -1265,8 +1493,8 @@ pub async fn compact_collab_snapshot(
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
             actor_user_id: Some(actor_user_id),
-            verb: "document.collab_snapshot_compacted".to_string(),
-            target_type: Some("document".to_string()),
+            verb: t.verb("collab_snapshot_compacted"),
+            target_type: Some(t.target_type.to_string()),
             target_id: Some(document_id),
             payload: payload.clone(),
         },
@@ -1278,8 +1506,8 @@ pub async fn compact_collab_snapshot(
             id: Uuid::now_v7(),
             workspace_id: Some(workspace_id),
             actor_user_id: Some(actor_user_id),
-            verb: "document.collab_snapshot_compacted".to_string(),
-            target_type: Some("document".to_string()),
+            verb: t.verb("collab_snapshot_compacted"),
+            target_type: Some(t.target_type.to_string()),
             target_id: Some(document_id),
             payload,
             ip: client_ip.map(str::to_string),
@@ -1287,13 +1515,14 @@ pub async fn compact_collab_snapshot(
     )
     .await?;
 
-    let refreshed = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let refreshed = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some(refreshed) = refreshed else {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
     };
     let tail = match load_tail_updates(
         &mut tx,
+        t,
         workspace_id,
         document_id,
         refreshed.3,
@@ -1326,9 +1555,30 @@ pub async fn resolve_collab_admission(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
+    resolve_collab_admission_kind(
+        pool,
+        CollabKind::Document,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+/// Resolve whether a live session may join a document or task collab room.
+pub async fn resolve_collab_admission_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<CollabAdmission, CollabDbError>, sqlx::Error> {
     let tx = pool.begin().await?;
     resolve_collab_admission_tx(
         tx,
+        kind,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1341,6 +1591,7 @@ pub async fn resolve_collab_admission(
 
 async fn resolve_collab_admission_tx(
     mut tx: Transaction<'_, Postgres>,
+    kind: CollabKind,
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
@@ -1366,7 +1617,7 @@ async fn resolve_collab_admission_tx(
         return Ok((Err(CollabDbError::NotFound), timings));
     }
     let access =
-        lock_collab_document_access(&mut tx, workspace_id, actor_user_id, document_id).await?;
+        lock_collab_access(&mut tx, kind, workspace_id, actor_user_id, document_id).await?;
     timings.row_lock_us = row_started.elapsed().as_micros() as u64;
     let Some(access) = access else {
         tx.rollback().await?;
@@ -1398,10 +1649,31 @@ pub async fn load_collab_readonly(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    load_collab_readonly_kind(
+        pool,
+        CollabKind::Document,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+pub async fn load_collab_readonly_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<CollabLoadState, CollabDbError>, sqlx::Error> {
+    let t = CollabTables::for_kind(kind);
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_collab_read(
         &mut tx,
+        kind,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1415,21 +1687,15 @@ pub async fn load_collab_readonly(
             return Ok(Err(err));
         }
     }
-    let content: (Value,) = sqlx::query_as(
-        "SELECT content_json FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id)
-    .bind(document_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    match ensure_collab_state_row(&mut tx, workspace_id, document_id, &content.0).await? {
+    let content = load_resource_content(&mut tx, t, workspace_id, document_id).await?;
+    match ensure_collab_state_row(&mut tx, t, workspace_id, document_id, &content.0).await? {
         Ok(()) => {}
         Err(err) => {
             tx.rollback().await?;
             return Ok(Err(err));
         }
     }
-    let state = fetch_state_for_update(&mut tx, workspace_id, document_id).await?;
+    let state = fetch_state_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some(state) = state else {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
@@ -1440,6 +1706,7 @@ pub async fn load_collab_readonly(
     }
     let tail = match load_tail_updates(
         &mut tx,
+        t,
         workspace_id,
         document_id,
         state.3,
@@ -1488,6 +1755,16 @@ pub async fn estimate_persisted_collab_bytes(
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
+    estimate_persisted_collab_bytes_kind(conn, CollabKind::Document, workspace_id, document_id)
+        .await
+}
+
+pub async fn estimate_persisted_collab_bytes_kind(
+    conn: &mut PgConnection,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> Result<u64, sqlx::Error> {
     #[cfg(feature = "db-tests")]
     if FORCE_ESTIMATE_FAIL
         .lock()
@@ -1496,23 +1773,24 @@ pub async fn estimate_persisted_collab_bytes(
     {
         return Err(sqlx::Error::Protocol("forced estimate fail".into()));
     }
+    let t = CollabTables::for_kind(kind);
     let mut tx = conn.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let row: Option<(i64, i64)> = sqlx::query_as(
+    let row: Option<(i64, i64)> = sqlx::query_as(&t.sql(
         r#"
         SELECT
             coalesce(octet_length(ds.state), 0)::bigint,
             coalesce((
                 SELECT sum(octet_length(payload))::bigint
-                FROM fvoci.document_collab_updates
+                FROM {updates}
                 WHERE workspace_id = ds.workspace_id
-                  AND document_id = ds.document_id
+                  AND {id} = ds.{id}
                   AND seq > ds.snapshot_cutoff_seq
             ), 0)::bigint
-        FROM fvoci.document_states ds
-        WHERE ds.workspace_id = $1 AND ds.document_id = $2
+        FROM {states} ds
+        WHERE ds.workspace_id = $1 AND ds.{id} = $2
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut *tx)
@@ -1528,6 +1806,15 @@ pub async fn project_derived_body(
     pool: &PgPool,
     input: ProjectDerivedBodyInput,
 ) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+    project_derived_body_kind(pool, CollabKind::Document, input).await
+}
+
+pub async fn project_derived_body_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    input: ProjectDerivedBodyInput,
+) -> Result<Result<ProjectDerivedBodyResult, CollabDbError>, sqlx::Error> {
+    let t = CollabTables::for_kind(kind);
     let ProjectDerivedBodyInput {
         workspace_id,
         actor_user_id,
@@ -1545,6 +1832,7 @@ pub async fn project_derived_body(
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_collab_write(
         &mut tx,
+        kind,
         workspace_id,
         actor_user_id,
         session_id,
@@ -1559,7 +1847,7 @@ pub async fn project_derived_body(
         }
     };
 
-    let state = fetch_state_fence_for_update(&mut tx, workspace_id, document_id).await?;
+    let state = fetch_state_fence_for_update(&mut tx, t, workspace_id, document_id).await?;
     let Some((current_generation, current_tail_seq)) = state else {
         tx.rollback().await?;
         return Ok(Err(CollabDbError::NotFound));
@@ -1577,9 +1865,9 @@ pub async fn project_derived_body(
         return Ok(Err(CollabDbError::StaleCutoff));
     }
 
-    let updated: Option<(Uuid,)> = sqlx::query_as(
+    let updated: Option<(Uuid,)> = sqlx::query_as(&t.sql(
         r#"
-        UPDATE fvoci.documents
+        UPDATE {resource}
         SET content_json = $3,
             text = $4,
             chosung = $5,
@@ -1589,7 +1877,7 @@ pub async fn project_derived_body(
           AND content_json IS DISTINCT FROM $3::jsonb
         RETURNING id
         "#,
-    )
+    ))
     .bind(workspace_id)
     .bind(document_id)
     .bind(content_json)
@@ -1603,7 +1891,7 @@ pub async fn project_derived_body(
         return Ok(Ok(ProjectDerivedBodyResult::Unchanged));
     }
 
-    append_system_document_updated_event(&mut tx, workspace_id, document_id).await?;
+    append_system_updated_event(&mut tx, t, workspace_id, document_id).await?;
     tx.commit().await?;
     Ok(Ok(ProjectDerivedBodyResult::Updated))
 }
