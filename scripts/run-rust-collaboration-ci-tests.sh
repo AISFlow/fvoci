@@ -40,6 +40,7 @@ cargo test --locked --offline --no-fail-fast --features db-tests \
   --test document_api_integration \
   --test document_import_export_integration \
   --test document_import_formats_integration \
+  --test task_collab_integration \
   | tee "$LOG"
 
 verify_native_admission_log "$LOG"

@@ -16,6 +16,20 @@ trap cleanup EXIT
 mkdir -p "$FAKE_BIN"
 export RUNNER_TEMP="$FIXTURE_RUN/logs"
 
+# Fixed suite list from main collaboration job (ebca941e); order-independent guard.
+EXPECTED_SUITE_NAMES=(
+  collab_product
+  collab_projection
+  collab_lifecycle
+  collab_shutdown
+  document_collab_lifecycle
+  revision_integration
+  document_api_integration
+  document_import_export_integration
+  document_import_formats_integration
+  task_collab_integration
+)
+
 mapfile -t EXPECTED_TEST_TARGETS < <(
   grep -E '^\s+--test ' "$RUN" | sed -E 's/^[[:space:]]+--test[[:space:]]+//; s/[[:space:]]*\\$//'
 )
@@ -23,17 +37,30 @@ mapfile -t EXPECTED_TEST_TARGETS < <(
 assert_expected_test_targets() {
   local args="$1"
   local target
-  for target in "${EXPECTED_TEST_TARGETS[@]}"; do
+  if ((${#EXPECTED_TEST_TARGETS[@]} != ${#EXPECTED_SUITE_NAMES[@]})); then
+    echo "expected ${#EXPECTED_SUITE_NAMES[@]} --test targets in runner, found ${#EXPECTED_TEST_TARGETS[@]}" >&2
+    return 1
+  fi
+  for target in "${EXPECTED_SUITE_NAMES[@]}"; do
     if [[ "$args" != *"--test ${target}"* ]]; then
       echo "cargo invocation missing --test ${target}" >&2
       echo "invocation: $args" >&2
       return 1
     fi
   done
-  if ((${#EXPECTED_TEST_TARGETS[@]} != 9)); then
-    echo "expected nine --test targets in runner, found ${#EXPECTED_TEST_TARGETS[@]}" >&2
-    return 1
-  fi
+  for target in "${EXPECTED_TEST_TARGETS[@]}"; do
+    local found=0
+    for expected in "${EXPECTED_SUITE_NAMES[@]}"; do
+      if [[ "$target" == "$expected" ]]; then
+        found=1
+        break
+      fi
+    done
+    if [[ "$found" -ne 1 ]]; then
+      echo "unexpected --test target in runner: ${target}" >&2
+      return 1
+    fi
+  done
 }
 
 cat >"$FAKE_BIN/cargo" <<STUB
