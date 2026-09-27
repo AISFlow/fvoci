@@ -21,6 +21,7 @@ use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
+use crate::settings::messages::Message;
 use crate::validate::{normalize_email, validate_family_name, validate_given_name};
 
 pub fn router() -> Router<AppState> {
@@ -65,6 +66,10 @@ async fn create_invitation(
         return Err(AppError::rate_limited(retry_after));
     }
     let ip = peer_ip(peer.ip());
+    // Read before the invite commits so a failed read leaves no invitation.
+    let messages = crate::settings::messages::load(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
     let result = crate::db::invitations::create_invitation(
         &state.auth.db.pool,
         workspace_id,
@@ -80,7 +85,12 @@ async fn create_invitation(
         Ok(created) => {
             let origin = state.public_origin.trim_end_matches('/');
             let accept_url = format!("{origin}/invite/{}", created.accept_path_token);
-            let mail_delayed = match state.mailer.send_invite(&email, &accept_url).await {
+            let subject = messages.subject(Message::InviteSubject);
+            let mail_delayed = match state
+                .mailer
+                .send_invite(&email, &subject, &accept_url)
+                .await
+            {
                 Ok(()) => None,
                 Err(_) => {
                     tracing::warn!(message = "invitation: invite mail", "mail.send_failed");

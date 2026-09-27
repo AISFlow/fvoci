@@ -531,15 +531,22 @@ pub(crate) async fn seed_workflow(
     .execute(&mut **tx)
     .await?;
 
-    let seeds: [(&str, &str, &str); 6] = [
-        ("백로그", "backlog", "V"),
-        ("할 일", "todo", "W"),
-        ("진행 중", "in_progress", "X"),
-        ("검토 대기", "in_progress", "Y"),
-        ("완료", "done", "Z"),
-        ("취소", "canceled", "a"),
+    use crate::settings::messages::Message;
+    // Names come from the instance overrides at seed time; statuses already
+    // created (or copied by a project clone) keep their names.
+    let messages = crate::settings::messages::load(&mut **tx).await?;
+    let seeds: [(Message, &str, &str); 6] = [
+        (Message::SeedStatusBacklog, "backlog", "V"),
+        (Message::SeedStatusTodo, "todo", "W"),
+        (Message::SeedStatusInProgress, "in_progress", "X"),
+        (Message::SeedStatusReview, "in_progress", "Y"),
+        (Message::SeedStatusDone, "done", "Z"),
+        (Message::SeedStatusCanceled, "canceled", "a"),
     ];
-    for (name, category, sort_key) in seeds {
+    for (message, category, sort_key) in seeds {
+        let name = messages.field(message, |name| {
+            crate::db::workflow_statuses::status_name_is_valid(name.trim())
+        });
         sqlx::query(
             r#"
             INSERT INTO fvoci.statuses (id, workspace_id, project_id, workflow_id, name, category, sort_key)

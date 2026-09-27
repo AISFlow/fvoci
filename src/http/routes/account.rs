@@ -48,6 +48,7 @@ use crate::http::guard::check_origin;
 use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::mail::{equalize_magic_response_timing, templates, MAGIC_PER_EMAIL, MAGIC_PER_IP};
+use crate::settings::messages::Message;
 use crate::validate::{normalize_email, validate_password_length};
 
 /// Source `http-rate-limit.ts` named limits (5-minute window unless noted).
@@ -273,6 +274,9 @@ async fn request_email_change(
     .await?;
     let started = Instant::now();
     let pool = &state.auth.db.pool;
+    let messages = crate::settings::messages::load(pool)
+        .await
+        .map_err(internal)?;
     if let Some(user) = account::live_user_identity(pool, auth.user_id)
         .await
         .map_err(internal)?
@@ -297,13 +301,13 @@ async fn request_email_change(
             let url = link_url(&state, "/confirm-email", &issued.token);
             state.mailer.send_detached(
                 new_email,
-                templates::EMAIL_CHANGE_SUBJECT.to_string(),
-                templates::magic_link_text(&url),
+                messages.subject(Message::EmailChangeSubject),
+                templates::magic_link_text(&messages, &url),
             );
             state.mailer.send_detached(
                 user.email,
-                templates::EMAIL_CHANGE_REQUESTED_SUBJECT.to_string(),
-                templates::EMAIL_CHANGE_REQUESTED_TEXT.to_string(),
+                messages.subject(Message::EmailChangeRequestedSubject),
+                messages.render(Message::EmailChangeRequestedText, &[]),
             );
         }
     }
@@ -323,6 +327,10 @@ async fn confirm_email_change(
     let Json(body) = body.map_err(AppError::from)?;
     let token = non_empty(body.token)?;
     let pool = &state.auth.db.pool;
+    // Read before the token is consumed so a failed read changes nothing.
+    let messages = crate::settings::messages::load(pool)
+        .await
+        .map_err(internal)?;
     let Some(payload) = consume_magic_token(pool, &token).await.map_err(internal)? else {
         return Err(AppError::from_code(ProblemCode::MagicInvalid));
     };
@@ -334,8 +342,8 @@ async fn confirm_email_change(
     };
     state.mailer.send_detached(
         changed.old_email,
-        templates::EMAIL_CHANGE_COMPLETED_SUBJECT.to_string(),
-        templates::EMAIL_CHANGE_COMPLETED_TEXT.to_string(),
+        messages.subject(Message::EmailChangeCompletedSubject),
+        messages.render(Message::EmailChangeCompletedText, &[]),
     );
     Ok(Json(OkResponse { ok: true }))
 }
@@ -416,6 +424,10 @@ async fn request_magic_link(
     limit(&state, format!("magic-email:{ip}:{email}"), MAGIC_PER_EMAIL).await?;
     let started = Instant::now();
     let pool = &state.auth.db.pool;
+    // Read for known and unknown addresses alike (same work on both paths).
+    let messages = crate::settings::messages::load(pool)
+        .await
+        .map_err(internal)?;
     if let Some(user) = account::login_link_user(pool, &email)
         .await
         .map_err(internal)?
@@ -427,8 +439,8 @@ async fn request_magic_link(
         let url = link_url(&state, "/magic-link", &issued.token);
         state.mailer.send_detached(
             email,
-            templates::MAGIC_LOGIN_SUBJECT.to_string(),
-            templates::magic_link_text(&url),
+            messages.subject(Message::MagicLoginSubject),
+            templates::magic_link_text(&messages, &url),
         );
     }
     equalize_magic_response_timing(started).await;

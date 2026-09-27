@@ -2587,3 +2587,206 @@ async fn dashboard_and_locate_follow_current_visibility() {
     assert_eq!(res.json["assigned"], json!([]));
     h.finish().await;
 }
+
+async fn patch_i18n(h: &Harness, cookie: &str, value: Value) -> Response {
+    call(
+        &h.app,
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        Some(json!({"i18n": value})),
+        Some(cookie),
+        peer(90),
+    )
+    .await
+}
+
+/// Source `settings-overrides.test.ts` / `consent.test.ts`: the magic-link and
+/// email-change mails and the withdrawn display name use the instance
+/// overrides at use time; a non-admin cannot set them.
+#[tokio::test]
+async fn i18n_overrides_apply_to_account_mail_and_anonymization() {
+    let h = Harness::start().await;
+    let (due_id, _, due_cookie) = h.member("gone", "member").await;
+    let (_, member_email, member_cookie) = h.member("mover", "member").await;
+    let passwordless = h.insert_user("linkonly@example.com", "링크", None).await;
+    h.add_membership(h.workspace_id, passwordless, "member")
+        .await;
+
+    // A workspace member is not an instance admin: refused, nothing stored.
+    let res = patch_i18n(
+        &h,
+        &member_cookie,
+        json!({"overrides": {"withdrawn.displayName": "Hijacked"}}),
+    )
+    .await;
+    assert!(
+        res.status == StatusCode::FORBIDDEN || res.status == StatusCode::NOT_FOUND,
+        "{:?} {:?}",
+        res.status,
+        res.json
+    );
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.instance_settings WHERE key = 'i18n'")
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(stored, 0);
+
+    let res = patch_i18n(
+        &h,
+        &h.owner_cookie,
+        json!({"overrides": {
+            "mail.magic.login.subject": "Your sign-in link",
+            "mail.magic.link.text": "{{minutes}} min: {{url}}",
+            "mail.magic.emailChange.subject": "Confirm the new address",
+            "mail.magic.emailChangeRequested.subject": "Address change requested",
+            "mail.magic.emailChangeRequested.text": "Someone asked to change your address.",
+            "mail.magic.emailChangeCompleted.subject": "Address changed",
+            "mail.magic.emailChangeCompleted.text": "Your address was changed.",
+            "withdrawn.displayName": "Former member"
+        }}),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+
+    // Magic login link.
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/magic-link",
+        Some(json!({"email": "linkonly@example.com"})),
+        None,
+        peer(91),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::ACCEPTED);
+    let mail = h
+        .sink
+        .wait_for(|m| m.to == "linkonly@example.com" && m.text().contains("/magic-link?token="))
+        .await;
+    assert!(mail.text().contains("Subject: Your sign-in link"));
+    assert!(mail
+        .text()
+        .contains("15 min: http://localhost/magic-link?token="));
+
+    // Email change: confirm link to the new address, notice to the old one,
+    // completion notice after confirm.
+    request_email_change(&h, &member_cookie, "moved@example.com", 92).await;
+    let confirm = h
+        .sink
+        .wait_for(|m| m.to == "moved@example.com" && m.text().contains("/confirm-email?token="))
+        .await;
+    assert!(confirm.text().contains("Subject: Confirm the new address"));
+    assert!(confirm
+        .text()
+        .contains("15 min: http://localhost/confirm-email?token="));
+    let notice = h
+        .sink
+        .wait_for(|m| m.to == member_email && m.text().contains("Address change requested"))
+        .await;
+    assert!(notice
+        .text()
+        .contains("Someone asked to change your address."));
+    let token = token_after(&confirm.text(), "/confirm-email?token=");
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/email/confirm",
+        Some(json!({"token": token})),
+        None,
+        peer(93),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    let done = h
+        .sink
+        .wait_for(|m| m.to == member_email && m.text().contains("Subject: Address changed"))
+        .await;
+    assert!(done.text().contains("Your address was changed."));
+
+    // Anonymization reads the override in its own transaction.
+    let res = h
+        .withdraw(
+            &due_cookie,
+            json!({"currentPassword": PASSWORD, "emailLocalPart": null}),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    sqlx::query(
+        "UPDATE fvoci.users SET deleted_at = now() - interval '14 days' - interval '1 minute' WHERE id = $1",
+    )
+    .bind(due_id)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        run_withdrawn_anonymize(&h.app_pool, Utc::now(), &cancel)
+            .await
+            .unwrap(),
+        1
+    );
+    let given: String = sqlx::query_scalar("SELECT given_name FROM fvoci.users WHERE id = $1")
+        .bind(due_id)
+        .fetch_one(&h.admin)
+        .await
+        .unwrap();
+    assert_eq!(given, "Former member");
+
+    // A name longer than the account name limit keeps the default; a reset
+    // restores it for the next anonymization.
+    let (next_id, _, next_cookie) = h.member("gone2", "member").await;
+    let (last_id, _, last_cookie) = h.member("gone3", "member").await;
+    let res = patch_i18n(
+        &h,
+        &h.owner_cookie,
+        json!({"overrides": {"withdrawn.displayName": "가".repeat(101)}}),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    for cookie in [&next_cookie, &last_cookie] {
+        let res = h
+            .withdraw(
+                cookie,
+                json!({"currentPassword": PASSWORD, "emailLocalPart": null}),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::OK);
+    }
+    sqlx::query(
+        "UPDATE fvoci.users SET deleted_at = now() - interval '15 days' WHERE id = ANY($1)",
+    )
+    .bind(vec![next_id])
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        run_withdrawn_anonymize(&h.app_pool, Utc::now(), &cancel)
+            .await
+            .unwrap(),
+        1
+    );
+    let res = patch_i18n(&h, &h.owner_cookie, Value::Null).await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    sqlx::query(
+        "UPDATE fvoci.users SET deleted_at = now() - interval '15 days' WHERE id = ANY($1)",
+    )
+    .bind(vec![last_id])
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        run_withdrawn_anonymize(&h.app_pool, Utc::now(), &cancel)
+            .await
+            .unwrap(),
+        1
+    );
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT given_name FROM fvoci.users WHERE id = ANY($1) ORDER BY email")
+            .bind(vec![next_id, last_id])
+            .fetch_all(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(names, ["탈퇴한 사용자", "탈퇴한 사용자"]);
+    h.finish().await;
+}

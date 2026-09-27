@@ -753,14 +753,12 @@ pub async fn identity_mail_for_event(
     tx: &mut Transaction<'_, Postgres>,
     event: &OutboxEvent,
 ) -> Result<Option<OutboundMail>, sqlx::Error> {
-    let (subject, text_fn): (&str, fn(&str) -> String) = match event.verb.as_str() {
-        "identity.linked" => (
-            crate::mail::templates::IDENTITY_LINKED_SUBJECT,
-            crate::mail::templates::identity_linked_text,
-        ),
+    use crate::settings::messages::Message;
+    let (subject, text) = match event.verb.as_str() {
+        "identity.linked" => (Message::IdentityLinkedSubject, Message::IdentityLinkedText),
         "identity.unlinked" => (
-            crate::mail::templates::IDENTITY_UNLINKED_SUBJECT,
-            crate::mail::templates::identity_unlinked_text,
+            Message::IdentityUnlinkedSubject,
+            Message::IdentityUnlinkedText,
         ),
         _ => return Ok(None),
     };
@@ -778,9 +776,12 @@ pub async fn identity_mail_for_event(
     let Some((email,)) = user else {
         return Ok(None);
     };
+    // Read at delivery time (a redelivery uses the then-current copy); the
+    // caller commits this transaction before SMTP.
+    let messages = crate::settings::messages::load(&mut **tx).await?;
     Ok(Some(OutboundMail {
         to: email,
-        subject: subject.to_string(),
-        text: text_fn(provider),
+        subject: messages.subject(subject),
+        text: messages.render(text, &[("provider", provider)]),
     }))
 }
