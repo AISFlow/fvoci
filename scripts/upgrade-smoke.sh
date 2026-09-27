@@ -187,7 +187,7 @@ cleanup() {
     if (( torn )); then
       printf 'FAIL: cleanup left resources or failed\n' >>"$ASSERT_LOG"
       echo "upgrade-smoke passed its checks but cleanup failed; kept for diagnosis:" >&2
-      echo "  projects: $UPGRADE_PROJECT $ROLLBACK_PROJECT (docker compose -p NAME down -v)" >&2
+      echo "  projects, in this order: $ROLLBACK_PROJECT $UPGRADE_PROJECT (docker compose -p NAME down -v)" >&2
       echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
       status=1
     else
@@ -204,7 +204,7 @@ cleanup() {
     [[ -f "$ROLLBACK_ENV" ]] && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" logs --no-color --tail 200 \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${ROLLBACK_PROJECT}.log"
     echo "upgrade-smoke failed after $((SECONDS - START_TS))s; kept for diagnosis:" >&2
-    echo "  projects: $UPGRADE_PROJECT $ROLLBACK_PROJECT (docker compose -p NAME down -v)" >&2
+    echo "  projects, in this order: $ROLLBACK_PROJECT $UPGRADE_PROJECT (docker compose -p NAME down -v)" >&2
     echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
   fi
   echo "evidence (redacted, kept): $EVIDENCE_DIR" >&2
@@ -454,16 +454,25 @@ storage_key() {
   sql "${UP[@]}" "$UPGRADE_TREE" "SELECT storage_key FROM fvoci.attachments WHERE id='$1' AND status='stored'"
 }
 
-# Every version of KEY as `<versionId> <size> <deleteMarker> <latest>` lines.
+# Every version of KEY as `<versionId> <size> <deleteMarker> <latest> <etag>`.
+# The pinned mcli emits no isLatest; the latest version is the one with the
+# highest versionOrdinal (newest first numbering), which must be unique.
 object_versions() {
   bucket_mc ls --versions "b/${S3_BUCKET_NAME}/$1" | python3 -c '
 import json, sys
-for line in sys.stdin:
-    if line.strip():
-        v = json.loads(line)
-        assert v.get("status") == "success", v
-        print(v["versionId"], v.get("size", 0), str(bool(v.get("isDeleteMarker"))).lower(), str(bool(v.get("isLatest"))).lower())
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+assert rows and all(v.get("status") == "success" for v in rows), rows
+ordinals = [v["versionOrdinal"] for v in rows]
+assert all(isinstance(o, int) for o in ordinals) and len(set(ordinals)) == len(ordinals), rows
+for v in rows:
+    print(v["versionId"], v.get("size", 0), str(bool(v.get("isDeleteMarker"))).lower(),
+          str(v["versionOrdinal"] == max(ordinals)).lower(), v.get("etag") or "-")
 '
+}
+
+# Field of the latest version line (1 id, 2 size, 3 marker, 5 etag).
+latest_field() {
+  awk -v f="$2" '$4 == "true" { print $f }' "$1"
 }
 
 # fvoci-migrate --verify-storage with the server's environment of PROJECT; sets
@@ -613,13 +622,19 @@ else
   KEY_A="$(storage_key "$ATTACHMENT_ID")"
   KEY_B="$(storage_key "$ATTACHMENT_B_ID")"
   [[ -n "$KEY_A" && -n "$KEY_B" && "$KEY_A" != "$KEY_B" ]] || fail "stored keys not found"
-  for key in "$KEY_A" "$KEY_B"; do
-    object_versions "$key" >"$WORK/versions-before"
-    if [[ "$(wc -l <"$WORK/versions-before")" != 1 ]] || ! grep -q " $(wc -c <"$FIXTURE_HWPX") false true$" "$WORK/versions-before"; then
-      fail "expected one live version of $key before the upgrade: $(cat "$WORK/versions-before")"
+  # Checkpoint: the one live version of each key at the dump, kept for restore.
+  for name in a b; do
+    [[ "$name" == a ]] && key="$KEY_A" || key="$KEY_B"
+    object_versions "$key" >"$WORK/checkpoint-${name}"
+    cp "$WORK/checkpoint-${name}" "$EVIDENCE_DIR/bucket-checkpoint-${name}.txt"
+    if [[ "$(wc -l <"$WORK/checkpoint-${name}")" != 1 ]] \
+      || [[ "$(latest_field "$WORK/checkpoint-${name}" 2) $(latest_field "$WORK/checkpoint-${name}" 3)" != "$(wc -c <"$FIXTURE_HWPX") false" ]]; then
+      fail "expected one live version of $key at the dump: $(cat "$WORK/checkpoint-${name}")"
     fi
   done
-  log_assert "pg_dump $(wc -c <"$BACKUP_DIR/database.dump") bytes at ${DUMP_AT}, 0 other sessions; 2 stored objects, one live version each: ok"
+  CKPT_A="$(latest_field "$WORK/checkpoint-a" 1)"
+  CKPT_B="$(latest_field "$WORK/checkpoint-b" 1)"
+  log_assert "pg_dump $(wc -c <"$BACKUP_DIR/database.dump") bytes at ${DUMP_AT}, 0 other sessions; checkpoint versions A=${CKPT_A} B=${CKPT_B} (one each): ok"
 fi
 cp -p "$UPGRADE_ENV" "$BACKUP_ENV"
 [[ -z "$(running_ids "$UPGRADE_PROJECT" server)" ]] || fail "server still running after the pre-upgrade backup"
@@ -756,8 +771,17 @@ no_server_started() {
 }
 
 s3_rollback() {
-  local silo_name wrong_bucket marker original fixture_size
+  local silo_name wrong_bucket marker fixture_size running
   fixture_size="$(wc -c <"$FIXTURE_HWPX")"
+  # The rollback server joins the upgrade network to reach the silo. Stop that
+  # project's postgres and meilisearch first so `postgres`/`meilisearch` there
+  # can only mean the rollback project's own (volumes kept).
+  project_compose "${UP[@]}" "$UPGRADE_TREE" stop -t 30 postgres meilisearch
+  running="$(docker ps --filter "label=com.docker.compose.project=$UPGRADE_PROJECT" \
+    --format '{{.Label "com.docker.compose.service"}}' | sort | paste -sd, -)"
+  [[ "$running" == silo ]] || fail "upgrade project must run only silo before the rollback, runs: ${running}"
+  log_assert "upgrade project: postgres and meilisearch stopped, only silo running: ok"
+
   # Damage after the backup while every server is stopped, as a purge or a
   # faulty writer would: object A deleted, object B overwritten with other bytes.
   log_assert "== bucket damage after the backup: delete A, overwrite B"
@@ -765,14 +789,18 @@ s3_rollback() {
   printf 'overwritten after the backup\n' | bucket_mc pipe "b/${S3_BUCKET_NAME}/${KEY_B}" >/dev/null
   object_versions "$KEY_A" >"$WORK/versions-a"
   object_versions "$KEY_B" >"$WORK/versions-b"
-  if [[ "$(wc -l <"$WORK/versions-a")" != 2 ]] || ! grep -q ' true true$' "$WORK/versions-a"; then
-    fail "A is not a delete marker over one version"
+  cp "$WORK/versions-a" "$EVIDENCE_DIR/bucket-damaged-a.txt"
+  cp "$WORK/versions-b" "$EVIDENCE_DIR/bucket-damaged-b.txt"
+  marker="$(latest_field "$WORK/versions-a" 1)"
+  if [[ "$(wc -l <"$WORK/versions-a")" != 2 || "$(latest_field "$WORK/versions-a" 3)" != true ]] \
+    || ! grep -q "^${CKPT_A} ${fixture_size} false false " "$WORK/versions-a"; then
+    fail "A is not a delete marker over its checkpoint version"
   fi
-  if [[ "$(wc -l <"$WORK/versions-b")" != 2 ]] || ! grep -q " ${fixture_size} false false$" "$WORK/versions-b" \
-    || grep -q " ${fixture_size} false true$" "$WORK/versions-b"; then
-    fail "B latest version is not the overwrite"
+  if [[ "$(wc -l <"$WORK/versions-b")" != 2 || "$(latest_field "$WORK/versions-b" 2)" == "$fixture_size" ]] \
+    || ! grep -q "^${CKPT_B} ${fixture_size} false false " "$WORK/versions-b"; then
+    fail "B latest version is not an overwrite over its checkpoint version"
   fi
-  log_assert "bucket: A latest is a delete marker, B latest is ${fixture_size}-byte-mismatched overwrite, originals kept as versions: ok"
+  log_assert "bucket: A latest is delete marker ${marker}, B latest is a $(latest_field "$WORK/versions-b" 2)-byte overwrite; checkpoints kept as older versions: ok"
 
   # Point the rollback server at the same bucket: the upgrade project's silo,
   # reached through that project's network (run-owned overlay, not in the repo).
@@ -813,15 +841,21 @@ EOF
   no_server_started "after refused verify-storage"
   log_assert "before start: wrong bucket refused at HeadBucket; damaged bucket refused (exit ${VS_STATUS}) missing=[A] sizeMismatch=[B]; no server container, no HTTP: ok"
 
-  # Restore both objects from bucket versions (RUNNING.md item 3).
-  marker="$(awk '$3 == "true" && $4 == "true" { print $1 }' "$WORK/versions-a")"
-  original="$(awk -v n="$fixture_size" '$2 == n && $3 == "false" && $4 == "false" { print $1 }' "$WORK/versions-b")"
-  [[ -n "$marker" && -n "$original" ]] || fail "version ids not found"
+  # Restore both checkpoint versions (RUNNING.md item 3): drop A's delete
+  # marker, copy B's checkpoint version back over the overwrite.
   bucket_mc rm --version-id "$marker" "b/${S3_BUCKET_NAME}/${KEY_A}" >/dev/null
-  bucket_mc cp --version-id "$original" "b/${S3_BUCKET_NAME}/${KEY_B}" "b/${S3_BUCKET_NAME}/${KEY_B}" >/dev/null
-  for key in "$KEY_A" "$KEY_B"; do
-    object_versions "$key" | grep -q " ${fixture_size} false true$" || fail "latest version of $key is not the original size"
-  done
+  bucket_mc cp --version-id "$CKPT_B" "b/${S3_BUCKET_NAME}/${KEY_B}" "b/${S3_BUCKET_NAME}/${KEY_B}" >/dev/null
+  object_versions "$KEY_A" >"$WORK/versions-a"
+  object_versions "$KEY_B" >"$WORK/versions-b"
+  cp "$WORK/versions-a" "$EVIDENCE_DIR/bucket-restored-a.txt"
+  cp "$WORK/versions-b" "$EVIDENCE_DIR/bucket-restored-b.txt"
+  [[ "$(wc -l <"$WORK/versions-a")" == 1 && "$(latest_field "$WORK/versions-a" 1)" == "$CKPT_A" ]] \
+    || fail "A latest is not its checkpoint version ${CKPT_A}"
+  # A copy is a new version; its bytes are checked end to end by sha256 below.
+  if [[ "$(wc -l <"$WORK/versions-b")" != 3 || "$(latest_field "$WORK/versions-b" 2)" != "$fixture_size" \
+    || "$(latest_field "$WORK/versions-b" 3)" != false ]] || ! grep -q "^${CKPT_B} " "$WORK/versions-b"; then
+    fail "B latest is not a copy of its checkpoint version ${CKPT_B}"
+  fi
   verify_storage restored "${RB[@]}" "$OLD_TREE"
   (( VS_STATUS == 0 )) || fail "verify-storage failed after restoring versions"
   expect_storage_report 2 "" "" || fail "unexpected verify-storage report after restoring versions"
@@ -831,7 +865,7 @@ EOF
   fi
   redact <<<"$VERIFY" >"$EVIDENCE_DIR/verify-secrets-rollback.log"
   no_server_started "after restored verify"
-  log_assert "versions restored (A delete marker removed, B original copied back); verify-storage checked 2 ok; verify-secrets ok; still no server: ok"
+  log_assert "versions restored (A latest = checkpoint ${CKPT_A}, B checkpoint ${CKPT_B} copied as a new latest); verify-storage checked 2 ok; verify-secrets ok; still no server: ok"
   project_compose "${RB[@]}" "$OLD_TREE" up -d --wait server 2>&1 | redact >"$EVIDENCE_DIR/rollback-start.log"
   docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(running_ids "$ROLLBACK_PROJECT" server)" \
     | grep -qx "S3_ENDPOINT=http://${silo_name}:9000" || fail "rollback server is not pointed at the original bucket"
