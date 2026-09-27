@@ -24,6 +24,7 @@ import { InvitePage } from "@/pages/InvitePage";
 import { AttachmentViewPage } from "@/pages/AttachmentViewPage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { PublicSharePage } from "@/pages/PublicSharePage";
+import { ShareAttachmentViewPage } from "@/pages/ShareAttachmentViewPage";
 import { WorkspaceHomePage } from "@/pages/WorkspaceHomePage";
 import { MagicLinkPage } from "@/pages/MagicLinkPage";
 import { ConfirmEmailPage } from "@/pages/ConfirmEmailPage";
@@ -53,6 +54,7 @@ export function App() {
           <Route path="/setup" element={<SetupPage />} />
           {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
           <Route path="/s/:token" element={<PublicSharePage />} />
+          <Route path="/s/:token/attachments/:attachmentId/view" element={<ShareAttachmentViewPage />} />
           <Route
             path="/invite/:token"
             element={
