@@ -1,6 +1,8 @@
 import { t } from "@fvoci/i18n";
+import { useQuery } from "@tanstack/react-query";
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { loadErrorMessage } from "@/components/query-status";
+import { publicInstanceQuery } from "@/lib/queries/admin";
 import { chunkPlainText } from "./chunk-plain-text";
 import { viewerKind } from "./attachment-kind";
 import { ViewerDownloadButton, ViewerErrorPane, ViewerLoadingPane } from "./viewer-shell";
@@ -14,6 +16,11 @@ const PdfViewer = lazy(async () => {
 const DocxViewer = lazy(async () => {
   const mod = await import("./docx-viewer");
   return { default: mod.DocxViewer };
+});
+
+const HwpViewer = lazy(async () => {
+  const mod = await import("./hwp-viewer");
+  return { default: mod.HwpViewer };
 });
 
 const XlsxViewer = lazy(async () => {
@@ -161,6 +168,40 @@ function SearchChunkSupplement({ previewHtmlUrl, chunk }: { previewHtmlUrl: stri
   );
 }
 
+/**
+ * HWP/HWPX (source `HwpPane`): the rhwp layout always, plus the search
+ * supplement only when the instance extracts on the server (`mode ===
+ * "server"`). The mode is read only for a session hit with a chunk, so a
+ * share view never calls `/instance` or `preview-html`, and the layout does
+ * not wait for it.
+ */
+function HwpPane({
+  downloadUrl,
+  previewHtmlUrl,
+  chunk,
+}: {
+  downloadUrl: string;
+  previewHtmlUrl?: string;
+  chunk?: number;
+}) {
+  const wantsSupplement = previewHtmlUrl !== undefined && chunk !== undefined;
+  const mode = useQuery({
+    ...publicInstanceQuery,
+    enabled: wantsSupplement,
+    select: (data) => data.values.attachmentPreview.mode,
+  });
+  return (
+    <>
+      {wantsSupplement && mode.data === "server" ? (
+        <SearchChunkSupplement previewHtmlUrl={previewHtmlUrl} chunk={chunk} />
+      ) : null}
+      <Suspense fallback={<ViewerLoadingPane />}>
+        <HwpViewer key={downloadUrl} downloadUrl={downloadUrl} {...(chunk === undefined ? {} : { chunk })} />
+      </Suspense>
+    </>
+  );
+}
+
 export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
   const kind = viewerKind({ name: props.name, mime: props.mime, image: props.image });
   const chrome = (
@@ -204,6 +245,14 @@ export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
       <Suspense fallback={<ViewerLoadingPane />}>
         <PdfViewer downloadUrl={props.downloadUrl} />
       </Suspense>
+    );
+  } else if (kind === "hwp") {
+    body = (
+      <HwpPane
+        downloadUrl={props.downloadUrl}
+        {...(props.previewHtmlUrl === undefined ? {} : { previewHtmlUrl: props.previewHtmlUrl })}
+        {...(props.chunk === undefined ? {} : { chunk: props.chunk })}
+      />
     );
   } else if (kind === "docx" || kind === "xlsx") {
     const Layout = kind === "docx" ? DocxViewer : XlsxViewer;
