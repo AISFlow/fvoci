@@ -252,19 +252,22 @@ test("public features.ai gates the document AI menu; the server keeps its own AI
 
 type BodyNode = { type?: string; text?: string; attrs?: { id?: string }; content?: BodyNode[] };
 
-/** Non-empty paragraph texts of a stored body, mentions as `@<id>`, in document order. */
-function paragraphsOf(node: BodyNode): string[] {
+/**
+ * Top-level blocks of a stored body in order: a paragraph as its text (mentions as `@<id>`,
+ * empty paragraphs as ""), any other block as `type[paragraph|texts]`.
+ */
+function blocksOf(root: BodyNode): string[] {
   const inline = (child: BodyNode): string =>
     child.type === "text"
       ? (child.text ?? "")
       : child.type === "mention"
         ? `@${child.attrs?.id ?? ""}`
         : (child.content ?? []).map(inline).join("");
-  if (node.type === "paragraph") {
-    const text = inline(node);
-    return text.length > 0 ? [text] : [];
-  }
-  return (node.content ?? []).flatMap(paragraphsOf);
+  const paragraphs = (node: BodyNode): string[] =>
+    node.type === "paragraph" ? [inline(node)] : (node.content ?? []).flatMap(paragraphs);
+  return (root.content ?? []).map((node) =>
+    node.type === "paragraph" ? inline(node) : `${node.type}[${paragraphs(node).join("|")}]`,
+  );
 }
 
 test("confirmed AI results apply through the live editor and the project task route", async ({ page }) => {
@@ -321,14 +324,19 @@ test("confirmed AI results apply through the live editor and the project task ro
         `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/body`,
       );
       expect(res.ok()).toBe(true);
-      return paragraphsOf((await res.json()).contentJson as BodyNode);
+      return blocksOf((await res.json()).contentJson as BodyNode);
     };
 
     await page.goto(`/w/${owner.workspaceSlug}/${doc.displayId}`);
     await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
     const editor = page.locator(".fvoci-editor .ProseMirror");
     await editor.click();
+    // The body ends in a bullet list with the caret inside it: results must go after the list,
+    // not into the item or the caret position.
     await page.keyboard.type("기존 본문");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("- 항목 하나");
+    await expect(editor.locator("ul li")).toHaveCount(1);
     await page.keyboard.press("Home");
 
     const aiMenu = page.getByRole("group", { name: "AI 도구" });
@@ -352,7 +360,13 @@ test("confirmed AI results apply through the live editor and the project task ro
     await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
     await expect
       .poll(bodyOf, { timeout: 15_000 })
-      .toEqual(["기존 본문", "요약 첫 줄 🙂", "요약 둘째 줄", `@${linkDoc.id}`]);
+      .toEqual([
+        "기존 본문",
+        "bulletList[항목 하나]",
+        "요약 첫 줄 🙂",
+        "요약 둘째 줄",
+        `@${linkDoc.id}`,
+      ]);
 
     // Tasks: the second create is rejected once (injected 422 before the server); the retry
     // creates only what is still missing, so the first title is not recreated.

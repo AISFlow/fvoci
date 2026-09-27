@@ -39,6 +39,26 @@ export function aiInsertNodes(preview: InsertPreview): InsertNode[] {
   ];
 }
 
+/** The slice of a ProseMirror document `appendRange` reads. */
+export interface AppendTarget {
+  content: { size: number };
+  lastChild: { type: { name: string }; content: { size: number }; nodeSize: number } | null;
+}
+
+/**
+ * Where appended blocks go: after the last top-level block, so they never land inside a list,
+ * code block or table and never split or merge the last paragraph. An empty last paragraph (the
+ * editor's trailing placeholder) is replaced instead of leaving a blank line before the result.
+ */
+export function appendRange(doc: AppendTarget): { from: number; to: number } {
+  const end = doc.content.size;
+  const last = doc.lastChild;
+  if (last && last.type.name === "paragraph" && last.content.size === 0) {
+    return { from: end - last.nodeSize, to: end };
+  }
+  return { from: end, to: end };
+}
+
 /**
  * `pending` — not created yet (retry creates it); `created` — the server answered success;
  * `unknown` — the request may have committed (no answer or a server error), so a retry must not

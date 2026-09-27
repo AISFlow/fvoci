@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   aiInsertNodes,
+  appendRange,
   applyTaskTitles,
   hasPendingTask,
   isDefiniteStatus,
@@ -107,4 +108,33 @@ test("4xx 만 확정 거절이다", () => {
   assert.equal(isDefiniteStatus(500), false);
   assert.equal(isDefiniteStatus(503), false);
   assert.equal(isDefiniteStatus(null), false);
+});
+
+const block = (name: string, contentSize: number) => ({
+  type: { name },
+  content: { size: contentSize },
+  nodeSize: contentSize + 2,
+});
+
+test("추가 위치는 마지막 블록 뒤이고, 빈 마지막 문단만 대체한다", () => {
+  // "기존 본문" paragraph: text stays whole, the result goes after it.
+  assert.deepEqual(appendRange({ content: { size: 7 }, lastChild: block("paragraph", 5) }), {
+    from: 7,
+    to: 7,
+  });
+  // A list or code block at the end is not entered.
+  assert.deepEqual(appendRange({ content: { size: 20 }, lastChild: block("bulletList", 18) }), {
+    from: 20,
+    to: 20,
+  });
+  assert.deepEqual(appendRange({ content: { size: 12 }, lastChild: block("codeBlock", 10) }), {
+    from: 12,
+    to: 12,
+  });
+  // Trailing empty paragraph (size 2) is replaced, not left as a blank line.
+  assert.deepEqual(appendRange({ content: { size: 9 }, lastChild: block("paragraph", 0) }), {
+    from: 7,
+    to: 9,
+  });
+  assert.deepEqual(appendRange({ content: { size: 0 }, lastChild: null }), { from: 0, to: 0 });
 });

@@ -10,6 +10,7 @@ import { treeQuery } from "@/lib/queries/documents";
 import { aiEnabledQuery } from "@/lib/queries/instance-settings";
 import {
   aiInsertNodes,
+  appendRange,
   applyTaskTitles,
   hasPendingTask,
   isDefiniteStatus,
@@ -233,11 +234,12 @@ export function DocumentAiMenu({
       result.action === "summarize"
         ? aiInsertNodes({ action: "summarize", lines: result.lines })
         : aiInsertNodes({ action: "suggestLinks", links });
-    // WHY: the confirmed result goes to the end of the body, not the caret — it never splits the
-    // sentence being edited. The insert is a normal editor transaction, so Yjs syncs it like typing.
+    // WHY: the confirmed result goes after the last block, not the caret — it never splits the
+    // sentence being edited or lands inside a trailing list/code block. The insert is a normal
+    // editor transaction, so Yjs syncs it like typing and keeps the existing body's history.
     applying.current = true;
     try {
-      editor.chain().focus("end").insertContent(content).run();
+      editor.chain().insertContentAt(appendRange(editor.state.doc), content).focus("end").run();
     } finally {
       applying.current = false;
     }
