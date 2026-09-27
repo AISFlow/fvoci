@@ -317,10 +317,7 @@ impl Stream for TaskAuthorizedSseStream {
             Poll::Ready(true) => {
                 let item = this.pending.take().expect("pending after auth");
                 this.authorize = None;
-                release_queue_body_bytes(
-                    &this.queue_body_bytes,
-                    task_item_body_bytes(&item),
-                );
+                release_queue_body_bytes(&this.queue_body_bytes, task_item_body_bytes(&item));
                 Poll::Ready(Some(Ok(queue_item_to_event(item))))
             }
         }
