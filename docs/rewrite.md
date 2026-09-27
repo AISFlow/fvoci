@@ -141,6 +141,10 @@
 진행 중(아래 항목은 미수락):
 - #131 협업 crash 검사의 live helper 관찰·SIGKILL·새 컨텍스트 복구 순서 보강: 기존 수정의 독립 검토와 로컬 24개 브라우저 검사를 회수했다. 최신 main 통합 delta 검토·CI는 진행 중이다.
 - #132 태스크 화면 갱신·workspace 접근 철회 SSE: PG 8개와 실제 UI 브라우저 2개를 회수했으며 최신 통합 SHA의 최종 검토·CI는 진행 중이다.
+- push-subscriptions(Web Push): 로컬 후보 `fvoci/rust-web-push`(475acbae + main 3478aef0 병합)이며 미수락이다.
+  migration 040, 세션 전용 PUT·VAPID 부트스트랩/`--rotate-vapid`/`--verify-secrets`, `push` outbox 소비자,
+  `/sw.js`·PushToggle을 포함한다. 로컬 PG·단위·웹 검사 결과는 인계 기록에 있다. 독립 검토·원격 CI·실제
+  푸시 서비스(FCM 등) 발송은 미실행이다. 같은 브라우저를 공유하는 사용자의 로그아웃 후 수신 정책은 원본 동작을 유지한 채 결정 대기다.
 - workspace ZIP export: 기존 구현을 보존하며 독립 검토의 인가·tenant·취소/한도 지적을 수정·검증 중이다.
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
   제품 런타임과 별개다. 필수 백업·복원 자체 검증은 Rust이며 pg_dump/pg_restore·얇은 실행 스크립트는 유지한다.

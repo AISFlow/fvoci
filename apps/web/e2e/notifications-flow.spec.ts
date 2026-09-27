@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, type Response, test } from "@playwright/test";
 import { createE2eUser, login, logout } from "./helpers";
 
 const owner = {
@@ -129,5 +129,124 @@ test("assignment shows unread badge, inbox, and mark-read", async ({ page }) => 
   await expect(page.getByRole("button", { name: "알림", exact: true })).toBeVisible({
     timeout: 15_000,
   });
+
+  await browserPushToggle(page, workspace.id);
 });
 
+/**
+ * Browser push opt-in through the real UI, `/instance` key, `/sw.js`
+ * registration, notification permission and PUT route. Headless Chromium has
+ * no push service, so only `PushManager.subscribe/getSubscription` are a
+ * controlled in-page boundary (persisted in sessionStorage); nothing reaches
+ * FCM or any other push service.
+ */
+async function browserPushToggle(page: Page, workspaceId: string): Promise<void> {
+  await page.context().grantPermissions(["notifications"]);
+  await page.addInitScript(() => {
+    const KEY = "e2e-push-subscription";
+    const LOG = "e2e-push-log";
+    const log = (entry: string) => {
+      const items: string[] = JSON.parse(sessionStorage.getItem(LOG) ?? "[]");
+      items.push(entry);
+      sessionStorage.setItem(LOG, JSON.stringify(items));
+    };
+    const toBase64Url = (bytes: Uint8Array) =>
+      btoa(String.fromCharCode(...bytes))
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+    const fromBase64Url = (value: string) =>
+      Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+    const build = (stored: { endpoint: string; key: string }) => ({
+      endpoint: stored.endpoint,
+      expirationTime: null,
+      options: { userVisibleOnly: true, applicationServerKey: fromBase64Url(stored.key).buffer },
+      toJSON: () => ({
+        endpoint: stored.endpoint,
+        expirationTime: null,
+        keys: {
+          p256dh:
+            "BLn9b-VR0ca83knDNZ32dCHGyjJp-1riX9ZTN40MqV8K_LpQmLqxC_DoHvqvFXO_nGdAB4W9dogZb_sM-uV4JbY",
+          auth: "EjRWeJCrze8SNFZ4kKvN7w",
+        },
+      }),
+      unsubscribe: async () => {
+        log("unsubscribe");
+        sessionStorage.removeItem(KEY);
+        return true;
+      },
+    });
+    PushManager.prototype.getSubscription = async function () {
+      const raw = sessionStorage.getItem(KEY);
+      return raw ? (build(JSON.parse(raw)) as unknown as PushSubscription) : null;
+    };
+    PushManager.prototype.subscribe = async function (options?: PushSubscriptionOptionsInit) {
+      const key = options?.applicationServerKey;
+      if (!(key instanceof Uint8Array)) throw new Error("expected raw applicationServerKey");
+      const stored = {
+        endpoint: `https://push.e2e.invalid/send/${crypto.randomUUID()}`,
+        key: toBase64Url(key),
+      };
+      log(`subscribe:${stored.key.length}`);
+      sessionStorage.setItem(KEY, JSON.stringify(stored));
+      return build(stored) as unknown as PushSubscription;
+    };
+  });
+
+  const instance = await (await page.request.get("/api/v1/instance")).json();
+  const publicKey: string | null = instance.values.webPushPublicKey;
+  expect(publicKey, "server bootstraps VAPID with ENCRYPTION_KEYS").toMatch(
+    /^B[A-Za-z0-9_-]{86}$/,
+  );
+
+  const pushLog = async (): Promise<string[]> =>
+    JSON.parse((await page.evaluate(() => sessionStorage.getItem("e2e-push-log"))) ?? "[]");
+  const putPath = `/api/v1/workspaces/${workspaceId}/push-subscriptions`;
+  const isPut = (response: Response) =>
+    response.url().endsWith(putPath) && response.request().method() === "PUT";
+
+  await page.goto(`/w/${owner.workspaceSlug}/settings`);
+  const toggle = page.getByLabel("브라우저 푸시");
+  await expect(toggle).toBeEnabled({ timeout: 15_000 });
+  await expect(toggle).not.toBeChecked();
+
+  const saved = page.waitForResponse(isPut);
+  await toggle.click();
+  const put = await saved;
+  expect(put.status()).toBe(200);
+  const body = put.request().postDataJSON();
+  expect(Object.keys(body).sort()).toEqual(["endpoint", "keys"]);
+  expect(body.endpoint).toMatch(/^https:\/\/push\.e2e\.invalid\/send\//);
+  await expect(toggle).toBeChecked();
+  await expect(page.getByText("푸시 알림을 켜지 못했습니다.")).toHaveCount(0);
+  expect(
+    await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.getRegistration("/sw.js");
+      const worker = registration?.active ?? registration?.waiting ?? registration?.installing;
+      return worker?.scriptURL ?? null;
+    }),
+  ).toMatch(/\/sw\.js$/);
+
+  // A subscription bound to an older VAPID key (after rotate-vapid) is
+  // replaced on load and stored again.
+  await page.evaluate(() => {
+    const stored = JSON.parse(sessionStorage.getItem("e2e-push-subscription") ?? "{}");
+    stored.key = `B${"A".repeat(85)}E`;
+    sessionStorage.setItem("e2e-push-subscription", JSON.stringify(stored));
+  });
+  const resaved = page.waitForResponse(isPut);
+  await page.reload();
+  expect((await resaved).status()).toBe(200);
+  await expect(page.getByLabel("브라우저 푸시")).toBeChecked({ timeout: 15_000 });
+  expect(await pushLog()).toEqual(["subscribe:87", "unsubscribe", "subscribe:87"]);
+
+  // Disabling only unsubscribes the browser: there is no delete route.
+  const requests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().endsWith(putPath)) requests.push(request.method());
+  });
+  await page.getByLabel("브라우저 푸시").click();
+  await expect(page.getByLabel("브라우저 푸시")).not.toBeChecked();
+  expect(await pushLog()).toEqual(["subscribe:87", "unsubscribe", "subscribe:87", "unsubscribe"]);
+  expect(requests).toEqual([]);
+}
