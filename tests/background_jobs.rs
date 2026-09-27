@@ -31,7 +31,7 @@ use fvoci_server::jobs::{
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{
     admin_pool, app_pool, create_project, json_request, session_id_for_user, setup_session,
-    wait_for_query_blocked_by, TestDb,
+    wait_for_blocked_by_holder, wait_for_query_blocked_by, TestDb,
 };
 use serde_json::json;
 use sqlx::{Connection, PgPool};
@@ -2257,12 +2257,62 @@ async fn revision_gc_caps_total_delete_rounds_per_batch() {
     harness.cleanup().await;
 }
 
+const GC_PROMOTION_RACE_LOCK_NS: i32 = 0x6676636f; // "fvoc" — test-only advisory gate
+const GC_PROMOTION_RACE_LOCK_KEY: i32 = 0x128;
+
+async fn install_gc_promotion_race_gate(admin: &PgPool) {
+    let sql = format!(
+        r#"
+        CREATE OR REPLACE FUNCTION fvoci.test_gc_promotion_race_gate()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.reason = 'manual'
+               AND OLD.reason IN ('session', 'scheduled')
+               AND NEW.workspace_id = OLD.workspace_id
+               AND NEW.id = OLD.id
+            THEN
+                PERFORM pg_advisory_xact_lock({ns}, {key});
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        "#,
+        ns = GC_PROMOTION_RACE_LOCK_NS,
+        key = GC_PROMOTION_RACE_LOCK_KEY,
+    );
+    sqlx::query(&sql)
+        .execute(admin)
+        .await
+        .expect("promotion gate fn");
+    sqlx::query(
+        r#"
+        CREATE TRIGGER fvoci_test_gc_promotion_race_gate
+        BEFORE UPDATE ON fvoci.revisions
+        FOR EACH ROW EXECUTE FUNCTION fvoci.test_gc_promotion_race_gate()
+        "#,
+    )
+    .execute(admin)
+    .await
+    .expect("promotion gate trigger");
+}
+
+async fn drop_gc_promotion_race_gate(admin: &PgPool) {
+    let _ =
+        sqlx::query("DROP TRIGGER IF EXISTS fvoci_test_gc_promotion_race_gate ON fvoci.revisions")
+            .execute(admin)
+            .await;
+    let _ = sqlx::query("DROP FUNCTION IF EXISTS fvoci.test_gc_promotion_race_gate()")
+        .execute(admin)
+        .await;
+}
+
 #[tokio::test]
 async fn gc_retains_manual_when_promotion_races_row_lock() {
     let harness = TestDb::bootstrap().await;
     let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
     let pool = app_pool(&harness).await;
     let admin = admin_pool(&harness).await;
+    install_gc_promotion_race_gate(&admin).await;
     let session_id = session_id_for_user(&admin, user_id).await;
     let doc = create_wiki_document(
         &pool,
@@ -2328,24 +2378,17 @@ async fn gc_retains_manual_when_promotion_races_row_lock() {
     .execute(&admin)
     .await
     .expect("head session row");
-    let mut hold = admin.begin().await.expect("tx");
-    let hold_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *hold)
+    let mut gate = admin.begin().await.expect("gate tx");
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
         .await
-        .expect("pid");
-    sqlx::query(
-        r#"
-        SELECT id FROM fvoci.revisions
-        WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2
-        ORDER BY created_at ASC
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(doc.id)
-    .fetch_all(&mut *hold)
-    .await
-    .expect("lock revision rows");
+        .expect("gate pid");
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(GC_PROMOTION_RACE_LOCK_NS)
+        .bind(GC_PROMOTION_RACE_LOCK_KEY)
+        .execute(&mut *gate)
+        .await
+        .expect("hold promotion gate");
     let pool_promote = app_pool(&harness).await;
     let document_id = doc.id;
     let y_snapshot_promote = y_snapshot.clone();
@@ -2365,19 +2408,22 @@ async fn gc_retains_manual_when_promotion_races_row_lock() {
         )
         .await
     });
-    let promote_pid =
-        wait_for_query_blocked_by(&admin, hold_pid, "%ORDER BY created_at DESC%").await;
+    let promote_pid = wait_for_blocked_by_holder(&admin, gate_pid, None, 1)
+        .await
+        .into_iter()
+        .next()
+        .expect("promotion blocked in gate");
     let pool_gc = app_pool(&harness).await;
     let workspace_id_gc = workspace_id;
     let gc_task = tokio::spawn(async move {
         gc_automatic_revisions_batch(&pool_gc, workspace_id_gc, 0, 5_000).await
     });
-    let gc_pid = wait_for_query_blocked_by(&admin, hold_pid, "%PARTITION BY target_kind%").await;
+    let gc_pid = wait_for_query_blocked_by(&admin, promote_pid, "%PARTITION BY target_kind%").await;
     assert_ne!(
         promote_pid, gc_pid,
         "promotion and GC must be distinct waiters"
     );
-    hold.commit().await.expect("release head lock");
+    gate.commit().await.expect("release promotion gate");
     let promoted = promote_task
         .await
         .expect("join promote")
@@ -2414,6 +2460,7 @@ async fn gc_retains_manual_when_promotion_races_row_lock() {
     .await
     .expect("count");
     assert_eq!(remaining, 1);
+    drop_gc_promotion_race_gate(&admin).await;
     admin.close().await;
     pool.close().await;
     harness.cleanup().await;
