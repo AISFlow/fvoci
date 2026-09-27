@@ -192,6 +192,11 @@ export function addCustomFilter(query: ViewQuery, filter: CustomFilter): ViewQue
   return patchViewFilter(query, "custom", [...current, filter]);
 }
 
+export function withTitleFilter(query: ViewQuery, title: string): ViewQuery {
+  const trimmed = title.trim();
+  return patchViewFilter(query, "title", trimmed === "" ? undefined : trimmed.slice(0, TITLE_MAX));
+}
+
 export function removeCustomFilter(query: ViewQuery, index: number): ViewQuery {
   return patchViewFilter(
     query,
