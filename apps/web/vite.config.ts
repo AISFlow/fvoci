@@ -11,6 +11,10 @@ import {
   pdfjsAssetBase,
 } from "./src/features/attachments/pdf-assets.ts";
 import {
+  RHWP_THIRD_PARTY_FILE,
+  rhwpWasmNoticeTitle,
+} from "./src/features/attachments/rhwp-notice.ts";
+import {
   fvociWebLicenseAdapt,
   VITE_LICENSE_DATA_FILE,
 } from "./vite-plugin-fvoci-web-licenses.ts";
@@ -80,6 +84,23 @@ function pdfjsAssets(): Plugin {
   };
 }
 
+/** Upstream crate table for the Rust code compiled into @rhwp/core's wasm. */
+function rhwpWasmNotice() {
+  const coreDir = path.dirname(createRequire(import.meta.url).resolve("@rhwp/core"));
+  const { version } = JSON.parse(
+    fs.readFileSync(path.join(coreDir, "package.json"), "utf8"),
+  ) as { version: string };
+  return {
+    title: rhwpWasmNoticeTitle(version),
+    text: fs
+      .readFileSync(
+        path.join(repoRoot, "third-party/browser-licenses", RHWP_THIRD_PARTY_FILE),
+        "utf8",
+      )
+      .trim(),
+  };
+}
+
 /**
  * `@office-kit/xlsx` ships THIRD_PARTY_NOTICES.md (the openpyxl MIT notice
  * for its derived code) next to its LICENSE; build.license takes only the
@@ -116,7 +137,7 @@ export default defineConfig({
     fvociWebLicenseAdapt({
       repoRoot,
       manifestPath: browserLicenseManifest,
-      assetNotices: () => [...pdfjsAssetNotices(), officeKitXlsxNotice()],
+      assetNotices: () => [...pdfjsAssetNotices(), officeKitXlsxNotice(), rhwpWasmNotice()],
     }),
     pdfjsAssets(),
   ],
