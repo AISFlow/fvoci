@@ -175,6 +175,23 @@ anchor 이후 추가 수락(anchor는 그대로 둔다): [#170](https://github.c
 live 문서 적용·프로젝트 태스크 생성. 35개 workflow check 실제 SUCCESS와 별도 Opus 코드·증거 ACCEPT 후 머지했고,
 merge tree는 premerge 통합 tree와 같다. main push workflow는 아직 통과로 표시하지 않는다.
 
+2026-09-28 KST 추가 대조 지점: main `1e0acbe15f903244ff7479c36dce2a90fa6e783d`.
+기존 anchor와 당시 관측은 유지한다. 아래 세 PR은 고정 HEAD의 35개 workflow check 실제 SUCCESS와
+별도 Opus 5.5 medium ACCEPT 후 머지했고 통합 tree를 대조했다. 이 대조 지점의 main push 전체 검사는
+2026-09-27 17:43 UTC에 대기 중이므로 통과로 표시하지 않는다.
+
+| PR | 고정 HEAD | merge | 수락 범위와 실제 검사 |
+| --- | --- | --- | --- |
+| [#171](https://github.com/AISFlow/fvoci/pull/171) | `ecbcad0782554be6620fd6d23f3b7c8986139462` | `a0c913b7733b23da4f4b47139d978d19cb409622` | 미추출 첨부의 격리 child 즉석 preview, 전달 직전 현재 인가·저장 상태 재검사. native x64/ARM64 인증 경로 3개·test-hang 10개씩, ARM64 preview 11·첨부 25·S3 17개 |
+| [#174](https://github.com/AISFlow/fvoci/pull/174) | `9033b93d563ffccece3704b8f0e2f0808afca679` | `92c19c07cb37993e3d27a27f407016198b7aed7f` | 실제 다운로드 bytes의 PDF layout·페이지·확대/축소, same-origin 글꼴/CMap 자산. Chromium 제품 흐름 1개와 한글 렌더링 시각 확인. Office/HWP 수락과 구분 |
+| [#172](https://github.com/AISFlow/fvoci/pull/172) | `7d703c2f4693da42551cdcf1d0c59232bb05a4df` | `1e0acbe15f903244ff7479c36dce2a90fa6e783d` | 컬렉션 저장 시간대가 유효하지 않으면 기존 actor 시간대 검증의 UTC fallback 사용. 실제 PostgreSQL collections 8개, 수정 전 500 재현 포함 |
+
+[#149](https://github.com/AISFlow/fvoci/issues/149)의 `fvoci` 계정 편집 이력에는 A(API 프록시 유지) 선택
+(2026-09-27 15:59:53 UTC)과 승인 체크(16:00:03 UTC)가 있다. 자동화도 같은 계정을 사용하므로
+사용자의 직접 선택인지는 대화 확인 중이며, 확인 전 현재 수락된 API 프록시를 유지한다.
+이 이슈를 정책 확정으로 닫았던 기록은 정정하고 다시 열었다. 제품 변경은 없으며,
+#148의 프록시 회귀는 유효하고 실제 Cloudflare 경유는 미실행이다.
+
 검증 기준: 각 PR의 필요한 실제 검사·원격 CI와 별도 세션의 독립 검토를 고정 SHA에서 확인한다.
 과거 Opus/Fable 검토는 당시 범위의 근거로 보존하며, 현재 역할은 AGENTS.md를 따른다.
 최신 실행·소유권·검증 SHA·인계 포인터는 `/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-26.md`에 둔다.
@@ -184,18 +201,19 @@ merge tree는 premerge 통합 tree와 같다. main push workflow는 아직 통�
 - 2026-09-27 14:55 UTC 관측의 수락 대기 #162·#164·#165는 이후 위 anchor 표의 고정 HEAD로 수락·머지됐다(#165는 당시
   `7f3e24779f967092cfdb1b901edffa10dd48b618`에 서식 전용 delta를 더한 `c1ee5165`). 당시 관측은 git 이력에 보존한다.
 - anchor 시점 C였던 AI 결과 적용 PR #170은 위와 같이 수락·머지됐다.
-- 수락 대기(C, 미수락): 미추출 첨부의 서버 즉석 preview PR [#171](https://github.com/AISFlow/fvoci/pull/171)
-  HEAD `ecbcad0782554be6620fd6d23f3b7c8986139462`(별도 Opus ACCEPT, 원격 CI 진행). 컬렉션 저장 시간대 F1 수정은
-  재현 후 로컬 후보(실제 PG 8개 통과)로 검토·CI 전이다. PDF viewer는 게시 전 로컬 후보이며 수락되지 않았다(B).
+- 이전 C/B였던 서버 즉석 preview(#171), PDF viewer(#174), 컬렉션 저장 시간대 F1(#172)은 위 고정 SHA로 수락됐다.
+- 수락 대기(C, 미수락): 공개 공유 첨부 deep-link UI #176, PostgreSQL 16/17 UUID 호환성 #177과 버전별 CI #175,
+  요청 trace의 URI 비밀값 제거 #178. 실제 CI·통합 수락은 기존 PR에서 마무리한다.
+- 진행(B): DOCX layout viewer와 검색 chunk 보조 표시, 실제 이미지 간 업그레이드·init 실패 복구 검사.
+  이 후보들은 기존 PDF·변환·백업 수락 범위를 취소하지 않으며 아직 수락 완료가 아니다.
 - 분류 근거·행별 종료 조건: `/home/kinesis/orca/fvoci-evidence/opus-decision-status-cleanup.md`.
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
   제품 런타임과 별개다. 필수 백업·복원 자체 검증은 Rust이며 pg_dump/pg_restore·얇은 실행 스크립트는 유지한다.
 - migration 037·038·039·040은 main에 수락됐다. 번호를 다시 배정하지 않는다.
 - 잔여 기능·검증: 실제 브라우저 PushManager 및 외부 푸시 서비스(FCM 등) 발송(F),
-  S3 브라우저 전송 방식(E, 사용자 결정 대기 [#149](https://github.com/AISFlow/fvoci/issues/149), 결정 전 프록시 유지),
-  #77 외부 제공자 검증의 미실행 범위(F), 컬렉션 query의 잘못된 저장 시간대 fallback(D, #168 검토 F1; 재현·로컬 수정 후보, 검토·CI 전 C)·wiki 컬렉션 권한 N+1(#76 S3·S4, 현재 코드 재확인 전),
-  preview-html의 미추출 파일 즉석 격리 parse(C #171)·첨부 viewer의 PDF/Office/HWP layout 표시와 preview-html chunk 보조 표시(B),
-  실제 이미지 간 업그레이드·init 실패 복구·S3 rollback 실행(F)·PostgreSQL 16/17 검증(B), 추가 DB(G 추적).
+  #77 외부 제공자 검증의 미실행 범위(F), wiki 컬렉션 권한 N+1(#76 S3·S4, 현재 코드 재확인 전),
+  첨부 viewer의 Office/HWP layout 표시와 preview-html chunk 보조 표시(B),
+  실제 이미지 간 업그레이드·init 실패 복구·S3 rollback 실행(F)·PostgreSQL 16/17 검증(C #175/#177), 추가 DB(G 추적).
   수락(anchor): `i18n.overrides`(#165), 태스크 목록·layout `dueBefore` actor 시간대(#168), calendar drag(#162·#167), 첨부 PAT 다운로드(#164),
   운영 TLS·업그레이드 안내 문서(#169); anchor 이후 AI 결과 적용 UI(#170).
   후속(비차단): #83 `DeriveFailed` dead arm·patch-block 409 테스트·duplicate node cap·backlinks references table;
@@ -238,14 +256,14 @@ G 선택·미승인·원본 부재(새 요구 없이 만들지 않음). 각 행�
 | 리비전 | documents/revisions.ts, core/revision.ts, collab applyRestore | 복원은 room actor의 forward system update, durable 후 broadcast | 수락 | #25, #104, #123, #128, #151, #161 | 수동·session·scheduled 리비전과 자동 보존 개수 제한은 수락. A: 리비전 route의 `document_permission` 인가. 기존 D 의심(writer-stale 후 연결 없는 room의 수동 캡처가 오래된 본문 저장): #151에서 실제 앱 역할 PG·WebSocket 재현 후 수정·수락. 프로젝트 문서 리비전(#161) 수락. A: 남은 차이 없음 |
 | 댓글 | comments/routes.ts, core/comment.ts | 문서 XOR 태스크·부모 활성·권한 | 수락 | #28, #47, #58, #146 | 수락: 그룹 멘션·프로젝트 문서 댓글(#58; 그룹 멘션은 원본 snapshot과 달리 전달 시점 재전개). 수락(기준 이후): 이중 DELETE 중복 이벤트·resolve 경합·동시 trash된 태스크 댓글(#146). A: 남은 차이 없음 |
 | 협업 | domains/collab, React/Tiptap | provider envelope·철회·CRDT 정본·persist barrier·writer generation·재시작 복원 | 부분 | #6, #7, #18, #24, #27, #39, #46, #114, #131 | 수락: room 용량(기본 30, 64 검증; §2), helper SIGKILL 후 복구(#131). A(오래된 표기 정정): actor panic/rejoin(1011 종료·자원 해제·durable 상태 재적재 후 successor 1개)은 `collab_lifecycle` 20개의 panic/rejoin 명명 테스트가 #114 x64/ARM64 협업 실행에서 통과해 수락됐다. 제품 이미지·compose는 `FVOCI_COLLAB_ENGINE`을 기본 설정하고 단독 서버는 그 env가 필요하다(정책·코드 변경 없음). F: 실제 OS IME(합성 입력과 구분). 종료: F 증거 |
-| 첨부 | domains/attachments, packages/storage | 부모 권한·원본 bytes·원자 완료·취소 | 부분 | #10, #39, #58, #63, #65, #80, #148 | 수락: viewer route(#58), S3 프록시·중단 업로드 GC(#63, #65), 태스크·프로젝트 문서 부모·DELETE·quota·이미지 preview·저장 추출문 preview-html(#80). 수락: `--verify-storage` preview 객체·크기 확인(#90). E: S3 브라우저 전송 방식(프록시 유지 vs presigned, [#149](https://github.com/AISFlow/fvoci/issues/149); 결정 전 현재 프록시 유지). C: 미추출 파일의 preview-html 즉석 격리 parse(PR #171 HEAD `ecbcad07`, 별도 Opus ACCEPT, 원격 CI 진행, 미수락). B: 원본 viewer 연결 중 없는 것 — PDF(로컬 후보, 미수락), Office(docx/pptx/xlsx) layout viewer, HWP viewer(rhwp WASM), `?chunk`의 preview-html 보조 표시; 추출 plain text는 layout viewer와 동등하지 않다. 수락(기준 이후): 업로드 완료 재시도·요청 상한 413/524(#148), 다운로드의 scope PAT 허용(#164, 기존 D 해소). 종료: E 결정 반영, #171 수락, B 구현 |
+| 첨부 | domains/attachments, packages/storage | 부모 권한·원본 bytes·원자 완료·취소 | 부분 | #10, #39, #58, #63, #65, #80, #148 | 수락: viewer route(#58), S3 프록시·중단 업로드 GC(#63, #65), 태스크·프로젝트 문서 부모·DELETE·quota·이미지 preview·저장 추출문 preview-html(#80). 수락: `--verify-storage` preview 객체·크기 확인(#90). E: S3 전송 정책의 사용자 직접 선택 확인([#149](https://github.com/AISFlow/fvoci/issues/149)); 확인 전 API 프록시 유지. 수락: 미추출 파일의 preview-html 즉석 격리 parse(#171), PDF layout viewer(#174). C: 공개 공유 첨부 deep-link UI(#176). B: Office(docx/pptx/xlsx) layout viewer, HWP viewer(rhwp WASM), `?chunk`의 preview-html 보조 표시; 추출 plain text는 layout viewer와 동등하지 않다. 수락(기준 이후): 업로드 완료 재시도·요청 상한 413/524(#148), 다운로드의 scope PAT 허용(#164, 기존 D 해소). 종료: E 확인·결정 반영, #176 수락, B 구현 |
 | HWP/HWPX 추출 | 원본 추출 경로, rhwp e8800c8 | 부분/손상/미지원을 빈 본문 성공으로 바꾸지 않음·자원 한도 | 수락 | #2, #8, #9, #11, #35 | A(오래된 표기 정정): lease 만료·재시도 결과 게시 경계는 #11의 lease token 게시 fence로 수락됐고, 탈취된 lease의 finish 0행·재시도 소진 `worker_failure`를 실제 PG 회귀가 확인한다(아래 A 근거). G: HWP 썸네일(원본 thumbnail은 이미지 MIME만, 새 요구로 만들지 않음) |
 | 검색·색인·AI | domains/search, packages/search | 검색에서도 인가·철회·색인 복구 | 수락 | #29, #30, #35, #48, #57, #58, #82, #83, #159, #170 | 수락: 워크스페이스·전역 검색, 댓글 hit, outbox 색인 배치(#57), 복구 후 rebuild, PAT scope 검색(#83), 의미(벡터) 검색(#82), 첨부 hit의 viewer 이동(#58, search E2E). A: 검색·색인·의미 검색은 수락. 수락(기준 이후): 문서 메뉴의 `features.ai` 소비(#159). 수락(anchor 이후): AI 결과의 live 문서 적용·프로젝트 태스크 생성 UI(#170, 기존 B 해소). A: 남은 차이 없음 |
 | 알림·outbox·메일·webhook·연동 | domains/notifications, packages/jobs | 커밋 후 전달·중복/재시도 | 부분 | #31, #35, #45 | 수락: 앱 내 알림, 메일·digest(#53, #61), webhook·GitHub App·AI 동작(#74). 수락: Web Push와 로그아웃 시 브라우저 연결 해제(#139). F: 실제 외부 푸시 서비스·브라우저 PushManager. G: requeue 운영 API/UI(원본도 없음). 종료: F 증거 |
-| 공유·즐겨찾기·최근·태그·컬렉션 | 해당 routes | 공유 링크 권한 | 부분 | #70, #72, #76, #84, #138, #142, #162, #167, #168 | 수락: 즐겨찾기·최근·공유 링크·공개 공유 페이지·PDF, 공유 정책(#72), 태그·컬렉션·저장 view(#76), 대화상자 정책·`/s/:token` head meta(#84), 공유 첨부 preview(#80). 수락: `HEAD /s/:token` 보안 헤더·빈 본문(#138). 수락(기준 이후): board 그룹 paging·drag-and-drop(#142), calendar view drag(#162)와 stream 갱신 후 충돌 검사 영구 회귀(#167), 태스크 목록·layout의 `dueBefore` actor 시간대(#168; 컬렉션 query는 이미 actor 시간대). D: 컬렉션 query가 잘못된 저장 시간대를 검증하지 않음(#168 검토 F1, `src/db/collection_query.rs`; 재현 후 게시 전 로컬 수정 후보, 실제 PG 8개 통과, 독립 검토·원격 CI 전 — C, 미수락). 종료: F1 수정 수락 |
+| 공유·즐겨찾기·최근·태그·컬렉션 | 해당 routes | 공유 링크 권한 | 수락 | #70, #72, #76, #84, #138, #142, #162, #167, #168 | 수락: 즐겨찾기·최근·공유 링크·공개 공유 페이지·PDF, 공유 정책(#72), 태그·컬렉션·저장 view(#76), 대화상자 정책·`/s/:token` head meta(#84), 공유 첨부 preview(#80). 수락: `HEAD /s/:token` 보안 헤더·빈 본문(#138). 수락(기준 이후): board 그룹 paging·drag-and-drop(#142), calendar view drag(#162)와 stream 갱신 후 충돌 검사 영구 회귀(#167), 태스크 목록·layout의 `dueBefore` actor 시간대(#168; 컬렉션 query는 이미 actor 시간대). 수락: 컬렉션 저장 시간대 UTC fallback(#172, #168 검토 F1 해소). 공개 공유 첨부 deep-link UI는 첨부 행 C #176에서 추적 |
 | 동의·감사·사용권·관리 | legal, auth.consents, admin.audit, packages/ee | 동의 gate·증거·권한 | 수락 | #72, #84, #159, #165 | 수락: 관리 API·instance settings·법률 문서·동의·428 gate·branding(#72), 관리자 사용자 삭제 예약/취소(#84). 수락: 사용자가 원본 정책 보존을 확정한 사용권·quota(#110), 운영자 정보(#119), security.txt(#120), 브라우저 오픈소스 고지(#122). 수락: settings `embed`(#124)·`attachmentPreview`(#80) 소비, 문서 메뉴 `features.ai` 소비(#159), 서버 메시지 `i18n.overrides` 사용 시점 적용(#165). G: 사용권 issuer trust(원본도 비어 있음) |
 | 제품 MCP·CLI·백업·복구 | init.ts, backup.ts, doctor.ts, MCP | 프로토콜·복원 | 수락 | #32, #31, #35, #63, #81, #84, #90, #109 | 수락: 컨테이너 설치 백업·복구(outbox cursor 재기준·검색 rebuild 포함), S3는 스크립트 백업 거부·복구 후 `--verify-storage`(#63, branding #84). 수락: 제품 MCP·CLI·doctor(#81), 키 fingerprint·`--verify-secrets`(#90), Rust 백업 manifest/preflight·키 검증 공유(#109). 개발 Python oracle는 유지. A: 남은 차이 없음 |
-| 설치·배포 산출물 | infra/app, compose | 비특권 실행·migrate/grant 분리·helper 포함 | 부분 | #17, #20, #29, #32, #35, #169 | 수락: 운영 TLS/secure cookie 안내와 같은 volume의 이미지 간 업그레이드·init 실패·이전 이미지 복귀 절차 문서(#169). F: 그 업그레이드·init 실패 복구·S3 rollback의 실제 실행(CI는 같은 이미지 재생성만). B: 원본 지원 PostgreSQL 16/17 검증(CI·compose는 18.3만). 종료: F 실행 증거, B 검증 |
+| 설치·배포 산출물 | infra/app, compose | 비특권 실행·migrate/grant 분리·helper 포함 | 부분 | #17, #20, #29, #32, #35, #169 | 수락: 운영 TLS/secure cookie 안내와 같은 volume의 이미지 간 업그레이드·init 실패·이전 이미지 복귀 절차 문서(#169). F: 그 업그레이드·init 실패 복구·S3 rollback의 실제 실행(CI는 같은 이미지 재생성만). C: PostgreSQL 16/17 검증(#175/#177, 미수락). 종료: F 실행 증거, C 수락 |
 | 추가 DB·플랫폼 | PR999 packages/db (SQLite/libSQL/Turso) | 원본 제공 범위와 목표 구분 | 미착수 | — | PG 우선; 원본 다중 DB를 완료로 간주하지 않음. G(추적 유지): 원본도 SQLite·libSQL·Turso를 목표로만 두고 전체 앱 백엔드로 선택할 수 없음. 제외하지 않으며 원본 계약 범위가 정해지면 B |
 | 프론트엔드 | apps/web, packages/editor | 한국어·접근성·기존 흐름 | 부분 | 각 PR E2E | B: 위 B 항목의 UI. 종료: 각 B 항목 UI |
 
