@@ -657,6 +657,7 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     }
     await expectTokensAbsent(pageA, ["지울토큰XYZ"]);
     await expectTokens(pageB, ["살아남을한글"]);
+    await expectConverged(pageA, pageB);
     await persistBody(pageA);
     await expectMatchingPersistAck(pageA, wire);
     await insertSlashTable(pageA);
