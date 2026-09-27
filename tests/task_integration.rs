@@ -4319,19 +4319,22 @@ async fn task_stream_notifies_other_viewer_on_task_meta_date_and_status_patch() 
     harness.cleanup().await;
 }
 
+/// Poll until at least `min_updates` `task.updated` rows are visible. The cursor
+/// is itself xmin-bounded, so an earlier `task.created` may still land in the
+/// window; counting every row would stop before a later update settles.
 async fn poll_task_updates_until(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     project_id: Uuid,
     cursor: &fvoci_server::streams::EventCursor,
-    min: usize,
+    min_updates: usize,
 ) -> Vec<fvoci_server::streams::StreamEventRow> {
     let mut rows = Vec::new();
     for _ in 0..30 {
         rows = poll_task_events(pool, workspace_id, project_id, cursor, 100)
             .await
             .expect("poll");
-        if rows.len() >= min {
+        if rows.iter().filter(|r| r.verb == "task.updated").count() >= min_updates {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4465,6 +4468,116 @@ async fn task_meta_and_move_events_reach_only_their_project_poll() {
         .await
         .expect("poll other project");
     assert!(foreign.is_empty(), "{foreign:?}");
+
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_update_poll_waits_for_update_held_behind_xmin() {
+    // Regression for the CI snapshot `task.created` + three updates while the
+    // move event was still above the cluster-wide xmin.
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "XMH", "workspace").await;
+    let project = lab["id"].as_str().unwrap().to_string();
+    let project_id = Uuid::parse_str(&project).unwrap();
+    let task = create_task_with_title(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        &project,
+        json!({"title": "held"}),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap();
+    let current_status = task["statusId"].as_str().unwrap().to_string();
+    let statuses = workflow_status_ids(app.clone(), &cookie, workspace_id, &project).await;
+    let next_status = statuses
+        .iter()
+        .find(|(id, _)| *id != current_status)
+        .unwrap()
+        .0
+        .clone();
+    for body in [
+        json!({"dueDate": "2026-05-01"}),
+        json!({"statusId": next_status}),
+        json!({"assigneeIds": [owner_id.to_string()]}),
+    ] {
+        let (status, _) =
+            patch_task(app.clone(), workspace_id, task_id, body.clone(), &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    // Settle everything committed so far (bounded, read-only), then hold an
+    // xid so the move commits above xmin until the hold ends.
+    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(&admin)
+        .await
+        .expect("current xid");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !sqlx::query_scalar::<_, bool>(
+        "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8",
+    )
+    .bind(&horizon)
+    .fetch_one(&admin)
+    .await
+    .expect("snapshot xmin")
+    {
+        assert!(Instant::now() < deadline, "events never settled");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut hold = admin.begin().await.expect("hold tx");
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&mut *hold)
+        .await
+        .expect("hold xid");
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move"),
+        Some(json!({"statusId": current_status})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let cursor = fvoci_server::streams::EventCursor::default();
+    let pending = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 100)
+        .await
+        .expect("poll");
+    let verbs: Vec<&str> = pending.iter().map(|r| r.verb.as_str()).collect();
+    assert_eq!(
+        verbs,
+        [
+            "task.created",
+            "task.updated",
+            "task.updated",
+            "task.updated"
+        ],
+        "move must stay hidden while the hold is open: {pending:?}"
+    );
+
+    let release = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        hold.commit().await.expect("release hold");
+    };
+    let (rows, ()) = tokio::join!(
+        poll_task_updates_until(&app_pool, workspace_id, project_id, &cursor, 4),
+        release
+    );
+    let updates: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r.verb == "task.updated")
+        .map(|r| &r.payload)
+        .collect();
+    assert_eq!(updates.len(), 4, "{rows:?}");
+    assert_eq!(updates[3]["from"], next_status);
+    assert_eq!(updates[3]["to"], current_status);
+    assert_eq!(updates[3]["projectId"], project);
 
     app_pool.close().await;
     admin.close().await;

@@ -656,19 +656,41 @@ async fn collab_lifecycle_drop_lease_without_leave_clears_connection() {
                     )))
                     .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
+                let admin = admin_pool(&run.inner.harness.admin_url).await;
 
+                // The background idle loop uses the same predicate as the explicit
+                // eviction below; hold it so an empty room stays Live until this
+                // test is the owner that closes it.
+                let idle_hold = IdleEvictionHold::arm(wiki.document_id);
                 let (_conn_id, lease) = hub_join_with_lease(&hub, &wiki, 1).await.expect("join");
                 assert_eq!(hub.probe_actor(key).await.connections, 1);
+                wait_until_guard(&admin, wiki.document_id, true).await;
                 drop(lease);
                 wait_for_probe_connections(&hub, key, 0).await;
                 wait_for_member_count(&hub, key, 0).await;
+                // Both waits also read 0 once a room is gone; prove it is an empty
+                // Live room that still owns its permit and fence.
+                assert_eq!(
+                    hub.room_lifecycle_phase(key).await,
+                    RoomLifecyclePhase::Live,
+                    "dropping the lease must leave an empty Live room"
+                );
+                assert_eq!(hub.available_room_slots(), 3);
+                assert!(room_guard_held(&admin, wiki.document_id).await);
 
                 hub.force_room_idle_eligible(key).await;
+                assert_eq!(
+                    hub.idle_evict_decision(key).await,
+                    IdleEvictDecision::WouldEvict
+                );
                 assert!(hub.execute_idle_evict_if_eligible(key).await);
                 assert_eq!(
                     hub.room_lifecycle_phase(key).await,
                     RoomLifecyclePhase::Absent
                 );
+                assert_eq!(hub.available_room_slots(), 4);
+                assert!(!room_guard_held(&admin, wiki.document_id).await);
+                drop(idle_hold);
             })
         },
     )
