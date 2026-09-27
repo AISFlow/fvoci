@@ -102,6 +102,26 @@ pub async fn pause_attachment_payload_barrier_if_armed(attachment_id: Uuid) {
 #[cfg(not(feature = "db-tests"))]
 pub async fn pause_attachment_payload_barrier_if_armed(_attachment_id: Uuid) {}
 
+/// Pause a document entry after its body fetch and before its delivery recheck.
+/// Shares the attachment barrier map keyed by entry id; callers arm distinct ids.
+#[cfg(feature = "db-tests")]
+pub fn arm_document_delivery_barrier(
+    document_id: Uuid,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    arm_attachment_payload_barrier(document_id)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn pause_document_delivery_barrier_if_armed(document_id: Uuid) {
+    pause_attachment_payload_barrier_if_armed(document_id).await;
+}
+
+#[cfg(not(feature = "db-tests"))]
+pub async fn pause_document_delivery_barrier_if_armed(_document_id: Uuid) {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceExportDbError {
     NotFound,

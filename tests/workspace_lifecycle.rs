@@ -891,10 +891,15 @@ async fn patch_document_export_fields(
         .expect("patch document export fields");
 }
 
+/// Streams the export while `secret_doc` is paused after its body fetch and
+/// before its delivery recheck, commits `revoke` at that producer point, then
+/// drains. Earlier witness bytes may already be queued; the paused entry must
+/// not be delivered once its recheck observes the committed revoke.
 async fn stream_export_aborts_after_witness<F, Fut>(
     app: axum::Router,
     cookie: &str,
     path: &str,
+    secret_doc: Uuid,
     witness: &str,
     secret: &str,
     revoke: F,
@@ -905,8 +910,12 @@ where
 {
     use axum::body::Body;
     use axum::http::Request;
+    use fvoci_server::db::workspace_export::arm_document_delivery_barrier;
     use tower::ServiceExt;
 
+    let (mut reached_rx, proceed_tx) = arm_document_delivery_barrier(secret_doc);
+    let mut proceed_tx = Some(proceed_tx);
+    let mut revoke = Some(revoke);
     let request = Request::builder()
         .method("GET")
         .uri(path)
@@ -924,29 +933,48 @@ where
     let mut buf = Vec::new();
     let mut revoked = false;
     let mut saw_error = false;
-    let mut revoke = Some(revoke);
-    let witness_bytes = witness.as_bytes();
-    let secret_bytes = secret.as_bytes();
-    while let Some(frame) = stream.next().await {
-        match frame {
-            Ok(bytes) => {
-                buf.extend_from_slice(&bytes);
-                if !revoked && buf.windows(witness_bytes.len()).any(|w| w == witness_bytes) {
-                    if let Some(revoke_fn) = revoke.take() {
+    let drive = async {
+        loop {
+            let frame = if revoked {
+                stream.next().await
+            } else {
+                tokio::select! {
+                    reached = &mut reached_rx => {
+                        reached.expect("document barrier reached, not cancelled");
+                        if let Some(revoke_fn) = revoke.take() {
                         revoke_fn().await;
                     }
-                    revoked = true;
+                        if let Some(tx) = proceed_tx.take() {
+                            tx.send(()).expect("release document barrier");
+                        }
+                        revoked = true;
+                        continue;
+                    }
+                    frame = stream.next() => frame,
                 }
-            }
-            Err(_) => {
-                saw_error = true;
-                break;
+            };
+            match frame {
+                Some(Ok(bytes)) => buf.extend_from_slice(&bytes),
+                Some(Err(_)) => {
+                    saw_error = true;
+                    break;
+                }
+                None => break,
             }
         }
-    }
-    assert!(revoked, "witness marker must appear before stream ends");
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), drive)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("export stream stalled: revoked={revoked} saw_error={saw_error}")
+        });
+    assert!(revoked, "export must reach the secret document barrier");
     assert!(
-        !buf.windows(secret_bytes.len()).any(|w| w == secret_bytes),
+        buf.windows(witness.len()).any(|w| w == witness.as_bytes()),
+        "entry authorized before the revoke is still delivered"
+    );
+    assert!(
+        !buf.windows(secret.len()).any(|w| w == secret.as_bytes()),
         "revoked content must not be delivered"
     );
     (saw_error, buf)
@@ -982,6 +1010,7 @@ async fn workspace_zip_aborts_when_project_access_revoked_mid_stream() {
         app,
         &cookie,
         &path,
+        doc_b,
         EXPORT_WITNESS_MARKER,
         EXPORT_WITNESS_SECRET,
         || async {
@@ -1023,6 +1052,7 @@ async fn workspace_zip_aborts_when_wiki_document_revoked_mid_stream() {
         app,
         &cookie,
         &path,
+        doc_b,
         EXPORT_WITNESS_MARKER,
         EXPORT_WITNESS_SECRET,
         || async {

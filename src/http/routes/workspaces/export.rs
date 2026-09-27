@@ -231,6 +231,14 @@ async fn write_workspace_zip(
     writer.data(Bytes::from_static(b"[\n")).await?;
     let mut first_doc = true;
     for doc in &snapshot.documents {
+        // Fetch first so the delivery recheck is the last gate before the body is sent.
+        let body = workspace_export::fetch_document_body(pool, workspace_id, doc.id)
+            .await
+            .map_err(|_| ExportFailure::Db)?;
+        let Some(body) = body else {
+            return Err(ExportFailure::Auth);
+        };
+        workspace_export::pause_document_delivery_barrier_if_armed(doc.id).await;
         map_recheck(
             workspace_export::recheck_document_delivery(
                 pool,
@@ -242,12 +250,6 @@ async fn write_workspace_zip(
             )
             .await,
         )?;
-        let body = workspace_export::fetch_document_body(pool, workspace_id, doc.id)
-            .await
-            .map_err(|_| ExportFailure::Db)?;
-        let Some(body) = body else {
-            return Err(ExportFailure::Auth);
-        };
         let element = pretty_element(&DocumentJson {
             id: doc.id.to_string(),
             parent_id: doc.parent_id.map(|id| id.to_string()),
@@ -302,6 +304,10 @@ async fn write_workspace_zip(
     writer.data(Bytes::from_static(b"[\n")).await?;
     let mut first_comment = true;
     for comment in &snapshot.comments {
+        let body = workspace_export::fetch_comment_body(pool, workspace_id, comment.id)
+            .await
+            .map_err(|_| ExportFailure::Db)?
+            .ok_or(ExportFailure::Auth)?;
         map_recheck(
             workspace_export::recheck_comment_delivery(
                 pool,
@@ -313,10 +319,6 @@ async fn write_workspace_zip(
             )
             .await,
         )?;
-        let body = workspace_export::fetch_comment_body(pool, workspace_id, comment.id)
-            .await
-            .map_err(|_| ExportFailure::Db)?
-            .ok_or(ExportFailure::Auth)?;
         let element = pretty_element(&CommentJson {
             id: comment.id.to_string(),
             document_id: comment.document_id.map(|id| id.to_string()),
