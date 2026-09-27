@@ -154,6 +154,11 @@ export function projectCollectionPath(
   return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}/${type}`;
 }
 
+/** Source `href.projectGantt`: month-scoped Gantt chart for a project. */
+export function projectGanttPath(slug: string, key: string): string {
+  return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}/gantt`;
+}
+
 /** Source `href.projectWorkflow`: project workflow status settings. */
 export function projectWorkflowPath(slug: string, key: string): string {
   return `/w/${slug.toLowerCase()}/${canonicalizeProjectKey(key)}/settings/workflow`;
