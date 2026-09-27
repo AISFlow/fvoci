@@ -934,19 +934,61 @@ with `STORAGE_DRIVER=s3`. The supported model for S3 is:
    server-generated UUIDs.
 2. **Database:** a `pg_dump` of schemas `public` and `fvoci` taken the same way
    as `scripts/backup.sh` does (custom format, owner role, server stopped so the
-   dump is quiesced). Objects deleted by workspace purge after the dump are
-   recoverable only from bucket versions.
-3. **Restore:** restore the dump, point the server at the bucket (or the
-   replica), and before starting the server run the storage check with the
-   server's environment:
+   dump is quiesced). Record the UTC time, in whole seconds, at which the dump
+   finished; restore needs it. Objects deleted by workspace purge after the dump
+   are recoverable only from bucket versions.
+3. **Restore:** `scripts/restore.sh` needs a volume archive and a manifest, so
+   run its database steps by hand into a **fresh** Compose project. Use the
+   image that took the dump. After a failed upgrade this is the old image; never
+   start it on the migrated database. You need these inputs:
+   - the dump;
+   - `<dump-utc>`: the UTC time, in whole seconds, recorded when the dump
+     finished. There is no manifest to recover it from. If it was not recorded,
+     stop instead of guessing;
+   - an env file with the original `POSTGRES_USER`, `POSTGRES_DB` and
+     `FVOCI_APP_ROLE` names;
+   - the same `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID`;
+   - `ENCRYPTION_KEYS` with every original key id unchanged (a superset is
+     fine). Nothing compares a fingerprint here; only `--verify-secrets` below
+     checks the keyring;
+   - `S3_*` pointing at the bucket (or the replica).
 
-   ```sh
-   docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml \
-     --project-name <project> --env-file <env> \
-     run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
-   ```
+   Then, with `C="docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --project-name <new-project> --env-file <env>"`:
 
-   It prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
+   1. Run `$C up -d --wait postgres meilisearch`. Then, as `scripts/restore.sh`
+      does:
+      - create `FVOCI_APP_ROLE` (`LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, password
+        `FVOCI_APP_PASSWORD`);
+      - copy the dump into the postgres container;
+      - run `pg_restore --exit-on-error --single-transaction --no-owner` with a
+        `--use-list` that drops the `SCHEMA - public` entry.
+   2. Run `$C run --rm init`. This does migrate, `--grant-app-role` and
+      `--ensure-meili-key`. Only the `init` service receives the owner
+      `DATABASE_URL`.
+   3. Rebase the outbox and rebuild search with the same bounds `restore.sh`
+      derives from its manifest. Set `<snapshot>` = `<dump-utc>` + 1 s, and
+      `<since>` = `<snapshot>` − 29 days (the widest window
+      `--recover-outbox` accepts):
+
+      ```sh
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
+        --recover-outbox --since <since> --snapshot-at <snapshot> \
+        --apply --reason "restore into <new-project>" --ack-external-replay
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --rebuild-search
+      ```
+
+   4. Before any server starts, run the storage check and then the secrets
+      check. Both use the server's environment (app role only, no owner URL):
+
+      ```sh
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-secrets
+      ```
+
+   5. Start the server with `$C up -d --wait server`, and only after both
+      checks pass.
+
+   `--verify-storage` prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
    and exits non-zero when any stored attachment is missing or has a different
    size, when a branding asset referenced by the instance settings
    (`logo`/`favicon`, uploaded in the admin console) is missing or does not
