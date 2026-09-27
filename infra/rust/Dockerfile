@@ -36,6 +36,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY packages ./packages
+COPY LICENSE ./LICENSE
+COPY third-party/browser-licenses ./third-party/browser-licenses
 COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
 WORKDIR /src/apps/web
 RUN npm ci --install-links --no-audit --no-fund \
