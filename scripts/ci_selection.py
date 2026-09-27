@@ -635,6 +635,14 @@ RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS: frozenset[str] = frozenset(
     }
 )
 CARGO_TEST_FLAG_RE = re.compile(r"(?:^|\s)--test\s+([A-Za-z0-9_-]+)")
+CARGO_TEST_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+RUST_POSTGRES_INTEGRATION_RUN_CANONICAL = (
+    "cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}"
+)
+RUST_S3_INTEGRATION_RUN_CANONICAL = (
+    "bash scripts/start-test-minio.sh cargo test --locked --offline --no-fail-fast "
+    "--features db-tests --test attachment_s3_integration"
+)
 
 
 def _package_autotests_enabled(cargo_data: dict) -> bool:
@@ -755,8 +763,11 @@ def postgres_matrix_inventory(jobs: dict) -> tuple[dict[str, set[str]], str | No
         tests_field = row.get("tests")
         if not isinstance(runner, str) or runner not in RUST_POSTGRES_RUNNER_ARCH:
             return {}, f"rust: postgres matrix row has unknown runner {runner!r}"
-        if not isinstance(tests_field, str) or not tests_field.strip():
+        if not isinstance(tests_field, str):
             return {}, "rust: postgres matrix row missing tests command fragment"
+        fragment_err = _validate_matrix_tests_fragment(tests_field)
+        if fragment_err:
+            return {}, fragment_err
         arch = RUST_POSTGRES_RUNNER_ARCH[runner]
         per_arch[arch].update(cargo_test_flags_in_text(tests_field))
     return per_arch, None
@@ -792,8 +803,95 @@ def _unique_named_step(
 
 
 def _execution_step_masked(step: dict, *, job: str, step_name: str) -> str | None:
-    if step.get("continue-on-error") is True:
+    if "continue-on-error" in step and step.get("continue-on-error") is not False:
         return f"rust: {job} step {step_name!r} must not use continue-on-error"
+    return None
+
+
+def _collapse_shell_words(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _cargo_command_suppression_error(norm: str, context: str) -> str | None:
+    if "--no-run" in norm:
+        return f"rust: {context} must not use --no-run"
+    if "--exclude" in norm:
+        return f"rust: {context} must not use --exclude"
+    for operator in ("||", "&&", "|", ";", "&"):
+        if operator in norm:
+            return f"rust: {context} must not contain shell operator {operator!r}"
+    separator = " -- "
+    if separator in norm:
+        suffix = norm.split(separator, 1)[1].strip()
+        if suffix != "--nocapture":
+            return f"rust: {context} must not use libtest filter after --"
+    return None
+
+
+def _validate_matrix_tests_fragment(tests_field: str) -> str | None:
+    trimmed = tests_field.strip()
+    if not trimmed:
+        return "rust: postgres matrix row missing tests command fragment"
+    suppression = _cargo_command_suppression_error(trimmed, "postgres matrix tests")
+    if suppression:
+        return suppression
+    tokens = trimmed.split()
+    if not tokens or len(tokens) % 2 != 0:
+        return "rust: postgres matrix tests must be --test NAME pairs only"
+    for index in range(0, len(tokens), 2):
+        if tokens[index] != "--test":
+            return "rust: postgres matrix tests must be --test NAME pairs only"
+        name = tokens[index + 1]
+        if not CARGO_TEST_NAME_RE.match(name):
+            return "rust: postgres matrix tests must be --test NAME pairs only"
+    return None
+
+
+def _validate_cargo_test_invocation(tokens: list[str], *, context: str, require_tests: bool) -> str | None:
+    if len(tokens) < 2 or tokens[0] != "cargo" or tokens[1] != "test":
+        return f"rust: {context} must invoke cargo test with --features db-tests"
+    index = 2
+    saw_locked = saw_offline = saw_no_fail_fast = saw_features = False
+    saw_test = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--locked":
+            saw_locked = True
+            index += 1
+            continue
+        if token == "--offline":
+            saw_offline = True
+            index += 1
+            continue
+        if token == "--no-fail-fast":
+            saw_no_fail_fast = True
+            index += 1
+            continue
+        if token == "--features":
+            if index + 1 >= len(tokens) or tokens[index + 1] != RUST_DB_TESTS_FEATURE:
+                return f"rust: {context} must invoke cargo test with --features db-tests"
+            saw_features = True
+            index += 2
+            continue
+        if token == "--test":
+            if index + 1 >= len(tokens) or not CARGO_TEST_NAME_RE.match(tokens[index + 1]):
+                return f"rust: {context} must use --test NAME pairs only"
+            saw_test = True
+            index += 2
+            continue
+        if token == "${{":
+            if (
+                index + 2 < len(tokens)
+                and tokens[index + 1] == "matrix.tests"
+                and tokens[index + 2] == "}}"
+            ):
+                index += 3
+                continue
+        return f"rust: {context} must not use unknown cargo test flag {token!r}"
+    if not (saw_locked and saw_offline and saw_no_fail_fast and saw_features):
+        return f"rust: {context} must invoke cargo test with --features db-tests"
+    if require_tests and not saw_test:
+        return f"rust: {context} must declare at least one --test target"
     return None
 
 
@@ -804,17 +902,11 @@ def _verify_postgres_integration_run(run: str) -> str | None:
             "rust: PostgreSQL integration step must execute "
             "cargo test with --features db-tests and ${{ matrix.tests }}"
         )
-    if not norm.startswith("cargo test"):
-        return (
-            "rust: PostgreSQL integration step must execute "
-            "cargo test with --features db-tests and ${{ matrix.tests }}"
-        )
-    if "--features db-tests" not in norm:
-        return (
-            "rust: PostgreSQL integration step must execute "
-            "cargo test with --features db-tests and ${{ matrix.tests }}"
-        )
-    if "${{ matrix.tests }}" not in norm:
+    suppression = _cargo_command_suppression_error(norm, "PostgreSQL integration step")
+    if suppression:
+        return suppression
+    collapsed = _collapse_shell_words(norm)
+    if collapsed != RUST_POSTGRES_INTEGRATION_RUN_CANONICAL:
         return (
             "rust: PostgreSQL integration step must execute "
             "cargo test with --features db-tests and ${{ matrix.tests }}"
@@ -828,15 +920,11 @@ def _verify_s3_integration_run(run: str) -> str | None:
         return (
             "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
         )
-    if not norm.startswith("bash scripts/start-test-minio.sh cargo test"):
-        return (
-            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
-        )
-    if "--features db-tests" not in norm:
-        return (
-            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
-        )
-    if "--test attachment_s3_integration" not in norm:
+    suppression = _cargo_command_suppression_error(norm, "S3 integration step")
+    if suppression:
+        return suppression
+    collapsed = _collapse_shell_words(norm)
+    if collapsed != RUST_S3_INTEGRATION_RUN_CANONICAL:
         return (
             "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
         )
@@ -979,11 +1067,21 @@ def collaboration_script_inventory(repo_root: Path) -> tuple[set[str], str | Non
     cargo_command = _collaboration_script_cargo_command(text)
     if not cargo_command:
         return set(), "rust: collaboration CI script missing cargo test invocation"
+    suppression = _cargo_command_suppression_error(
+        cargo_command, "collaboration CI script cargo test"
+    )
+    if suppression:
+        return set(), suppression
+    shape_err = _validate_cargo_test_invocation(
+        cargo_command.split(),
+        context="collaboration CI script cargo test",
+        require_tests=True,
+    )
+    if shape_err:
+        return set(), shape_err
     tests = cargo_test_flags_in_text(cargo_command)
     if not tests:
         return set(), "rust: collaboration CI script declares no --test targets"
-    if "--features db-tests" not in cargo_command:
-        return set(), "rust: collaboration CI script cargo test must pass --features db-tests"
     return tests, None
 
 

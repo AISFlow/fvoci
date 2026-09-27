@@ -946,6 +946,80 @@ class RustSuiteRegistryTest(unittest.TestCase):
             errors = SEL.verify_rust_suite_registry(fx.root)
         self.assertTrue(any("collaboration integration step" in err for err in errors))
 
+    def test_postgres_integration_no_run_suffix_fails(self) -> None:
+        def add_no_run(data: dict) -> None:
+            for step in data["jobs"]["postgres"]["steps"]:
+                if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP:
+                    step["run"] = step["run"] + " --no-run"
+
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.mutate_rust_workflow(add_no_run)
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("--no-run" in err for err in errors))
+
+    def test_postgres_integration_exclude_fails(self) -> None:
+        def add_exclude(data: dict) -> None:
+            for step in data["jobs"]["postgres"]["steps"]:
+                if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP:
+                    step["run"] = step["run"].replace(
+                        "${{ matrix.tests }}",
+                        "--exclude fvoci-server ${{ matrix.tests }}",
+                    )
+
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.mutate_rust_workflow(add_exclude)
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("--exclude" in err for err in errors))
+
+    def test_postgres_integration_libtest_skip_fails(self) -> None:
+        def add_libtest_filter(data: dict) -> None:
+            for step in data["jobs"]["postgres"]["steps"]:
+                if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP:
+                    step["run"] = step["run"] + " -- --skip '*'"
+
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.mutate_rust_workflow(add_libtest_filter)
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("libtest filter" in err for err in errors))
+
+    def test_postgres_integration_shell_or_true_fails(self) -> None:
+        def add_or_true(data: dict) -> None:
+            for step in data["jobs"]["postgres"]["steps"]:
+                if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP:
+                    step["run"] = step["run"] + " || true"
+
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.mutate_rust_workflow(add_or_true)
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("shell operator" in err for err in errors))
+
+    def test_postgres_matrix_tests_no_run_fragment_fails(self) -> None:
+        def poison_matrix_tests(data: dict) -> None:
+            rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
+            rows[0]["tests"] = "--no-run --test db_integration"
+
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.mutate_rust_workflow(poison_matrix_tests)
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("--no-run" in err or "--test NAME" in err for err in errors))
+
+    def test_postgres_integration_continue_on_error_string_fails(self) -> None:
+        def string_continue_on_error(data: dict) -> None:
+            for step in data["jobs"]["postgres"]["steps"]:
+                if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP:
+                    step["continue-on-error"] = "true"
+
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.mutate_rust_workflow(string_continue_on_error)
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("continue-on-error" in err for err in errors))
+
 
 class RegistryMutationCliTest(unittest.TestCase):
     def _mutated_root(self) -> Path:
