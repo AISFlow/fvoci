@@ -18,6 +18,7 @@ import { taskListQuery, taskQuery, projectLabelsQuery, projectMilestonesQuery } 
 import { membersQuery, meQuery } from "@/lib/queries";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
+import { useTaskStream } from "@/hooks/use-task-stream";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { itemPath, parseRef, projectsPath, projectTasksPath } from "@/lib/href";
@@ -47,6 +48,8 @@ export function TaskDetailPage() {
   const projectDocument =
     lookupTarget?.kind === "project-document" ? lookupTarget.item : null;
   const task = useQuery(taskQuery(workspace?.id ?? "", lookupTask?.id ?? ""));
+  const streamProjectId = project?.id ?? lookupTask?.projectId;
+  useTaskStream(workspace?.id, streamProjectId);
   const workflow = useQuery(
     workflowQuery(workspace?.id ?? "", project?.id ?? lookupTask?.projectId ?? ""),
   );

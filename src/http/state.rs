@@ -6,6 +6,7 @@ use crate::collab::CollabHub;
 use crate::documents::markdown_helper::MarkdownHelper;
 use crate::http::rate_limit::RateLimiter;
 use crate::search::meili::MeiliConfig;
+use crate::streams::StreamHub;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -32,4 +33,11 @@ pub struct AppState {
     /// Workspace storage and per-upload limits (source `QuotaProvider`).
     pub quota: crate::db::quota::StorageQuota,
     pub mailer: std::sync::Arc<crate::mail::Mailer>,
+    pub streams: std::sync::Arc<StreamHub>,
+}
+
+impl AppState {
+    pub fn fresh_streams() -> std::sync::Arc<StreamHub> {
+        StreamHub::new_arc()
+    }
 }

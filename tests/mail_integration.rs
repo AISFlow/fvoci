@@ -354,6 +354,7 @@ async fn app_state(app_url: &str, mailer: Arc<Mailer>) -> AppState {
         import_wake: None,
         import_extractor_available: false,
         quota: Default::default(),
+        streams: fvoci_server::http::state::AppState::fresh_streams(),
     }
 }
 

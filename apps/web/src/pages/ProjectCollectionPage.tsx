@@ -7,6 +7,7 @@ import { QueryError, QueryLoading, loadErrorMessage } from "@/components/query-s
 import { CollectionContents, type CollectionViewType } from "@/features/collections/collection-panel";
 import { ProjectViewNav } from "@/features/collections/project-view-nav";
 import { useProjectRef } from "@/features/collections/use-project-ref";
+import { useTaskStream } from "@/hooks/use-task-stream";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { projectCollectionPath, projectPath, projectsPath } from "@/lib/href";
 import { projectCollectionQuery } from "@/lib/queries/collections";
@@ -18,6 +19,7 @@ export function ProjectCollectionPage({ type }: { type: CollectionViewType }) {
   const viewId = search.get("view");
   const { slug, workspace, projects, project, notFound } = useProjectRef();
   const collection = useQuery(projectCollectionQuery(workspace?.id ?? "", project?.id ?? ""));
+  useTaskStream(workspace?.id, project?.id);
 
   if (!workspace) return null;
 

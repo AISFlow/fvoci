@@ -7,12 +7,18 @@ mod project_harness;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Request, StatusCode};
+use futures_util::StreamExt;
 use project_harness::{
     add_workspace_user, admin_pool, count_rows, create_project, drop_insert_fail_trigger,
     insert_minimal_project, insert_project_document, install_insert_fail_trigger, json_request,
-    setup_session, wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
+    app_state, setup_session, test_peer, wait_for_query_blocked_by,
+    wait_for_user_for_update_blocked, TestDb,
 };
+use tokio::time::timeout;
+use tower::ServiceExt;
 use serde_json::json;
 use url::form_urlencoded;
 use uuid::Uuid;
@@ -3448,5 +3454,268 @@ async fn task_dates_accept_only_source_iso_format() {
     .await;
     assert_eq!(st, StatusCode::OK, "{body}");
     admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn sse_listen(
+    app: axum::Router,
+    path: String,
+    cookie: String,
+    open_needle: Option<Vec<u8>>,
+    open_notify: Option<tokio::sync::oneshot::Sender<()>>,
+    hit_needle: Option<Vec<u8>>,
+    within: Duration,
+) -> bool {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(&path)
+        .header("cookie", format!("fvoci_session={}", cookie))
+        .header("origin", "http://localhost")
+        .body(Body::empty())
+        .expect("request");
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(test_peer()));
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+    let open_needle = open_needle;
+    let open_notify = open_notify;
+    let hit_needle = hit_needle;
+    let wait_for_hit = hit_needle.is_some();
+    tokio::spawn(async move {
+        let response = app.oneshot(request).await.expect("sse response");
+        let ct = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if response.status() != StatusCode::OK || !ct.contains("text/event-stream") {
+            let _ = opened_tx.send(false);
+            let _ = done_tx.send(false);
+            return;
+        }
+        let mut open_confirmed = open_needle.is_none();
+        let mut open_notify = open_notify;
+        let mut opened_signal = Some(opened_tx);
+        if open_confirmed {
+            if let Some(tx) = opened_signal.take() {
+                let _ = tx.send(true);
+            }
+            if let Some(notify) = open_notify.take() {
+                notify.send(()).ok();
+            }
+        }
+        let mut stream = response.into_body().into_data_stream();
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                    if !open_confirmed {
+                        if let Some(needle) = open_needle.as_ref() {
+                            if buf.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                                open_confirmed = true;
+                                if let Some(tx) = opened_signal.take() {
+                                    let _ = tx.send(true);
+                                }
+                                if let Some(notify) = open_notify.take() {
+                                    notify.send(()).ok();
+                                }
+                            }
+                        }
+                    }
+                    if open_confirmed {
+                        if let Some(needle) = hit_needle.as_ref() {
+                            if buf.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                                done_tx.send(true).ok();
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if !open_confirmed {
+            if let Some(tx) = opened_signal.take() {
+                let _ = tx.send(false);
+            }
+        }
+        let _ = done_tx.send(false);
+    });
+    let opened = timeout(within, opened_rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(false);
+    if !opened {
+        return false;
+    }
+    if !wait_for_hit {
+        return true;
+    }
+    timeout(within, done_rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn task_stream_notifies_viewers_on_other_user_task_create() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let owner = add_workspace_user(&admin, workspace_id, "member", "owner2").await;
+    let peer = add_workspace_user(&admin, workspace_id, "member", "peer").await;
+    let lab = create_project(
+        app.clone(),
+        &owner.cookie,
+        workspace_id,
+        "LAB",
+        "workspace",
+    )
+    .await;
+    let project_id = lab["id"].as_str().unwrap();
+    let path = format!(
+        "/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream"
+    );
+    let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+    let listener = tokio::spawn(sse_listen(
+        app.clone(),
+        path.clone(),
+        owner.cookie.clone(),
+        Some(b"event: open".to_vec()),
+        Some(open_tx),
+        Some(b"event: task".to_vec()),
+        Duration::from_secs(20),
+    ));
+    assert!(
+        timeout(Duration::from_secs(5), open_rx)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_some(),
+        "task stream should emit open before mutations"
+    );
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "remote"})),
+        Some(&peer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        listener.await.expect("listener task"),
+        "project stream should receive a task invalidation frame"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_stream_denies_non_member_like_task_list() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let owner = add_workspace_user(&admin, workspace_id, "member", "priv-owner").await;
+    let outsider = add_workspace_user(&admin, workspace_id, "member", "outsider").await;
+    let lab = create_project(
+        app.clone(),
+        &owner.cookie,
+        workspace_id,
+        "PRV",
+        "private",
+    )
+    .await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream"),
+        None,
+        Some(&outsider.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_stream_rejects_65th_concurrent_subscriber() {
+    let harness = TestDb::bootstrap().await;
+    let state = app_state(&harness.app_url).await;
+    let hub = state.streams.clone();
+    let app = fvoci_server::http::router(state, None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup")
+                .header("content-type", "application/json")
+                .header("origin", "http://localhost")
+                .extension(ConnectInfo(test_peer()))
+                .body(Body::from(
+                    json!({
+                        "email": "cap@example.com",
+                        "password": "supersecret1",
+                        "givenName": "Cap",
+                        "workspaceSlug": "cap",
+                        "workspaceName": "Cap"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("setup");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let cookie = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .find_map(|v| v.to_str().ok())
+        .and_then(|s| s.split(';').next())
+        .and_then(|s| s.strip_prefix("fvoci_session="))
+        .expect("session");
+    let (status, list) = json_request(
+        app.clone(),
+        "GET",
+        "/api/v1/me/workspaces",
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let workspace_id = Uuid::parse_str(list["items"][0]["id"].as_str().unwrap()).unwrap();
+    let lab = create_project(app.clone(), cookie, workspace_id, "CAP", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let path = format!(
+        "/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream"
+    );
+    let holds = (0..64).map(|_| {
+        tokio::spawn(sse_listen(
+            app.clone(),
+            path.clone(),
+            cookie.to_string(),
+            Some(b"event: open".to_vec()),
+            None,
+            None,
+            Duration::from_secs(10),
+        ))
+    });
+    for hold in holds {
+        assert!(hold.await.expect("hold task"), "subscriber should open");
+    }
+    assert_eq!(hub.active_count(), 64);
+    let (status, _) = json_request(app.clone(), "GET", &path, None, Some(cookie)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    hub.begin_shutdown();
+    let (status, _) = json_request(app.clone(), "GET", &path, None, Some(cookie)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     harness.cleanup().await;
 }

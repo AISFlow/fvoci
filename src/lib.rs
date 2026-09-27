@@ -30,5 +30,6 @@ pub mod secret_box;
 pub mod secret_verify;
 pub mod settings;
 pub mod share_render;
+pub mod streams;
 pub mod tasks;
 pub mod validate;
