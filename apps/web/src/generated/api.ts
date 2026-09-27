@@ -2916,6 +2916,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_task_layout"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks": {
         parameters: {
             query?: never;
@@ -4410,6 +4426,63 @@ export interface components {
         FeaturesSettings: {
             ai: boolean;
         };
+        GanttBarOutput: {
+            id: string;
+            inferred: components["schemas"]["ScheduleInference"];
+            /** Format: int32 */
+            lane: number;
+            milestone: boolean;
+            /** Format: double */
+            width: number;
+            /** Format: double */
+            x: number;
+        };
+        GanttLayoutItemOutput: {
+            assigneeIds: string[];
+            dueAt?: string | null;
+            dueDate?: components["schemas"]["String"] | null;
+            end: components["schemas"]["String"];
+            id: string;
+            inferred: components["schemas"]["ScheduleInference"];
+            milestone: boolean;
+            /** Format: int32 */
+            number: number;
+            priority: string;
+            start: components["schemas"]["String"];
+            startDate?: components["schemas"]["String"] | null;
+            statusId: string;
+            title: string;
+        };
+        GanttLayoutOutput: {
+            bars: components["schemas"]["GanttBarOutput"][];
+            columns: components["schemas"]["ScaleTickOutput"][];
+            dropped: string[];
+            /** Format: double */
+            height: number;
+            items: components["schemas"]["GanttLayoutItemOutput"][];
+            /** Format: int32 */
+            laneCount: number;
+            /** Format: int32 */
+            laneHeight: number;
+            monthBands: components["schemas"]["MonthBandOutput"][];
+            overflow: string[];
+            pack: string;
+            /** Format: int32 */
+            pathTotal: number;
+            /** @description Compact paths: [blockerIndex, blockedIndex, x1, y1, x2, y2, ...] */
+            paths: number[][];
+            scale: components["schemas"]["GanttScaleOutput"];
+            truncated: boolean;
+            /** Format: double */
+            width: number;
+        };
+        GanttScaleOutput: {
+            end: components["schemas"]["String"];
+            /** Format: double */
+            pxPerDay: number;
+            start: components["schemas"]["String"];
+            zoom: string;
+        };
         GithubInstallOutput: {
             installationId?: string | null;
         };
@@ -4683,6 +4756,14 @@ export interface components {
             name: string;
             projectId: string;
             sortKey: string;
+        };
+        MonthBandOutput: {
+            key: string;
+            label: string;
+            /** Format: double */
+            width: number;
+            /** Format: double */
+            x: number;
         };
         MoveDocumentBody: {
             /** Format: uuid */
@@ -5037,6 +5118,17 @@ export interface components {
         RevisionRestoreResponse: {
             restored: boolean;
         };
+        ScaleTickOutput: {
+            date: components["schemas"]["String"];
+            label: string;
+            offDuty: boolean;
+            /** Format: double */
+            width: number;
+            /** Format: double */
+            x: number;
+        };
+        /** @enum {string} */
+        ScheduleInference: "none" | "from-due" | "from-start" | "swapped";
         SearchItemOutput: {
             /** Format: int64 */
             chunkNo: number | null;
@@ -5219,6 +5311,7 @@ export interface components {
             /** Format: int32 */
             wipLimit?: number | null;
         };
+        String: string;
         TaskChildOutput: {
             id: string;
             /** Format: int32 */
@@ -18006,6 +18099,77 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProjectOutput"];
+                };
+            };
+            /** @description Not found or forbidden */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    get_task_layout: {
+        parameters: {
+            query: {
+                /** @description Calendar year */
+                year: number;
+                /** @description Calendar month */
+                month: number;
+                /** @description 0 Sunday or 1 Monday */
+                weekStartsOn?: number;
+                /** @description day|week|month|quarter */
+                zoom?: string;
+                /** @description Pixels per day */
+                pxPerDay?: number;
+                /** @description Lane height in px */
+                laneHeight?: number;
+                /** @description rows|overlap */
+                pack?: string;
+                /** @description Max lanes for overlap pack */
+                maxLanes?: number;
+                /** @description JSON-encoded view query */
+                query?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+                /** @description Project id */
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Gantt layout */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GanttLayoutOutput"];
+                };
+            };
+            /** @description Invalid query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
                 };
             };
             /** @description Not found or forbidden */
