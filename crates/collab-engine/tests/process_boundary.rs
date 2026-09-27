@@ -7,8 +7,8 @@ use collab_engine::limits::{Limits, MIN_CHILD_STACK_BYTES};
 use collab_engine::outcome::{EngineStatus, LimitKind};
 use collab_engine::process::EngineSession;
 use collab_engine::protocol::{preflight_wire_json, Request};
-use serde_json::json;
 use collab_engine::{SpawnRequest, WorkerFailureReason};
+use serde_json::json;
 use yrs::{Any, Map, ReadTxn, StateVector, Transact};
 
 static SPAWN_TEST: Mutex<()> = Mutex::new(());
@@ -632,7 +632,11 @@ fn revision_snapshots_equal_wire_preflight_and_child_malformed() {
         tail_b64: Vec::new(),
         encoding: 1,
     });
-    assert!(matches!(load.outcome, EngineStatus::Ok { .. }), "{:?}", load.outcome);
+    assert!(
+        matches!(load.outcome, EngineStatus::Ok { .. }),
+        "{:?}",
+        load.outcome
+    );
     let snap = match session.call(&Request::RevisionSnapshot).outcome {
         EngineStatus::Ok {
             update_b64: Some(bytes),

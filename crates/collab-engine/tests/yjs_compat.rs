@@ -437,13 +437,21 @@ fn revision_snapshots_equal_matches_and_differs() {
         encoding: 1,
     }));
     let snap_a = snapshot_bytes_of(&mut engine);
-    assert!(revision_snapshots_equal_applied(&mut engine, &snap_a, &snap_a));
+    assert!(revision_snapshots_equal_applied(
+        &mut engine,
+        &snap_a,
+        &snap_a
+    ));
     assert_ok_applied(&engine.handle(&Request::Apply {
         update_b64: load_bytes("followup_edit.v1"),
         encoding: 1,
     }));
     let snap_b = snapshot_bytes_of(&mut engine);
-    assert!(!revision_snapshots_equal_applied(&mut engine, &snap_a, &snap_b));
+    assert!(!revision_snapshots_equal_applied(
+        &mut engine,
+        &snap_a,
+        &snap_b
+    ));
 }
 
 #[test]
@@ -498,27 +506,30 @@ fn revision_snapshots_equal_respects_max_ops() {
     let mut session = spawn(limits);
     let snap = load_bytes("structured.v1");
     assert!(matches!(
-        session.call(&Request::RevisionSnapshotsEqual {
-            left_b64: snap.clone(),
-            right_b64: snap.clone(),
-        })
-        .outcome,
+        session
+            .call(&Request::RevisionSnapshotsEqual {
+                left_b64: snap.clone(),
+                right_b64: snap.clone(),
+            })
+            .outcome,
         EngineStatus::Ok { .. }
     ));
     assert!(matches!(
-        session.call(&Request::RevisionSnapshotsEqual {
-            left_b64: snap.clone(),
-            right_b64: snap.clone(),
-        })
-        .outcome,
+        session
+            .call(&Request::RevisionSnapshotsEqual {
+                left_b64: snap.clone(),
+                right_b64: snap.clone(),
+            })
+            .outcome,
         EngineStatus::Ok { .. }
     ));
     assert!(matches!(
-        session.call(&Request::RevisionSnapshotsEqual {
-            left_b64: snap.clone(),
-            right_b64: snap.clone(),
-        })
-        .outcome,
+        session
+            .call(&Request::RevisionSnapshotsEqual {
+                left_b64: snap.clone(),
+                right_b64: snap.clone(),
+            })
+            .outcome,
         EngineStatus::ResourceLimit {
             kind: LimitKind::Ops,
             ..

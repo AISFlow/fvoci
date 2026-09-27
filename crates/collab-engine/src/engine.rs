@@ -81,7 +81,10 @@ impl CollabEngine {
             Request::Inspect => self.inspect(),
             Request::Project { .. } => self.project(),
             Request::RevisionSnapshot => self.revision_snapshot(),
-            Request::RevisionSnapshotsEqual { left_b64, right_b64 } => {
+            Request::RevisionSnapshotsEqual {
+                left_b64,
+                right_b64,
+            } => {
                 if let Err(st) = Request::preflight(req, &self.limits) {
                     return st;
                 }

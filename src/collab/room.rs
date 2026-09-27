@@ -29,14 +29,14 @@ use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
 use crate::collab::revision::prepare_revision_text;
+use crate::collab::validation::{
+    classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
+    ValidateStageTimings,
+};
 use crate::db::revisions::{
     create_system_revision, latest_revision_y_snapshot, load_durable_collab_for_system,
     CreateRevisionInput, RevisionDbError, RevisionTarget, SystemRevisionHead,
     SYSTEM_REVISION_HEAD_RETRIES,
-};
-use crate::collab::validation::{
-    classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
-    ValidateStageTimings,
 };
 
 const MAX_REJECTED_CANDIDATES_PER_USER: usize = 8;
@@ -430,7 +430,10 @@ pub async fn arm_session_revision_persist_barrier(
 
 #[cfg(feature = "db-tests")]
 pub async fn disarm_session_revision_persist_barrier(document_id: Uuid) {
-    SESSION_REVISION_PERSIST_BARRIERS.lock().await.remove(&document_id);
+    SESSION_REVISION_PERSIST_BARRIERS
+        .lock()
+        .await
+        .remove(&document_id);
 }
 
 #[cfg(feature = "db-tests")]
@@ -1246,10 +1249,13 @@ pub async fn spawn_room(
             let _ = finished_tx.send(());
         }
     });
-    Ok((RoomHandle {
-        tx,
-        session_cancel: session_cancel_tx,
-    }, finished_rx))
+    Ok((
+        RoomHandle {
+            tx,
+            session_cancel: session_cancel_tx,
+        },
+        finished_rx,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1584,9 +1590,7 @@ impl RoomActor {
     }
 
     fn session_revision_cancelled(&self) -> bool {
-        self.shutting_down
-            || self.fence_lost
-            || *self.session_cancel_rx.borrow()
+        self.shutting_down || self.fence_lost || *self.session_cancel_rx.borrow()
     }
 
     fn abort_session_revision_work(&mut self) {
@@ -1596,13 +1600,10 @@ impl RoomActor {
     async fn capture_committed_revision_primary(
         &mut self,
     ) -> Result<CapturedRevision, RevisionCaptureError> {
-        let durable = load_durable_collab_for_system(
-            &self.pool,
-            self.workspace_id,
-            self.revision_target(),
-        )
-        .await
-        .map_err(|_| RevisionCaptureError::Unavailable)?;
+        let durable =
+            load_durable_collab_for_system(&self.pool, self.workspace_id, self.revision_target())
+                .await
+                .map_err(|_| RevisionCaptureError::Unavailable)?;
         let durable = durable.map_err(|_| RevisionCaptureError::Unavailable)?;
         self.committed.snapshot = durable.snapshot;
         self.committed.tail_payloads = durable.tail;

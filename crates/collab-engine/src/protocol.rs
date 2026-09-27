@@ -111,9 +111,11 @@ impl Request {
             | Self::Inspect
             | Self::Project { .. }
             | Self::RevisionSnapshot => 0,
-            Self::RevisionSnapshotsEqual { left_b64, right_b64, .. } => {
-                left_b64.len() as u64 + right_b64.len() as u64
-            }
+            Self::RevisionSnapshotsEqual {
+                left_b64,
+                right_b64,
+                ..
+            } => left_b64.len() as u64 + right_b64.len() as u64,
             Self::Apply { update_b64, .. } => update_b64.len() as u64,
             Self::Sync {
                 state_vector_b64, ..
