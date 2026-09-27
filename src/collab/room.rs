@@ -437,6 +437,14 @@ pub async fn disarm_session_revision_persist_barrier(document_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
+pub async fn session_revision_persist_barrier_armed(document_id: Uuid) -> bool {
+    SESSION_REVISION_PERSIST_BARRIERS
+        .lock()
+        .await
+        .contains_key(&document_id)
+}
+
+#[cfg(feature = "db-tests")]
 async fn pause_for_session_revision_persist_barrier(document_id: Uuid) {
     let barrier = SESSION_REVISION_PERSIST_BARRIERS
         .lock()
@@ -2199,6 +2207,11 @@ impl RoomActor {
     }
 
     async fn handle_leave(&mut self, conn_id: Uuid) {
+        // The lease drop may already have evicted this connection; a stale Leave must not
+        // schedule another session revision capture.
+        if !self.connections.contains_key(&conn_id) {
+            return;
+        }
         self.close_connection(conn_id, 1000, "client leave").await;
     }
 

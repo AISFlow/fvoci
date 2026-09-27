@@ -16,7 +16,8 @@ use fvoci_server::collab::room::CapturedRevision;
 use fvoci_server::collab::room::{
     arm_append_revoke_barrier, arm_join_channel_admission_witness,
     arm_session_revision_persist_barrier, disarm_join_channel_admission_witness,
-    disarm_session_revision_persist_barrier, AuthenticatedConnection, CollabSession, RoomJoin,
+    disarm_session_revision_persist_barrier, session_revision_persist_barrier_armed,
+    AuthenticatedConnection, CollabSession, RoomJoin,
 };
 use fvoci_server::collab::seed::SeedEngine;
 use fvoci_server::collab::wire::{CollabKind, CollabRoomName};
@@ -971,6 +972,44 @@ async fn wait_session_revision_count(
     }
 }
 
+/// Bounded wait for the armed last-leave persist barrier; on timeout names the stage that stopped short.
+async fn await_session_persist_barrier(
+    hub: &CollabHub,
+    harness: &support::TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    reached: tokio::sync::oneshot::Receiver<()>,
+) {
+    let Ok(reached) = tokio::time::timeout(Duration::from_secs(8), reached).await else {
+        let armed = session_revision_persist_barrier_armed(document_id).await;
+        let probe = tokio::time::timeout(
+            Duration::from_secs(5),
+            hub.probe_actor(room_key(workspace_id, document_id)),
+        )
+        .await;
+        let count = tokio::time::timeout(
+            Duration::from_secs(5),
+            count_session_revisions(harness, workspace_id, document_id),
+        )
+        .await
+        .ok();
+        let stage = match (armed, &probe) {
+            (false, _) => "barrier consumed without a reached signal",
+            (true, Err(_)) => "room actor stalled before the persist pause (capture/recycle/head read)",
+            (true, Ok(_)) if count.is_some_and(|count| count > 0) => {
+                "last-leave work deduped against an existing session revision before the persist pause"
+            }
+            (true, Ok(_)) => {
+                "last-leave work never scheduled or aborted before the persist pause (capture/compare/text)"
+            }
+        };
+        panic!(
+            "session revision persist barrier not reached: {stage}; armed={armed} probe={probe:?} session_count={count:?}"
+        );
+    };
+    reached.expect("session revision persist barrier");
+}
+
 #[tokio::test]
 async fn session_revision_on_last_disconnect_two_clients() {
     run_test("session_revision_on_last_disconnect_two_clients", async {
@@ -1438,9 +1477,14 @@ async fn session_revision_persists_through_immediate_reconnect() {
             let (persist_reached, persist_proceed) =
                 arm_session_revision_persist_barrier(wiki.document_id).await;
             let _ = ws.close(None).await;
-            persist_reached
-                .await
-                .expect("session revision persist barrier");
+            await_session_persist_barrier(
+                &hub,
+                &run.harness,
+                workspace_id,
+                document_id,
+                persist_reached,
+            )
+            .await;
             assert_eq!(
                 count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id,)
                     .await,
@@ -1522,6 +1566,77 @@ async fn session_revision_persists_through_immediate_reconnect() {
                     .await,
                 1,
                 "unchanged content after reconnect leave must dedupe, not erase prior snapshot"
+            );
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// Transport enqueues `Leave` and then drops the lease; the actor may select the lease drop first.
+/// The trailing `Leave` for the already-evicted connection must not schedule another capture.
+#[tokio::test]
+async fn session_revision_stale_leave_after_lease_drop_does_not_reschedule() {
+    run_test(
+        "session_revision_stale_leave_after_lease_drop_does_not_reschedule",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let hub = hub.clone();
+            let addr = run.spawn_router_state(state, hub.clone()).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+            apply_and_persist(
+                addr,
+                &wiki.session.session_token,
+                &key,
+                1,
+                &engine_fixture("structured.v1"),
+            )
+            .await;
+            wait_session_revision_count(
+                &run.harness,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                1,
+            )
+            .await;
+
+            let room = room_key(wiki.session.workspace_id, wiki.document_id);
+            let conn_id = Uuid::now_v7();
+            let lease = hub_join_with_conn(
+                &hub,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                wiki.session.session_id,
+                wiki.session.user_id,
+                20,
+                conn_id,
+            )
+            .await
+            .expect("hub join");
+            drop(lease);
+            // The first probe drains the lease drop; the second is served only after that
+            // turn's session revision work has finished.
+            hub.probe_actor(room).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            assert_eq!(
+                count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                    .await,
+                1,
+                "unchanged lease-drop leave must dedupe"
+            );
+
+            clear_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                .await;
+            hub.leave_room(room, conn_id).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            assert_eq!(
+                count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                    .await,
+                0,
+                "stale leave for an evicted connection must not schedule a session revision"
             );
             run.finish().await.expect("cleanup");
         },
