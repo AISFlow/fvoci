@@ -16,6 +16,11 @@ const DocxViewer = lazy(async () => {
   return { default: mod.DocxViewer };
 });
 
+const XlsxViewer = lazy(async () => {
+  const mod = await import("./xlsx-viewer");
+  return { default: mod.XlsxViewer };
+});
+
 export type AttachmentViewerProps = {
   name: string;
   mime: string;
@@ -200,14 +205,15 @@ export function AttachmentViewer(props: AttachmentViewerProps): ReactNode {
         <PdfViewer downloadUrl={props.downloadUrl} />
       </Suspense>
     );
-  } else if (kind === "docx") {
+  } else if (kind === "docx" || kind === "xlsx") {
+    const Layout = kind === "docx" ? DocxViewer : XlsxViewer;
     body = (
       <>
         {props.chunk !== undefined && props.previewHtmlUrl !== undefined ? (
           <SearchChunkSupplement previewHtmlUrl={props.previewHtmlUrl} chunk={props.chunk} />
         ) : null}
         <Suspense fallback={<ViewerLoadingPane />}>
-          <DocxViewer key={props.downloadUrl} downloadUrl={props.downloadUrl} />
+          <Layout key={props.downloadUrl} downloadUrl={props.downloadUrl} />
         </Suspense>
       </>
     );

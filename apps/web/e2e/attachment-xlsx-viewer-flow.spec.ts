@@ -218,6 +218,12 @@ test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, st
   await expect(viewer.getByText("시트 선택: Second (2/2)")).toBeVisible();
   await expect(viewer.locator("td")).toHaveText(["SECOND SHEET"]);
 
+  // Search hit: the extract-text supplement sits above the grid and never replaces it.
+  await page.goto(`/w/acme/a/${twoSheetsId}/view?chunk=0`);
+  await expect(page.locator("[data-chunk-supplement]")).toBeVisible({ timeout: 20_000 });
+  await expect(viewer.getByText("시트 선택: 첫 시트 (1/2)")).toBeVisible();
+  await expect(viewer.locator("td")).toHaveText(["FIRST SHEET"]);
+
   // Bounds: over the row cap and a small highly compressed part → download only.
   const overRowsId = await uploadAttachment(
     page,
@@ -317,9 +323,11 @@ test("XLSX attachment: sheets, paging, zoom, cached values, bounds, failures, st
     const path = new URL(request.url()).pathname;
     if (path.startsWith("/api/")) readerApi.push(path);
   });
-  await reader.goto(`${sharePath}/attachments/${bookId}/view`);
+  await reader.goto(`${sharePath}/attachments/${bookId}/view?chunk=0`);
   const shared = reader.getByTestId("xlsx-viewer");
   await expect(shared.getByText("시트 선택: 요약 📊 (1/3)")).toBeVisible({ timeout: 20_000 });
+  // Share views have no preview-html supplement.
+  await expect(reader.locator("[data-chunk-supplement]")).toHaveCount(0);
   await expect(shared.locator("td").first()).toHaveText("한글 셀 😀");
   await shared.getByRole("button", { name: "다음 시트" }).click();
   await expect(shared.locator("[data-xlsx-unsupported]").getByRole("link", { name: "다운로드" })).toHaveAttribute(

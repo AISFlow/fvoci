@@ -22,12 +22,18 @@ export function isDocx(name: string, mime: string): boolean {
   return mime.toLowerCase().includes("wordprocessingml.document") || /\.docx$/i.test(name);
 }
 
-export type ViewerKind = "image" | "pdf" | "docx" | "text" | "download";
+/** Source `officeKind` "xlsx" (by MIME or extension), checked after "docx" as in the source. */
+export function isXlsx(name: string, mime: string): boolean {
+  return mime.toLowerCase().includes("spreadsheetml.sheet") || /\.xlsx$/i.test(name);
+}
+
+export type ViewerKind = "image" | "pdf" | "docx" | "xlsx" | "text" | "download";
 
 export function viewerKind(att: { name: string; mime: string; image: boolean }): ViewerKind {
   if (att.image) return "image";
   if (isPdf(att.name, att.mime)) return "pdf";
   if (isDocx(att.name, att.mime)) return "docx";
+  if (isXlsx(att.name, att.mime)) return "xlsx";
   if (isExtractableText(att.name, att.mime)) return "text";
   return "download";
 }
