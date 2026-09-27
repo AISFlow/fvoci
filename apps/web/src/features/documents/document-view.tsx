@@ -27,6 +27,7 @@ import {
 import { projectAncestors } from "./project-ancestors";
 import { projectDocumentsQuery } from "@/features/projects/queries";
 import { CommentPanel } from "@/features/comments/comment-panel";
+import { OriginPanel } from "@/features/collections/origin-panel";
 import {
   createAttachmentBridge,
   createProjectDocumentAttachmentBridge,
@@ -599,6 +600,7 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
           </AttachmentBlockContext.Provider>
         ) : null}
       </section>
+      <OriginPanel workspaceId={workspaceId} slug={slug} documentId={documentId} />
       {me.data ? (
         <CommentPanel
           workspaceId={workspaceId}
