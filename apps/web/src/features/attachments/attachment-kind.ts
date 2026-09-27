@@ -17,17 +17,28 @@ export function isPdf(name: string, mime: string): boolean {
   return mime.toLowerCase() === "application/pdf" || /\.pdf$/i.test(name);
 }
 
-export type ViewerKind = "image" | "pdf" | "text" | "download";
+/** Source `officeKind` "docx" (by MIME or extension); other Office kinds stay download here. */
+export function isDocx(name: string, mime: string): boolean {
+  return mime.toLowerCase().includes("wordprocessingml.document") || /\.docx$/i.test(name);
+}
+
+export type ViewerKind = "image" | "pdf" | "docx" | "text" | "download";
 
 export function viewerKind(att: { name: string; mime: string; image: boolean }): ViewerKind {
   if (att.image) return "image";
   if (isPdf(att.name, att.mime)) return "pdf";
+  if (isDocx(att.name, att.mime)) return "docx";
   if (isExtractableText(att.name, att.mime)) return "text";
   return "download";
 }
 
 export function attachmentDownloadUrl(workspaceId: string, attachmentId: string): string {
   return `/api/v1/workspaces/${workspaceId}/attachments/${attachmentId}/download`;
+}
+
+/** Session-only extract text for the search-chunk supplement; share has no equivalent. */
+export function attachmentPreviewHtmlUrl(workspaceId: string, attachmentId: string): string {
+  return `/api/v1/workspaces/${workspaceId}/attachments/${attachmentId}/preview-html`;
 }
 
 export { attachmentViewPath } from "@/lib/href";

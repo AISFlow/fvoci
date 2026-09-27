@@ -7,6 +7,7 @@ import { t } from "@fvoci/i18n";
 import { AttachmentViewer } from "@/features/attachments/attachment-viewer";
 import {
   attachmentDownloadUrl,
+  attachmentPreviewHtmlUrl,
   chunkSearch,
 } from "@/features/attachments/attachment-kind";
 import "@/features/attachments/attachment-shell.css";
@@ -76,6 +77,7 @@ export function AttachmentViewPage() {
           mime={query.data.mime}
           image={query.data.image}
           downloadUrl={downloadUrl}
+          previewHtmlUrl={attachmentPreviewHtmlUrl(workspace.id, id)}
           {...(chunk === undefined ? {} : { chunk })}
         />
       ) : null}
