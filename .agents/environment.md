@@ -213,3 +213,15 @@ AGENTS.md의 두 Cursor 모델로 배정하며 기존 sol 구현 결과와 당�
 - Grok은 검증된 `cursor-grok-4.6-high` 경로를 유지한다. 최근 조사 dispatch와 실제
   Grok 4.6 High 실행 근거는 기존 진행 인계에 있으며 모델 확인만을 위한 새 작업은 만들지 않는다.
 - 실행 설정과 실제 task 완료는 구분한다. 현재 작업·파일 소유권·인계 결과는 기존 진행 기록에 둔다.
+
+## sol 차단 시 독립 검토 대체 — 2026-09-27 추가 사용자 승인
+
+사용자는 sol 독립 검토가 차단되면 cursor-agent Grok 4.6으로 진행하도록 명시 승인했다.
+실행 ID는 기존에 검증한 `cursor-grok-4.6-high`이며 별도 effort 인자를 넣지 않는다.
+구현자 및 코디네이터와 다른 읽기 전용 세션을 사용한다. sol의 이전 capacity 오류와 이후
+readiness timeout은 복구됐다고 기록하지 않으며 과거 sol 검토 이력도 그대로 보존한다.
+
+실제 대체 검토 dispatch `ctx_8d4b648cd02a`의 requested/effective는 모두
+`agent=cursor`, `model=cursor-grok-4.6-high`, `effort=null`이다. 별도 terminal
+`term_74250c16-7eda-49f8-8b51-02dff54b8421`에서 Grok 4.6 High와 대상 worktree를 확인했다.
+이 기록은 실행 배정의 확인이며, 개별 후보의 검토 완료·수락 결과는 진행 인계에 둔다.
