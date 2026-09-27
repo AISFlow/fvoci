@@ -237,8 +237,9 @@ async function completeOnce(
   parts: { partNumber: number; etag: string }[],
   signal?: AbortSignal,
 ): Promise<CompleteAttempt> {
+  let result;
   try {
-    const result = await api.POST(
+    result = await api.POST(
       "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete",
       {
         params: {
@@ -248,29 +249,25 @@ async function completeOnce(
         signal,
       },
     );
-    if (result.response.ok && result.data) return { done: attachmentResult(result.data) };
-    const status = result.response.status;
-    if (isPermanentAuthStatus(status)) {
-      throw new ProblemError(status, result.error?.code);
-    }
-    const stored = await storedAttachmentMeta(workspaceId, attachmentId, signal);
-    if (stored) return { done: attachmentResult(stored) };
-    if (isPermanentPartStatus(status)) {
-      throw new ProblemError(status, result.error?.code);
-    }
-    if (isTransientCompleteStatus(status)) {
-      return { retry: new ProblemError(status, result.error?.code) };
-    }
-    return { done: attachmentResult(await ensureOk(result)) };
   } catch (err) {
     if (isAbortError(err) || signal?.aborted) throw err;
-    if (err instanceof ProblemError && isPermanentAuthStatus(err.status)) throw err;
+    // The request never got a readable HTTP answer (connection reset, proxy drop).
     const stored = await reconcileStored(workspaceId, attachmentId, signal);
     if (stored) return { done: attachmentResult(stored) };
-    if (err instanceof ProblemError) throw err;
-    // The request never got an HTTP answer (connection reset, proxy drop).
     return { retry: err };
   }
+  if (result.response.ok && result.data) return { done: attachmentResult(result.data) };
+  // The complete's own answer decides what is thrown or retried; a metadata
+  // lookup only turns it into success when the attachment is already stored.
+  const status = result.response.status;
+  const problem = result.response.ok
+    ? new ProblemError(500)
+    : new ProblemError(status, result.error?.code);
+  if (isPermanentAuthStatus(status)) throw problem;
+  const stored = await reconcileStored(workspaceId, attachmentId, signal);
+  if (stored) return { done: attachmentResult(stored) };
+  if (isTransientCompleteStatus(status)) return { retry: problem };
+  throw problem;
 }
 
 async function completeUpload(

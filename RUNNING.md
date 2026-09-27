@@ -154,7 +154,9 @@ a 125 s Proxy Read Timeout and a 30 s Proxy Write Timeout
 A part or complete answered 524/502/504 (or with a lost connection) is retried a
 bounded number of times; complete is idempotent, the client first checks
 whether the attachment is already stored, and a complete abandoned by the proxy
-publishes nothing until a later complete finishes it or the upload expires.
+publishes the attachment only if the origin still finishes that complete (a proxy
+may not cancel the origin request) or a later complete finishes it; otherwise
+nothing is published before the upload expires.
 Complete assembles the whole file before answering, so a very large file on
 slow storage can exceed the read timeout on every bounded retry and fail
 without data loss. Not verified against a real Cloudflare zone: request
