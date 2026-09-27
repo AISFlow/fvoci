@@ -193,21 +193,7 @@ const SCHEDULED_REASON: &str = "scheduled";
 const TARGET_DOCUMENT: &str = "document";
 const TARGET_TASK: &str = "task";
 
-type TaskRevisionLockSqlRow = (Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
-
-struct TaskRevisionLockRow {
-    project_id: Uuid,
-    deleted_at: Option<DateTime<Utc>>,
-}
-
-fn task_revision_lock_row(
-    (project_id, _archived_at, deleted_at): TaskRevisionLockSqlRow,
-) -> TaskRevisionLockRow {
-    TaskRevisionLockRow {
-        project_id,
-        deleted_at,
-    }
-}
+type TaskRevisionLockRow = (Uuid, Option<DateTime<Utc>>);
 
 fn is_automatic_revision_reason(reason: &str) -> bool {
     reason == SESSION_REASON || reason == SCHEDULED_REASON
@@ -704,10 +690,7 @@ pub async fn create_manual_revision(
                 sqlx::query(
                     r#"
                     UPDATE fvoci.revisions
-                    SET reason = $3,
-                        created_by = $4,
-                        content_json = $5,
-                        text = $6
+                    SET reason = $3, created_by = $4
                     WHERE workspace_id = $1 AND id = $2
                     "#,
                 )
@@ -715,8 +698,6 @@ pub async fn create_manual_revision(
                 .bind(id)
                 .bind(MANUAL_REASON)
                 .bind(actor_user_id)
-                .bind(&input.content_json)
-                .bind(&input.text)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -849,9 +830,9 @@ async fn lock_system_revision_target(
             if project.is_none() {
                 return Ok(Err(RevisionDbError::NotFound));
             }
-            let row: Option<TaskRevisionLockSqlRow> = sqlx::query_as(
+            let row: Option<TaskRevisionLockRow> = sqlx::query_as(
                 r#"
-                SELECT project_id, archived_at, deleted_at
+                SELECT project_id, deleted_at
                 FROM fvoci.tasks
                 WHERE workspace_id = $1 AND id = $2
                 FOR NO KEY UPDATE
@@ -861,11 +842,7 @@ async fn lock_system_revision_target(
             .bind(task_id)
             .fetch_optional(&mut **tx)
             .await?;
-            let Some(TaskRevisionLockRow {
-                project_id,
-                deleted_at,
-            }) = row.map(task_revision_lock_row)
-            else {
+            let Some((project_id, deleted_at)) = row else {
                 return Ok(Err(RevisionDbError::NotFound));
             };
             if deleted_at.is_some() || project_id != expected_project_id {
