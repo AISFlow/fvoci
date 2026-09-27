@@ -1,96 +1,84 @@
-import { isSafeDataImageUrl } from "./docx-frame.ts";
-
 /**
- * Hardening for `@office-kit/pptx-preview` slide SVG before it is shown.
+ * The slide as served to the page: a fixed outer SVG, written entirely here,
+ * whose only content is one `<image>` of the renderer's SVG as a
+ * `data:image/svg+xml;base64,` URL.
  *
- * The slide is only ever displayed through `<img>` from a blob URL, where a
- * browser runs no script, follows no link and loads no external resource.
- * That is the isolation boundary. On top of it, the served markup itself
- * carries no navigation or remote reference, so it stays inert even if the
- * blob is opened as a document: the renderer emits `<a href>` (with
- * `target="_blank"`) for run and shape hyperlinks, including `javascript:`
- * targets taken verbatim from the deck, and puts deck font names into CSS.
+ * `@office-kit/pptx-preview` interpolates some deck strings into its markup
+ * unescaped (chart number-format prefixes, for one), so its output is treated
+ * as hostile markup and never parsed, filtered or rewritten here. SVG that an
+ * `<image>` element references is processed as an image (SVG Integration):
+ * no script, no external loads, no links or other interaction. That holds for
+ * the inner slide wherever the outer blob is shown: through the viewer's
+ * `<img>`, which is itself image mode, or opened on its own as a document
+ * ("open image in new tab"), where the outer markup — ours — has nothing
+ * active and the slide inside is still an image.
  *
- * This works on the markup string, not a DOM: every in-page DOM parse
- * (DOMParser, an inert HTML document, `<template>`) inherits the app CSP and
- * reports each `style` attribute as a `style-src` violation. It is exact for
- * this renderer's output, which escapes `& < > "` in all text and attribute
- * values, so a tag is precisely `<[^<>]*>` and a quoted value `"[^"]*"`.
- * Anything outside that shape or the renderer's element set — declarations,
- * processing instructions, comments, script, SMIL, `<style>` or an event
- * attribute — makes the slide unavailable rather than being rewritten.
+ * The renderer inlines pictures as `data:` URLs, which image mode displays.
+ * No DOM parse happens in the page, so the app CSP (`style-src`) reports
+ * nothing for the slide's style attributes.
  */
 
-const TAG = /<[^<>]*>/g;
+export const SLIDE_IMAGE_TYPE = "image/svg+xml";
 
-const DENIED_TAG =
-  /^<\/?(script|iframe|frame|frameset|object|embed|applet|link|meta|base|form|input|button|textarea|select|template|portal|noscript|audio|video|source|track|style|animate|animatemotion|animatetransform|set|discard|handler|listener|feimage)\b/i;
+/** A slide dimension, in CSS px, as the outer template writes it. */
+const MAX_DIMENSION = 1_000_000;
 
-/** Declarations, processing instructions, comments, CDATA: never emitted by the renderer. */
-const DECLARATION = /^<[!?]/;
+/** Bytes per `btoa` call: a multiple of 3, so the pieces join into one base64 string. */
+const BASE64_CHUNK = 3 * 8 * 1024;
 
-const EVENT_ATTRIBUTE = /\son[a-z]+\s*=/i;
-
-const ANCHOR = /^<\/?a(\s|>)/i;
-
-const URL_ATTRIBUTE = /(\s)((?:[a-z]+:)?href|src)\s*=\s*"([^"]*)"/gi;
-
-const SAFE_DATA_FONT = /^data:(font\/|application\/(font|x-font|octet-stream|vnd\.ms-))/i;
-
-/** A same-document reference such as `#clip-3`. */
-function isFragment(url: string): boolean {
-  return /^#\S*$/.test(url.trim());
+/** Standard base64 of `bytes`, without a per-byte string of the whole input. */
+export function toBase64(bytes: Uint8Array): string {
+  const parts: string[] = [];
+  for (let at = 0; at < bytes.byteLength; at += BASE64_CHUNK) {
+    const chunk = bytes.subarray(at, Math.min(bytes.byteLength, at + BASE64_CHUNK));
+    parts.push(btoa(String.fromCharCode(...chunk)));
+  }
+  return parts.join("");
 }
+
+function dimension(value: number): string | null {
+  if (!(Number.isFinite(value) && value > 0 && value <= MAX_DIMENSION)) return null;
+  return String(Math.round(value * 100) / 100);
+}
+
+export type SlideImageSvg = { status: "ok"; svg: string } | { status: "tooLarge" } | { status: "failed" };
 
 /**
- * Replaces every CSS or presentation-attribute `url(...)` that is not a
- * same-document fragment or an embedded image/font with `none`, and drops
- * `@import`.
+ * Wraps renderer SVG `inner` for a `width` × `height` px slide. `inner` is
+ * encoded as UTF-8 (`TextEncoder`, which replaces any lone surrogate with
+ * U+FFFD) and must start with the renderer's `<svg` root; more than
+ * `maxBytes` of it is `tooLarge`.
  */
-export function neutralizeSvgUrls(value: string): string {
-  return value
-    .replace(/@import[^;]*;?/gi, "")
-    .replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi, (whole, dq, sq, bare) => {
-      const target = String(dq ?? sq ?? bare ?? "").trim();
-      return isFragment(target) || isSafeDataImageUrl(target) || SAFE_DATA_FONT.test(target) ? whole : "none";
-    });
+export function slideImageSvg(inner: string, width: number, height: number, maxBytes: number): SlideImageSvg {
+  const w = dimension(width);
+  const h = dimension(height);
+  if (w === null || h === null || !/^<svg[\s>]/.test(inner)) return { status: "failed" };
+  // UTF-8 is never shorter than the UTF-16 length, so this skips encoding a string that cannot fit.
+  if (inner.length > maxBytes) return { status: "tooLarge" };
+  const bytes = new TextEncoder().encode(inner);
+  if (bytes.byteLength > maxBytes) return { status: "tooLarge" };
+  return {
+    status: "ok",
+    svg:
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+      `<image width="${w}" height="${h}" href="data:${SLIDE_IMAGE_TYPE};base64,${toBase64(bytes)}"/></svg>`,
+  };
 }
 
-/** Undoes the renderer's attribute escaping, for checking a URL value. */
-function unescapeAttribute(value: string): string {
-  return value
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
-}
+const OUTER = /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="([0-9.]+)" height="([0-9.]+)" viewBox="0 0 \1 \2"><image width="\1" height="\2" href="data:image\/svg\+xml;base64,([A-Za-z0-9+/]*={0,2})"\/><\/svg>$/;
 
 /**
- * Returns the slide SVG with navigation and remote references removed, or
- * `null` when it holds markup the renderer never produces. `<a>` tags are
- * unwrapped (link text and styling stay); `href`/`src` values other than
- * fragments and embedded `data:` images are dropped; CSS `url()` to anything
- * else becomes `none`. Text content is never touched.
+ * The inner slide SVG of a served blob, or `null` unless `outer` is exactly
+ * the template `slideImageSvg` writes. For tests and the browser spec.
  */
-export function sanitizeSlideSvg(svg: string): string | null {
-  if (!/^<svg[\s>]/.test(svg) || !/<\/svg>\s*$/.test(svg)) return null;
-  let rejected = false;
-  const out = svg.replace(TAG, (tag) => {
-    if (rejected) return tag;
-    // Attribute names only: quoted values (e.g. a deck font name) cannot trip the check.
-    const names = tag.replace(/"[^"]*"/g, '""');
-    if (DECLARATION.test(tag) || DENIED_TAG.test(tag) || EVENT_ATTRIBUTE.test(names)) {
-      rejected = true;
-      return tag;
-    }
-    if (ANCHOR.test(tag)) return "";
-    let clean = tag.replace(URL_ATTRIBUTE, (whole, space: string, _name: string, value: string) => {
-      const url = unescapeAttribute(value);
-      return isFragment(url) || isSafeDataImageUrl(url) ? whole : space.trimEnd();
-    });
-    if (/url\(|@import/i.test(clean)) clean = neutralizeSvgUrls(clean);
-    return clean;
-  });
-  return rejected ? null : out;
+export function innerSlideSvg(outer: string): string | null {
+  const match = OUTER.exec(outer);
+  if (!match || match[3]!.length % 4 !== 0) return null;
+  const binary = atob(match[3]!);
+  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }

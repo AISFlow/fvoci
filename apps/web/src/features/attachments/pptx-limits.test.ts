@@ -4,8 +4,9 @@ import { deflateRawSync, crc32 as zlibCrc32 } from "node:zlib";
 import { getSlides, loadPresentation } from "@office-kit/pptx";
 import { Zip, ZipDeflate, unzipSync } from "fflate";
 import { crc32, writeZip } from "./docx-test-fixture.ts";
-import { repackPptx } from "./pptx-limits.ts";
-import { buildFixturePptx } from "./pptx-test-fixture.ts";
+import { openPptx } from "./pptx-deck.ts";
+import { PPTX_MAX_EXPANDED_BYTES, PPTX_MAX_MARKUP_BYTES, repackPptx, startsLikeMarkup } from "./pptx-limits.ts";
+import { buildFixturePptx, DEFAULT_PPTX_TEXT, FIXTURE_PPTX_FILLER } from "./pptx-test-fixture.ts";
 
 const MiB = 1024 * 1024;
 const alive = () => true;
@@ -258,4 +259,81 @@ test("a forged ZIP64 entry count is never walked", async () => {
   const started = Date.now();
   assert.deepEqual(await repackPptx(bytes, alive), { status: "invalid" });
   assert.ok(Date.now() - started < 2_000);
+});
+
+// --- Markup budget (review B2) -------------------------------------------------
+
+const enc = (text: string) => new TextEncoder().encode(text);
+
+/** `size` bytes that the loader's XML reader would accept as the start of a document. */
+function markupOf(size: number, prefix = ""): Uint8Array {
+  const out = new Uint8Array(size).fill(0x20);
+  out.set(enc(`${prefix}<r>`).subarray(0, size));
+  return out;
+}
+
+function deflated(name: string, bytes: Uint8Array) {
+  return { name, deflated: deflateRawSync(bytes), crc: zlibCrc32(bytes), size: bytes.byteLength };
+}
+
+test("the loader's XML reader starts at '<' after BOMs and XML whitespace; anything else is not markup", () => {
+  assert.equal(startsLikeMarkup(enc("<?xml")), true);
+  assert.equal(startsLikeMarkup(enc(" \t\r\n<p:sld")), true);
+  assert.equal(startsLikeMarkup(new Uint8Array([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf, 0x3c])), true);
+  assert.equal(startsLikeMarkup(enc("  ")), undefined);
+  assert.equal(startsLikeMarkup(new Uint8Array(0)), undefined);
+  assert.equal(startsLikeMarkup(new Uint8Array([0x89, 0x50, 0x4e, 0x47])), false);
+  assert.equal(startsLikeMarkup(new Uint8Array([0xff, 0xfe, 0x3c, 0x00])), false);
+  assert.equal(startsLikeMarkup(new Uint8Array([0x00, 0x3c])), false);
+  assert.equal(startsLikeMarkup(enc("x<p/>")), false);
+});
+
+test("markup is counted by content at the cap edge, whatever the part name", async () => {
+  const cap = 64 * 1024;
+  const parts = [
+    { name: "[Content_Types].xml", bytes: markupOf(1000, "\uFEFF") },
+    // A part named like a picture still counts: the loader follows relationships, not extensions.
+    { name: "ppt/media/slide.png", bytes: markupOf(cap - 1000, " \n") },
+    // Blank bytes and then something other than '<': not markup.
+    { name: "ppt/media/pad.bin", bytes: Uint8Array.from([0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00]) },
+    // Binary media: only the total budget.
+    { name: "ppt/media/big.png", bytes: new Uint8Array(4 * cap).fill(7) },
+  ];
+  const zip = writeZip(parts.map((p) => deflated(p.name, p.bytes)));
+  const ok = await repackPptx(zip, alive, undefined, undefined, cap);
+  assert.equal(ok.status, "ok");
+  if (ok.status !== "ok") return;
+  assert.equal(ok.markup, cap);
+  assert.equal(ok.expanded, cap + 11 + 4 * cap);
+  assert.deepEqual(await repackPptx(zip, alive, undefined, undefined, cap - 1), { status: "tooLarge" });
+  // The total cap still applies to media.
+  assert.deepEqual(await repackPptx(zip, alive, 4 * cap, undefined, cap), { status: "tooLarge" });
+});
+
+test("default budgets: 16 MiB of markup passes, one byte more does not; 128 MiB total stays", async () => {
+  assert.equal(PPTX_MAX_MARKUP_BYTES, 16 * MiB);
+  assert.equal(PPTX_MAX_EXPANDED_BYTES, 128 * MiB);
+  const at = writeZip([deflated("ppt/slides/slide1.xml", markupOf(PPTX_MAX_MARKUP_BYTES))]);
+  const over = writeZip([deflated("ppt/slides/slide1.xml", markupOf(PPTX_MAX_MARKUP_BYTES + 1))]);
+  assert.ok(over.byteLength < 64 * 1024);
+  assert.equal((await repackPptx(at, alive)).status, "ok");
+  assert.deepEqual(await repackPptx(over, alive), { status: "tooLarge" });
+});
+
+test("a small deck with a 16 MiB+ slide is refused before the loader parses it; large media still opens", async () => {
+  const filler = enc(FIXTURE_PPTX_FILLER).byteLength;
+  const deck = buildFixturePptx(DEFAULT_PPTX_TEXT, { slide2Paragraphs: Math.ceil(PPTX_MAX_MARKUP_BYTES / filler) });
+  const parts = unzipSync(deck);
+  const compact = writeZip(Object.entries(parts).map(([name, bytes]) => deflated(name, bytes)));
+  assert.ok(compact.byteLength < 2 * MiB, String(compact.byteLength));
+  assert.deepEqual(await openPptx(compact, alive), { status: "tooLarge" });
+
+  // Control: 24 MiB of picture bytes is not markup, and the deck opens.
+  const media = unzipSync(buildFixturePptx());
+  const png = new Uint8Array(24 * MiB);
+  png.set(media["ppt/media/blue.png"]!);
+  media["ppt/media/blue.png"] = png;
+  const withMedia = writeZip(Object.entries(media).map(([name, bytes]) => deflated(name, bytes)));
+  const opened = await openPptx(withMedia, alive);
+  assert.equal(opened.status, "ok");
 });

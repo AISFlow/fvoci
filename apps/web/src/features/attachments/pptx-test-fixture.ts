@@ -8,7 +8,9 @@
  * two-level bullet list, a 2×2 table whose first cell is filled red, a green
  * rectangle and an orange ellipse, an embedded 4×2 blue PNG shown at 96×48 px
  * and a linked (external) picture that must never load. Slide 2 carries one
- * text box.
+ * text box, optionally followed by `slide2Paragraphs` filler paragraphs of
+ * `FIXTURE_PPTX_FILLER` (for layout-time tests: the renderer's layout is
+ * super-linear in a text box's paragraph count).
  */
 
 import { solidPng, writeZip } from "./docx-test-fixture.ts";
@@ -107,7 +109,13 @@ const MASTER = `${XML}<p:sldMaster xmlns:a="${A}" xmlns:r="${R}" xmlns:p="${P}">
 
 const LAYOUT = `${XML}<p:sldLayout xmlns:a="${A}" xmlns:r="${R}" xmlns:p="${P}" type="blank" preserve="1">${EMPTY_TREE.replace("<p:cSld>", '<p:cSld name="Blank">')}<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>`;
 
-export function buildFixturePptx(text: PptxFixtureText = DEFAULT_PPTX_TEXT): Uint8Array {
+/** One filler paragraph (≈ 94 bytes of slide XML). */
+export const FIXTURE_PPTX_FILLER = `<a:p><a:r><a:rPr lang="ko-KR" sz="1000"/><a:t>가나다라마바사 filler text 0123456789</a:t></a:r></a:p>`;
+
+export function buildFixturePptx(
+  text: PptxFixtureText = DEFAULT_PPTX_TEXT,
+  { slide2Paragraphs = 0 }: { slide2Paragraphs?: number } = {},
+): Uint8Array {
   const enc = (s: string) => new TextEncoder().encode(s);
   const contentTypes = `${XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`;
   const presentation = `${XML}<p:presentation xmlns:a="${A}" xmlns:r="${R}" xmlns:p="${P}"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/></p:sldIdLst><p:sldSz cx="${px(FIXTURE_PPTX_SLIDE_W)}" cy="${px(FIXTURE_PPTX_SLIDE_H)}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`;
@@ -134,7 +142,7 @@ export function buildFixturePptx(text: PptxFixtureText = DEFAULT_PPTX_TEXT): Uin
       picture(10, "Linked picture", '<a:blip r:link="rIdLinkedImage"/>', 640, 400, 48, 48),
     ].join(""),
   );
-  const slide2 = slideXml(textBox(2, "Second", 40, 40, 880, 60, `<a:p>${run(text.secondSlide, { size: 3200 })}</a:p>`));
+  const slide2 = slideXml(textBox(2, "Second", 40, 40, 880, 60, `<a:p>${run(text.secondSlide, { size: 3200 })}</a:p>${FIXTURE_PPTX_FILLER.repeat(slide2Paragraphs)}`));
 
   return writeZip([
     { name: "[Content_Types].xml", bytes: enc(contentTypes) },

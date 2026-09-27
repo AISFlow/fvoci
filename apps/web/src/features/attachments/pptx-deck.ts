@@ -1,6 +1,7 @@
 import { getSlides, getSlideSize, loadPresentation, type PresentationData, type SlideData } from "@office-kit/pptx";
 import { renderSlideToSvg } from "@office-kit/pptx-preview";
-import { PPTX_MAX_SLIDE_SVG_CHARS, PPTX_MAX_SLIDES, repackPptx } from "./pptx-limits.ts";
+import { PPTX_MAX_SLIDE_SVG_BYTES, PPTX_MAX_SLIDES, repackPptx } from "./pptx-limits.ts";
+import { slideImageSvg, type SlideImageSvg } from "./pptx-svg.ts";
 
 const EMU_PER_PX = 9525;
 
@@ -17,11 +18,11 @@ export type PptxDeck = {
 
 export type PptxOpen = { status: "ok"; deck: PptxDeck } | { status: "tooLarge" } | { status: "invalid" };
 
-export type PptxLimits = { maxSlides: number; maxSlideSvgChars: number };
+export type PptxLimits = { maxSlides: number; maxSlideSvgBytes: number };
 
 export const PPTX_LIMITS: PptxLimits = {
   maxSlides: PPTX_MAX_SLIDES,
-  maxSlideSvgChars: PPTX_MAX_SLIDE_SVG_CHARS,
+  maxSlideSvgBytes: PPTX_MAX_SLIDE_SVG_BYTES,
 };
 
 /**
@@ -57,8 +58,11 @@ export async function openPptx(
 export type SlideSvg = { status: "ok"; svg: string } | { status: "tooLarge" } | { status: "failed" };
 
 /**
- * One slide as SVG markup (source `renderSlideToSvg`, browser entry). Output
- * past `maxSlideSvgChars` — pictures are inlined as base64 — is not shown.
+ * One slide as the renderer's SVG markup (source `renderSlideToSvg`, browser
+ * entry). Output that cannot be `maxSlideSvgBytes` of UTF-8 — pictures are
+ * inlined as base64 — is not shown. The layout is synchronous and can be
+ * slow (super-linear in a text box's paragraph count), so the viewer runs it
+ * in a worker (`pptx-worker.ts`) with a wall-clock bound.
  */
 export function renderSlide(deck: PptxDeck, index: number, limits: PptxLimits = PPTX_LIMITS): SlideSvg {
   const slide = deck.slides[index];
@@ -69,6 +73,16 @@ export function renderSlide(deck: PptxDeck, index: number, limits: PptxLimits = 
   } catch {
     return { status: "failed" };
   }
-  if (svg.length > limits.maxSlideSvgChars) return { status: "tooLarge" };
+  if (svg.length > limits.maxSlideSvgBytes) return { status: "tooLarge" };
   return { status: "ok", svg };
+}
+
+/**
+ * One slide as the page may show it: the renderer's SVG wrapped as an image
+ * in the fixed outer template of `pptx-svg.ts`.
+ */
+export function renderSlideImage(deck: PptxDeck, index: number, limits: PptxLimits = PPTX_LIMITS): SlideImageSvg {
+  const rendered = renderSlide(deck, index, limits);
+  if (rendered.status !== "ok") return rendered;
+  return slideImageSvg(rendered.svg, deck.width, deck.height, limits.maxSlideSvgBytes);
 }

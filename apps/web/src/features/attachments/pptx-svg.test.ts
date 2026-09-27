@@ -1,99 +1,124 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { openPptx, renderSlide, type PptxDeck } from "./pptx-deck.ts";
-import { neutralizeSvgUrls, sanitizeSlideSvg } from "./pptx-svg.ts";
-import { buildFixturePptx, DEFAULT_PPTX_TEXT, FIXTURE_PPTX_EXTERNAL_LINK } from "./pptx-test-fixture.ts";
+import { openPptx, renderSlide, renderSlideImage, type PptxDeck } from "./pptx-deck.ts";
+import { buildChartPptx, HOSTILE_PPTX_MARKUP } from "./pptx-hostile-fixture.ts";
+import { innerSlideSvg, slideImageSvg, toBase64 } from "./pptx-svg.ts";
+import { buildFixturePptx, DEFAULT_PPTX_TEXT, FIXTURE_PPTX_SLIDE_H, FIXTURE_PPTX_SLIDE_W } from "./pptx-test-fixture.ts";
 
-async function fixtureSvg(index: number): Promise<string> {
-  const opened = await openPptx(buildFixturePptx(), () => true);
+async function deckOf(bytes: Uint8Array): Promise<PptxDeck> {
+  const opened = await openPptx(bytes, () => true);
   assert.equal(opened.status, "ok");
-  const rendered = renderSlide((opened as { deck: PptxDeck }).deck, index);
+  return (opened as { deck: PptxDeck }).deck;
+}
+
+function rawSvg(deck: PptxDeck, index: number): string {
+  const rendered = renderSlide(deck, index);
   assert.equal(rendered.status, "ok");
   return (rendered as { svg: string }).svg;
 }
 
-const wrap = (inner: string) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">${inner}</svg>`;
+function imageSvg(deck: PptxDeck, index: number): string {
+  const image = renderSlideImage(deck, index);
+  assert.equal(image.status, "ok");
+  return (image as { svg: string }).svg;
+}
 
-test("fragment and embedded data references survive; everything else becomes none", () => {
-  assert.equal(neutralizeSvgUrls("url(#clip-1)"), "url(#clip-1)");
-  assert.equal(neutralizeSvgUrls('fill:url("#grad")'), 'fill:url("#grad")');
-  assert.equal(neutralizeSvgUrls("url(data:image/png;base64,AAAA)"), "url(data:image/png;base64,AAAA)");
-  assert.equal(neutralizeSvgUrls("url('data:font/woff2;base64,AAAA')"), "url('data:font/woff2;base64,AAAA')");
-  for (const target of [
-    "https://example.com/x.png",
-    "//example.com/x",
-    "/api/v1/me",
-    "other.svg#frag",
-    "javascript:alert(1)",
-    "data:text/html,<script>alert(1)</script>",
-    "# spaced",
+const TEMPLATE = (w: string, h: string, base64: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+  `<image width="${w}" height="${h}" href="data:image/svg+xml;base64,${base64}"/></svg>`;
+
+test("the served slide is exactly the fixed template around the renderer's SVG, byte for byte", async () => {
+  const deck = await deckOf(buildFixturePptx());
+  for (const index of [0, 1]) {
+    const raw = rawSvg(deck, index);
+    const outer = imageSvg(deck, index);
+    assert.equal(outer, TEMPLATE("960", "540", Buffer.from(raw, "utf8").toString("base64")));
+    assert.equal(innerSlideSvg(outer), raw);
+  }
+  // Korean text, links (inert as an image), foreignObject text and the embedded picture are all still inside.
+  const inner = innerSlideSvg(imageSvg(deck, 0))!;
+  for (const part of [DEFAULT_PPTX_TEXT.title, DEFAULT_PPTX_TEXT.link, ...DEFAULT_PPTX_TEXT.table]) {
+    assert.ok(inner.includes(part), part);
+  }
+  assert.match(inner, /<foreignObject/);
+  assert.match(inner, /<image [^>]*href="data:image\/png;base64,/);
+  assert.equal(deck.width, FIXTURE_PPTX_SLIDE_W);
+  assert.equal(deck.height, FIXTURE_PPTX_SLIDE_H);
+});
+
+test("review B1 counterexamples: chart number-format markup reaches the renderer, never the outer document", async () => {
+  for (const [name, markup] of Object.entries(HOSTILE_PPTX_MARKUP)) {
+    const deck = await deckOf(await buildChartPptx(markup));
+    const raw = rawSvg(deck, 0);
+    // Negative control: the renderer really does emit the deck's markup unescaped.
+    assert.ok(raw.includes(markup), name);
+    const outer = imageSvg(deck, 0);
+    const match = /^<svg [^<>]*><image [^<>]*href="data:image\/svg\+xml;base64,([A-Za-z0-9+/=]*)"\/><\/svg>$/.exec(outer);
+    assert.ok(match, name);
+    assert.equal(outer, TEMPLATE("1280", "720", match[1]!), name);
+    assert.equal(innerSlideSvg(outer), raw, name);
+  }
+});
+
+test("base64 is standard and chunk joins are exact", () => {
+  let seed = 7;
+  const random = (n: number) =>
+    Uint8Array.from({ length: n }, () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed & 0xff;
+    });
+  for (const n of [0, 1, 2, 3, 4, 24_575, 24_576, 24_577, 49_152, 100_003]) {
+    const bytes = random(n);
+    assert.equal(toBase64(bytes), Buffer.from(bytes).toString("base64"), String(n));
+  }
+});
+
+test("UTF-8: multi-byte text round-trips, a lone surrogate becomes U+FFFD, the cap counts bytes", () => {
+  const inner = '<svg viewBox="0 0 1 1"><text>한글 😀 &amp;</text></svg>';
+  const ok = slideImageSvg(inner, 1, 1, 1024);
+  assert.equal(ok.status, "ok");
+  assert.equal(innerSlideSvg((ok as { svg: string }).svg), inner);
+
+  const lone = slideImageSvg('<svg viewBox="0 0 1 1"><text>a\uD800b</text></svg>', 1, 1, 1024);
+  assert.equal(innerSlideSvg((lone as { svg: string }).svg), '<svg viewBox="0 0 1 1"><text>a�b</text></svg>');
+
+  const bytes = new TextEncoder().encode(inner).byteLength;
+  assert.ok(bytes > inner.length);
+  assert.equal(slideImageSvg(inner, 1, 1, bytes).status, "ok");
+  // Fits in UTF-16 code units, not in UTF-8 bytes.
+  assert.deepEqual(slideImageSvg(inner, 1, 1, bytes - 1), { status: "tooLarge" });
+  assert.deepEqual(slideImageSvg(inner, 1, 1, inner.length - 1), { status: "tooLarge" });
+});
+
+test("only a renderer <svg> root and sane dimensions are wrapped", () => {
+  for (const inner of ["", "<html></html>", ' <svg viewBox="0 0 1 1"/>', "<svgx/>", '<?xml version="1.0"?><svg/>']) {
+    assert.deepEqual(slideImageSvg(inner, 1, 1, 1024), { status: "failed" }, inner);
+  }
+  for (const [w, h] of [
+    [0, 1],
+    [1, -1],
+    [Number.NaN, 1],
+    [1, Number.POSITIVE_INFINITY],
+    [1e7, 1],
   ]) {
-    // An unquoted CSS url() cannot contain parentheses; only quoted forms are tested for those.
-    if (!target.includes("(")) assert.equal(neutralizeSvgUrls(`background:url(${target})`), "background:none", target);
-    assert.equal(neutralizeSvgUrls(`background:url("${target}")`), "background:none", target);
+    assert.deepEqual(slideImageSvg("<svg></svg>", w!, h!, 1024), { status: "failed" }, `${w}x${h}`);
   }
-  assert.equal(neutralizeSvgUrls("@import url(https://example.com/a.css); fill:red"), " fill:red");
+  const fractional = slideImageSvg("<svg></svg>", 960.004, 540.126, 1024);
+  assert.ok((fractional as { svg: string }).svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540.13" '));
 });
 
-test("renderer output: only the link tags go; text, styles, shapes and the embedded picture stay", async () => {
-  const raw = await fixtureSvg(0);
-  const clean = sanitizeSlideSvg(raw);
-  assert.ok(clean !== null);
-  assert.equal(clean, raw.replace(/<a [^>]*>|<\/a>/g, ""));
-  assert.doesNotMatch(clean, /<a[\s>]/);
-  assert.ok(!clean.includes(FIXTURE_PPTX_EXTERNAL_LINK));
-  assert.ok(!clean.includes("javascript:"));
-  assert.match(clean, /<image [^>]*href="data:image\/png;base64,/);
-  for (const part of [DEFAULT_PPTX_TEXT.link, DEFAULT_PPTX_TEXT.scriptLink, ...DEFAULT_PPTX_TEXT.table]) {
-    assert.ok(clean.includes(part), part);
-  }
-  // Link styling is on the inner span and survives the unwrap.
-  assert.match(clean, /text-decoration:underline;color:#0563C1">외부 링크/);
-  const second = await fixtureSvg(1);
-  assert.equal(sanitizeSlideSvg(second), second);
-});
-
-test("remote references are dropped or neutralized, fragments kept", () => {
-  const out = sanitizeSlideSvg(
-    wrap(
-      '<image href="https://example.com/t.png" xlink:href="//example.com/t.png" width="1"/>' +
-        '<image href="data:image/png;base64,AAAA" width="1"/>' +
-        '<rect fill="url(#g)" clip-path="url(https://example.com/c.svg#c)" style="font-family:X;background:url(https://example.com/b)"/>' +
-        '<div xmlns="http://www.w3.org/1999/xhtml"><img src="https://example.com/i.png"/><img src="data:image/gif;base64,R0"/></div>' +
-        "<text>url(https://example.com/in-text) stays text</text>",
-    ),
-  );
-  assert.ok(out !== null);
-  assert.ok(!/https:\/\/example\.com\/(t|c|b|i)\b/.test(out), out);
-  assert.match(out, /<image width="1"\/>/);
-  assert.match(out, /href="data:image\/png;base64,AAAA"/);
-  assert.match(out, /fill="url\(#g\)" clip-path="none"/);
-  assert.match(out, /background:none/);
-  assert.match(out, /<img\/>/);
-  assert.match(out, /<img src="data:image\/gif;base64,R0"\/>/);
-  assert.match(out, /<text>url\(https:\/\/example\.com\/in-text\) stays text<\/text>/);
-});
-
-test("markup the renderer never emits makes the slide unavailable", () => {
-  for (const inner of [
-    "<script>alert(1)</script>",
-    '<rect onclick="alert(1)"/>',
-    '<rect ONLOAD = "x"/>',
-    '<set attributeName="href" to="javascript:alert(1)"/>',
-    '<animate attributeName="x"/>',
-    "<style>rect{fill:url(https://example.com/x)}</style>",
-    '<foreignObject><iframe src="https://example.com"></iframe></foreignObject>',
-    "<!-- comment -->",
-    "<![CDATA[x]]>",
-    '<?xml-stylesheet href="https://example.com/s.css"?>',
-    '<feImage href="https://example.com/x.png"/>',
+test("innerSlideSvg accepts the exact template only", () => {
+  const outer = (slideImageSvg("<svg>한</svg>", 10, 20, 1024) as { svg: string }).svg;
+  assert.equal(innerSlideSvg(outer), "<svg>한</svg>");
+  for (const other of [
+    `${outer}<script/>`,
+    `<!--x-->${outer}`,
+    outer.replace('width="10" height="20" viewBox', 'width="10" height="21" viewBox'),
+    outer.replace("base64,", "base64,*"),
+    outer.replace("<image ", '<image onload="x" '),
+    TEMPLATE("10", "20", "gA=="), // 0x80: not UTF-8
+    TEMPLATE("10", "20", "PHN2Zz4"), // unpadded
   ]) {
-    assert.equal(sanitizeSlideSvg(wrap(inner)), null, inner);
+    assert.equal(innerSlideSvg(other), null, other.slice(0, 80));
   }
-  assert.equal(sanitizeSlideSvg(`<!DOCTYPE svg [<!ENTITY x SYSTEM "https://example.com/">]>${wrap("")}`), null);
-  assert.equal(sanitizeSlideSvg("<html></html>"), null);
-  assert.equal(sanitizeSlideSvg(wrap("").slice(0, -3)), null);
-  // Event-looking text inside a quoted value (e.g. a deck font name) is not an attribute.
-  const fontName = wrap('<text style="font-family:Arial onload=x">가</text>');
-  assert.equal(sanitizeSlideSvg(fontName), fontName);
 });

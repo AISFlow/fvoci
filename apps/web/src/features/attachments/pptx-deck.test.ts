@@ -58,7 +58,7 @@ test("slide 1 lays out Korean/emoji text, runs, list, table, shapes and the embe
   assert.equal((svg.match(/<image /g) ?? []).length, 1);
   assert.match(svg, /data-pptx-fallback="image"/);
   assert.ok(!new RegExp(`(href|src)="${FIXTURE_PPTX_EXTERNAL_IMAGE}`).test(svg));
-  // Raw renderer output still links out; the viewer strips this (pptx-svg.ts, browser test).
+  // Raw renderer output still links out; the viewer shows it only as an image inside an image (pptx-svg.ts).
   assert.ok(svg.includes(`href="${FIXTURE_PPTX_EXTERNAL_LINK}"`));
   assert.ok(svg.includes('href="javascript:alert(1)"'));
 });
@@ -74,8 +74,8 @@ test("slide 2 carries only its own text", async () => {
 test("slide count and rendered size caps", async () => {
   assert.deepEqual(await openPptx(buildFixturePptx(), alive, { ...PPTX_LIMITS, maxSlides: 1 }), { status: "tooLarge" });
   const deck = await fixtureDeck();
-  assert.deepEqual(renderSlide(deck, 0, { ...PPTX_LIMITS, maxSlideSvgChars: 1000 }), { status: "tooLarge" });
-  assert.equal(renderSlide(deck, 1, { ...PPTX_LIMITS, maxSlideSvgChars: 1000 }).status, "ok");
+  assert.deepEqual(renderSlide(deck, 0, { ...PPTX_LIMITS, maxSlideSvgBytes: 1000 }), { status: "tooLarge" });
+  assert.equal(renderSlide(deck, 1, { ...PPTX_LIMITS, maxSlideSvgBytes: 1000 }).status, "ok");
 });
 
 test("packages over the inflate cap or that are not decks are refused", async () => {

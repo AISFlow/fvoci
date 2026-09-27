@@ -2,11 +2,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { crc32 as zlibCrc32, deflateRawSync } from "node:zlib";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { unzipSync } from "fflate";
 import { writeZip } from "../src/features/attachments/docx-test-fixture";
+import { buildChartPptx, HOSTILE_PPTX_MARKUP } from "../src/features/attachments/pptx-hostile-fixture";
+import { PPTX_MAX_MARKUP_BYTES } from "../src/features/attachments/pptx-limits";
+import { innerSlideSvg } from "../src/features/attachments/pptx-svg";
 import {
   buildFixturePptx,
   DEFAULT_PPTX_TEXT,
   FIXTURE_PPTX_COLORS,
+  FIXTURE_PPTX_FILLER,
   FIXTURE_PPTX_EXTERNAL_IMAGE,
   FIXTURE_PPTX_EXTERNAL_LINK,
   FIXTURE_PPTX_SLIDE_H,
@@ -113,41 +118,31 @@ async function recordSvgBlobs(page: Page): Promise<void> {
 
 type SvgProbe = {
   src: string;
+  /** The served blob, verbatim. */
+  outer: string;
+  /** The renderer SVG inside it, or null when the blob is not exactly the fixed template. */
+  inner: string | null;
   text: string;
-  anchors: number;
-  denied: number;
-  handlers: number;
-  refs: string[];
-  cssUrls: string[];
   images: number;
   foreignObjects: number;
 };
 
 /**
- * What the served slide SVG (the Blob behind the visible `<img>`) contains.
- * The markup is analysed here in Node: an in-page DOM parse would itself
+ * What the served slide (the Blob behind the visible `<img>`) contains. It
+ * must be exactly the fixed outer template (`innerSlideSvg`); the renderer SVG
+ * inside is decoded and read here in Node: an in-page DOM parse would itself
  * raise CSP `style-src` reports for the slide's style attributes.
  */
 async function probeSvg(page: Page): Promise<SvgProbe> {
   const img = page.locator("[data-pptx-viewer] img.pptx-viewer__slide");
   const src = (await img.getAttribute("src"))!;
-  const markup = await page.evaluate(async (url) => {
+  const outer = await page.evaluate(async (url) => {
     const store = (window as unknown as { __svgBlobs: { created: Map<string, Blob> } }).__svgBlobs;
     return store.created.get(url)!.text();
   }, src);
-  // The renderer escapes & < > " in text and values, so tags are exactly <[^<>]*>.
-  const tags = markup.match(/<[^<>]*>/g) ?? [];
-  const named = (name: string) => tags.filter((tag) => new RegExp(`^<${name}[\\s/>]`, "i").test(tag)).length;
-  const refs: string[] = [];
-  const cssUrls: string[] = [];
-  for (const tag of tags) {
-    for (const match of tag.matchAll(/\s((?:[a-z]+:)?href|src)="([^"]*)"/gi)) {
-      if (!match[2]!.startsWith("#") && !match[2]!.startsWith("data:image/")) refs.push(`${match[1]}=${match[2]!.slice(0, 60)}`);
-    }
-    for (const match of tag.matchAll(/url\(\s*["']?([^"')]*)/gi)) {
-      if (!match[1]!.startsWith("#") && !match[1]!.startsWith("data:")) cssUrls.push(match[1]!);
-    }
-  }
+  const inner = innerSlideSvg(outer);
+  const markup = inner ?? "";
+  // Text for assertions only: tags dropped and the renderer's entities undone.
   const text = markup
     .replace(/<[^<>]*>/g, "")
     .replace(/&lt;/g, "<")
@@ -157,15 +152,17 @@ async function probeSvg(page: Page): Promise<SvgProbe> {
     .replace(/&amp;/g, "&");
   return {
     src,
+    outer,
+    inner,
     text,
-    anchors: named("a"),
-    denied: ["script", "iframe", "object", "embed", "form", "animate", "set", "style"].reduce((n, name) => n + named(name), 0),
-    handlers: tags.filter((tag) => /\son[a-z]+\s*=/i.test(tag.replace(/"[^"]*"/g, '""'))).length,
-    refs,
-    cssUrls,
-    images: named("image"),
-    foreignObjects: named("foreignObject"),
+    images: (markup.match(/<image[\s/>]/g) ?? []).length,
+    foreignObjects: (markup.match(/<foreignObject[\s/>]/g) ?? []).length,
   };
+}
+
+/** The dedicated PPTX workers (Vite names the built chunk after `pptx-worker.ts`). */
+function pptxWorkers(page: Page) {
+  return page.workers().filter((worker) => /\/assets\/pptx-worker-[^/]+\.js$/.test(new URL(worker.url()).pathname));
 }
 
 type Rgb = [number, number, number];
@@ -216,11 +213,26 @@ function evidence(name: string, body: Buffer | string): void {
   fs.writeFileSync(path.join(dir, name), body);
 }
 
-test("PPTX attachment: slide layout, inert SVG, slides, zoom, original bytes, chunk supplement, failures, limits, share", async ({
+/** The same package with every part deflated, so a large synthetic deck uploads small. */
+function deflateAll(bytes: Uint8Array): Buffer {
+  const parts = unzipSync(bytes);
+  return Buffer.from(
+    writeZip(
+      Object.entries(parts).map(([name, data]) => ({
+        name,
+        deflated: deflateRawSync(data),
+        crc: zlibCrc32(data),
+        size: data.byteLength,
+      })),
+    ),
+  );
+}
+
+test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original bytes, chunk supplement, failures, limits, hostile markup, worker bounds, share", async ({
   page,
   browser,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(300_000);
   await recordSvgBlobs(page);
   const csp = watchCspViolations(page);
   const baseOrigin = new URL(test.info().project.use.baseURL ?? "http://127.0.0.1:5173").origin;
@@ -287,11 +299,10 @@ test("PPTX attachment: slide layout, inert SVG, slides, zoom, original bytes, ch
     expect(first.text).toContain(part);
   }
   expect(first.text).not.toContain(text.secondSlide);
-  expect(first.anchors).toBe(0);
-  expect(first.denied).toBe(0);
-  expect(first.handlers).toBe(0);
-  expect(first.refs).toEqual([]);
-  expect(first.cssUrls).toEqual([]);
+  // The blob is only the fixed outer template; the renderer SVG (links included) is an image inside it.
+  expect(first.inner).not.toBeNull();
+  expect(first.outer).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="960" height="540" viewBox="0 0 960 540"><image /);
+  expect(first.inner).toContain(`href="${FIXTURE_PPTX_EXTERNAL_LINK}"`);
   expect(first.images).toBe(1);
   expect(first.foreignObjects).toBeGreaterThan(0);
 
@@ -327,6 +338,7 @@ test("PPTX attachment: slide layout, inert SVG, slides, zoom, original bytes, ch
   await expect(viewer.getByRole("button", { name: "다음 슬라이드" })).toBeDisabled();
   await expect(img).not.toHaveAttribute("src", first.src);
   const second = await probeSvg(page);
+  expect(second.inner).not.toBeNull();
   expect(second.text).toContain(text.secondSlide);
   expect(second.text).not.toContain(text.title);
   const revoked = await page.evaluate(
@@ -457,6 +469,126 @@ test("PPTX attachment: slide layout, inert SVG, slides, zoom, original bytes, ch
   await expect(page.getByText(unavailable)).toBeVisible();
   await expect(page.locator("[data-pptx-viewer]")).toHaveCount(0);
 
+  // --- Markup budget: a small deck whose slide XML inflates past 16 MiB -------
+  const fillerBytes = new TextEncoder().encode(FIXTURE_PPTX_FILLER).byteLength;
+  const bigSlide = buildFixturePptx(DEFAULT_PPTX_TEXT, {
+    slide2Paragraphs: Math.ceil(PPTX_MAX_MARKUP_BYTES / fillerBytes),
+  });
+  const markupId = await uploadAttachment(page, wsId, documentId, "markup.pptx", deflateAll(bigSlide));
+  await page.goto(`/w/acme/a/${markupId}/view`);
+  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(unavailable, { timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "다시 시도" })).toHaveCount(0);
+  await expect.poll(() => pptxWorkers(page).length).toBe(0);
+
+  // --- Hostile chart markup: inert in the page and in the standalone blob ------
+  const pwned: string[] = [];
+  page.context().on("request", (request) => {
+    if (/pwned/.test(request.url())) pwned.push(request.url());
+  });
+  const hostileId = await uploadAttachment(
+    page,
+    wsId,
+    documentId,
+    "hostile.pptx",
+    await buildChartPptx(Object.values(HOSTILE_PPTX_MARKUP).join("")),
+  );
+  await page.goto(`/w/acme/a/${hostileId}/view`);
+  await expect(viewer).toBeVisible({ timeout: 20_000 });
+  const hostile = await probeSvg(page);
+  // The renderer really emitted the deck's markup (negative control), but only inside the image.
+  expect(hostile.inner).not.toBeNull();
+  for (const markup of Object.values(HOSTILE_PPTX_MARKUP)) expect(hostile.inner).toContain(markup);
+  expect(hostile.outer).not.toMatch(/script|iframe|meta|javascript/i);
+  await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+  evidence("pptx-hostile-chart.png", await img.screenshot());
+  await img.click({ position: { x: 40, y: 40 } });
+  // "Open image in new tab": the blob as its own document, on the app origin.
+  const standalone = await page.context().newPage();
+  const standaloneCsp = watchCspViolations(standalone);
+  const standaloneErrors: string[] = [];
+  standalone.on("pageerror", (error) => standaloneErrors.push(error.message));
+  await standalone.goto(hostile.src);
+  await standalone.waitForTimeout(1_000);
+  expect(standalone.url()).toBe(hostile.src);
+  expect(standalone.frames()).toHaveLength(1);
+  expect(await standalone.evaluate(() => (window as unknown as { __pptxPwned?: number }).__pptxPwned)).toBeUndefined();
+  expect(await standalone.evaluate(() => document.documentElement.outerHTML.length)).toBeGreaterThan(0);
+  expect(await standalone.evaluate(() => document.querySelectorAll("script, iframe, a, meta").length)).toBe(0);
+  evidence("pptx-hostile-standalone.png", await standalone.screenshot());
+  await standalone.mouse.click(40, 40);
+  await standalone.waitForTimeout(300);
+  expect(standalone.url()).toBe(hostile.src);
+  expect(standaloneErrors).toEqual([]);
+  expect(standaloneCsp).toEqual([]);
+  await standalone.close();
+  expect(await page.evaluate(() => (window as unknown as { __pptxPwned?: number }).__pptxPwned)).toBeUndefined();
+  expect(page.url()).toContain(`/a/${hostileId}/view`);
+  expect(pwned).toEqual([]);
+
+  // --- Slow layout: leaving a slide mid-layout, the render bound, unmount -----
+  // Slide 2's text box has ~1 MiB of paragraphs: its layout runs far past the 10 s bound.
+  const slowId = await uploadAttachment(
+    page,
+    wsId,
+    documentId,
+    "slow.pptx",
+    deflateAll(buildFixturePptx(DEFAULT_PPTX_TEXT, { slide2Paragraphs: 11_000 })),
+  );
+  await page.goto(`/w/acme/a/${slowId}/view`);
+  await expect(viewer).toBeVisible({ timeout: 20_000 });
+  const pane = page.locator("[data-pptx-viewer]");
+  await expect.poll(() => pptxWorkers(page).length).toBe(1);
+  const slowFirstWorker = pptxWorkers(page)[0]!;
+  await pane.getByRole("button", { name: "다음 슬라이드" }).click();
+  await expect(pane).toHaveAttribute("data-pptx-slide-state", "loading");
+  // The page stays responsive while the worker lays out slide 2.
+  const tick = await page.evaluate(() => new Promise<number>((resolve) => {
+    const started = performance.now();
+    setTimeout(() => resolve(performance.now() - started), 0);
+  }));
+  expect(tick).toBeLessThan(500);
+  // Back to slide 1 mid-layout: that worker is terminated and a new one shows slide 1.
+  await pane.getByRole("button", { name: "이전 슬라이드" }).click();
+  await expect(page.locator('[data-pptx-viewer][data-pptx-slide="0"][data-pptx-slide-state="ready"]')).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect.poll(() => pptxWorkers(page).includes(slowFirstWorker)).toBe(false);
+  await expect.poll(() => pptxWorkers(page).length).toBe(1);
+  // Left alone, slide 2 hits the render bound: unavailable, and slide 1 still works.
+  const boundStarted = Date.now();
+  await pane.getByRole("button", { name: "다음 슬라이드" }).click();
+  await expect(page.locator('[data-pptx-viewer][data-pptx-slide="1"][data-pptx-slide-state="unavailable"]')).toBeVisible({
+    timeout: 30_000,
+  });
+  expect(Date.now() - boundStarted).toBeGreaterThanOrEqual(9_000);
+  await expect(pane.getByRole("alert")).toHaveText(unavailable);
+  await pane.getByRole("button", { name: "이전 슬라이드" }).click();
+  await expect(page.locator('[data-pptx-viewer][data-pptx-slide="0"][data-pptx-slide-state="ready"]')).toBeVisible({
+    timeout: 20_000,
+  });
+  // Not laid out again: slide 2 is unavailable at once.
+  await pane.getByRole("button", { name: "다음 슬라이드" }).click();
+  await expect(page.locator('[data-pptx-viewer][data-pptx-slide="1"][data-pptx-slide-state="unavailable"]')).toBeVisible({
+    timeout: 2_000,
+  });
+  // Unmount mid-layout (switch attachments): no PPTX worker is left running.
+  await page.goto(`/w/acme/a/${slowId}/view`);
+  await expect(viewer).toBeVisible({ timeout: 20_000 });
+  await pane.getByRole("button", { name: "다음 슬라이드" }).click();
+  await expect(pane).toHaveAttribute("data-pptx-slide-state", "loading");
+  await page.evaluate((to) => {
+    window.history.pushState({}, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/w/acme/a/${textId}/view`);
+  await expect(page.getByText("plain attachment body")).toBeVisible();
+  await expect.poll(() => pptxWorkers(page).length, { timeout: 3_000 }).toBe(0);
+
+  // --- The worker bundle's packages are in the public notice -----------------
+  const notice = await (await page.request.get("/open-source-licenses.txt")).text();
+  for (const name of ["@office-kit/pptx", "@office-kit/pptx-preview", "fflate"]) {
+    expect(notice).toContain(name);
+  }
+
   expect(csp).toEqual([]);
   expect(foreign).toEqual([]);
   expect(foreign.filter((url) => url.startsWith(new URL(FIXTURE_PPTX_EXTERNAL_LINK).origin))).toEqual([]);
@@ -488,9 +620,8 @@ test("PPTX attachment: slide layout, inert SVG, slides, zoom, original bytes, ch
   await expect(reader.locator("[data-chunk-supplement]")).toHaveCount(0);
   await expect(reader.locator("[data-attachment-viewer] header a[download]")).toHaveAttribute("href", shareDownload);
   const sharedSvg = await probeSvg(reader);
+  expect(sharedSvg.inner).not.toBeNull();
   expect(sharedSvg.text).toContain(text.title);
-  expect(sharedSvg.anchors).toBe(0);
-  expect(sharedSvg.refs).toEqual([]);
 
   const shareHold = holdRoute();
   await reader.route(`**${shareDownload}`, shareHold.handler);
