@@ -279,6 +279,7 @@ mod trace_tests {
             markdown: None,
             import_wake: None,
             import_extractor_available: false,
+            preview_extract: None,
             quota: Default::default(),
             streams: AppState::fresh_streams(),
             mailer: Arc::new(crate::mail::Mailer::disabled()),
