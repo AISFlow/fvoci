@@ -49,13 +49,106 @@ function authorLabel(
   return name && name.trim().length > 0 ? name : t("version.author.member");
 }
 
+type RevisionTargetKind = "document" | "task";
+
+/* Source revision routes: documents and tasks share the revisions table and the
+ * same list/create/get/restore contract under their own paths. */
+async function listRevisions(kind: RevisionTargetKind, workspaceId: string, id: string) {
+  if (kind === "task") {
+    return ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions", {
+        params: { path: { workspace_id: workspaceId, task_id: id }, query: { limit: 20 } },
+      }),
+    );
+  }
+  return ensureOk(
+    await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions", {
+      params: { path: { workspace_id: workspaceId, document_id: id }, query: { limit: 20 } },
+    }),
+  );
+}
+
+async function createRevision(kind: RevisionTargetKind, workspaceId: string, id: string) {
+  if (kind === "task") {
+    return ensureOk(
+      await api.POST("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions", {
+        params: { path: { workspace_id: workspaceId, task_id: id } },
+      }),
+    );
+  }
+  return ensureOk(
+    await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions", {
+      params: { path: { workspace_id: workspaceId, document_id: id } },
+    }),
+  );
+}
+
+async function restoreRevision(
+  kind: RevisionTargetKind,
+  workspaceId: string,
+  id: string,
+  revisionId: string,
+  correlationId: string,
+) {
+  if (kind === "task") {
+    return ensureOk(
+      await api.POST(
+        "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}/restore",
+        {
+          params: { path: { workspace_id: workspaceId, task_id: id, revision_id: revisionId } },
+          body: { correlationId },
+        },
+      ),
+    );
+  }
+  return ensureOk(
+    await api.POST(
+      "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore",
+      {
+        params: {
+          path: { workspace_id: workspaceId, document_id: id, revision_id: revisionId },
+        },
+        body: { correlationId },
+      },
+    ),
+  );
+}
+
+async function getRevision(
+  kind: RevisionTargetKind,
+  workspaceId: string,
+  id: string,
+  revisionId: string,
+) {
+  if (kind === "task") {
+    return ensureOk(
+      await api.GET("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions/{revision_id}", {
+        params: { path: { workspace_id: workspaceId, task_id: id, revision_id: revisionId } },
+      }),
+    );
+  }
+  return ensureOk(
+    await api.GET(
+      "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}",
+      {
+        params: {
+          path: { workspace_id: workspaceId, document_id: id, revision_id: revisionId },
+        },
+      },
+    ),
+  );
+}
+
 export function RevisionPanel({
   workspaceId,
+  targetKind = "document",
   documentId,
   readOnly,
   persistNow,
 }: {
   workspaceId: string;
+  /** Revision owner kind; `documentId` is the task id for `"task"`. */
+  targetKind?: RevisionTargetKind;
   documentId: string;
   readOnly: boolean;
   persistNow?: () => Promise<void>;
@@ -71,7 +164,7 @@ export function RevisionPanel({
   const openerRef = useRef<HTMLElement | null>(null);
   const cancelRestoreRef = useRef<HTMLButtonElement>(null);
   const confirmRestoreRef = useRef<HTMLButtonElement>(null);
-  const queryKey = ["revisions", workspaceId, documentId] as const;
+  const queryKey = ["revisions", workspaceId, targetKind, documentId] as const;
 
   useEffect(() => {
     if (!pendingRestoreId) {
@@ -87,15 +180,7 @@ export function RevisionPanel({
 
   const listQuery = useQuery({
     queryKey,
-    queryFn: async () =>
-      ensureOk(
-        await api.GET("/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions", {
-          params: {
-            path: { workspace_id: workspaceId, document_id: documentId },
-            query: { limit: 20 },
-          },
-        }),
-      ),
+    queryFn: () => listRevisions(targetKind, workspaceId, documentId),
     enabled: open,
   });
 
@@ -111,14 +196,7 @@ export function RevisionPanel({
   );
 
   const saveRevision = useMutation({
-    mutationFn: async () =>
-      ensureOk(
-        await api.POST("/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions", {
-          params: {
-            path: { workspace_id: workspaceId, document_id: documentId },
-          },
-        }),
-      ),
+    mutationFn: () => createRevision(targetKind, workspaceId, documentId),
     onSuccess: async () => {
       setNotice(null);
       await queryClient.invalidateQueries({ queryKey });
@@ -133,21 +211,7 @@ export function RevisionPanel({
         correlationId = crypto.randomUUID();
         correlations.current.set(revId, correlationId);
       }
-      return ensureOk(
-        await api.POST(
-          "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore",
-          {
-            params: {
-              path: {
-                workspace_id: workspaceId,
-                document_id: documentId,
-                revision_id: revId,
-              },
-            },
-            body: { correlationId },
-          },
-        ),
-      );
+      return restoreRevision(targetKind, workspaceId, documentId, revId, correlationId);
     },
     onSuccess: async (_data, revId) => {
       correlations.current.delete(revId);
@@ -159,12 +223,14 @@ export function RevisionPanel({
       const timedOut = err instanceof ProblemError && err.status === 504;
       if (timedOut) {
         void queryClient.invalidateQueries({ queryKey });
-        void queryClient.invalidateQueries({
-          queryKey: ["document", workspaceId, documentId],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["document-body", workspaceId, documentId],
-        });
+        if (targetKind === "document") {
+          void queryClient.invalidateQueries({
+            queryKey: ["document", workspaceId, documentId],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["document-body", workspaceId, documentId],
+          });
+        }
       }
       setNotice(timedOut ? t("version.restore.timeout") : t("version.restore.failed"));
     },
@@ -172,20 +238,7 @@ export function RevisionPanel({
 
   async function showPreview(id: string) {
     try {
-      const detail = await ensureOk(
-        await api.GET(
-          "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}",
-          {
-            params: {
-              path: {
-                workspace_id: workspaceId,
-                document_id: documentId,
-                revision_id: id,
-              },
-            },
-          },
-        ),
-      );
+      const detail = await getRevision(targetKind, workspaceId, documentId, id);
       setPreview(detail);
     } catch {
       setNotice(t("version.list.failed"));
