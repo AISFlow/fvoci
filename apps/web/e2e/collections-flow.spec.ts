@@ -585,12 +585,31 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await expect(cell("2027-05-25").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
 
   // 3. Stale dates (changed elsewhere): expectedDates rejects the move and the calendar
-  //    shows the server value instead of a false success.
+  //    shows the server value instead of a false success. The drag starts first so the
+  //    dragged row is the pre-edit snapshot whether or not the task stream refreshes the
+  //    calendar before the drop; the target's drop-over marker shows dragstart ran.
   await expect(cell("2027-05-12").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
+  const staleFrom = (await preview(stale.displayId).boundingBox())!;
+  const staleTo = (await cell("2027-05-15").boundingBox())!;
+  await page.mouse.move(staleFrom.x + staleFrom.width / 2, staleFrom.y + staleFrom.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(staleFrom.x + staleFrom.width / 2 + 40, staleFrom.y + staleFrom.height / 2, { steps: 4 });
+  await page.mouse.move(staleTo.x + staleTo.width / 2, staleTo.y + staleTo.height - 8, { steps: 8 });
+  await expect(cell("2027-05-15")).toHaveAttribute("data-drop-over", "true");
   expect(
     (await page.request.patch(`${base}/tasks/${stale.id}`, { data: { dueDate: "2027-05-13" } })).ok(),
   ).toBe(true);
-  await preview(stale.displayId).dragTo(cell("2027-05-15"));
+  const staleMove = page.waitForResponse(
+    (res) => res.request().method() === "PATCH" && new URL(res.url()).pathname === `${base}/tasks/${stale.id}`,
+  );
+  await page.mouse.move(staleTo.x + staleTo.width / 2 + 4, staleTo.y + staleTo.height - 8, { steps: 2 });
+  await page.mouse.up();
+  const staleResponse = await staleMove;
+  expect(staleResponse.status()).toBe(409);
+  expect(staleResponse.request().postDataJSON()).toMatchObject({
+    dueDate: "2027-05-15",
+    expectedDates: { dueDate: "2027-05-12" },
+  });
   await expect(page.getByRole("alert").filter({ hasText: "다른 곳에서 먼저 수정되었습니다" })).toBeVisible();
   await expect(cell("2027-05-13").getByTestId(`collection-preview-${stale.displayId}`)).toBeVisible();
   await expect(cell("2027-05-15").getByTestId(`collection-preview-${stale.displayId}`)).toHaveCount(0);
