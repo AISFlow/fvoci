@@ -4,8 +4,9 @@
 //! A restored database whose sealed values do not open is not usable: MFA
 //! sign-in, workspace SSO and webhook deliveries would fail closed at the
 //! first use. This opens every TOTP secret (`user_mfa`), workspace SSO client
-//! secret (`workspace_oidc`) and webhook signing secret (`webhooks`) with the
-//! same AAD context the product uses. The opened values are dropped at once
+//! secret (`workspace_oidc`), webhook signing secret (`webhooks`) and the Web
+//! Push VAPID private key (`vapid`, reported under the nil id) with the same
+//! AAD context the product uses. The opened values are dropped at once
 //! and never reported.
 //!
 //! OIDC flow states (`oidc_states`) are not opened: they are single-use,
@@ -27,6 +28,7 @@ use crate::auth::password::Keyring;
 use crate::db::context::set_system;
 use crate::identity::{user_mfa_context, workspace_oidc_context};
 use crate::integrations::webhooks::webhook_secret_context;
+use crate::push::vapid_context;
 use crate::secret_box::{self, SecretBoxError};
 
 #[derive(Debug, Default, Serialize)]
@@ -57,6 +59,8 @@ pub struct SecretsVerifyReport {
     pub workspace_oidc: SealedTableReport,
     /// `webhooks` signing secrets, by webhook id.
     pub webhooks: SealedTableReport,
+    /// VAPID private key sealed as `vapid:1`.
+    pub vapid: SealedTableReport,
     /// How many sealed values name each key id (rotation: a key id still in
     /// use here must stay in the keyring).
     pub key_ids_in_use: BTreeMap<String, u64>,
@@ -66,7 +70,10 @@ pub struct SecretsVerifyReport {
 
 impl SecretsVerifyReport {
     pub fn failed(&self) -> usize {
-        self.user_mfa.failed() + self.workspace_oidc.failed() + self.webhooks.failed()
+        self.user_mfa.failed()
+            + self.workspace_oidc.failed()
+            + self.webhooks.failed()
+            + self.vapid.failed()
     }
 
     pub fn is_complete(&self) -> bool {
@@ -122,6 +129,10 @@ pub async fn verify_sealed_secrets(
         sqlx::query_as("SELECT workspace_id, id, secret FROM fvoci.webhooks ORDER BY id")
             .fetch_all(&mut *tx)
             .await?;
+    // The app role reads the sealed VAPID key only through the definer.
+    let vapid: Option<String> = sqlx::query_scalar("SELECT fvoci.app_vapid_private_key()")
+        .fetch_one(&mut *tx)
+        .await?;
     tx.commit().await?;
 
     let mut report = SecretsVerifyReport {
@@ -155,6 +166,16 @@ pub async fn verify_sealed_secrets(
     for (workspace_id, id, sealed) in &hooks {
         let context = webhook_secret_context(*workspace_id, *id);
         check(keys, &mut report.webhooks, in_use, *id, sealed, &context);
+    }
+    if let Some(sealed) = vapid {
+        check(
+            keys,
+            &mut report.vapid,
+            in_use,
+            Uuid::nil(),
+            &sealed,
+            vapid_context(),
+        );
     }
     Ok(report)
 }

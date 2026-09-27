@@ -75,6 +75,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
         38,
     ),
     (include_str!("../../migrations/039_templates.sql"), 39),
+    (include_str!("../../migrations/040_web_push.sql"), 40),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -579,6 +580,10 @@ mod tests {
         (
             39,
             "27713b14583fd331f0679244e359ade3ae4a2427d8db06210cbfd4d6dc4f34d5",
+        ),
+        (
+            40,
+            "ed2db8ff0ab33ce59fd098d0370e05464779d5197799a16054bf43b7e2b6f33f",
         ),
     ];
 

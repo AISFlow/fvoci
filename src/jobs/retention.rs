@@ -12,6 +12,7 @@ pub const GC_DELETE_ROUNDS: u32 = 30;
 const PROCESSED_GC_CONSUMERS: &[&str] = &[
     "notifications",
     "mail",
+    "push",
     "search-index",
     "webhooks",
     "github",

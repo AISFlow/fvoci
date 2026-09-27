@@ -238,3 +238,17 @@ GRANT EXECUTE ON FUNCTION fvoci.app_workspace_sso_id_by_slug(text) TO :"app_role
 -- 032 admin user erasure cancel.
 REVOKE EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) TO :"app_role";
+
+-- 040 Web Push.
+REVOKE ALL ON fvoci.instance_config FROM :"app_role";
+GRANT SELECT (vapid_public_key) ON fvoci.instance_config TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.push_subscriptions TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.push_deliveries TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_vapid_public_key() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_vapid_public_key() TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_vapid_private_key() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_vapid_private_key() TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_set_vapid(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_set_vapid(text, text) TO :"app_role";
+REVOKE EXECUTE ON FUNCTION fvoci.app_init_vapid(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION fvoci.app_init_vapid(text, text) TO :"app_role";

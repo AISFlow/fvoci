@@ -41,7 +41,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 | `FVOCI_MEILI_KEY_FILE` | Path to a file containing the API key (preferred in compose). Takes precedence over `FVOCI_MEILI_KEY`. |
 | `FVOCI_MEILI_INDEX` | Index uid (default `fvoci`). Tests may set a per-run uid. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Outgoing mail (invitations, password reset). All three or none; unset disables mail and invitation links are shown instead. No AUTH (same as the source). STARTTLS is used whenever the relay offers it, with certificate verification against public roots, so an internal relay needs a publicly trusted certificate or must not offer STARTTLS. |
-| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --verify-secrets` lists the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
+| `ENCRYPTION_KEYS` / `ENCRYPTION_ACTIVE_KEY_ID` | Optional keyring (same JSON-hex format as the pepper) that seals workspace webhook signing secrets and the Web Push VAPID private key at rest (AES-256-GCM, `enc:v2:<kid>:…`, bound to the webhook row). Both or neither. Unset: webhook creation answers `503 integration_unavailable` and pending deliveries fail closed. Rotate by adding a key and switching the active id; keep old keys while any secret sealed with them exists (`fvoci-migrate --verify-secrets` lists the key ids in use). Back it up with the database; restore checks it (see Backup and restore). |
 | `FVOCI_WEBHOOK_ALLOW_TARGETS` | Comma list of host names / IP addresses that webhook URLs may use despite the outbound rules (default empty). A listed URL host skips the port (80/443) and host-name rules; a listed IP is accepted as a literal or resolved private address. Meant for local receivers (tests, e2e); leave empty in production. `0.0.0.0` / `::` are refused. |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET` | Optional GitHub App (all three or none; the PEM may use literal `\n`). Enables `/github/install`, `/api/v1/github/callback`, the signed `/api/v1/github/webhook` endpoint and the `github` outbox consumer that closes/reopens linked issues. The install `state` is single use and bound to the admin session that started it (the callback needs that session cookie); the callback confirms the installation with `GET /app/installations/{id}` and never replaces an existing link to another installation (uninstall first). While the app is not configured the `github` cursor still advances, so enabling it later does not replay older status changes. |
 | `GITHUB_STATE_SECRET` | Server-only key (at least 32 bytes) for the install `state` MAC. If unset it is derived (HKDF-SHA256) from the active `ENCRYPTION_KEYS` key; with neither, a configured GitHub App fails at boot. The webhook secret is not used because GitHub App managers also hold it. |
@@ -636,8 +636,8 @@ the original or existing passwords will not verify. `POSTGRES_USER`,
 `POSTGRES_DB`, and `FVOCI_APP_ROLE` names must match; cluster passwords and
 `MEILI_MASTER_KEY` may be new. `scripts/restore.sh` compares the keyring fingerprint recorded in the backup manifest and refuses to restore with a different keyring.
 
-`ENCRYPTION_KEYS` seals TOTP secrets, workspace SSO client secrets and webhook
-signing secrets in the dump. The manifest's `encryptionKeys` entry records, per
+`ENCRYPTION_KEYS` seals TOTP secrets, workspace SSO client secrets, webhook
+signing secrets and the Web Push VAPID private key in the dump. The manifest's `encryptionKeys` entry records, per
 key id, `HMAC-SHA256(key, label || id)` (and a whole-keyring SHA-256 like the
 pepper's), never the keys. Before any volume is
 created, restore requires every backed-up key id with the same key; extra keys
@@ -689,8 +689,8 @@ asset (logo/favicon) the restored instance settings reference must exist with
 its recorded SHA-256. It then runs `fvoci-migrate --verify-secrets`, also with
 the server's environment (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`; the app role
 reads the ciphertext columns in the system context, no owner URL): every
-sealed value in `user_mfa`, `workspace_oidc` and `webhooks` must open with its
-row's context. It prints counts, failing row ids and the key ids in use, never
+sealed value in `user_mfa`, `workspace_oidc` and `webhooks`, and the VAPID
+private key (`vapid`, context `vapid:1`), must open with its row's context. It prints counts, failing row ids and the key ids in use, never
 secret values, and exits nonzero on any failure. OIDC flow states are not
 opened (single-use, expired ten minutes after issue, fail closed per sign-in).
 Either failure stops the restore before the server starts.
@@ -831,6 +831,7 @@ job, backup and restore (the server binary stays single-purpose):
 | `fvoci outbox-recover` | `fvoci-migrate --recover-outbox ...` | owner `DATABASE_URL` |
 | `fvoci backup <collect\|restore\|...>` | `scripts/backup.sh`, `scripts/restore.sh` (below) | Compose project |
 | — (restore check) | `fvoci-migrate --verify-storage` | the server's |
+| `fvoci secrets rotate-vapid` | `fvoci-migrate --rotate-vapid` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
 
 Not ported: `secrets audit/rotate`, `reindex` (extract re-enqueue), `healthcheck`
 and the split worker roles (`worker`, `compact`, `thumbnail`, `collab`); the Rust
@@ -877,6 +878,67 @@ sent, and database URLs in details are masked.
 ```sh
 docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
   run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --doctor
+```
+
+### Web Push (VAPID)
+
+Browser push needs `ENCRYPTION_KEYS` and a secure browser origin: service
+workers and `PushManager` only run on `https://` origins (or `localhost`), so
+production uses `FVOCI_PUBLIC_ORIGIN=https://…`. The same origin is the VAPID
+`sub` claim push services use to contact the operator. The static root must
+serve the unhashed `/sw.js` (the web build copies `apps/web/public/sw.js`).
+
+- **Bootstrap.** On start the server generates the instance P-256 keypair if
+  none exists and stores it in `instance_config` (public key plain, private key
+  sealed with `ENCRYPTION_KEYS` under context `vapid:1`). Replicas starting
+  together keep the first stored pair. Without `ENCRYPTION_KEYS` (or on any
+  error) the server still starts, logs `push.skipped` / `vapid_keys_missing`,
+  and `GET /api/v1/instance` answers `webPushPublicKey: null`, so the toggle in
+  workspace notification settings shows "not available". Notifications created
+  while keys are missing are not pushed later.
+- **Delivery.** The `push` outbox consumer queues one `push_deliveries` row per
+  recipient device (no endpoint, key or content) in the same transaction as
+  its processed mark. An in-process sender claims up to 8 rows (30 s lease)
+  and, in one short transaction, re-checks each row: the event's current
+  recipients (membership, resource access, in-app preference), a user who is
+  not deleted or suspended, and the subscription with the session that
+  registered it still live. It commits, then posts outside any transaction
+  (5 s timeout each) and acknowledges. Every device gets one attempt; 404/410
+  remove the endpoint, other failures are logged with the endpoint origin
+  only. A crash or failed acknowledgement repeats only that batch after the
+  lease, after the same check (at least once per device).
+- **Sessions and logout.** A subscription is bound to the session that last
+  registered it; the web client re-binds it once per new session. Expired or
+  revoked sessions (logout, password reset, revoke-all, suspension) no longer
+  authorize sends. Logging out also deletes this browser's rows for that user
+  in the logout transaction (the ending session's rows plus the endpoint the
+  browser reports), never other accounts' rows or the user's other devices,
+  and the browser then unsubscribes (best effort). A logout committed before
+  a row's final check prevents that send; a send already past the check
+  completes, and messages a push service already accepted can still be shown.
+  Another account signing in on the same browser profile without a logout
+  sees the toggle off; that account's subscription keeps delivering until its
+  session ends or the new user enables push, which replaces the browser
+  subscription.
+- **Rotation.** `fvoci-migrate --rotate-vapid` (server environment, app role)
+  stores a new keypair, deletes every browser subscription (push services
+  reject old-key subscriptions with 401/403, which the sender does not clean
+  up), and records `instance.vapid_rotated` `{revokedSubscriptions}` as an
+  event and audit row, all in one transaction. It prints only
+  `{"publicKey","revokedSubscriptions"}`. `/instance` shows the new key without
+  a restart (up to its 60 s HTTP cache); browsers resubscribe when users open
+  notification settings. This is not `ENCRYPTION_KEYS` rotation: adding a new
+  active key id keeps the sealed VAPID key readable while the old id stays in
+  the keyring.
+- **Backup and restore.** The sealed private key is in the database dump;
+  `--verify-secrets` opens it (reported as `vapid`, nil id). A restore without
+  the original key id cannot open it: push stays off (logged per event) until
+  the original `ENCRYPTION_KEYS` is restored, or `--rotate-vapid` issues a new
+  pair, which revokes all subscriptions.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --rotate-vapid
 ```
 
 ## Product MCP server (`fvoci-mcp`)
