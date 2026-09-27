@@ -15,7 +15,9 @@
 //! `FVOCI_WEBHOOK_ALLOW_TARGETS` (comma list, default empty) exists for local
 //! receivers: a listed URL host skips the port and host-name rules, and a
 //! listed IP address is accepted as a resolved or literal target. Nothing else
-//! relaxes the rules.
+//! relaxes the rules. Workspace unfurl always uses [`OutboundPolicy::default`]
+//! via [`Outbound::without_allow_list`] and never this allow-list, even when
+//! it is configured for webhooks.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -236,17 +238,85 @@ impl Resolve for SystemResolver {
     }
 }
 
+/// One pinned GET after DNS/address checks. Tests inject this instead of
+/// opening a product allow-private path.
+#[derive(Debug, Clone)]
+pub struct PinnedGet {
+    pub status: u16,
+    pub location: Option<String>,
+    pub body: Vec<u8>,
+}
+
+pub type GetFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<PinnedGet, OutboundError>> + Send + 'a>>;
+
+pub trait GetClient: Send + Sync {
+    fn get<'a>(
+        &'a self,
+        url: &'a Url,
+        pinned: SocketAddr,
+        headers: &'a [(&'a str, String)],
+        timeout: Duration,
+    ) -> GetFuture<'a>;
+}
+
+pub struct ReqwestGet;
+
+impl GetClient for ReqwestGet {
+    fn get<'a>(
+        &'a self,
+        url: &'a Url,
+        pinned: SocketAddr,
+        headers: &'a [(&'a str, String)],
+        timeout: Duration,
+    ) -> GetFuture<'a> {
+        Box::pin(async move {
+            let client = pinned_client(url, pinned, timeout)?;
+            let mut request = client.get(url.clone());
+            for (name, value) in headers {
+                request = request.header(*name, value);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|err| OutboundError::Transport(transport_kind(&err)))?;
+            let status = response.status().as_u16();
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let body = read_capped_body(response).await?;
+            Ok(PinnedGet {
+                status,
+                location,
+                body,
+            })
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Outbound {
     policy: Arc<OutboundPolicy>,
     resolver: Arc<dyn Resolve>,
+    get_client: Arc<dyn GetClient>,
 }
 
 impl Outbound {
     pub fn new(policy: OutboundPolicy, resolver: Arc<dyn Resolve>) -> Self {
+        Self::with_get_client(policy, resolver, Arc::new(ReqwestGet))
+    }
+
+    pub fn with_get_client(
+        policy: OutboundPolicy,
+        resolver: Arc<dyn Resolve>,
+        get_client: Arc<dyn GetClient>,
+    ) -> Self {
         Self {
             policy: Arc::new(policy),
             resolver,
+            get_client,
         }
     }
 
@@ -256,6 +326,17 @@ impl Outbound {
 
     pub fn policy(&self) -> &OutboundPolicy {
         &self.policy
+    }
+
+    /// Same resolver and GET client, always the strict default policy.
+    /// Workspace unfurl uses this so `FVOCI_WEBHOOK_ALLOW_TARGETS` cannot
+    /// open private hop targets.
+    pub fn without_allow_list(&self) -> Self {
+        Self {
+            policy: Arc::new(OutboundPolicy::default()),
+            resolver: self.resolver.clone(),
+            get_client: self.get_client.clone(),
+        }
     }
 
     /// Resolves the URL host once and returns the address to connect to.
@@ -307,18 +388,7 @@ impl Outbound {
         let remaining = timeout
             .saturating_sub(started.elapsed())
             .max(Duration::from_millis(1));
-        let mut builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .timeout(remaining)
-            .connect_timeout(remaining)
-            .pool_max_idle_per_host(0);
-        if let Some(Host::Domain(name)) = url.host() {
-            builder = builder.resolve(name, pinned);
-        }
-        let client = builder
-            .build()
-            .map_err(|err| OutboundError::Transport(err.without_url().to_string()))?;
+        let client = pinned_client(&url, pinned, remaining)?;
         let mut request = client.post(url).body(body);
         for (name, value) in headers {
             request = request.header(*name, value);
@@ -331,17 +401,72 @@ impl Outbound {
         if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
             return Err(OutboundRejected::Redirect.into());
         }
-        let mut read = 0usize;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|err| OutboundError::Transport(transport_kind(&err)))?;
-            read += chunk.len();
-            if read > RESPONSE_READ_CAP {
-                break;
-            }
-        }
+        let _ = read_capped_body(response).await?;
         Ok(status.as_u16())
     }
+
+    /// GET after re-validating the URL and connecting only to the checked
+    /// address. Redirects are **not** followed here; unfurl walks hops itself
+    /// so each `Location` is parsed and pinned again. Webhook [`Self::post`]
+    /// still refuses 3xx.
+    pub async fn get(
+        &self,
+        raw_url: &str,
+        headers: &[(&str, String)],
+        timeout: Duration,
+    ) -> Result<PinnedGet, OutboundError> {
+        let url = parse_target_url(raw_url, &self.policy)?;
+        let started = tokio::time::Instant::now();
+        let pinned = tokio::time::timeout(timeout, self.pin(&url))
+            .await
+            .map_err(|_| OutboundError::Transport("resolve timeout".into()))??;
+        let remaining = timeout
+            .saturating_sub(started.elapsed())
+            .max(Duration::from_millis(1));
+        tokio::time::timeout(
+            remaining,
+            self.get_client.get(&url, pinned, headers, remaining),
+        )
+        .await
+        .map_err(|_| OutboundError::Transport("get timeout".into()))?
+    }
+}
+
+fn pinned_client(
+    url: &Url,
+    pinned: SocketAddr,
+    timeout: Duration,
+) -> Result<reqwest::Client, OutboundError> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .pool_max_idle_per_host(0);
+    if let Some(Host::Domain(name)) = url.host() {
+        builder = builder.resolve(name, pinned);
+    }
+    builder
+        .build()
+        .map_err(|err| OutboundError::Transport(err.without_url().to_string()))
+}
+
+async fn read_capped_body(response: reqwest::Response) -> Result<Vec<u8>, OutboundError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| OutboundError::Transport(transport_kind(&err)))?;
+        let take = RESPONSE_READ_CAP.saturating_sub(body.len());
+        if take == 0 {
+            break;
+        }
+        if chunk.len() > take {
+            body.extend_from_slice(&chunk[..take]);
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn transport_kind(err: &reqwest::Error) -> String {
@@ -464,6 +589,17 @@ mod tests {
         }
         let empty = Outbound::new(none(), Arc::new(Fixed(vec![])));
         assert_eq!(empty.pin(&url).await, Err(OutboundRejected::Resolve));
+    }
+
+    #[test]
+    fn without_allow_list_ignores_webhook_exception() {
+        let policy = OutboundPolicy::parse_allow_list("127.0.0.1, hook.test").expect("policy");
+        let outbound = Outbound::new(policy, Arc::new(Fixed(vec!["127.0.0.1".parse().unwrap()])));
+        assert!(parse_target_url("http://127.0.0.1:5555/", outbound.policy()).is_ok());
+        let unfurl = outbound.without_allow_list();
+        assert!(parse_target_url("http://127.0.0.1:5555/", unfurl.policy()).is_err());
+        assert!(parse_target_url("http://hook.test:5555/", unfurl.policy()).is_err());
+        assert!(parse_target_url("https://example.com/", unfurl.policy()).is_ok());
     }
 
     struct Hang;

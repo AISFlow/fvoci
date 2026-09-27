@@ -7,6 +7,7 @@ import { collabBadge } from "@/features/documents/collab-badge";
 import { CollabPresence } from "@/features/documents/collab-presence";
 import type { CollabSession, CollabUser } from "@/features/documents/collab-session";
 import { RevisionPanel } from "@/features/documents/revision-panel";
+import { UrlEmbedProvider } from "@/features/workspace/document-editor";
 import "@/features/documents/document-shell.css";
 
 /* Source task-detail-screen: the task body is the `${ws}:task:${id}` collab room.
@@ -101,17 +102,19 @@ export function TaskBodyEditor({
       {!ready && session?.status !== "unauthorized" ? <QueryLoading /> : null}
       {ready && session && collabUser ? (
         <div className="document-page__body document-page__body--editor">
-          <FvociEditor
-            ydoc={session.doc}
-            provider={session.provider}
-            user={collabUser}
-            editable={!readOnly}
-            ariaLabel={t("doc.body.a11y")}
-            workspaceSlug={slug}
-            gutterAddLabel={t("editor.gutter.add")}
-            gutterMoveLabel={t("editor.gutter.move")}
-            insertLabel={t("editor.mobile.insert")}
-          />
+          <UrlEmbedProvider workspaceId={workspaceId}>
+            <FvociEditor
+              ydoc={session.doc}
+              provider={session.provider}
+              user={collabUser}
+              editable={!readOnly}
+              ariaLabel={t("doc.body.a11y")}
+              workspaceSlug={slug}
+              gutterAddLabel={t("editor.gutter.add")}
+              gutterMoveLabel={t("editor.gutter.move")}
+              insertLabel={t("editor.mobile.insert")}
+            />
+          </UrlEmbedProvider>
         </div>
       ) : null}
     </section>
