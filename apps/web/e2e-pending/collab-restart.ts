@@ -232,8 +232,8 @@ export class OwnedServer {
     if (this.bind === "") {
       throw new Error("cannot crash-kill before the owned server has bound a port");
     }
-    this.requireObservedLiveHelper();
-    await this.killGroupObserved();
+    const helpersLive = this.requireObservedLiveHelper();
+    await this.killGroupObserved(helpersLive);
   }
 
   async rebindAfterCrash(): Promise<void> {
@@ -249,8 +249,8 @@ export class OwnedServer {
       throw new Error("cannot restart before the owned server has bound a port");
     }
     const bind = this.bind;
-    this.requireObservedLiveHelper();
-    await this.killGroupObserved();
+    const helpersLive = this.requireObservedLiveHelper();
+    await this.killGroupObserved(helpersLive);
     await this.spawnAt(bind, bind);
   }
 
@@ -398,13 +398,13 @@ export class OwnedServer {
     throw new Error(`fvoci-server did not become ready on ${bind}: ${this.logs.slice(-2000)}`);
   }
 
-  private async killGroupObserved(): Promise<void> {
+  private async killGroupObserved(helpersLive?: readonly ProcMember[]): Promise<void> {
     const child = this.child;
     const pgid = this.pgid;
     const parentPid = this.parentPid;
     const identity = this.parentIdentity;
     const owners = this.observeOwnedMembers();
-    const helpersBefore = liveCollabHelpers(owners);
+    const helpersBefore = helpersLive ?? liveCollabHelpers(owners);
     this.child = null;
     this.pgid = null;
     this.parentPid = null;
