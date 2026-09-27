@@ -7,6 +7,8 @@ import { HwpDocument, initSync } from "@rhwp/core";
 import {
   buildFixtureHwpx,
   FIXTURE_PAGES,
+  readZip,
+  writeZip,
 } from "../src/features/attachments/hwp-test-fixture";
 import { watchCspViolations } from "./helpers";
 
@@ -36,6 +38,24 @@ function threePageHwp(): Buffer {
   } finally {
     doc.free();
   }
+}
+
+/**
+ * The review's HWPX counterexample: the Hancom sample plus four unreferenced
+ * 32 MiB `Scripts/*` parts (about 140 KB on disk) that rhwp 0.8.6 would
+ * inflate eagerly. The viewer's package budget refuses it before rhwp runs.
+ */
+const scriptsBombHwpx = Buffer.from(
+  writeZip([
+    ...readZip(new Uint8Array(hancomHwpx)),
+    ...[0, 1, 2, 3].map((n) => ({ name: `Scripts/s${n}.js`, data: new Uint8Array(32 * 1024 * 1024) })),
+  ]),
+);
+
+/** Running rhwp document workers (one per open HWP viewer). */
+function hwpWorkers(page: Page): number {
+  return page.workers().filter((worker) => /\/assets\/hwp-worker-[^/]+\.js$/.test(new URL(worker.url()).pathname))
+    .length;
 }
 
 function sha256(bytes: Buffer | Uint8Array): string {
@@ -215,6 +235,8 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   await expect(viewer.getByRole("button", { name: "이전 쪽" })).toBeDisabled();
   const first = await probePage(page);
   expect(first.src.startsWith("blob:")).toBe(true);
+  // rhwp runs in one module worker for this document.
+  expect(hwpWorkers(page)).toBe(1);
   expect(first.naturalWidth).toBeGreaterThan(700);
   expect(first.dark).toBeGreaterThan(2_000);
   expect(Math.round(first.cssWidth)).toBe(Math.round(first.naturalWidth));
@@ -352,6 +374,17 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   }
 
   // Switching attachments while the HWP bytes are in flight never paints the old file.
+  // Leaving an open document terminates its worker (SPA navigation, same page).
+  await page.goto(`/w/acme/a/${hwpxId}/view`);
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => hwpWorkers(page)).toBe(1);
+  await page.evaluate((to) => {
+    window.history.pushState({}, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/w/acme/a/${textId}/view`);
+  await expect(page.getByText("plain attachment body")).toBeVisible();
+  await expect.poll(() => hwpWorkers(page)).toBe(0);
+
   let releaseHwp!: () => void;
   const held = new Promise<void>((resolve) => {
     releaseHwp = resolve;
@@ -378,6 +411,7 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   await expect(page.locator("[data-hwp-viewer]")).toHaveCount(0);
   await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
   await page.unroute(hwpDownload);
+  expect(hwpWorkers(page)).toBe(0);
 
   // Share: the anonymous reader gets the same layout from share URLs only.
   const shareRes = await page.request.post(
@@ -419,6 +453,15 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   }
   expect(readerCsp).toEqual([]);
   await anon.close();
+
+  // The Scripts bomb stays download-only and leaves no worker behind.
+  const bombId = await uploadAttachment(page, wsId, documentId, "스크립트.hwpx", scriptsBombHwpx);
+  await page.goto(`/w/acme/a/${bombId}/view`);
+  await expect(shell.getByRole("alert")).toHaveText("이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.", {
+    timeout: 30_000,
+  });
+  await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
+  await expect.poll(() => hwpWorkers(page)).toBe(0);
 
   // Session revoked while the bytes are in flight: the viewer shows an error, not the document.
   let releaseRevoked!: () => void;
