@@ -1904,29 +1904,239 @@ fn revision_maintenance_params_with_snapshots() -> RevisionMaintenanceParams {
     }
 }
 
+fn revision_maintenance_params_gc_phase_fixture() -> RevisionMaintenanceParams {
+    RevisionMaintenanceParams {
+        settings: RevisionSettings {
+            session_snapshot_enabled: false,
+            keep: 2,
+            snapshot_interval_hours: 24,
+        },
+        engine: Some(revision_maintenance_orchestration_engine()),
+    }
+}
+
+async fn seed_stale_scheduled_document_candidate(
+    pool: &PgPool,
+    admin: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> Uuid {
+    let doc = create_wiki_document(
+        pool,
+        workspace_id,
+        user_id,
+        session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "phase-skip-scheduled",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let y_snapshot = vec![0x31u8, 0x32, 0x33];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(admin)
+    .await
+    .expect("document state");
+    let anchor = Utc::now() - ChronoDuration::hours(30);
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by, created_at
+        ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'anchor', 'session', NULL, $5)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .bind(anchor)
+    .execute(admin)
+    .await
+    .expect("stale anchor revision");
+    sqlx::query(
+        "UPDATE fvoci.document_states SET updated_at = now() WHERE workspace_id = $1 AND document_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .execute(admin)
+    .await
+    .expect("fresh collab anchor");
+    doc.id
+}
+
+async fn count_revisions_by_reason(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    reason: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2 AND reason = $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(reason)
+    .fetch_one(admin)
+    .await
+    .expect("count")
+}
+
+async fn seed_document_with_excess_automatic_revisions(
+    pool: &PgPool,
+    admin: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+    automatic_rows: usize,
+) -> Uuid {
+    let doc = create_wiki_document(
+        pool,
+        workspace_id,
+        user_id,
+        session_id,
+        CreateDocumentInput {
+            parent_id: None,
+            title: "phase-skip-gc",
+            icon: None,
+        },
+        None,
+    )
+    .await
+    .expect("wiki")
+    .expect("created");
+    let y_snapshot = vec![0x41u8, 0x42, 0x43];
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (workspace_id, document_id, state, encoding, writer_generation)
+        VALUES ($1, $2, $3, 1, 1)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .execute(admin)
+    .await
+    .expect("document state");
+    let anchor = Utc::now();
+    for i in 0..automatic_rows {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by, created_at
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'auto', 'session', NULL, $5)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(doc.id)
+        .bind(vec![i as u8])
+        .bind(anchor + ChronoDuration::milliseconds(i as i64))
+        .execute(admin)
+        .await
+        .expect("automatic revision");
+    }
+    doc.id
+}
+
+async fn count_automatic_session_revisions(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> i64 {
+    sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1
+            AND target_kind = 'document'
+            AND target_id = $2
+            AND reason = 'session'
+            AND created_by IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(admin)
+    .await
+    .expect("count")
+}
+
 #[tokio::test]
 async fn revision_maintenance_batch_skips_scheduled_when_gc_phase_pending() {
     let harness = TestDb::bootstrap().await;
     let pool = app_pool(&harness).await;
-    let (_, _, _, workspace_id) = setup_session(&harness).await;
-    let resume = RevisionMaintenanceResume {
+    let admin = admin_pool(&harness).await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let document_id =
+        seed_stale_scheduled_document_candidate(&pool, &admin, workspace_id, user_id, session_id)
+            .await;
+    let params = revision_maintenance_params_with_snapshots();
+    let session_before =
+        count_revisions_by_reason(&admin, workspace_id, document_id, "session").await;
+    let scheduled_before =
+        count_revisions_by_reason(&admin, workspace_id, document_id, "scheduled").await;
+
+    let resume_skip = RevisionMaintenanceResume {
         workspace_id: None,
         target: None,
         gc_workspace_after: Some(workspace_id),
         scheduled_phase_complete: true,
         gc_phase_complete: false,
     };
-    let (stats, next) = run_revision_maintenance_batch(
-        &pool,
-        &revision_maintenance_params_with_snapshots(),
-        resume,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let (stats, next) =
+        run_revision_maintenance_batch(&pool, &params, resume_skip, &CancellationToken::new())
+            .await
+            .unwrap();
     assert_eq!(stats.snapshots_attempted, 0);
+    assert_eq!(stats.snapshots_failed, 0);
     assert_eq!(stats.snapshots_created, 0);
     assert!(next.scheduled_phase_complete);
+    assert_eq!(
+        count_revisions_by_reason(&admin, workspace_id, document_id, "session").await,
+        session_before,
+        "scheduled skip must not touch session revisions"
+    );
+    assert_eq!(
+        count_revisions_by_reason(&admin, workspace_id, document_id, "scheduled").await,
+        scheduled_before,
+        "scheduled skip must not create scheduled rows"
+    );
+
+    let resume_eligible = RevisionMaintenanceResume {
+        workspace_id: None,
+        target: None,
+        gc_workspace_after: None,
+        scheduled_phase_complete: false,
+        gc_phase_complete: true,
+    };
+    let (eligible_stats, _) =
+        run_revision_maintenance_batch(&pool, &params, resume_eligible, &CancellationToken::new())
+            .await
+            .unwrap();
+    assert!(
+        eligible_stats.snapshots_attempted > 0 || eligible_stats.snapshots_failed > 0,
+        "stale live target must attempt scheduled capture when phase flag is false (stats={eligible_stats:?})"
+    );
+
+    admin.close().await;
     pool.close().await;
     harness.cleanup().await;
 }
@@ -1935,24 +2145,65 @@ async fn revision_maintenance_batch_skips_scheduled_when_gc_phase_pending() {
 async fn revision_maintenance_batch_skips_gc_when_snapshot_phase_pending() {
     let harness = TestDb::bootstrap().await;
     let pool = app_pool(&harness).await;
-    let (_, _, _, workspace_id) = setup_session(&harness).await;
-    let resume = RevisionMaintenanceResume {
-        workspace_id: Some(workspace_id),
+    let admin = admin_pool(&harness).await;
+    let (_app, _cookie, user_id, workspace_id) = setup_session(&harness).await;
+    let session_id = session_id_for_user(&admin, user_id).await;
+    let keep = revision_maintenance_params_gc_phase_fixture().settings.keep;
+    let automatic_rows = (keep as usize) + 2;
+    let document_id = seed_document_with_excess_automatic_revisions(
+        &pool,
+        &admin,
+        workspace_id,
+        user_id,
+        session_id,
+        automatic_rows,
+    )
+    .await;
+    let automatic_before =
+        count_automatic_session_revisions(&admin, workspace_id, document_id).await;
+    assert!(automatic_before > keep as i64);
+
+    let params = revision_maintenance_params_gc_phase_fixture();
+    let resume_skip_gc = RevisionMaintenanceResume {
+        workspace_id: None,
         target: None,
         gc_workspace_after: None,
         scheduled_phase_complete: false,
         gc_phase_complete: true,
     };
-    let (stats, next) = run_revision_maintenance_batch(
-        &pool,
-        &revision_maintenance_params_with_snapshots(),
-        resume,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let (stats, next) =
+        run_revision_maintenance_batch(&pool, &params, resume_skip_gc, &CancellationToken::new())
+            .await
+            .unwrap();
     assert_eq!(stats.revisions_deleted, 0);
     assert!(next.gc_phase_complete);
+    assert_eq!(
+        count_automatic_session_revisions(&admin, workspace_id, document_id).await,
+        automatic_before,
+        "gc skip must retain automatic revisions beyond keep"
+    );
+
+    let resume_gc_active = RevisionMaintenanceResume {
+        workspace_id: None,
+        target: None,
+        gc_workspace_after: None,
+        scheduled_phase_complete: true,
+        gc_phase_complete: false,
+    };
+    let (gc_stats, _) =
+        run_revision_maintenance_batch(&pool, &params, resume_gc_active, &CancellationToken::new())
+            .await
+            .unwrap();
+    assert!(
+        gc_stats.revisions_deleted > 0,
+        "with gc phase enabled, excess automatic rows must be deleted (stats={gc_stats:?})"
+    );
+    assert!(
+        count_automatic_session_revisions(&admin, workspace_id, document_id).await <= keep as i64,
+        "gc control must enforce keep={keep}"
+    );
+
+    admin.close().await;
     pool.close().await;
     harness.cleanup().await;
 }
