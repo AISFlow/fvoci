@@ -2,7 +2,8 @@
 
 This slice initializes a new PostgreSQL database. Importing an existing TypeScript FVOCI installation is not supported.
 The Rust server has forward schema migrations (see "Migrate and grant before server" and, for the Compose
-install, "Upgrade", including its unexecuted image-to-image validation scope). Downgrading a migrated database is not supported.
+install, "Upgrade"; its image-to-image upgrade, failed-init recovery and old-image rollback are validated
+locally for local storage by "Upgrade validation", while S3 rollback and CI runs of that smoke are not). Downgrading a migrated database is not supported.
 
 ## Toolchain
 
