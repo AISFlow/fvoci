@@ -77,6 +77,11 @@ use crate::api::dto::{
     WorkspaceStatusOutput,
 };
 #[cfg(feature = "api-schema")]
+use crate::gantt::{
+    GanttBarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttScaleOutput, MonthBandOutput,
+    ScaleTickOutput, ScheduleInference,
+};
+#[cfg(feature = "api-schema")]
 use crate::integrations::unfurl::{UnfurlKind, UnfurlResult};
 #[cfg(feature = "api-schema")]
 use crate::settings::catalog::{
@@ -196,6 +201,7 @@ impl Modify for CookieSecurityAddon {
         workspace_search,
         workspace_unfurl,
         list_tasks,
+        get_task_layout,
         create_task,
         get_task,
         list_task_activity,
@@ -433,6 +439,13 @@ impl Modify for CookieSecurityAddon {
             TaskChildOutput,
             TaskChildProgressOutput,
             TaskListResponse,
+            GanttLayoutOutput,
+            GanttLayoutItemOutput,
+            GanttScaleOutput,
+            GanttBarOutput,
+            ScaleTickOutput,
+            MonthBandOutput,
+            ScheduleInference,
             LabelOutput,
             LabelListResponse,
             CreateLabelBody,
@@ -1931,6 +1944,34 @@ fn get_project_workflow() {}
     )
 )]
 fn list_tasks() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout",
+    tag = "tasks",
+    security(("fvoci_session" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("project_id" = String, description = "Project id"),
+        ("year" = i32, Query, description = "Calendar year"),
+        ("month" = i32, Query, description = "Calendar month"),
+        ("weekStartsOn" = Option<i32>, Query, description = "0 Sunday or 1 Monday"),
+        ("zoom" = Option<String>, Query, description = "day|week|month|quarter"),
+        ("pxPerDay" = Option<f64>, Query, description = "Pixels per day"),
+        ("laneHeight" = Option<i32>, Query, description = "Lane height in px"),
+        ("pack" = Option<String>, Query, description = "rows|overlap"),
+        ("maxLanes" = Option<i32>, Query, description = "Max lanes for overlap pack"),
+        ("query" = Option<String>, Query, description = "JSON-encoded view query"),
+    ),
+    responses(
+        (status = 200, description = "Gantt layout", body = GanttLayoutOutput),
+        (status = 400, description = "Invalid query", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+    )
+)]
+fn get_task_layout() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

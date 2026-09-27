@@ -15,6 +15,7 @@ import { WorkspaceSettingsPage } from "@/pages/WorkspaceSettingsPage";
 import { DocumentTagsSettingsPage } from "@/pages/DocumentTagsSettingsPage";
 import { TemplatesSettingsPage } from "@/pages/TemplatesSettingsPage";
 import { ProjectCollectionPage } from "@/pages/ProjectCollectionPage";
+import { ProjectGanttPage } from "@/pages/ProjectGanttPage";
 import { MyTasksPage } from "@/pages/MyTasksPage";
 import { ProjectWorkflowPage } from "@/pages/ProjectWorkflowPage";
 import { ProjectFieldsPage } from "@/pages/ProjectFieldsPage";
@@ -166,6 +167,7 @@ export function App() {
             <Route path=":ref/table" element={<ProjectCollectionPage type="table" />} />
             <Route path=":ref/board" element={<ProjectCollectionPage type="board" />} />
             <Route path=":ref/calendar" element={<ProjectCollectionPage type="calendar" />} />
+            <Route path=":ref/gantt" element={<ProjectGanttPage />} />
             <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
             <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
             <Route path=":ref" element={<WorkspaceRefPage />} />
