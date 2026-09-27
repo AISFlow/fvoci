@@ -69,7 +69,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/036_identity_link_template_repin.sql"),
         36,
     ),
-    // 037 is reserved by PR 104.
+    (include_str!("../../migrations/037_task_collab.sql"), 37),
     (
         include_str!("../../migrations/038_oidc_legacy_issuer_fail_closed.sql"),
         38,
@@ -566,6 +566,10 @@ mod tests {
         (
             36,
             "6932eba2f27535ac16801d00bafbf5fa1c25e6b0f84c4ff42ea63957103e576c",
+        ),
+        (
+            37,
+            "4a67badc60a646dc99a7b7698800cb309a3b1bcae76bf8fb5be7531b58e33b81",
         ),
         (
             38,

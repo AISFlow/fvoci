@@ -1,8 +1,7 @@
 //! OIDC sign-in, identity links and workspace SSO configuration (source
 //! `apps/server/src/domains/identity/oidc.ts`, `domains/workspaces/oidc.ts`).
 //!
-//! Workspace SSO is an EE feature in the source (`workspaceSso`); license
-//! verification is not ported, so, like branding and audit, it is enabled.
+//! Workspace SSO is gated by the signed enterprise license.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -171,7 +170,8 @@ async fn providers(
     State(state): State<AppState>,
     Extension(identity): Extension<Arc<Identity>>,
 ) -> Result<Json<ProvidersOutput>, AppError> {
-    let workspace_sso = identity.encryption_keys.is_some()
+    let workspace_sso = state.auth.db.license.has_feature("workspaceSso")
+        && identity.encryption_keys.is_some()
         && db::any_workspace_oidc(&state.auth.db.pool)
             .await
             .map_err(internal)?;
@@ -226,6 +226,9 @@ async fn sso(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     limit_ip(&state, peer).await?;
+    if !state.auth.db.license.has_feature("workspaceSso") {
+        return Err(AppError::from_code(ProblemCode::ProviderNotConfigured));
+    }
     let query = strict_query(raw, &["slug"])?;
     let slug = query
         .get("slug")
@@ -240,6 +243,7 @@ async fn sso(
     let started = flow::begin(
         &state.auth.db.pool,
         &identity,
+        &state.auth.db.license,
         BeginParams {
             provider: ProviderKey::Generic,
             mode: Mode::Login,
@@ -276,6 +280,7 @@ async fn start(
     let started = flow::begin(
         &state.auth.db.pool,
         &identity,
+        &state.auth.db.license,
         BeginParams {
             provider,
             mode: if invitation.is_some() {
@@ -325,13 +330,18 @@ async fn callback(
             }),
         None => None,
     };
-    let settings = crate::settings::current_values(&state.auth.db.pool, &state.branding_name)
-        .await
-        .map_err(internal)?;
+    let settings = crate::settings::current_values_with_license(
+        &state.auth.db.pool,
+        &state.branding_name,
+        &state.auth.db.license,
+    )
+    .await
+    .map_err(internal)?;
     let ip = peer_ip(peer.ip());
     let result = flow::complete(
         &state.auth.db.pool,
         &identity,
+        &state.auth.db.license,
         CompleteParams {
             provider,
             query: &query,
@@ -419,6 +429,7 @@ async fn link(
     let started = flow::begin(
         &state.auth.db.pool,
         &identity,
+        &state.auth.db.license,
         BeginParams {
             provider,
             mode: Mode::Link,
@@ -497,6 +508,9 @@ async fn get_workspace_oidc(
     jar: CookieJar,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<WorkspaceOidcGetOutput>, AppError> {
+    if !state.auth.db.license.has_feature("workspaceSso") {
+        return Err(AppError::from_code(ProblemCode::NotFound));
+    }
     let workspace_id = workspace_path(&workspace_id)?;
     let auth = manage_auth(&state, &headers, &jar, workspace_id).await?;
     let row = db::get_workspace_oidc(
@@ -561,6 +575,9 @@ async fn put_workspace_oidc(
     Path(workspace_id): Path<String>,
     body: Result<Json<WorkspaceOidcBody>, JsonRejection>,
 ) -> Result<Json<WorkspaceOidcOutput>, AppError> {
+    if !state.auth.db.license.has_feature("workspaceSso") {
+        return Err(AppError::from_code(ProblemCode::NotFound));
+    }
     let workspace_id = workspace_path(&workspace_id)?;
     check_origin(&headers, &state.public_origin)?;
     let auth = manage_auth(&state, &headers, &jar, workspace_id).await?;
@@ -604,6 +621,9 @@ async fn delete_workspace_oidc(
     jar: CookieJar,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<OkResponse>, AppError> {
+    if !state.auth.db.license.has_feature("workspaceSso") {
+        return Err(AppError::from_code(ProblemCode::NotFound));
+    }
     let workspace_id = workspace_path(&workspace_id)?;
     check_origin(&headers, &state.public_origin)?;
     let auth = manage_auth(&state, &headers, &jar, workspace_id).await?;
