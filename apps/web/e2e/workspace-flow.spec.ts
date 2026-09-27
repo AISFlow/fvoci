@@ -93,7 +93,7 @@ test("instance admin creates a team workspace from home dialog", async ({ page }
   await page.getByRole("link", { name: betaName }).click();
   await expect(page).toHaveURL(new RegExp(`/w/${betaSlug}/wiki$`));
   await page.goto(`/w/${betaSlug}/settings`);
-  await expect(page.getByRole("heading", { name: "워크스페이스" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "워크스페이스", exact: true })).toBeVisible();
   await expect(page.getByLabel("워크스페이스 이름", { exact: true })).toHaveValue(betaName);
 });
 

@@ -148,6 +148,7 @@ impl Modify for CookieSecurityAddon {
         get_workspace,
         patch_workspace,
         delete_workspace,
+        workspace_export,
         list_members,
         patch_member,
         remove_member,
@@ -1307,6 +1308,22 @@ fn patch_workspace() {}
     )
 )]
 fn delete_workspace() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/export",
+    tag = "workspaces",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "ZIP: workspace.json, documents.json, tasks.json, comments.json, attachments.json, attachments/*", content_type = "application/zip"),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or forbidden", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn workspace_export() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

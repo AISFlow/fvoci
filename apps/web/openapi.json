@@ -11456,6 +11456,71 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/export": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "workspace_export",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ZIP: workspace.json, documents.json, tasks.json, comments.json, attachments.json, attachments/*",
+            "content": {
+              "application/zip": {}
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "fvoci_session": []
+          },
+          {
+            "bearer_api_token": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/github": {
       "get": {
         "tags": [

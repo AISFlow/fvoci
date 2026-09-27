@@ -22,6 +22,8 @@ use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::validate::{normalize_slug, validate_given_name};
 
+mod export;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/me/workspaces", get(list_my_workspaces))
@@ -40,6 +42,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/members/{user_id}",
             patch(patch_member).delete(remove_member),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/export",
+            get(export::workspace_export),
         )
 }
 

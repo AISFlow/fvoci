@@ -54,6 +54,7 @@ pub mod user_export;
 pub mod view_query;
 pub mod workflow_statuses;
 pub mod workspace;
+pub mod workspace_export;
 
 use sqlx::PgPool;
 use std::sync::Arc;
