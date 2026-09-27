@@ -153,7 +153,7 @@
 | [#159](https://github.com/AISFlow/fvoci/pull/159) | `00e7dadb17a41cb5ca919ac686237cf26204a6c0` | `2f4483b06411aa85939a18eda8e428684801d2c9` | 문서 메뉴의 instance `features.ai` 설정 소비 | 1개 성공, 나머지 대기·진행 |
 | [#161](https://github.com/AISFlow/fvoci/pull/161) | `d76908912c31d1888c117a11d6fb06a75a94dd9a` | `1e7c1a807bca35e50b0cf0fd2e0bf8fc157b5a94` | 프로젝트 문서 리비전 이력 API·UI·forward 복원 | 대기·진행 |
 | [#151](https://github.com/AISFlow/fvoci/pull/151) | `27365b68ea02cd0ad75a726e9af1553ae71fe9e6` | `bfc0c5b8f945f1129c0687015ae2707e18ff94ae` | room writer 상실 후 durable 리비전 상태 재적재(stale capture) | 대기·진행 |
-| [#163](https://github.com/AISFlow/fvoci/pull/163) | `3870a58e16f5655baf241d0af0f75636249c7b57` | `771d1cf213413258e0637ad42ce0a96799bba768` | 태스크 메타 변경의 다른 프로젝트 viewer SSE 전달 | 대기 |
+| [#163](https://github.com/AISFlow/fvoci/pull/163) | `3870a58e16f5655baf241d0af0f75636249c7b57` | `771d1cf213413258e0637ad42ce0a96799bba768` | 태스크 메타 변경의 같은 프로젝트 내 다른 viewer SSE 전달 | 대기 |
 | [#148](https://github.com/AISFlow/fvoci/pull/148) | `62744ab13826ddbb2be9645e84327883a4dddf96` | `8d4b7c3d0fffdb3c295359889b98a30e48f33c45` | 첨부 multipart 완료 재시도·proxy 요청 상한 413/524 | 대기 |
 
 검증 기준: 각 PR의 필요한 실제 검사·원격 CI와 별도 세션의 독립 검토를 고정 SHA에서 확인한다.
@@ -161,10 +161,7 @@
 최신 실행·소유권·검증 SHA·인계 포인터는 `/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-26.md`에 둔다.
 
 현재 작업·잔여 범위:
-- 수락 대기(C, 2026-09-27 기준 main 시점 관측; 이후 #142·#146·#148 모두 머지, 위 표): 컬렉션 board 그룹별 paging·drag-and-drop은 PR #142
-  HEAD `830851f2b20a162d17291c929e529d5316628905`(독립 검토 ACCEPT, CI 진행), 댓글 변경 경합은 PR #146
-  HEAD `fa3153b88945588e7670644660ee65c46f6d1339`(독립 검토 ACCEPT, CI 대기), 첨부 업로드 완료 재시도·요청 상한
-  413/524는 PR #148 HEAD `0aec71c5792a344df6ed2db8157a8a70bf7f0982`(읽기 전용 검토 대기). 모두 미수락이며 소유권은 최신 인계에 둔다.
+- 기준 main 시점에 수락 대기였던 #142·#146·#148은 이후 위 표의 고정 HEAD로 수락·머지됐다. 당시 관측은 git 이력에 보존한다.
 - 수락 대기(C, 2026-09-27 14:55 UTC 관측, 미수락): calendar drag PR [#162](https://github.com/AISFlow/fvoci/pull/162)
   HEAD `548739735922df772b0077128b2a08f972949d7a`, 첨부 다운로드 PAT 허용 PR [#164](https://github.com/AISFlow/fvoci/pull/164)
   HEAD `a166f9525d13c64919807751614eebfb8ff38edf`, 서버 메시지 `i18n.overrides` 소비 PR [#165](https://github.com/AISFlow/fvoci/pull/165)
