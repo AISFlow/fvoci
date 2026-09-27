@@ -32,6 +32,7 @@ import { AdminAuditPage } from "@/pages/AdminAuditPage";
 import { AdminLegalPage } from "@/pages/AdminLegalPage";
 import { ConsentPage } from "@/pages/ConsentPage";
 import { LegalPage } from "@/pages/LegalPage";
+import { ServiceInfoPage } from "@/pages/ServiceInfoPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -75,6 +76,7 @@ export function App() {
             }
           />
           <Route path="/consent" element={<ConsentPage />} />
+          <Route path="/service-info" element={<ServiceInfoPage />} />
           <Route path="/legal/:kind" element={<LegalPage />} />
           <Route
             path="/settings/admin"

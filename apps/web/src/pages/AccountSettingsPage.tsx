@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { AccountSettingsView } from "@/features/settings/settings-account";
+import { AuthenticatedLegalNav } from "@/features/legal/operator-info";
 import { MfaSection } from "@/features/settings/settings-account-mfa";
 import { api, ensureOk } from "@/lib/api";
 import { erasureRecoveryHash } from "@/lib/erasure-hash";
@@ -141,6 +142,9 @@ export function AccountSettingsPage() {
           )}
         </div>
       </main>
+      <footer className="border-t border-border px-4 py-3">
+        <AuthenticatedLegalNav />
+      </footer>
     </div>
   );
 }

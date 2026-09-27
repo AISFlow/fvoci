@@ -5,6 +5,7 @@ import { LoginForm } from "@/features/auth/login";
 import { MfaStep } from "@/features/auth/mfa";
 import { api, ensureOk } from "@/lib/api";
 import { oidcErrorMessage, takeMfaFragment } from "@/lib/oidc";
+import { publicInstanceQuery } from "@/lib/queries/admin";
 import { meQuery, providersQuery, setupStatusQuery } from "@/lib/queries";
 
 export function LoginPage() {
@@ -12,6 +13,7 @@ export function LoginPage() {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const setupQuery = useQuery(setupStatusQuery);
+  const instance = useQuery(publicInstanceQuery);
   const meQueryState = useQuery(meQuery);
   const providers = useQuery(providersQuery);
   const resetNotice = searchParams.get("reset") === "1";
@@ -44,6 +46,7 @@ export function LoginPage() {
   return (
     <LoginForm
       brandingName={brandingName}
+      operator={instance.data?.values.operator ?? null}
       unavailableNotice={null}
       mailEnabled={setupQuery.data?.mailEnabled === true}
       resetNotice={resetNotice}

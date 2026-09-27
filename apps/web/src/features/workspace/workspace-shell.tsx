@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { AuthenticatedLegalNav } from "@/features/legal/operator-info";
 import { SearchCommand } from "@/features/workspace/search-command";
 import { NotificationBell } from "@/features/notifications/notification-bell";
 import {
@@ -182,6 +183,9 @@ export function WorkspaceShell({
         </div>
       </header>
       <main className="app-shell__main">{children}</main>
+      <footer className="border-t border-border px-4 py-3">
+        <AuthenticatedLegalNav />
+      </footer>
     </div>
   );
 }
