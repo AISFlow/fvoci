@@ -100,9 +100,14 @@ test("only a renderer <svg> root and sane dimensions are wrapped", () => {
     [Number.NaN, 1],
     [1, Number.POSITIVE_INFINITY],
     [1e7, 1],
+    [0.004, 1],
+    [1, 0.0049],
   ]) {
     assert.deepEqual(slideImageSvg("<svg></svg>", w!, h!, 1024), { status: "failed" }, `${w}x${h}`);
   }
+  // The smallest dimension the template can write.
+  const smallest = slideImageSvg("<svg></svg>", 0.005, 1e6, 1024);
+  assert.ok((smallest as { svg: string }).svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="0.01" height="1000000" '));
   const fractional = slideImageSvg("<svg></svg>", 960.004, 540.126, 1024);
   assert.ok((fractional as { svg: string }).svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540.13" '));
 });

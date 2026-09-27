@@ -37,8 +37,10 @@ export function toBase64(bytes: Uint8Array): string {
 }
 
 function dimension(value: number): string | null {
-  if (!(Number.isFinite(value) && value > 0 && value <= MAX_DIMENSION)) return null;
-  return String(Math.round(value * 100) / 100);
+  if (!(Number.isFinite(value) && value <= MAX_DIMENSION)) return null;
+  const rounded = Math.round(value * 100) / 100;
+  // Also rejects a positive value that rounds to "0": a zero-size image.
+  return rounded > 0 ? String(rounded) : null;
 }
 
 export type SlideImageSvg = { status: "ok"; svg: string } | { status: "tooLarge" } | { status: "failed" };

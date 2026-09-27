@@ -30,6 +30,8 @@ const owner = {
 
 const unavailable = "이 파일을 뷰어로 열 수 없습니다. 원본을 다운로드하세요.";
 const loadFailed = "불러오지 못했습니다.";
+/** Thrown inside an idle PPTX worker by the spec; the page may report it as an uncaught worker error. */
+const IDLE_WORKER_DEATH = "pptx idle worker death (spec)";
 
 async function uploadAttachment(
   page: Page,
@@ -201,6 +203,64 @@ async function sampleSlide(page: Page, points: Record<string, [number, number]>)
   );
 }
 
+/**
+ * The hostile chart deck (1280 × 720 slide px) paints two columns in the
+ * default series fill (Office accent 1): x 112–206 and 350–444, bottoms at
+ * y 288. Measured in the 8f4b82aa screenshots: 31,933 pixels within 24 of it.
+ */
+const HOSTILE_CHART = {
+  width: 1280,
+  bar: [68, 114, 196],
+  inBars: [
+    [159, 240],
+    [397, 120],
+  ],
+  background: [
+    [280, 120],
+    [800, 500],
+  ],
+} as const;
+
+/**
+ * Proof that the inner chart SVG was parsed and painted, from a screenshot of
+ * exactly the slide: bar and background samples, and the bar-coloured area in
+ * slide px². Decoded in `page` (the app document), not the page shown.
+ */
+async function chartPaint(page: Page, png: Buffer) {
+  return page.evaluate(
+    async ({ data, chart }) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${data}`;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(image, 0, 0);
+      const px = canvas.width / chart.width;
+      const at = ([x, y]: readonly [number, number]) => {
+        const [r, g, b] = ctx.getImageData(Math.round(x * px), Math.round(y * px), 1, 1).data;
+        return [r!, g!, b!] as [number, number, number];
+      };
+      const all = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let bar = 0;
+      for (let i = 0; i < all.length; i += 4) {
+        if (chart.bar.every((c, k) => Math.abs(all[i + k]! - c) <= 24)) bar += 1;
+      }
+      return { inBars: chart.inBars.map(at), background: chart.background.map(at), barArea: bar / (px * px) };
+    },
+    { data: png.toString("base64"), chart: HOSTILE_CHART },
+  );
+}
+
+async function expectChartPainted(page: Page, png: Buffer) {
+  const paint = await chartPaint(page, png);
+  for (const rgb of paint.inBars) expect(near(rgb, HOSTILE_CHART.bar), `bar ${rgb}`).toBe(true);
+  for (const rgb of paint.background) expect(near(rgb, [255, 255, 255]), `background ${rgb}`).toBe(true);
+  expect(paint.barArea).toBeGreaterThan(25_000);
+  expect(paint.barArea).toBeLessThan(40_000);
+}
+
 function near(actual: Rgb, expected: readonly number[], tolerance = 24) {
   return actual.every((c, i) => Math.abs(c - expected[i]!) <= tolerance);
 }
@@ -232,7 +292,7 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   page,
   browser,
 }) => {
-  test.setTimeout(300_000);
+  test.setTimeout(180_000);
   await recordSvgBlobs(page);
   const csp = watchCspViolations(page);
   const baseOrigin = new URL(test.info().project.use.baseURL ?? "http://127.0.0.1:5173").origin;
@@ -416,6 +476,26 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   await page.getByRole("button", { name: "다시 시도" }).click();
   await expect(viewer).toBeVisible({ timeout: 20_000 });
 
+  // --- The worker dies while idle: the next slide change fails visibly -------
+  // No render is waiting to hear of it, and reopening on its own could repeat without end.
+  await expect.poll(() => pptxWorkers(page).length).toBe(1);
+  const idleWorker = pptxWorkers(page)[0]!;
+  await idleWorker.evaluate((message) => {
+    setTimeout(() => {
+      throw new Error(message);
+    }, 0);
+  }, IDLE_WORKER_DEATH);
+  await expect.poll(() => pptxWorkers(page).includes(idleWorker)).toBe(false);
+  await viewer.getByRole("button", { name: "다음 슬라이드" }).click();
+  await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(loadFailed, { timeout: 2_000 });
+  await expect(page.locator("[data-pptx-viewer]")).toHaveCount(0);
+  expect(pptxWorkers(page)).toHaveLength(0);
+  // Retry downloads and opens again, in exactly one new worker.
+  await page.getByRole("button", { name: "다시 시도" }).click();
+  await expect(viewer).toBeVisible({ timeout: 20_000 });
+  await expect(viewer.getByText("슬라이드 1 / 2")).toBeVisible();
+  await expect.poll(() => pptxWorkers(page).length).toBe(1);
+
   // --- Switch files while the PPTX bytes are in flight ------------------------
   const hold = holdRoute();
   await page.route(downloadRoute, hold.handler);
@@ -500,7 +580,10 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   for (const markup of Object.values(HOSTILE_PPTX_MARKUP)) expect(hostile.inner).toContain(markup);
   expect(hostile.outer).not.toMatch(/script|iframe|meta|javascript/i);
   await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
-  evidence("pptx-hostile-chart.png", await img.screenshot());
+  const hostileShot = await img.screenshot();
+  evidence("pptx-hostile-chart.png", hostileShot);
+  // Positive control: the inner chart really painted, so the negatives below are not vacuous.
+  await expectChartPainted(page, hostileShot);
   await img.click({ position: { x: 40, y: 40 } });
   // "Open image in new tab": the blob as its own document, on the app origin.
   const standalone = await page.context().newPage();
@@ -514,7 +597,9 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   expect(await standalone.evaluate(() => (window as unknown as { __pptxPwned?: number }).__pptxPwned)).toBeUndefined();
   expect(await standalone.evaluate(() => document.documentElement.outerHTML.length)).toBeGreaterThan(0);
   expect(await standalone.evaluate(() => document.querySelectorAll("script, iframe, a, meta").length)).toBe(0);
-  evidence("pptx-hostile-standalone.png", await standalone.screenshot());
+  const standaloneShot = await standalone.screenshot({ clip: { x: 0, y: 0, width: HOSTILE_CHART.width, height: 720 } });
+  evidence("pptx-hostile-standalone.png", standaloneShot);
+  await expectChartPainted(page, standaloneShot);
   await standalone.mouse.click(40, 40);
   await standalone.waitForTimeout(300);
   expect(standalone.url()).toBe(hostile.src);
@@ -593,7 +678,7 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   expect(foreign).toEqual([]);
   expect(foreign.filter((url) => url.startsWith(new URL(FIXTURE_PPTX_EXTERNAL_LINK).origin))).toEqual([]);
   expect(foreign.filter((url) => url.startsWith(new URL(FIXTURE_PPTX_EXTERNAL_IMAGE).origin))).toEqual([]);
-  expect(pageErrors).toEqual([]);
+  expect(pageErrors.filter((message) => !message.includes(IDLE_WORKER_DEATH))).toEqual([]);
 
   // --- Share: same viewer over share bytes; no session preview/edit calls -----
   const shareRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents/${documentId}/share-links`, {

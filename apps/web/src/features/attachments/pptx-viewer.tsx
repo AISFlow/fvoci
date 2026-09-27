@@ -49,6 +49,8 @@ export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
   const [image, setImage] = useState<SlideImage | null>(null);
   /** Slides of the current source whose layout timed out or took the worker down: not laid out again. */
   const failed = useRef<{ source: Source | null; slides: Set<number> }>({ source: null, slides: new Set() });
+  /** Decks this viewer closed, or whose failure a render reported: the open effect replaces them. */
+  const retired = useRef(new WeakSet<RemotePptxDeck>());
 
   useEffect(() => {
     const controller = new AbortController();
@@ -116,13 +118,22 @@ export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
     return () => {
       alive = false;
       controller.abort();
-      opened?.close();
+      if (opened) {
+        retired.current.add(opened);
+        opened.close();
+      }
     };
   }, [source, epoch]);
 
   useEffect(() => {
-    // A closed deck is about to be replaced by the open effect.
-    if (!deck || deck.closed) return;
+    if (!deck) return;
+    if (deck.closed) {
+      // A retired deck is about to be replaced by the open effect. Any other closed deck lost its
+      // worker while idle, with no render to report it: reopening could repeat without end, so
+      // this is a load failure whose retry downloads again.
+      if (!retired.current.has(deck)) setState({ status: "error", message: t("load.failed"), retry: true });
+      return;
+    }
     if (failed.current.slides.has(slide)) {
       setImage({ deck, index: slide, status: "unavailable" });
       return;
@@ -146,6 +157,7 @@ export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
         // `closed`: whoever closed the worker also opens the next one, or the viewer is gone.
         if (!alive || (error instanceof PptxWorkerError && error.reason === "closed")) return;
         failed.current.slides.add(slide);
+        retired.current.add(deck);
         setImage({ deck, index: slide, status: "unavailable" });
         // The worker is gone; the other slides need a new one.
         setEpoch((n) => n + 1);
@@ -155,6 +167,7 @@ export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
       alive = false;
       if (!settled && !deck.closed) {
         // Still laying out this slide: only terminating the worker stops it.
+        retired.current.add(deck);
         deck.close();
         setEpoch((n) => n + 1);
       }

@@ -252,6 +252,24 @@ test("close, an abort, a worker error or a mismatched reply terminates the worke
   assert.ok(confused.terminated && book.deck.closed);
 });
 
+test("a worker that dies while idle is closed, and every later render fails with `closed` without a request", async () => {
+  for (const event of ["onerror", "onmessageerror"] as const) {
+    const idle = silentDeck();
+    const opened = await openPptxInWorker(new Uint8Array(8), { createWorker: () => idle });
+    if (opened.status !== "ok") return assert.fail("expected ok");
+    assert.equal(opened.deck.closed, false);
+    idle[event]?.({} as ErrorEvent & MessageEvent);
+    // Nothing was pending to reject: `closed` is the only trace, which the viewer checks (pptx-viewer.tsx).
+    assert.ok(idle.terminated && opened.deck.closed, event);
+    await assert.rejects(opened.deck.render(1), (error) => error instanceof PptxWorkerError && error.reason === "closed");
+    assert.deepEqual(
+      idle.requests.map((r) => r.type),
+      ["open"],
+      event,
+    );
+  }
+});
+
 test("the default bounds", () => {
   assert.equal(PPTX_OPEN_TIMEOUT_MS, 20_000);
   assert.equal(PPTX_RENDER_TIMEOUT_MS, 10_000);
