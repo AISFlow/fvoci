@@ -3450,3 +3450,100 @@ async fn task_dates_accept_only_source_iso_format() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+#[tokio::test]
+async fn task_layout_gantt_geometry_and_holiday_column() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let (status, task_a) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({
+            "title": "Layout A",
+            "startDate": "2026-09-01",
+            "dueDate": "2026-09-03"
+        })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, task_b) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({
+            "title": "Layout B",
+            "startDate": "2026-09-04",
+            "dueDate": "2026-09-04"
+        })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let a_id = task_a["id"].as_str().unwrap();
+    let b_id = task_b["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{a_id}/dependencies"),
+        Some(json!({"blockedId": b_id, "type": "FS"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/holidays"),
+        Some(json!({"date": "2026-09-02"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let q = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("year", "2026")
+        .append_pair("month", "9")
+        .append_pair(
+            "query",
+            r#"{"filters":{"title":"Layout"},"sort":[]}"#,
+        )
+        .finish();
+    let (status, layout) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?{q}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(layout["truncated"], false);
+    let items = layout["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(layout["pathTotal"], 1);
+    let off = layout["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["date"] == "2026-09-02")
+        .unwrap();
+    assert_eq!(off["offDuty"], true);
+    assert!(layout["monthBands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["label"] == "9월"));
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?year=2026&month=9&view=calendar"
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    admin.close().await;
+    harness.cleanup().await;
+}

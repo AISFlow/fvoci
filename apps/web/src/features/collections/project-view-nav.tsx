@@ -4,12 +4,13 @@ import { Link } from "react-router-dom";
 import {
   projectCollectionPath,
   projectFieldsPath,
+  projectGanttPath,
   projectTasksPath,
   projectWorkflowPath,
 } from "@/lib/href";
 import "./collections.css";
 
-export type ProjectViewTab = "tasks" | "table" | "board" | "calendar" | "fields" | "workflow";
+export type ProjectViewTab = "tasks" | "table" | "board" | "calendar" | "gantt" | "fields" | "workflow";
 
 export function ProjectViewNav({
   slug,
@@ -29,6 +30,7 @@ export function ProjectViewNav({
       to: projectCollectionPath(slug, projectKey, "calendar"),
       label: t("collection.calendar"),
     },
+    { id: "gantt", to: projectGanttPath(slug, projectKey), label: t("view.gantt") },
     { id: "fields", to: projectFieldsPath(slug, projectKey), label: t("collection.fieldSettings") },
     {
       id: "workflow",
