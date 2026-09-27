@@ -11,6 +11,7 @@ import {
   pdfjsAssetBase,
 } from "./src/features/attachments/pdf-assets.ts";
 import {
+  collectWorkerModuleIds,
   fvociWebLicenseAdapt,
   VITE_LICENSE_DATA_FILE,
 } from "./vite-plugin-fvoci-web-licenses.ts";
@@ -106,6 +107,9 @@ function officeKitXlsxNotice() {
   };
 }
 
+/** Modules of every web-worker bundle, for the license notice. */
+const workerModuleIds = new Set<string>();
+
 const apiProxyTarget =
   process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
@@ -117,6 +121,7 @@ export default defineConfig({
       repoRoot,
       manifestPath: browserLicenseManifest,
       assetNotices: () => [...pdfjsAssetNotices(), officeKitXlsxNotice()],
+      workerModuleIds: () => workerModuleIds,
     }),
     pdfjsAssets(),
   ],
@@ -142,6 +147,9 @@ export default defineConfig({
         ws: true,
       },
     },
+  },
+  worker: {
+    plugins: () => [collectWorkerModuleIds(workerModuleIds)],
   },
   build: {
     outDir: "dist",
