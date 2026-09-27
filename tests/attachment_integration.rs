@@ -2527,7 +2527,32 @@ struct CappedProxy {
     read_timeout: Arc<std::sync::Mutex<Duration>>,
     /// Forward the next request, let the origin finish it, then answer 524.
     lose_next_response: Arc<std::sync::atomic::AtomicBool>,
+    /// Answer 524 to the requests in flight now and drop their origin
+    /// connections, as an edge giving up on a held origin does.
+    cancel_in_flight: Arc<tokio::sync::Notify>,
     upstream_requests: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn start_capped_proxy(
+    upstream: String,
+    max_request_bytes: usize,
+) -> (CappedProxy, String, tokio::task::JoinHandle<()>) {
+    let proxy = CappedProxy {
+        upstream,
+        client: reqwest::Client::new(),
+        max_request_bytes,
+        read_timeout: Arc::new(std::sync::Mutex::new(Duration::from_secs(30))),
+        lose_next_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cancel_in_flight: Arc::new(tokio::sync::Notify::new()),
+        upstream_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let (edge, edge_task) = serve_on_loopback(
+        axum::Router::new()
+            .fallback(capped_proxy_handler)
+            .with_state(proxy.clone()),
+    )
+    .await;
+    (proxy, edge, edge_task)
 }
 
 fn gateway_page(status: u16) -> axum::response::Response {
@@ -2575,7 +2600,11 @@ async fn capped_proxy_handler(
         forward = forward.body(bytes);
     }
     proxy.upstream_requests.fetch_add(1, Ordering::SeqCst);
-    let upstream = match forward.send().await {
+    let cancelled = proxy.cancel_in_flight.notified();
+    let upstream = match tokio::select! {
+        res = forward.send() => res,
+        _ = cancelled => return gateway_page(524),
+    } {
         Ok(res) => res,
         Err(err) if err.is_timeout() => return gateway_page(524),
         Err(_) => return gateway_page(502),
@@ -2677,20 +2706,7 @@ async fn proxy_capped_parts_round_trip_exact_bytes_through_413_and_524() {
     let app = app_router(state);
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let (origin, origin_task) = serve_on_loopback(app).await;
-    let proxy = CappedProxy {
-        upstream: origin,
-        client: reqwest::Client::new(),
-        max_request_bytes: PROXY_CAP,
-        read_timeout: Arc::new(std::sync::Mutex::new(Duration::from_secs(30))),
-        lose_next_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        upstream_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    };
-    let (edge, edge_task) = serve_on_loopback(
-        axum::Router::new()
-            .fallback(capped_proxy_handler)
-            .with_state(proxy.clone()),
-    )
-    .await;
+    let (proxy, edge, edge_task) = start_capped_proxy(origin, PROXY_CAP).await;
     let client = reqwest::Client::new();
 
     // Larger than one proxied request can carry; not a multiple of the part size.
@@ -2828,27 +2844,27 @@ async fn proxy_capped_parts_round_trip_exact_bytes_through_413_and_524() {
             .collect::<Vec<_>>()
     });
 
-    // Complete outlives the proxy read timeout: 524, and nothing is published.
+    // The edge gives up on a complete the origin holds after assembly, before
+    // it marks the row stored: 524, and nothing is published. The edge answers
+    // only once the origin is known to be held, so assembly time cannot race
+    // it (the wall-clock limit itself is covered by
+    // `proxy_read_timeout_answers_524_without_publishing`).
     let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
     let mut barrier = test_barrier::arm_pre_mark_stored(attachment_uuid);
-    *proxy.read_timeout.lock().unwrap() = Duration::from_millis(500);
     let complete_path = format!("{ws}/attachments/{attachment_id}/complete");
-    let (status, _) = via_proxy_json(
-        &client,
-        &edge,
-        Method::POST,
-        &complete_path,
-        &cookie,
-        Some(complete_body.clone()),
-    )
-    .await;
-    assert_eq!(status.as_u16(), 524);
-    tokio::time::timeout(Duration::from_secs(5), barrier.wait_entered())
+    let abandoned = tokio::spawn({
+        let (client, edge, cookie) = (client.clone(), edge.clone(), cookie.clone());
+        let (path, body) = (complete_path.clone(), complete_body.clone());
+        async move { via_proxy_json(&client, &edge, Method::POST, &path, &cookie, Some(body)).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
         .await
         .expect("complete reached the pre-mark barrier")
         .expect("barrier entered");
+    proxy.cancel_in_flight.notify_waiters();
+    let (status, _) = abandoned.await.unwrap();
+    assert_eq!(status.as_u16(), 524);
     test_barrier::disarm_pre_mark_stored(attachment_uuid);
-    *proxy.read_timeout.lock().unwrap() = Duration::from_secs(30);
     let (status, _) = via_proxy_json(
         &client,
         &edge,
@@ -2999,5 +3015,139 @@ async fn proxy_capped_parts_round_trip_exact_bytes_through_413_and_524() {
     edge_task.abort();
     origin_task.abort();
     let _ = std::fs::remove_dir_all(&storage_root);
+    harness.cleanup().await;
+}
+
+/// The edge's own time limit: a complete the origin cannot finish in time is
+/// answered 524 by the proxy's request timer, publishes nothing, and a re-sent
+/// complete stores the exact bytes once. The stand-in timer is reqwest's
+/// whole-request timeout (not Cloudflare's idle read timeout). The origin is
+/// held at the pre-mark barrier, so whether the timer fires during assembly or
+/// while held, the abandoned complete cannot publish before the checks.
+#[tokio::test]
+async fn proxy_read_timeout_answers_524_without_publishing() {
+    use reqwest::Method;
+    use std::sync::atomic::Ordering;
+
+    const READ_TIMEOUT: Duration = Duration::from_millis(500);
+
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let payload = b"edge-time-limit";
+    let (attachment_id, part_url, _) = begin_upload(
+        &app,
+        &cookie,
+        workspace_id,
+        &document_id,
+        "timeout.bin",
+        payload,
+    )
+    .await;
+    let (status, _, headers) = request(
+        app.clone(),
+        "PUT",
+        &part_url,
+        Some(payload.to_vec()),
+        Some("application/octet-stream"),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+    let complete_body = json!({ "parts": [{ "partNumber": 1, "etag": etag }] });
+
+    let (origin, origin_task) = serve_on_loopback(app.clone()).await;
+    let (proxy, edge, edge_task) = start_capped_proxy(origin, 1024 * 1024).await;
+    let client = reqwest::Client::new();
+    let ws = format!("/api/v1/workspaces/{workspace_id}");
+    let complete_path = format!("{ws}/attachments/{attachment_id}/complete");
+
+    let attachment_uuid = Uuid::parse_str(&attachment_id).unwrap();
+    let mut barrier = test_barrier::arm_pre_mark_stored(attachment_uuid);
+    *proxy.read_timeout.lock().unwrap() = READ_TIMEOUT;
+    let started = std::time::Instant::now();
+    let (status, _) = via_proxy_json(
+        &client,
+        &edge,
+        Method::POST,
+        &complete_path,
+        &cookie,
+        Some(complete_body.clone()),
+    )
+    .await;
+    assert_eq!(status.as_u16(), 524);
+    assert!(
+        started.elapsed() >= READ_TIMEOUT,
+        "524 came from the edge timer"
+    );
+    assert_eq!(proxy.upstream_requests.load(Ordering::SeqCst), 1);
+    *proxy.read_timeout.lock().unwrap() = Duration::from_secs(30);
+
+    // Still armed, so the abandoned complete cannot have published.
+    let (status, _) = via_proxy_json(
+        &client,
+        &edge,
+        Method::GET,
+        &format!("{ws}/attachments/{attachment_id}"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "not published after the 524");
+    let (status, _, _) = via_proxy(
+        &client,
+        &edge,
+        Method::GET,
+        &format!("{ws}/attachments/{attachment_id}/download"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    test_barrier::disarm_pre_mark_stored(attachment_uuid);
+    let (status, completed) = via_proxy_json(
+        &client,
+        &edge,
+        Method::POST,
+        &complete_path,
+        &cookie,
+        Some(complete_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-sent complete: {completed:?}");
+    assert_eq!(completed["sizeBytes"], payload.len());
+    barrier.proceed();
+    let (status, downloaded, _) = via_proxy(
+        &client,
+        &edge,
+        Method::GET,
+        &format!("{ws}/attachments/{attachment_id}/download"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(downloaded, payload);
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'attachment.completed' AND target_id = $1",
+    )
+    .bind(attachment_uuid)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(count.0, 1, "one completion event");
+    admin.close().await;
+
+    edge_task.abort();
+    origin_task.abort();
     harness.cleanup().await;
 }
