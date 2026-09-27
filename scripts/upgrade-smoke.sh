@@ -4,8 +4,9 @@
 #   scripts/upgrade-smoke.sh --old <sha> --new <sha> [--main-ref origin/main]
 #                            [--evidence-dir DIR] [--build-jobs 2] [--min-free-gib 15] [--plan-only]
 #
-# --plan-only checks sources, migrations, recipes and disk, then exits
-# without building or starting anything.
+# --plan-only checks sources, migrations and recipes, and the disk gate for each
+# image that would need a build, then exits without building, starting or
+# tearing down anything.
 # Both SHAs must be on the first-parent history of --main-ref, old an ancestor of
 # new, and new must add at least two migrations. Each image is built from a
 # `git archive` of its SHA (never the working tree) and labelled with it. The
@@ -20,9 +21,13 @@
 # into a fresh project on the old image. The old image never runs on the
 # migrated database. S3 storage is not covered.
 #
-# On success the trap removes the two projects and the work dir. On failure it
-# keeps them for diagnosis and prints the cleanup commands. The evidence dir
-# holds redacted logs only.
+# On success the trap tears both projects down with the compose file of the tree
+# each was started from and checks that no container, volume or network of
+# either project remains; only then does it remove the work dir. A failed
+# teardown or a leftover fails the run and keeps the work dir. On any other
+# failure it keeps the projects and work dir for diagnosis and prints the
+# cleanup commands. The evidence dir (default: a new 0700 dir under TMPDIR)
+# holds redacted logs only and is kept on success and failure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,7 +40,7 @@ MIN_FREE_GIB=15
 PLAN_ONLY=0
 
 usage() {
-  sed -n '2,7p' "${BASH_SOURCE[0]}" >&2
+  sed -n '2,9p' "${BASH_SOURCE[0]}" >&2
   exit 2
 }
 
@@ -67,7 +72,9 @@ require_cmd git docker openssl curl node python3 sha256sum tar awk diff
 RUN_ID="$(openssl rand -hex 8)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-upgrade.${RUN_ID}.XXXXXX")"
 chmod 700 "$WORK"
-EVIDENCE_DIR="${EVIDENCE_DIR:-$WORK/evidence}"
+if [[ -z "$EVIDENCE_DIR" ]]; then
+  EVIDENCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-upgrade-evidence.${RUN_ID}.XXXXXX")"
+fi
 mkdir -p "$EVIDENCE_DIR"
 ASSERT_LOG="$EVIDENCE_DIR/assertions.log"
 : >"$ASSERT_LOG"
@@ -80,6 +87,10 @@ BACKUP_DIR="$WORK/backup"
 COOKIE_JAR="$WORK/cookies"
 DOWNLOAD_PATH="$WORK/download"
 FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
+OLD_TREE="$WORK/src-old"
+NEW_TREE="$WORK/src-new"
+# The tree whose compose file last started the upgrade project.
+UPGRADE_TREE="$OLD_TREE"
 SECRETS=()
 STACK_STARTED=0
 START_TS=$SECONDS
@@ -95,15 +106,16 @@ fail() {
 }
 
 # Replace every generated secret with a marker before a log reaches the evidence dir.
+# The secrets go through the environment, not argv, so ps does not list them.
 redact() {
-  python3 -c '
-import sys
+  FVOCI_REDACT="$(printf '%s\n' "${SECRETS[@]}")" python3 -c '
+import os, sys
 data = sys.stdin.read()
-for secret in sys.argv[1:]:
+for secret in os.environ["FVOCI_REDACT"].split("\n"):
     if secret:
         data = data.replace(secret, "[redacted]")
 sys.stdout.write(data)
-' "${SECRETS[@]}"
+'
 }
 
 project_compose() {
@@ -112,25 +124,70 @@ project_compose() {
   docker compose -f "$tree/infra/rust/compose.yml" --project-name "$project" --env-file "$env_file" "$@"
 }
 
+# Containers, volumes and networks that still carry the project's compose label.
+owned_resources() {
+  local filter="label=com.docker.compose.project=$1" containers volumes networks
+  containers="$(docker ps -a -q --filter "$filter")" || return 1
+  volumes="$(docker volume ls -q --filter "$filter")" || return 1
+  networks="$(docker network ls -q --filter "$filter")" || return 1
+  printf '%s\n' "$containers" "$volumes" "$networks" | awk 'NF' | paste -sd' ' -
+}
+
+# `down -v` with the tree the project was started from, then prove nothing is left.
+teardown_project() {
+  local project="$1" env_file="$2" tree="$3" left rc=0
+  if [[ -f "$env_file" ]]; then
+    project_compose "$project" "$env_file" "$tree" down -v --remove-orphans 2>&1 \
+      | redact >"$EVIDENCE_DIR/teardown-${project}.log"
+    if (( PIPESTATUS[0] != 0 )); then
+      echo "cleanup: down failed for $project (see $EVIDENCE_DIR/teardown-${project}.log)" >&2
+      rc=1
+    fi
+  fi
+  if ! left="$(owned_resources "$project")"; then
+    echo "cleanup: could not list the resources of $project" >&2
+    return 1
+  fi
+  if [[ -n "$left" ]]; then
+    echo "cleanup: $project still has: $left" >&2
+    rc=1
+  fi
+  return "$rc"
+}
+
 cleanup() {
   local status=$?
   set +e
-  if (( status != 0 && STACK_STARTED == 0 )); then
-    rm -rf "$WORK"
-  elif (( status == 0 )); then
-    project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$ROOT" down -v --remove-orphans >/dev/null 2>&1
-    project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$ROOT" down -v --remove-orphans >/dev/null 2>&1
+  if (( status == 0 )); then
+    local torn=0
+    if (( STACK_STARTED )); then
+      teardown_project "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" || torn=1
+      teardown_project "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" || torn=1
+    fi
+    if (( torn )); then
+      printf 'FAIL: cleanup left resources or failed\n' >>"$ASSERT_LOG"
+      echo "upgrade-smoke passed its checks but cleanup failed; kept for diagnosis:" >&2
+      echo "  projects: $UPGRADE_PROJECT $ROLLBACK_PROJECT (docker compose -p NAME down -v)" >&2
+      echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
+      status=1
+    else
+      (( STACK_STARTED )) && log_assert "cleanup: both projects down, no container, volume or network left: ok"
+      rm -rf "$WORK"
+    fi
+  elif (( STACK_STARTED == 0 )); then
+    # Nothing was started and no env file was written; the work dir holds only
+    # the two source archives and recipes.
     rm -rf "$WORK"
   else
-    [[ -f "$UPGRADE_ENV" ]] && project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$ROOT" logs --no-color --tail 200 \
+    [[ -f "$UPGRADE_ENV" ]] && project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" logs --no-color --tail 200 \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${UPGRADE_PROJECT}.log"
-    [[ -f "$ROLLBACK_ENV" ]] && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$ROOT" logs --no-color --tail 200 \
+    [[ -f "$ROLLBACK_ENV" ]] && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" logs --no-color --tail 200 \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${ROLLBACK_PROJECT}.log"
     echo "upgrade-smoke failed after $((SECONDS - START_TS))s; kept for diagnosis:" >&2
     echo "  projects: $UPGRADE_PROJECT $ROLLBACK_PROJECT (docker compose -p NAME down -v)" >&2
     echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
-    echo "  evidence: $EVIDENCE_DIR" >&2
   fi
+  echo "evidence (redacted, kept): $EVIDENCE_DIR" >&2
   exit "$status"
 }
 trap cleanup EXIT
@@ -178,8 +235,6 @@ export_tree() {
   mkdir -p "$dest"
   git -C "$ROOT" archive --format=tar "$sha" | tar -x -C "$dest"
 }
-OLD_TREE="$WORK/src-old"
-NEW_TREE="$WORK/src-new"
 export_tree "$OLD_SHA" "$OLD_TREE"
 export_tree "$NEW_SHA" "$NEW_TREE"
 
@@ -211,12 +266,12 @@ ensure_image() {
     [[ -z "$labels" ]] || fail "${name}: tag $tag exists with other labels ($labels); not reusing or overwriting it"
     local free
     free="$(docker_free_gib)"
-    if (( PLAN_ONLY )); then
-      log_assert "${name} image ${tag}: would build (${free:-?} GiB free, need ${MIN_FREE_GIB}); recipe-sha256=${recipe_hash}" >&2
-      return 0
-    fi
     if [[ -z "$free" ]] || (( free < MIN_FREE_GIB )); then
       fail "${name}: ${free:-?} GiB free under the Docker root, need ${MIN_FREE_GIB}; not building"
+    fi
+    if (( PLAN_ONLY )); then
+      log_assert "${name} image ${tag}: would build, disk gate ok (${free} GiB free, need ${MIN_FREE_GIB}); recipe-sha256=${recipe_hash}" >&2
+      return 0
     fi
     log_assert "== build ${name} image ${tag} from git archive ${sha} (jobs ${BUILD_JOBS}, ${free} GiB free)" >&2
     local started=$SECONDS
@@ -236,7 +291,7 @@ ensure_image() {
 OLD_IMAGE_ID="$(ensure_image "$OLD_SHA" "$OLD_TREE" old)"
 NEW_IMAGE_ID="$(ensure_image "$NEW_SHA" "$NEW_TREE" new)"
 if (( PLAN_ONLY )); then
-  log_assert "== plan only: nothing built or started"
+  log_assert "== plan only: nothing built, started or torn down; the disk gate ran only for images that need a build"
   exit 0
 fi
 OLD_TAG="fvoci-rust-install:upgrade-${OLD_SHA:0:12}"
@@ -412,6 +467,7 @@ log_assert "pre-upgrade backup taken, old server stopped, env copy kept (0600): 
 
 # --- 3. Upgrade whose init fails -------------------------------------------
 sed -i "s#^FVOCI_IMAGE=.*#FVOCI_IMAGE=${NEW_TAG}#" "$UPGRADE_ENV"
+UPGRADE_TREE="$NEW_TREE"
 sql "${UP[@]}" "$NEW_TREE" "CREATE TABLE ${BLOCKER_TABLE} (blocker integer)" >/dev/null
 log_assert "== upgrade attempt 1 with ${BLOCKER_TABLE} pre-created (must fail)"
 set +e
@@ -468,15 +524,31 @@ check_seeded_data "$BASE" "upgraded"
 VERIFY="$(project_compose "${UP[@]}" "$NEW_TREE" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-secrets 2>&1)" \
   || { redact <<<"$VERIFY" >&2; fail "verify-secrets failed after upgrade"; }
 redact <<<"$VERIFY" >"$EVIDENCE_DIR/verify-secrets-upgraded.log"
-# Negative control: the same probe with a different k1 must not open the secret.
-if project_compose "${UP[@]}" "$NEW_TREE" run --rm --no-deps -e "ENCRYPTION_KEYS={\"k1\":\"$(openssl rand -hex 32)\"}" \
-  --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-secrets >/dev/null 2>&1; then
-  fail "verify-secrets accepted a different k1"
+# Negative control: the same probe with a different k1 must fail to open the
+# sealed MFA secret (AEAD failure: `invalid`, not a missing key id or a DB error).
+WRONG_K1="$(openssl rand -hex 32)"
+SECRETS+=("$WRONG_K1")
+if WRONG_VERIFY="$(project_compose "${UP[@]}" "$NEW_TREE" run --rm --no-deps -e "ENCRYPTION_KEYS={\"k1\":\"${WRONG_K1}\"}" \
+  --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-secrets 2>&1)"; then
+  WRONG_STATUS=0
+else
+  WRONG_STATUS=$?
 fi
+redact <<<"$WRONG_VERIFY" >"$EVIDENCE_DIR/verify-secrets-wrong-key.log"
+(( WRONG_STATUS != 0 )) || fail "verify-secrets accepted a different k1"
+python3 -c '
+import json, sys
+reports = [line for line in sys.stdin.read().splitlines() if line.startswith("{")]
+assert len(reports) == 1, reports
+mfa = json.loads(reports[0])["userMfa"]
+assert mfa["checked"] == 1 and len(mfa["invalid"]) == 1 and mfa["keyUnavailable"] == [], mfa
+' <"$EVIDENCE_DIR/verify-secrets-wrong-key.log" || fail "wrong-key verify-secrets did not report the MFA secret invalid"
+grep -q 'do not open with the configured ENCRYPTION_KEYS' "$EVIDENCE_DIR/verify-secrets-wrong-key.log" \
+  || fail "wrong-key verify-secrets failed for another reason (exit ${WRONG_STATUS})"
 POST_DOC="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d '{"parentId":null,"title":"After upgrade"}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
-log_assert "upgraded: doctor ok, extraction kept, sealed secret opens with k1 and not with another key, new write ok: ok"
+log_assert "upgraded: doctor ok, extraction kept, sealed secret opens with k1 and is invalid under another k1 (exit ${WRONG_STATUS}), new write ok: ok"
 
 log_assert "== stop upgraded server before rollback"
 UPGRADED_CID="$(running_ids "$UPGRADE_PROJECT" server)"
