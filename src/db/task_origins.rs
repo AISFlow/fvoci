@@ -14,11 +14,15 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::context::{lock_key_from_uuid, recheck_session, session_is_live, set_tenant};
-use crate::db::documents::{document_permission, lock_membership_users, workspace_is_live};
+use crate::db::documents::{
+    document_permission, lock_membership_users, membership_role, workspace_is_live,
+};
+use crate::db::group_grants::group_members_join_sql;
 use crate::db::projects::{
-    lock_project, project_permission, project_permission_by_id, ProjectDbError,
+    lock_project, project_permission, project_permission_by_id, visible_project_sql, ProjectDbError,
 };
 use crate::db::tasks::{create_task_tx, CreateTaskInput};
+use crate::db::workspace::WorkspaceRole;
 use crate::projects::ProjectPermission;
 
 /// Serialises origin creation per source document (see module docs).
@@ -63,7 +67,83 @@ pub struct TaskOriginItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskOriginPage {
     pub items: Vec<TaskOriginItem>,
+    pub count: usize,
     pub next_cursor: Option<Uuid>,
+}
+
+pub struct TaskProject {
+    pub id: Uuid,
+    pub name: String,
+    pub key: String,
+}
+
+pub struct TaskProjectPicker {
+    pub items: Vec<TaskProject>,
+    pub suggested_id: Option<Uuid>,
+    pub can_create_project: bool,
+}
+
+/// The picker checks current document View and project Edit before exposing
+/// project names. Archived and deleted projects are excluded.
+pub async fn task_projects(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<TaskProjectPicker, TaskOriginDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await?
+        || !workspace_is_live(&mut tx, workspace_id).await?
+        || !document_view_permission(&mut tx, workspace_id, actor_user_id, document_id)
+            .await?
+            .at_least(ProjectPermission::View)
+    {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    let source_project_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let workspace_role = membership_role(&mut tx, workspace_id, actor_user_id).await?;
+    let guest = workspace_role.unwrap_or(WorkspaceRole::Guest) == WorkspaceRole::Guest;
+    let editable = editable_project_sql("p", 2, 3);
+    let picker_sql = format!(
+        r#"
+        SELECT p.id, p.name, p.key
+        FROM fvoci.projects p
+        WHERE p.workspace_id = $1
+          AND p.deleted_at IS NULL
+          AND p.status <> 'archived'
+          AND {editable}
+        ORDER BY p.updated_at DESC, p.id ASC
+        "#
+    );
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(&picker_sql)
+        .bind(workspace_id)
+        .bind(guest)
+        .bind(actor_user_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    let items = rows
+        .into_iter()
+        .map(|(id, name, key)| TaskProject { id, name, key })
+        .collect::<Vec<_>>();
+    let suggested_id = source_project_id
+        .filter(|id| items.iter().any(|item| item.id == *id))
+        .or_else(|| items.first().map(|item| item.id));
+    let can_create_project =
+        workspace_role.is_some_and(|role| role.at_least(WorkspaceRole::Member));
+    tx.commit().await?;
+    Ok(Ok(TaskProjectPicker {
+        items,
+        suggested_id,
+        can_create_project,
+    }))
 }
 
 /// Source request hash: sha256 over the user, target project, anchor and the
@@ -289,6 +369,63 @@ type OriginRow = (
     Option<String>,
 );
 
+fn origin_item_from_row(row: OriginRow) -> TaskOriginItem {
+    let (
+        task_id,
+        document_id,
+        task_project_key,
+        task_number,
+        task_title,
+        document_project_key,
+        document_number,
+        document_title,
+        anchor,
+    ) = row;
+    TaskOriginItem {
+        task_id,
+        document_id,
+        task_display_id: format!(
+            "{}-{task_number}",
+            task_project_key.as_deref().unwrap_or_default()
+        ),
+        document_display_id: format!(
+            "{}-{document_number}",
+            document_project_key.as_deref().unwrap_or("WIKI")
+        ),
+        task_title,
+        document_title,
+        anchor,
+    }
+}
+
+/// Current Edit, matching `effective_permission` at or above Edit. Local to
+/// this picker so we do not add a generic list framework.
+fn editable_project_sql(project_alias: &str, guest_param: u32, actor_param: u32) -> String {
+    let join = group_members_join_sql("pm", "gm");
+    format!(
+        "(
+            ({project_alias}.visibility = 'workspace' AND ${guest_param} = false)
+            OR EXISTS (
+                SELECT 1 FROM fvoci.project_members pm
+                WHERE pm.workspace_id = {project_alias}.workspace_id
+                  AND pm.project_id = {project_alias}.id
+                  AND pm.user_id = ${actor_param}
+                  AND pm.role IN ('member', 'lead')
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM fvoci.project_members pm
+                {join}
+                WHERE pm.workspace_id = {project_alias}.workspace_id
+                  AND pm.project_id = {project_alias}.id
+                  AND gm.user_id = ${actor_param}
+                  AND pm.group_id IS NOT NULL
+                  AND pm.role IN ('member', 'lead')
+            )
+        )"
+    )
+}
+
 /// Source `listTaskOrigin` (`GET tasks/{id}/origin`): the task must be visible;
 /// an origin whose document the caller cannot view is omitted (200, empty).
 pub async fn get_task_origin(
@@ -343,47 +480,112 @@ pub async fn get_task_origin(
     .await?;
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
-        let (
-            origin_task_id,
-            document_id,
-            task_project_key,
-            task_number,
-            task_title,
-            document_project_key,
-            document_number,
-            document_title,
-            anchor,
-        ) = row;
+        let document_id = row.1;
         let visible = document_view_permission(&mut tx, workspace_id, actor_user_id, document_id)
             .await?
             .at_least(ProjectPermission::View);
         if !visible {
             continue;
         }
-        items.push(TaskOriginItem {
-            task_id: origin_task_id,
-            document_id,
-            task_display_id: format!(
-                "{}-{task_number}",
-                task_project_key.as_deref().unwrap_or_default()
-            ),
-            document_display_id: format!(
-                "{}-{document_number}",
-                document_project_key.as_deref().unwrap_or("WIKI")
-            ),
-            task_title,
-            document_title,
-            anchor,
-        });
+        items.push(origin_item_from_row(row));
     }
     tx.commit().await?;
+    let count = items.len();
     let next_cursor = if items.len() as i64 > limit {
         items.truncate(limit as usize);
         items.last().map(|item| item.task_id)
     } else {
         None
     };
-    Ok(Ok(TaskOriginPage { items, next_cursor }))
+    Ok(Ok(TaskOriginPage {
+        items,
+        count,
+        next_cursor,
+    }))
+}
+
+/// Lists links from a visible live document. Permission filtering happens
+/// before the cursor and page size so hidden tasks cannot consume slots or
+/// inflate the total count.
+pub async fn list_document_task_origins(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+    after: Option<Uuid>,
+    limit: i64,
+) -> Result<Result<TaskOriginPage, TaskOriginDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !session_is_live(&mut tx, actor_user_id, session_id).await?
+        || !workspace_is_live(&mut tx, workspace_id).await?
+        || !document_view_permission(&mut tx, workspace_id, actor_user_id, document_id)
+            .await?
+            .at_least(ProjectPermission::View)
+    {
+        return Ok(Err(TaskOriginDbError::NotFound));
+    }
+    let guest = membership_role(&mut tx, workspace_id, actor_user_id)
+        .await?
+        .unwrap_or(WorkspaceRole::Guest)
+        == WorkspaceRole::Guest;
+    let visible = visible_project_sql("tp", 2, 3);
+    let from_where = format!(
+        r#"
+        FROM fvoci.task_origins o
+        JOIN fvoci.tasks t
+          ON t.workspace_id = o.workspace_id AND t.id = o.task_id AND t.deleted_at IS NULL
+        JOIN fvoci.projects tp
+          ON tp.workspace_id = t.workspace_id AND tp.id = t.project_id AND tp.deleted_at IS NULL
+         AND {visible}
+        JOIN fvoci.documents d
+          ON d.workspace_id = o.workspace_id AND d.id = o.document_id AND d.deleted_at IS NULL
+        LEFT JOIN fvoci.projects dp
+          ON dp.workspace_id = d.workspace_id AND dp.id = d.project_id
+        WHERE o.workspace_id = $1 AND o.document_id = $4
+        "#
+    );
+    let count_sql = format!("SELECT count(*)::bigint {from_where}");
+    let total: i64 = sqlx::query_scalar(&count_sql)
+        .bind(workspace_id)
+        .bind(guest)
+        .bind(actor_user_id)
+        .bind(document_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let page_sql = format!(
+        r#"
+        SELECT o.task_id, o.document_id, tp.key, t.number, t.title,
+               dp.key, d.number, d.title, o.anchor
+        {from_where}
+          AND ($5::uuid IS NULL OR o.task_id > $5)
+        ORDER BY o.task_id
+        LIMIT $6
+        "#
+    );
+    let rows: Vec<OriginRow> = sqlx::query_as(&page_sql)
+        .bind(workspace_id)
+        .bind(guest)
+        .bind(actor_user_id)
+        .bind(document_id)
+        .bind(after)
+        .bind(limit.saturating_add(1))
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let mut items: Vec<_> = rows.into_iter().map(origin_item_from_row).collect();
+    let next_cursor = if items.len() as i64 > limit {
+        items.truncate(limit as usize);
+        items.last().map(|item| item.task_id)
+    } else {
+        None
+    };
+    Ok(Ok(TaskOriginPage {
+        items,
+        count: total.max(0) as usize,
+        next_cursor,
+    }))
 }
 
 #[cfg(test)]
