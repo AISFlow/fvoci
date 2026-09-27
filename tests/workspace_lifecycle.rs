@@ -6,9 +6,11 @@ mod project_harness;
 
 use axum::http::StatusCode;
 use chrono::{Duration as ChronoDuration, Utc};
+use futures_util::StreamExt;
 use project_harness::{
     add_workspace_user, admin_pool, app_pool, create_project, http_request,
-    insert_stored_attachment, json_request, setup_session, TestDb,
+    insert_minimal_project, insert_project_document, insert_stored_attachment, json_request,
+    setup_session, TestDb,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -479,6 +481,488 @@ async fn sweep_purges_expired_team_and_personal_immediately() {
 
     admin.close().await;
     pool.close().await;
+    harness.cleanup().await;
+}
+
+async fn bytes_request(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("origin", "http://localhost");
+    if let Some(cookie) = cookie {
+        builder = builder.header("cookie", format!("fvoci_session={}", cookie));
+    }
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder.body(Body::empty()).unwrap();
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(project_harness::test_peer()));
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default()
+        .to_vec();
+    (status, bytes, headers)
+}
+
+fn external_zip_check(bytes: &[u8]) {
+    let path = std::env::temp_dir().join(format!("fvoci-ws-export-{}.zip", Uuid::now_v7()));
+    std::fs::write(&path, bytes).unwrap();
+    let output = std::process::Command::new("python3")
+        .args(["-m", "zipfile", "-t"])
+        .arg(&path)
+        .output()
+        .expect("python3 is required for the external zip check");
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        output.status.success(),
+        "python3 -m zipfile -t failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn read_zip_entry(bytes: &[u8], want: &str) -> Option<Vec<u8>> {
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let eocd = bytes.len().checked_sub(22).filter(|_| bytes.len() >= 22)?;
+    if u32_at(eocd) != 0x0605_4b50 {
+        return None;
+    }
+    let count = u16_at(eocd + 10);
+    let mut at = u32_at(eocd + 16);
+    for _ in 0..count {
+        if u32_at(at) != 0x0201_4b50 {
+            return None;
+        }
+        let size = u32_at(at + 24);
+        let name_len = u16_at(at + 28);
+        let local = u32_at(at + 42);
+        let name = String::from_utf8(bytes[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        if name == want {
+            let data_at = local + 30 + u16_at(local + 26) + u16_at(local + 28);
+            return Some(bytes[data_at..data_at + size].to_vec());
+        }
+        at += 46 + name_len + u16_at(at + 30) + u16_at(at + 32);
+    }
+    None
+}
+
+fn read_zip_names(bytes: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut offset = 0usize;
+    while offset + 4 <= bytes.len() {
+        let sig = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        if sig == 0x0201_4b50 {
+            break;
+        }
+        if sig != 0x0403_4b50 {
+            offset += 1;
+            continue;
+        }
+        if offset + 30 > bytes.len() {
+            break;
+        }
+        let name_len = u16::from_le_bytes(bytes[offset + 26..offset + 28].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().unwrap()) as usize;
+        let name_start = offset + 30;
+        let name_end = name_start + name_len;
+        if name_end > bytes.len() {
+            break;
+        }
+        names.push(String::from_utf8_lossy(&bytes[name_start..name_end]).into_owned());
+        let data_len = u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().unwrap()) as usize;
+        offset = name_end + extra_len + data_len;
+    }
+    names
+}
+
+#[tokio::test]
+async fn workspace_zip_export_requires_manage_and_streams_zip() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
+
+    let wiki = create_wiki(app.clone(), &cookie, workspace_id, "보낼 위키").await;
+    let document_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
+    let _attachment_id = insert_stored_attachment(&admin, workspace_id, document_id, owner_id).await;
+
+    let path = format!("/api/v1/workspaces/{workspace_id}/export");
+    let (status, _, _) = bytes_request(app.clone(), "GET", &path, Some(&member.cookie), &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body, headers) = bytes_request(app.clone(), "GET", &path, Some(&cookie), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("content-type").unwrap(), "application/zip");
+    assert_eq!(
+        headers.get("content-disposition").unwrap(),
+        "attachment; filename=\"fvoci-workspace.zip\""
+    );
+    external_zip_check(&body);
+    let names = read_zip_names(&body);
+    assert!(names.iter().any(|n| n == "workspace.json"));
+    assert!(names.iter().any(|n| n == "documents.json"));
+    let docs: serde_json::Value =
+        serde_json::from_slice(&read_zip_entry(&body, "documents.json").expect("documents.json"))
+            .expect("documents json");
+    assert!(
+        docs.as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["title"] == "보낼 위키"),
+        "{docs}"
+    );
+    let ws_start = body
+        .windows(14)
+        .position(|w| w == b"workspace.json")
+        .expect("workspace.json entry");
+    let json_start = body[ws_start..]
+        .iter()
+        .position(|b| *b == b'{')
+        .map(|i| ws_start + i)
+        .expect("json brace");
+    let json_end = body[json_start..]
+        .iter()
+        .position(|b| *b == b'}')
+        .map(|i| json_start + i + 1)
+        .expect("json end");
+    let workspace_json: serde_json::Value =
+        serde_json::from_slice(&body[json_start..json_end]).expect("workspace.json");
+    assert_eq!(workspace_json["slug"], "acme");
+    assert!(workspace_json.get("excludedPrivateProjectCount").is_some());
+    let _ = document_id;
+
+    let (status, token_body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/api-tokens"),
+        Some(json!({"name": "export", "scopes": ["workspace.manage"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let secret = token_body["token"].as_str().unwrap();
+    let (status, _, _) = bytes_request(
+        app.clone(),
+        "GET",
+        &path,
+        None,
+        &[("authorization", &format!("Bearer {secret}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_zip_omits_private_project_without_membership() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let private_id = Uuid::now_v7();
+    let private_doc = Uuid::now_v7();
+    insert_minimal_project(&admin, workspace_id, private_id, "SEC", owner_id, "private").await;
+    insert_project_document(&admin, workspace_id, private_id, private_doc, owner_id, 1).await;
+
+    let path = format!("/api/v1/workspaces/{workspace_id}/export");
+    let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    external_zip_check(&body);
+    let workspace_json: serde_json::Value = serde_json::from_slice(
+        &read_zip_entry(&body, "workspace.json").expect("workspace.json"),
+    )
+    .unwrap();
+    assert_eq!(workspace_json["excludedPrivateProjectCount"], 1);
+    let docs: serde_json::Value =
+        serde_json::from_slice(&read_zip_entry(&body, "documents.json").unwrap()).unwrap();
+    let ids: Vec<String> = docs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !ids.contains(&private_doc.to_string()),
+        "private project doc must not appear: {ids:?}"
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn insert_attachment_with_payload(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    uploader_id: Uuid,
+    name: &str,
+    scan: &str,
+    payload: &[u8],
+) -> Uuid {
+    let id = Uuid::now_v7();
+    let key = Uuid::now_v7().to_string();
+    let dir = std::env::temp_dir()
+        .join("fvoci-ws-export-objects")
+        .join(&key);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("payload"), payload).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.attachments (
+            id, workspace_id, document_id, uploader_id, status, name, mime, reserved_size_bytes,
+            size_bytes, storage_key, scan_status, completed_at
+        ) VALUES ($1, $2, $3, $4, 'stored', $5, 'application/octet-stream', $6, $6, $7, $8, now())
+        "#,
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(uploader_id)
+    .bind(name)
+    .bind(payload.len() as i64)
+    .bind(key)
+    .bind(scan)
+    .execute(admin)
+    .await
+    .expect("insert attachment");
+    id
+}
+
+#[tokio::test]
+async fn workspace_zip_skips_infected_attachment_bytes() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let wiki = create_wiki(app.clone(), &cookie, workspace_id, "첨부 검사").await;
+    let document_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
+    let infected_id = insert_attachment_with_payload(
+        &admin,
+        workspace_id,
+        document_id,
+        owner_id,
+        "bad.bin",
+        "infected",
+        b"bad",
+    )
+    .await;
+
+    let path = format!("/api/v1/workspaces/{workspace_id}/export");
+    let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    external_zip_check(&body);
+    let meta: serde_json::Value =
+        serde_json::from_slice(&read_zip_entry(&body, "attachments.json").unwrap()).unwrap();
+    let ids: Vec<String> = meta
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        ids.iter().any(|id| id == &infected_id.to_string()),
+        "{meta}"
+    );
+    let names = read_zip_names(&body);
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains(&infected_id.to_string())),
+        "infected payload must not be packed: {names:?}"
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+const EXPORT_WITNESS_MARKER: &str = "EXPORT_WITNESS_MARKER_A";
+const EXPORT_WITNESS_SECRET: &str = "EXPORT_WITNESS_SECRET_B";
+
+async fn patch_document_export_fields(
+    admin: &sqlx::PgPool,
+    document_id: Uuid,
+    sort_key: &str,
+    text: &str,
+) {
+    sqlx::query(
+        "UPDATE fvoci.documents SET sort_key = $1, text = $2 WHERE id = $3",
+    )
+    .bind(sort_key)
+    .bind(text)
+    .bind(document_id)
+    .execute(admin)
+    .await
+    .expect("patch document export fields");
+}
+
+async fn stream_export_aborts_after_witness<F, Fut>(
+    app: axum::Router,
+    cookie: &str,
+    path: &str,
+    witness: &str,
+    secret: &str,
+    revoke: F,
+) -> (bool, Vec<u8>)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("origin", "http://localhost")
+        .header("cookie", format!("fvoci_session={cookie}"))
+        .body(Body::empty())
+        .unwrap();
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(project_harness::test_peer()));
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let mut buf = Vec::new();
+    let mut revoked = false;
+    let mut saw_error = false;
+    let mut revoke = Some(revoke);
+    let witness_bytes = witness.as_bytes();
+    let secret_bytes = secret.as_bytes();
+    while let Some(frame) = stream.next().await {
+        match frame {
+            Ok(bytes) => {
+                buf.extend_from_slice(&bytes);
+                if !revoked && buf.windows(witness_bytes.len()).any(|w| w == witness_bytes) {
+                    if let Some(revoke_fn) = revoke.take() {
+                        revoke_fn().await;
+                    }
+                    revoked = true;
+                }
+            }
+            Err(_) => {
+                saw_error = true;
+                break;
+            }
+        }
+    }
+    assert!(revoked, "witness marker must appear before stream ends");
+    assert!(
+        !buf.windows(secret_bytes.len()).any(|w| w == secret_bytes),
+        "revoked content must not be delivered"
+    );
+    (saw_error, buf)
+}
+
+#[tokio::test]
+async fn workspace_zip_aborts_when_project_access_revoked_mid_stream() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "PRV", "private").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let deputy = add_workspace_user(&admin, workspace_id, "member", "deputy-lead").await;
+    sqlx::query(
+        "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES ($1, $2, $3, $4, 'lead')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(project_id)
+    .bind(deputy.user_id)
+    .execute(&admin)
+    .await
+    .expect("second project lead");
+    let doc_a = Uuid::now_v7();
+    let doc_b = Uuid::now_v7();
+    insert_project_document(&admin, workspace_id, project_id, doc_a, owner_id, 2).await;
+    insert_project_document(&admin, workspace_id, project_id, doc_b, owner_id, 3).await;
+    patch_document_export_fields(&admin, doc_a, "A", EXPORT_WITNESS_MARKER).await;
+    patch_document_export_fields(&admin, doc_b, "B", EXPORT_WITNESS_SECRET).await;
+
+    let path = format!("/api/v1/workspaces/{workspace_id}/export");
+    let (saw_error, _) = stream_export_aborts_after_witness(
+        app,
+        &cookie,
+        &path,
+        EXPORT_WITNESS_MARKER,
+        EXPORT_WITNESS_SECRET,
+        || async {
+            sqlx::query(
+                "DELETE FROM fvoci.project_members WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3",
+            )
+            .bind(workspace_id)
+            .bind(project_id)
+            .bind(owner_id)
+            .execute(&admin)
+            .await
+            .expect("revoke project membership");
+        },
+    )
+    .await;
+    assert!(
+        saw_error,
+        "export must fail after project access is revoked mid-stream"
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_zip_aborts_when_wiki_document_revoked_mid_stream() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let wiki_a = create_wiki(app.clone(), &cookie, workspace_id, "witness-a").await;
+    let wiki_b = create_wiki(app.clone(), &cookie, workspace_id, "witness-b").await;
+    let doc_a = Uuid::parse_str(wiki_a["id"].as_str().unwrap()).unwrap();
+    let doc_b = Uuid::parse_str(wiki_b["id"].as_str().unwrap()).unwrap();
+    patch_document_export_fields(&admin, doc_a, "A", EXPORT_WITNESS_MARKER).await;
+    patch_document_export_fields(&admin, doc_b, "B", EXPORT_WITNESS_SECRET).await;
+
+    let path = format!("/api/v1/workspaces/{workspace_id}/export");
+    let (saw_error, _) = stream_export_aborts_after_witness(
+        app,
+        &cookie,
+        &path,
+        EXPORT_WITNESS_MARKER,
+        EXPORT_WITNESS_SECRET,
+        || async {
+            sqlx::query(
+                "UPDATE fvoci.documents SET deleted_at = now() WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace_id)
+            .bind(doc_b)
+            .execute(&admin)
+            .await
+            .expect("soft-delete wiki document");
+        },
+    )
+    .await;
+    assert!(
+        saw_error,
+        "export must fail after wiki document is revoked mid-stream"
+    );
+
+    admin.close().await;
     harness.cleanup().await;
 }
 

@@ -45,15 +45,16 @@ pub mod search_index;
 pub mod share;
 pub mod stars;
 pub mod task_activity;
-pub mod task_layout;
 pub mod task_ops;
 pub mod task_origins;
 pub mod tasks;
+pub mod task_layout;
 pub mod templates;
 pub mod user_export;
 pub mod view_query;
 pub mod workflow_statuses;
 pub mod workspace;
+pub mod workspace_export;
 
 use sqlx::PgPool;
 use std::sync::Arc;

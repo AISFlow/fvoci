@@ -169,3 +169,24 @@ test("owner imports markdown zip and exports document markdown", async ({ page }
   await expect(page.getByText("노션 본문")).toBeVisible({ timeout: 15_000 });
   expect(cspViolations).toEqual([]);
 });
+
+test("owner downloads workspace zip from settings", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
+
+  await page.getByLabel("성").fill(owner.familyName);
+  await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
+  await page.getByLabel("이메일").fill(owner.email);
+  await page.getByLabel("비밀번호").fill(owner.password);
+  await page.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
+  await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
+  await page.getByRole("button", { name: "시작하기" }).click();
+  await expect(page).toHaveURL(/\/$/);
+
+  await page.goto("/w/acme/settings");
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: /워크스페이스.*보내기/ }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("fvoci-workspace.zip");
+});
