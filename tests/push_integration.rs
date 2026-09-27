@@ -1455,7 +1455,6 @@ async fn stalled_endpoints_delay_but_never_drop_later_recipients() {
     let pool = app_pool(&harness).await;
     let keys = encryption_keys();
     ensure_vapid_keys(&pool, Some(&keys)).await.unwrap();
-    // Created first, so its 9 stalled devices come first in the ledger.
     let staller = add_workspace_user(&admin, workspace_id, "member", "push-staller").await;
     let healthy = add_workspace_user(&admin, workspace_id, "member", "push-healthy").await;
     let (base, received) = start_receiver().await;
@@ -1486,17 +1485,17 @@ async fn stalled_endpoints_delay_but_never_drop_later_recipients() {
         &[staller.user_id, healthy.user_id],
     )
     .await;
-    let pipeline = Pipeline::start(
-        &pool,
-        Some((
-            test_outbound(),
-            Some(keys),
-            sender_settings(8, Duration::from_secs(1)),
-        )),
-        Vec::new(),
-    );
+    let pipeline = Pipeline::start(&pool, None, Vec::new());
     wait_processed(&admin, "push", event_id).await;
+    assert_eq!(ledger_len(&admin).await, 10);
+    // The 9 stalled devices are claimed before the healthy one: a full batch
+    // of 8 stalls, and the healthy row shares the next batch with the last.
+    let mut claim_order: Vec<String> = (0..9).map(|n| format!("{base}/push/stall-{n}")).collect();
+    claim_order.push(format!("{base}/push/healthy"));
+    pin_ledger_order(&admin, &claim_order).await;
+    let sender = start_sender(&pool, keys, sender_settings(8, Duration::from_secs(1)));
     wait_ledger_empty(&admin).await;
+    stop_sender(sender).await;
     pipeline.stop().await;
     assert_eq!(received_count(&received, "/push/healthy"), 1);
     let stalled = received
