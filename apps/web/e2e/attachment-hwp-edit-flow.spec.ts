@@ -277,7 +277,9 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
 
   // Save copy: a new HWPX attachment beside the original, opened in its place, no guard prompt.
   await saveButton.click();
-  await expect(page).toHaveURL(/\/w\/acme\/a\/[0-9a-f-]{36}\/view$/, { timeout: 30_000 });
+  // The original's URL has the same shape: wait until the save has left it.
+  await expect(page).not.toHaveURL(new RegExp(`${viewPath}$`), { timeout: 30_000 });
+  await expect(page).toHaveURL(/\/w\/acme\/a\/[0-9a-f-]{36}\/view$/);
   expect(page.url()).not.toContain(hwpxId);
   await expect(dialog).toHaveCount(0);
   const copyId = page.url().split("/a/")[1]!.split("/")[0]!;
