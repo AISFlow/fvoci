@@ -1,10 +1,10 @@
 #![cfg(feature = "db-tests")]
-#![allow(dead_code)]
 
 //! Workspace unfurl HTTP contracts: auth, membership, revocation, SSRF,
 //! live `embed.hosts`, and rate limits. Outbound GETs use an injected client
 //! (no public internet, no product allow-private backdoor).
 
+#[allow(dead_code)]
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
