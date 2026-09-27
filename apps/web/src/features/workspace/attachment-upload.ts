@@ -7,6 +7,8 @@ import { api, ensureOk, ProblemError } from "@/lib/api";
 
 const PARALLEL = 3;
 const PART_RETRIES = 2;
+/** Re-sends of an idempotent complete after a gateway failure or lost response. */
+const COMPLETE_RETRIES = 2;
 /** Total time a part may wait out 503 `Retry-After` (server upload capacity). */
 const CAPACITY_WAIT_BUDGET_MS = 120_000;
 
@@ -203,17 +205,41 @@ async function storedAttachmentMeta(
   return null;
 }
 
-async function completeUpload(
+/**
+ * Gateway failures where the complete may not have run, may still be running,
+ * or may have finished with its response lost (e.g. a reverse proxy's 502/504
+ * or Cloudflare's 520–524). Complete is idempotent on the server, so these are
+ * retried a bounded number of times after checking for a stored attachment.
+ */
+function isTransientCompleteStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504 || (status >= 520 && status <= 524);
+}
+
+type CompleteAttempt = { done: AttachmentUploadResult } | { retry: unknown };
+
+/** Stored metadata, or null when it is not stored yet or cannot be read now. */
+async function reconcileStored(
+  workspaceId: string,
+  attachmentId: string,
+  signal?: AbortSignal,
+): Promise<AttachmentOutput | null> {
+  try {
+    return await storedAttachmentMeta(workspaceId, attachmentId, signal);
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) throw err;
+    return null;
+  }
+}
+
+async function completeOnce(
   workspaceId: string,
   attachmentId: string,
   parts: { partNumber: number; etag: string }[],
   signal?: AbortSignal,
-): Promise<AttachmentUploadResult> {
-  if (signal?.aborted) {
-    throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
-  }
+): Promise<CompleteAttempt> {
+  let result;
   try {
-    const result = await api.POST(
+    result = await api.POST(
       "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/complete",
       {
         params: {
@@ -223,24 +249,47 @@ async function completeUpload(
         signal,
       },
     );
-    if (result.response.ok && result.data) return attachmentResult(result.data);
-    const status = result.response.status;
-    if (isPermanentAuthStatus(status)) {
-      throw new ProblemError(status, result.error?.code);
-    }
-    const stored = await storedAttachmentMeta(workspaceId, attachmentId, signal);
-    if (stored) return attachmentResult(stored);
-    if (isPermanentPartStatus(status)) {
-      throw new ProblemError(status, result.error?.code);
-    }
-    return ensureOk(result);
   } catch (err) {
     if (isAbortError(err) || signal?.aborted) throw err;
-    if (err instanceof ProblemError && isPermanentAuthStatus(err.status)) throw err;
-    const stored = await storedAttachmentMeta(workspaceId, attachmentId, signal);
-    if (stored) return attachmentResult(stored);
-    throw err;
+    // The request never got a readable HTTP answer (connection reset, proxy drop).
+    const stored = await reconcileStored(workspaceId, attachmentId, signal);
+    if (stored) return { done: attachmentResult(stored) };
+    return { retry: err };
   }
+  if (result.response.ok && result.data) return { done: attachmentResult(result.data) };
+  // The complete's own answer decides what is thrown or retried; a metadata
+  // lookup only turns it into success when the attachment is already stored.
+  const status = result.response.status;
+  const problem = result.response.ok
+    ? new ProblemError(500)
+    : new ProblemError(status, result.error?.code);
+  if (isPermanentAuthStatus(status)) throw problem;
+  const stored = await reconcileStored(workspaceId, attachmentId, signal);
+  if (stored) return { done: attachmentResult(stored) };
+  if (isTransientCompleteStatus(status)) return { retry: problem };
+  throw problem;
+}
+
+async function completeUpload(
+  workspaceId: string,
+  attachmentId: string,
+  parts: { partNumber: number; etag: string }[],
+  deps: Required<UploadPipelineDeps>,
+  signal?: AbortSignal,
+): Promise<AttachmentUploadResult> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= COMPLETE_RETRIES; attempt += 1) {
+    if (attempt > 0) {
+      await abortableDelay(1000 * 2 ** (attempt - 1), signal, deps.delay);
+    }
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+    }
+    const outcome = await completeOnce(workspaceId, attachmentId, parts, signal);
+    if ("done" in outcome) return outcome.done;
+    lastError = outcome.retry;
+  }
+  throw lastError instanceof Error ? lastError : new Error("complete failed");
 }
 
 function attachmentResult(att: AttachmentOutput): AttachmentUploadResult {
@@ -312,7 +361,7 @@ function uploadsBridge(
         );
         parts = [...resumed.uploadedParts, ...rest];
       }
-      return await completeUpload(workspaceId, created.attachmentId, parts, signal);
+      return await completeUpload(workspaceId, created.attachmentId, parts, deps, signal);
     },
     downloadUrl(attachmentId) {
       return `/api/v1/workspaces/${workspaceId}/attachments/${attachmentId}/download`;
