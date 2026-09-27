@@ -9,7 +9,7 @@
 ## Fixed HEAD
 
 - Branch: `fvoci/rust-session-revisions`
-- SHA: `fa24edbf81a30f7ba0b89ce784f37217fd9859f7`
+- SHA: `0f3a4679e8a19980c053d871936b8170698295af` (branch tip; substantive reconnect fix in `ea69c54d`)
 
 ## Test delta (narrow)
 
