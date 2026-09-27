@@ -674,9 +674,21 @@ mod tests {
             .await
             .unwrap();
 
+        // First yielded body chunk is reachable only after create_writing_file
+        // returns, so the outer stage future owns WritingGuard. File
+        // appearance alone can precede that transfer while spawn_blocking
+        // still holds the guard; that earlier boundary is covered by the
+        // delayed-create test.
+        let (first_chunk_tx, first_chunk_rx) = tokio::sync::oneshot::channel();
+        let mut first_chunk_tx = Some(first_chunk_tx);
         let hanging = stream::iter(vec![Ok::<bytes::Bytes, std::io::Error>(
             bytes::Bytes::from_static(b"xx"),
         )])
+        .inspect(move |_| {
+            if let Some(tx) = first_chunk_tx.take() {
+                let _ = tx.send(());
+            }
+        })
         .chain(futures_util::stream::pending());
         let staged = tokio::spawn({
             let storage = storage.clone();
@@ -684,18 +696,22 @@ mod tests {
             async move { storage.stage_part_stream(&key, 2, hanging, 32).await }
         });
         let dir = storage.parts_dir(&key);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if !writing_names(&dir).await.is_empty() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("writing temp should appear");
+        tokio::time::timeout(Duration::from_secs(5), first_chunk_rx)
+            .await
+            .expect("stage must consume the first body chunk after owning the writing guard")
+            .expect("first-chunk witness must not be dropped");
+        assert!(
+            !writing_names(&dir).await.is_empty(),
+            "writing temp should appear"
+        );
         staged.abort();
-        let _ = staged.await;
+        let join_err = staged
+            .await
+            .expect_err("cancelled stage must not complete successfully");
+        assert!(
+            join_err.is_cancelled(),
+            "cancelled stage must be a cancellation, not a panic: {join_err:?}"
+        );
         assert!(
             writing_names(&dir).await.is_empty(),
             "cancelled stage must remove .writing"
