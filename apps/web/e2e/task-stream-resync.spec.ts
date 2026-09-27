@@ -102,6 +102,10 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   expect(streamRes.status()).toBe(200);
   expect(streamRes.headers()["content-type"] ?? "").toContain("text/event-stream");
   await expect(viewerTab.getByRole("heading", { name: "Stream Lab" })).toBeVisible();
+  const viewerListUrl = viewerTab.url();
+  const viewerTaskList = viewerTab.locator(".task-status-list");
+  await expect(viewerTab.getByText("태스크가 없습니다")).toBeVisible();
+  await expect(viewerTaskList.locator("a.task-row")).toHaveCount(0);
 
   await login(memberPage, member.email, member.password);
   await memberPage.goto(`/w/${owner.workspaceSlug}/TSR/tasks`);
@@ -109,8 +113,12 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   await memberPage.getByLabel("제목").fill("다른 탭 반영");
   await memberPage.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
 
-  const peerTaskLink = viewerTab.getByRole("link", { name: /다른 탭 반영/ });
-  await expect(peerTaskLink).toBeVisible({ timeout: 25_000 });
+  await expect(viewerTab).toHaveURL(viewerListUrl);
+  await expect(viewerTab.getByText("태스크가 없습니다")).toBeHidden({ timeout: 25_000 });
+  const peerTaskTitle = viewerTaskList.locator(".task-row__title", { hasText: "다른 탭 반영" });
+  await expect(peerTaskTitle).toBeVisible({ timeout: 25_000 });
+  const peerTaskLink = viewerTaskList.getByRole("link", { name: /다른 탭 반영/ });
+  await expect(peerTaskLink).toBeVisible();
   await expect(peerTaskLink).toHaveAttribute("href", /\/w\/tsre2e\/TSR-\d+$/);
 
   await ownerContext.close();
