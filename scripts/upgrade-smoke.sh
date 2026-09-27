@@ -730,12 +730,10 @@ s3_restore_db() {
   project_compose "${RB[@]}" "$OLD_TREE" up -d --wait postgres meilisearch || return 1
   pg_cid="$(project_compose "${RB[@]}" "$OLD_TREE" ps -q postgres)" && [[ -n "$pg_cid" ]] || return 1
   [[ "$(sql "${RB[@]}" "$OLD_TREE" "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('public','fvoci') AND c.relkind IN ('r','p','v','m','S')")" == 0 ]] || return 1
-  project_compose "${RB[@]}" "$OLD_TREE" exec -T -e app_role=fvoci_app -e app_password="$APP_PASSWORD" postgres \
-    sh -c 'exec psql -X -v ON_ERROR_STOP=1 -v app_role="$app_role" -v app_password="$app_password" -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL' || return 1
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS', :'app_role', :'app_password')
-WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_role')
-\gexec
-SQL
+  # The app password goes through stdin (printf is a builtin), not argv. It is hex.
+  printf "SELECT format('CREATE ROLE %%I LOGIN PASSWORD %%L NOSUPERUSER NOBYPASSRLS', 'fvoci_app', '%s') WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fvoci_app')\n\\gexec\n" "$APP_PASSWORD" \
+    | project_compose "${RB[@]}" "$OLD_TREE" exec -T postgres \
+      sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' || return 1
   docker cp "$BACKUP_DIR/database.dump" "${pg_cid}:/tmp/fvoci-restore.dump" || return 1
   project_compose "${RB[@]}" "$OLD_TREE" exec -T postgres sh -c \
     'pg_restore --list /tmp/fvoci-restore.dump | grep -v " SCHEMA - public " >/tmp/fvoci-restore.list' || return 1
