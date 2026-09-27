@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Image-to-image upgrade smoke for the infra/rust Compose install (local storage).
+# Image-to-image upgrade smoke for the infra/rust Compose install.
 #
-#   scripts/upgrade-smoke.sh --old <sha> --new <sha> [--main-ref origin/main]
+#   scripts/upgrade-smoke.sh --old <sha> --new <sha> [--main-ref origin/main] [--storage local|s3]
 #                            [--evidence-dir DIR] [--build-jobs 2] [--min-free-gib 15] [--plan-only]
 #
 # --plan-only checks sources, migrations and recipes, and the disk gate for each
@@ -19,7 +19,15 @@
 # remove the blocker, rerun `up` once, verify the data on the new image, stop
 # it, then restore the pre-upgrade backup with the old checkout's restore.sh
 # into a fresh project on the old image. The old image never runs on the
-# migrated database. S3 storage is not covered.
+# migrated database.
+#
+# --storage s3 adds infra/rust/compose.s3.yml and follows RUNNING.md "S3 storage
+# backup" instead of backup.sh/restore.sh (which must refuse S3): versioning on
+# the project's own silo bucket, the documented server stop and a quiesced
+# pg_dump. After the upgrade it deletes one stored object and overwrites another
+# in the bucket, restores the dump into a fresh old-image project pointed at the
+# same bucket, requires --verify-storage to refuse before the server starts,
+# restores both objects from bucket versions, and only then starts the server.
 #
 # On success the trap tears both projects down with the compose file of the tree
 # each was started from and checks that no container, volume or network of
@@ -38,6 +46,7 @@ EVIDENCE_DIR=""
 BUILD_JOBS=2
 MIN_FREE_GIB=15
 PLAN_ONLY=0
+STORAGE=local
 
 usage() {
   sed -n '2,9p' "${BASH_SOURCE[0]}" >&2
@@ -53,11 +62,13 @@ while (($#)); do
     --build-jobs) BUILD_JOBS="${2:?}"; shift 2 ;;
     --min-free-gib) MIN_FREE_GIB="${2:?}"; shift 2 ;;
     --plan-only) PLAN_ONLY=1; shift ;;
+    --storage) STORAGE="${2:?}"; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ -n "$OLD_REF" && -n "$NEW_REF" ]] || usage
 [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ && "$MIN_FREE_GIB" =~ ^[0-9]+$ ]] || usage
+[[ "$STORAGE" == local || "$STORAGE" == s3 ]] || usage
 
 require_cmd() {
   for cmd in "$@"; do
@@ -83,6 +94,9 @@ ROLLBACK_PROJECT="fvoci-up-rb-${RUN_ID}"
 UPGRADE_ENV="$WORK/upgrade.env"
 BACKUP_ENV="$WORK/backup.env"
 ROLLBACK_ENV="$WORK/rollback.env"
+# S3 only: joins the rollback server to the upgrade project's network so it
+# reads the original bucket (RUNNING.md "S3 storage backup", item 3).
+RB_BUCKET_OVERLAY="$WORK/rollback-bucket.yml"
 BACKUP_DIR="$WORK/backup"
 COOKIE_JAR="$WORK/cookies"
 DOWNLOAD_PATH="$WORK/download"
@@ -121,7 +135,12 @@ sys.stdout.write(data)
 project_compose() {
   local project="$1" env_file="$2" tree="$3"
   shift 3
-  docker compose -f "$tree/infra/rust/compose.yml" --project-name "$project" --env-file "$env_file" "$@"
+  local files=(-f "$tree/infra/rust/compose.yml")
+  if [[ "$STORAGE" == s3 ]]; then
+    files+=(-f "$tree/infra/rust/compose.s3.yml")
+    [[ "$project" == "$ROLLBACK_PROJECT" && -f "$RB_BUCKET_OVERLAY" ]] && files+=(-f "$RB_BUCKET_OVERLAY")
+  fi
+  docker compose "${files[@]}" --project-name "$project" --env-file "$env_file" "$@"
 }
 
 # Containers, volumes and networks that still carry the project's compose label.
@@ -161,13 +180,14 @@ cleanup() {
   if (( status == 0 )); then
     local torn=0
     if (( STACK_STARTED )); then
-      teardown_project "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" || torn=1
+      # Rollback first: with S3 its server joins the upgrade project's network.
       teardown_project "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" || torn=1
+      teardown_project "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" || torn=1
     fi
     if (( torn )); then
       printf 'FAIL: cleanup left resources or failed\n' >>"$ASSERT_LOG"
       echo "upgrade-smoke passed its checks but cleanup failed; kept for diagnosis:" >&2
-      echo "  projects: $UPGRADE_PROJECT $ROLLBACK_PROJECT (docker compose -p NAME down -v)" >&2
+      echo "  projects, in this order: $ROLLBACK_PROJECT $UPGRADE_PROJECT (docker compose -p NAME down -v)" >&2
       echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
       status=1
     else
@@ -184,7 +204,7 @@ cleanup() {
     [[ -f "$ROLLBACK_ENV" ]] && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" logs --no-color --tail 200 \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${ROLLBACK_PROJECT}.log"
     echo "upgrade-smoke failed after $((SECONDS - START_TS))s; kept for diagnosis:" >&2
-    echo "  projects: $UPGRADE_PROJECT $ROLLBACK_PROJECT (docker compose -p NAME down -v)" >&2
+    echo "  projects, in this order: $ROLLBACK_PROJECT $UPGRADE_PROJECT (docker compose -p NAME down -v)" >&2
     echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
   fi
   echo "evidence (redacted, kept): $EVIDENCE_DIR" >&2
@@ -237,6 +257,15 @@ export_tree() {
 }
 export_tree "$OLD_SHA" "$OLD_TREE"
 export_tree "$NEW_SHA" "$NEW_TREE"
+if [[ "$STORAGE" == s3 ]]; then
+  for tree in "$OLD_TREE" "$NEW_TREE"; do
+    [[ -f "$tree/infra/rust/compose.s3.yml" ]] || fail "no infra/rust/compose.s3.yml in ${tree##*/}"
+  done
+  # The old checkout's backup.sh must refuse S3; the smoke checks that it does.
+  grep -q 'STORAGE_DRIVER=s3: this script archives the local storage volume' "$OLD_TREE/scripts/backup.sh" \
+    || fail "old backup.sh has no S3 refusal"
+  log_assert "storage s3: compose.s3.yml in both trees, old backup.sh refuses S3"
+fi
 
 # --- Images ----------------------------------------------------------------
 docker_free_gib() {
@@ -352,8 +381,11 @@ check_seeded_data() {
   curl -fsS -b "$COOKIE_JAR" "$base/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
     | python3 -c 'import json,sys; body=json.load(sys.stdin); assert body["contentJson"]==json.loads(sys.argv[1])["contentJson"], body' "$BODY_BEFORE" \
     || fail "$label: document body differs"
-  curl -fsS -b "$COOKIE_JAR" "$base/api/v1/workspaces/${WORKSPACE_ID}/attachments/${ATTACHMENT_ID}/download" -o "$DOWNLOAD_PATH"
-  [[ "$(sha256sum "$DOWNLOAD_PATH" | awk '{print $1}')" == "$FIXTURE_SHA" ]] || fail "$label: attachment bytes differ"
+  local id
+  for id in "${ATTACHMENT_IDS[@]}"; do
+    curl -fsS -b "$COOKIE_JAR" "$base/api/v1/workspaces/${WORKSPACE_ID}/attachments/${id}/download" -o "$DOWNLOAD_PATH"
+    [[ "$(sha256sum "$DOWNLOAD_PATH" | awk '{print $1}')" == "$FIXTURE_SHA" ]] || fail "$label: attachment $id bytes differ"
+  done
   curl -fsS -b "$COOKIE_JAR" "$base/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments" \
     | python3 -c '
 import json, sys
@@ -361,7 +393,7 @@ body = json.load(sys.stdin)
 items = body.get("items", body if isinstance(body, list) else [])
 assert any(c.get("id") == sys.argv[1] and c.get("body") == "업그레이드 댓글 🙂" for c in items), body
 ' "$COMMENT_ID" || fail "$label: comment missing"
-  log_assert "${label}: login, document body, attachment sha256 ${FIXTURE_SHA:0:12}, comment: ok"
+  log_assert "${label}: login, document body, ${#ATTACHMENT_IDS[@]} attachment(s) sha256 ${FIXTURE_SHA:0:12}, comment: ok"
 }
 
 write_env() {
@@ -383,6 +415,11 @@ FVOCI_PUBLISH_PORT=${port}
 FVOCI_EXTRACT_POLL_SECS=2
 MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
 EOF
+  if [[ "$STORAGE" == s3 ]]; then
+    # compose.s3.yml's silo uses these as its root credentials; run-owned.
+    printf 'S3_BUCKET=%s\nS3_ACCESS_KEY_ID=%s\nS3_SECRET_ACCESS_KEY=%s\n' \
+      "$S3_BUCKET_NAME" "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >>"$dest"
+  fi
   chmod 600 "$dest"
 }
 
@@ -395,10 +432,76 @@ ENC_K1="$(openssl rand -hex 32)"
 ENCRYPTION_KEYS="{\"k1\":\"${ENC_K1}\"}"
 OWNER_EMAIL="owner@upgrade.test"
 OWNER_LOGIN_PASSWORD="upgradepass1"
-SECRETS=("$OWNER_PASSWORD" "$APP_PASSWORD" "$MEILI_MASTER_KEY" "$PEPPER_KEY" "$ENC_K1" "$OWNER_LOGIN_PASSWORD")
+S3_BUCKET_NAME="fvoci-up-${RUN_ID}"
+S3_ACCESS_KEY="fvoci$(openssl rand -hex 8)"
+S3_SECRET_KEY="$(openssl rand -hex 24)"
+SECRETS=("$OWNER_PASSWORD" "$APP_PASSWORD" "$MEILI_MASTER_KEY" "$PEPPER_KEY" "$ENC_K1" "$OWNER_LOGIN_PASSWORD"
+  "$S3_ACCESS_KEY" "$S3_SECRET_KEY")
 FIXTURE_SHA="$(sha256sum "$FIXTURE_HWPX" | awk '{print $1}')"
 
 UP=("$UPGRADE_PROJECT" "$UPGRADE_ENV")
+
+# mcli inside the upgrade project's silo, against the bucket every project in
+# this run uses. The credentials stay in that container's environment
+# (MC_HOST_b), never in host argv.
+bucket_mc() {
+  # shellcheck disable=SC2016 # expanded by the container's shell
+  project_compose "${UP[@]}" "$UPGRADE_TREE" exec -T silo sh -c \
+    'MC_HOST_b="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@127.0.0.1:9000" exec mcli --json "$@"' mcli "$@"
+}
+
+storage_key() {
+  sql "${UP[@]}" "$UPGRADE_TREE" "SELECT storage_key FROM fvoci.attachments WHERE id='$1' AND status='stored'"
+}
+
+# Every version of KEY as `<versionId> <size> <deleteMarker> <latest> <etag>`.
+# The pinned mcli emits no isLatest; the latest version is the one with the
+# highest versionOrdinal (newest first numbering), which must be unique.
+object_versions() {
+  bucket_mc ls --versions "b/${S3_BUCKET_NAME}/$1" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+assert rows and all(v.get("status") == "success" for v in rows), rows
+ordinals = [v["versionOrdinal"] for v in rows]
+assert all(isinstance(o, int) for o in ordinals) and len(set(ordinals)) == len(ordinals), rows
+for v in rows:
+    print(v["versionId"], v.get("size", 0), str(bool(v.get("isDeleteMarker"))).lower(),
+          str(v["versionOrdinal"] == max(ordinals)).lower(), v.get("etag") or "-")
+'
+}
+
+# Field of the latest version line (1 id, 2 size, 3 marker, 5 etag).
+latest_field() {
+  awk -v f="$2" '$4 == "true" { print $f }' "$1"
+}
+
+# fvoci-migrate --verify-storage with the server's environment of PROJECT; sets
+# VS_STATUS and VS_OUT (redacted copy in the evidence dir).
+verify_storage() {
+  local label="$1" project="$2" env_file="$3" tree="$4"
+  shift 4
+  if VS_OUT="$(project_compose "$project" "$env_file" "$tree" run --rm --no-deps "$@" \
+    --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage 2>&1)"; then
+    VS_STATUS=0
+  else
+    VS_STATUS=$?
+  fi
+  redact <<<"$VS_OUT" >"$EVIDENCE_DIR/verify-storage-${label}.log"
+}
+
+# Asserts the single JSON report of the last verify_storage call.
+expect_storage_report() {
+  python3 -c '
+import json, sys
+reports = [l for l in sys.stdin.read().splitlines() if l.startswith("{")]
+assert len(reports) == 1, reports
+r = json.loads(reports[0])
+want = {"checked": int(sys.argv[1]), "missing": sorted(filter(None, sys.argv[2].split(","))),
+        "sizeMismatch": sorted(filter(None, sys.argv[3].split(",")))}
+got = {"checked": r["checked"], "missing": sorted(r["missing"]), "sizeMismatch": sorted(r["sizeMismatch"])}
+assert got == want and not r["previewMissing"] and not r["previewSizeMismatch"], (got, want, r)
+' "$@" <<<"$VS_OUT"
+}
 
 # --- 1. Old install with data ---------------------------------------------
 PORT="$(pick_port)"
@@ -424,28 +527,52 @@ WORKSPACE_ID="$(curl -fsS -b "$COOKIE_JAR" "$BASE/api/v1/me/workspaces" | python
 DOCUMENT_ID="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d '{"parentId":null,"title":"Upgrade doc"}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+if [[ "$STORAGE" == s3 ]]; then
+  # RUNNING.md "S3 storage backup", item 1: the operator enables versioning
+  # before relying on it. The server wrote no object yet (fresh install).
+  bucket_mc version enable "b/${S3_BUCKET_NAME}" >/dev/null
+  bucket_mc version info "b/${S3_BUCKET_NAME}" | python3 -c '
+import json, sys
+info = json.load(sys.stdin)
+assert info.get("versioning", {}).get("status") == "Enabled", info
+' || fail "bucket versioning is not enabled"
+  [[ "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(running_ids "$UPGRADE_PROJECT" server)" \
+    | grep -c '^STORAGE_DRIVER=s3$')" == 1 ]] || fail "old server does not run with STORAGE_DRIVER=s3"
+  log_assert "old server on STORAGE_DRIVER=s3, run-owned silo bucket ${S3_BUCKET_NAME} versioning Enabled: ok"
+fi
 # The old checkout's own collab client, matched to the old server's API.
 BODY_BEFORE="$(node "$OLD_TREE/scripts/install-smoke-collab.mjs" --base-url "$BASE" --origin "$BASE" \
   --session "$SESSION" --workspace-id "$WORKSPACE_ID" --document-id "$DOCUMENT_ID")"
 grep -q '"contentJson"' <<<"$BODY_BEFORE" || fail "collab body projection failed on old image"
 
-UPLOAD_INIT="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
-  -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/uploads" \
-  -d "{\"name\":\"sample.hwpx\",\"sizeBytes\":$(wc -c <"$FIXTURE_HWPX"),\"declaredMime\":\"application/x-hwp\"}")"
-ATTACHMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["attachmentId"])' "$UPLOAD_INIT")"
-PART_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["parts"][0]["url"])' "$UPLOAD_INIT")"
-ETAG="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $BASE" -X PUT "$BASE${PART_URL}" \
-  --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null | awk '/^[Ee]tag:/ { print $2; exit }' | tr -d '\r')"
-curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
-  -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/attachments/${ATTACHMENT_ID}/complete" \
-  -d "{\"parts\":[{\"partNumber\":1,\"etag\":\"${ETAG}\"}]}" >/dev/null
-EXTRACT_STATUS=pending
-for _ in $(seq 1 90); do
-  EXTRACT_STATUS="$(sql "${UP[@]}" "$OLD_TREE" "SELECT extract_status FROM fvoci.attachments WHERE id='${ATTACHMENT_ID}'")"
-  [[ "$EXTRACT_STATUS" == pending ]] || break
-  sleep 1
-done
-[[ "$EXTRACT_STATUS" == ok ]] || fail "old image extraction status: $EXTRACT_STATUS"
+# Uploads the HWPX fixture under NAME and waits for extraction `ok`; prints the id.
+upload_fixture() {
+  local name="$1" init id part_url etag status=pending
+  init="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
+    -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/uploads" \
+    -d "{\"name\":\"${name}\",\"sizeBytes\":$(wc -c <"$FIXTURE_HWPX"),\"declaredMime\":\"application/x-hwp\"}")"
+  id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["attachmentId"])' "$init")"
+  part_url="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["parts"][0]["url"])' "$init")"
+  etag="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $BASE" -X PUT "$BASE${part_url}" \
+    --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null | awk '/^[Ee]tag:/ { print $2; exit }' | tr -d '\r')"
+  curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
+    -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/attachments/${id}/complete" \
+    -d "{\"parts\":[{\"partNumber\":1,\"etag\":\"${etag}\"}]}" >/dev/null
+  for _ in $(seq 1 90); do
+    status="$(sql "${UP[@]}" "$OLD_TREE" "SELECT extract_status FROM fvoci.attachments WHERE id='${id}'")"
+    [[ "$status" == pending ]] || break
+    sleep 1
+  done
+  [[ "$status" == ok ]] || fail "old image extraction status of ${name}: $status"
+  printf '%s\n' "$id"
+}
+ATTACHMENT_ID="$(upload_fixture sample.hwpx)"
+ATTACHMENT_IDS=("$ATTACHMENT_ID")
+if [[ "$STORAGE" == s3 ]]; then
+  # A second stored object, so one can be deleted and the other overwritten.
+  ATTACHMENT_B_ID="$(upload_fixture sample-b.hwpx)"
+  ATTACHMENT_IDS+=("$ATTACHMENT_B_ID")
+fi
 COMMENT_ID="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments" \
   -d '{"body":"업그레이드 댓글 🙂"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
@@ -458,11 +585,59 @@ check_seeded_data "$BASE" "old image seeded"
 log_assert "old image seed: collab body, HWPX extract ok, sealed MFA secret (k1): ok"
 
 # --- 2. Pre-upgrade backup with the old checkout ---------------------------
-log_assert "== old checkout backup.sh --leave-stopped"
-bash "$OLD_TREE/scripts/backup.sh" --project "$UPGRADE_PROJECT" --env-file "$UPGRADE_ENV" \
-  --output "$BACKUP_DIR" --leave-stopped 2>&1 | redact >"$EVIDENCE_DIR/backup.log"
+if [[ "$STORAGE" == local ]]; then
+  log_assert "== old checkout backup.sh --leave-stopped"
+  bash "$OLD_TREE/scripts/backup.sh" --project "$UPGRADE_PROJECT" --env-file "$UPGRADE_ENV" \
+    --output "$BACKUP_DIR" --leave-stopped 2>&1 | redact >"$EVIDENCE_DIR/backup.log"
+else
+  # Negative control: the volume archive must refuse S3 without stopping anything.
+  if bash "$OLD_TREE/scripts/backup.sh" --project "$UPGRADE_PROJECT" --env-file "$UPGRADE_ENV" \
+    --output "$WORK/refused-backup" --leave-stopped >"$WORK/refused-backup.log" 2>&1; then
+    fail "old backup.sh accepted an S3 install"
+  fi
+  redact <"$WORK/refused-backup.log" >"$EVIDENCE_DIR/backup-s3-refused.log"
+  grep -q 'STORAGE_DRIVER=s3' "$EVIDENCE_DIR/backup-s3-refused.log" || fail "backup.sh failed for another reason"
+  [[ ! -e "$WORK/refused-backup" && -n "$(running_ids "$UPGRADE_PROJECT" server)" ]] \
+    || fail "refused backup.sh left output or stopped the server"
+  log_assert "old backup.sh refuses STORAGE_DRIVER=s3, no output, server still running: ok"
+
+  # RUNNING.md "S3 storage backup", item 2 and "Upgrade" step 2 for S3: the
+  # documented stop, then the same quiesced pg_dump backup.sh takes.
+  log_assert "== documented server stop, quiesced pg_dump (S3)"
+  OLD_CID="$(running_ids "$UPGRADE_PROJECT" server)"
+  project_compose "${UP[@]}" "$OLD_TREE" stop -t 45 server
+  [[ "$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$OLD_CID")" == "exited 0 false" ]] \
+    || fail "old server did not stop cleanly"
+  [[ "$(sql "${UP[@]}" "$OLD_TREE" "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend'")" == 0 ]] \
+    || fail "other database sessions remain after stopping the server"
+  mkdir -m 700 "$BACKUP_DIR"
+  # shellcheck disable=SC2016 # expanded in the postgres container, as in backup.sh
+  project_compose "${UP[@]}" "$OLD_TREE" exec -T postgres sh -c \
+    'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --schema=public --schema=fvoci' \
+    >"$BACKUP_DIR/database.dump"
+  chmod 600 "$BACKUP_DIR/database.dump"
+  [[ "$(head -c 5 "$BACKUP_DIR/database.dump")" == PGDMP ]] || fail "pg_dump output is not custom format"
+  # Taken after the dump, whole seconds, like backup.sh's manifest createdAt.
+  DUMP_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  KEY_A="$(storage_key "$ATTACHMENT_ID")"
+  KEY_B="$(storage_key "$ATTACHMENT_B_ID")"
+  [[ -n "$KEY_A" && -n "$KEY_B" && "$KEY_A" != "$KEY_B" ]] || fail "stored keys not found"
+  # Checkpoint: the one live version of each key at the dump, kept for restore.
+  for name in a b; do
+    [[ "$name" == a ]] && key="$KEY_A" || key="$KEY_B"
+    object_versions "$key" >"$WORK/checkpoint-${name}"
+    cp "$WORK/checkpoint-${name}" "$EVIDENCE_DIR/bucket-checkpoint-${name}.txt"
+    if [[ "$(wc -l <"$WORK/checkpoint-${name}")" != 1 ]] \
+      || [[ "$(latest_field "$WORK/checkpoint-${name}" 2) $(latest_field "$WORK/checkpoint-${name}" 3)" != "$(wc -c <"$FIXTURE_HWPX") false" ]]; then
+      fail "expected one live version of $key at the dump: $(cat "$WORK/checkpoint-${name}")"
+    fi
+  done
+  CKPT_A="$(latest_field "$WORK/checkpoint-a" 1)"
+  CKPT_B="$(latest_field "$WORK/checkpoint-b" 1)"
+  log_assert "pg_dump $(wc -c <"$BACKUP_DIR/database.dump") bytes at ${DUMP_AT}, 0 other sessions; checkpoint versions A=${CKPT_A} B=${CKPT_B} (one each): ok"
+fi
 cp -p "$UPGRADE_ENV" "$BACKUP_ENV"
-[[ -z "$(running_ids "$UPGRADE_PROJECT" server)" ]] || fail "server still running after backup --leave-stopped"
+[[ -z "$(running_ids "$UPGRADE_PROJECT" server)" ]] || fail "server still running after the pre-upgrade backup"
 log_assert "pre-upgrade backup taken, old server stopped, env copy kept (0600): ok"
 
 # --- 3. Upgrade whose init fails -------------------------------------------
@@ -548,12 +723,153 @@ grep -q 'do not open with the configured ENCRYPTION_KEYS' "$EVIDENCE_DIR/verify-
 POST_DOC="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d '{"parentId":null,"title":"After upgrade"}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+if [[ "$STORAGE" == s3 ]]; then
+  verify_storage upgraded "${UP[@]}" "$NEW_TREE"
+  (( VS_STATUS == 0 )) || fail "verify-storage failed on the upgraded install"
+  expect_storage_report 2 "" "" || fail "unexpected verify-storage report on the upgraded install"
+  log_assert "upgraded: new image --verify-storage checked 2, none missing or mismatched: ok"
+fi
 log_assert "upgraded: doctor ok, extraction kept, sealed secret opens with k1 and is invalid under another k1 (exit ${WRONG_STATUS}), new write ok: ok"
 
 log_assert "== stop upgraded server before rollback"
 UPGRADED_CID="$(running_ids "$UPGRADE_PROJECT" server)"
 project_compose "${UP[@]}" "$NEW_TREE" stop -t 45 server
 [[ "$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$UPGRADED_CID")" == "exited 0" ]] || fail "upgraded server did not stop cleanly"
+
+# The old restore.sh sequence without the volume archive (RUNNING.md "S3 storage
+# backup", item 3): fresh PostgreSQL, app role, pg_restore, init, outbox
+# rebase and search rebuild, all before any server of the project starts.
+# shellcheck disable=SC2016 # sh -c bodies expand in the postgres container, as in restore.sh
+s3_restore_db() {
+  local pg_cid snapshot_at since
+  project_compose "${RB[@]}" "$OLD_TREE" up -d --wait postgres meilisearch || return 1
+  pg_cid="$(project_compose "${RB[@]}" "$OLD_TREE" ps -q postgres)" && [[ -n "$pg_cid" ]] || return 1
+  [[ "$(sql "${RB[@]}" "$OLD_TREE" "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('public','fvoci') AND c.relkind IN ('r','p','v','m','S')")" == 0 ]] || return 1
+  # The app password goes through stdin (printf is a builtin), not argv. It is hex.
+  printf "SELECT format('CREATE ROLE %%I LOGIN PASSWORD %%L NOSUPERUSER NOBYPASSRLS', 'fvoci_app', '%s') WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fvoci_app')\n\\gexec\n" "$APP_PASSWORD" \
+    | project_compose "${RB[@]}" "$OLD_TREE" exec -T postgres \
+      sh -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' || return 1
+  docker cp "$BACKUP_DIR/database.dump" "${pg_cid}:/tmp/fvoci-restore.dump" || return 1
+  project_compose "${RB[@]}" "$OLD_TREE" exec -T postgres sh -c \
+    'pg_restore --list /tmp/fvoci-restore.dump | grep -v " SCHEMA - public " >/tmp/fvoci-restore.list' || return 1
+  project_compose "${RB[@]}" "$OLD_TREE" exec -T postgres sh -c \
+    'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --exit-on-error --single-transaction --no-owner --use-list=/tmp/fvoci-restore.list /tmp/fvoci-restore.dump' || return 1
+  project_compose "${RB[@]}" "$OLD_TREE" exec -T postgres rm -f /tmp/fvoci-restore.dump /tmp/fvoci-restore.list || return 1
+  project_compose "${RB[@]}" "$OLD_TREE" run --rm init || return 1
+  # As restore.sh: the next whole second after the dump, 29 days of history.
+  snapshot_at="$(date -u -d "$DUMP_AT + 1 second" +%Y-%m-%dT%H:%M:%SZ)" || return 1
+  since="$(date -u -d "$snapshot_at - 29 days" +%Y-%m-%dT%H:%M:%SZ)" || return 1
+  project_compose "${RB[@]}" "$OLD_TREE" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
+    --recover-outbox --since "$since" --snapshot-at "$snapshot_at" \
+    --apply --reason "restore into $ROLLBACK_PROJECT" --ack-external-replay || return 1
+  project_compose "${RB[@]}" "$OLD_TREE" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --rebuild-search
+}
+
+no_server_started() {
+  [[ -z "$(service_ids "$ROLLBACK_PROJECT" server)" ]] || fail "$1: a rollback server container exists"
+  ! curl -fsS -m 2 "$RB_BASE/api/v1/setup" >/dev/null 2>&1 || fail "$1: HTTP answered on $RB_BASE"
+}
+
+s3_rollback() {
+  local silo_name wrong_bucket marker fixture_size running
+  fixture_size="$(wc -c <"$FIXTURE_HWPX")"
+  # The rollback server joins the upgrade network to reach the silo. Stop that
+  # project's postgres and meilisearch first so `postgres`/`meilisearch` there
+  # can only mean the rollback project's own (volumes kept).
+  project_compose "${UP[@]}" "$UPGRADE_TREE" stop -t 30 postgres meilisearch
+  running="$(docker ps --filter "label=com.docker.compose.project=$UPGRADE_PROJECT" \
+    --format '{{.Label "com.docker.compose.service"}}' | sort | paste -sd, -)"
+  [[ "$running" == silo ]] || fail "upgrade project must run only silo before the rollback, runs: ${running}"
+  log_assert "upgrade project: postgres and meilisearch stopped, only silo running: ok"
+
+  # Damage after the backup while every server is stopped, as a purge or a
+  # faulty writer would: object A deleted, object B overwritten with other bytes.
+  log_assert "== bucket damage after the backup: delete A, overwrite B"
+  bucket_mc rm "b/${S3_BUCKET_NAME}/${KEY_A}" >/dev/null
+  printf 'overwritten after the backup\n' | bucket_mc pipe "b/${S3_BUCKET_NAME}/${KEY_B}" >/dev/null
+  object_versions "$KEY_A" >"$WORK/versions-a"
+  object_versions "$KEY_B" >"$WORK/versions-b"
+  cp "$WORK/versions-a" "$EVIDENCE_DIR/bucket-damaged-a.txt"
+  cp "$WORK/versions-b" "$EVIDENCE_DIR/bucket-damaged-b.txt"
+  marker="$(latest_field "$WORK/versions-a" 1)"
+  if [[ "$(wc -l <"$WORK/versions-a")" != 2 || "$(latest_field "$WORK/versions-a" 3)" != true ]] \
+    || ! grep -q "^${CKPT_A} ${fixture_size} false false " "$WORK/versions-a"; then
+    fail "A is not a delete marker over its checkpoint version"
+  fi
+  if [[ "$(wc -l <"$WORK/versions-b")" != 2 || "$(latest_field "$WORK/versions-b" 2)" == "$fixture_size" ]] \
+    || ! grep -q "^${CKPT_B} ${fixture_size} false false " "$WORK/versions-b"; then
+    fail "B latest version is not an overwrite over its checkpoint version"
+  fi
+  log_assert "bucket: A latest is delete marker ${marker}, B latest is a $(latest_field "$WORK/versions-b" 2)-byte overwrite; checkpoints kept as older versions: ok"
+
+  # Point the rollback server at the same bucket: the upgrade project's silo,
+  # reached through that project's network (run-owned overlay, not in the repo).
+  silo_name="$(docker inspect -f '{{.Name}}' "$(running_ids "$UPGRADE_PROJECT" silo)")"
+  silo_name="${silo_name#/}"
+  [[ "$silo_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "unexpected silo container name $silo_name"
+  printf 'S3_ENDPOINT=http://%s:9000\n' "$silo_name" >>"$ROLLBACK_ENV"
+  cat >"$RB_BUCKET_OVERLAY" <<EOF
+services:
+  server:
+    networks: [default, bucket]
+networks:
+  bucket:
+    external: true
+    name: ${UPGRADE_PROJECT}_default
+EOF
+  log_assert "== fresh-DB restore of the pre-upgrade dump into ${ROLLBACK_PROJECT} on ${OLD_TAG}, bucket ${S3_BUCKET_NAME} via ${silo_name}"
+  if ! s3_restore_db >"$WORK/restore-s3.log" 2>&1; then
+    redact <"$WORK/restore-s3.log" >"$EVIDENCE_DIR/restore-s3.log"
+    fail "S3 fresh-DB restore failed"
+  fi
+  redact <"$WORK/restore-s3.log" >"$EVIDENCE_DIR/restore-s3.log"
+  [[ "$(applied_versions "${RB[@]}" "$OLD_TREE")" == "$OLD_VERSIONS" ]] || fail "restored schema is not $OLD_VERSIONS"
+  no_server_started "after restore"
+
+  # Negative controls before start: a wrong bucket aborts the check; the damaged
+  # bucket is refused with exactly A missing and B size-mismatched.
+  wrong_bucket="fvoci-up-absent-${RUN_ID}"
+  verify_storage wrong-bucket "${RB[@]}" "$OLD_TREE" -e "S3_BUCKET=${wrong_bucket}"
+  if (( VS_STATUS == 0 )) || grep -q '^{' <<<"$VS_OUT" \
+    || ! grep -qF "storage probe failed: HeadBucket on \"${wrong_bucket}\"" <<<"$VS_OUT"; then
+    fail "verify-storage against a wrong bucket did not fail at the bucket probe (exit ${VS_STATUS})"
+  fi
+  verify_storage damaged "${RB[@]}" "$OLD_TREE"
+  (( VS_STATUS != 0 )) || fail "verify-storage accepted the damaged bucket"
+  expect_storage_report 2 "$ATTACHMENT_ID" "$ATTACHMENT_B_ID" \
+    || fail "verify-storage refused the damaged bucket with another report (exit ${VS_STATUS})"
+  no_server_started "after refused verify-storage"
+  log_assert "before start: wrong bucket refused at HeadBucket; damaged bucket refused (exit ${VS_STATUS}) missing=[A] sizeMismatch=[B]; no server container, no HTTP: ok"
+
+  # Restore both checkpoint versions (RUNNING.md item 3): drop A's delete
+  # marker, copy B's checkpoint version back over the overwrite.
+  bucket_mc rm --version-id "$marker" "b/${S3_BUCKET_NAME}/${KEY_A}" >/dev/null
+  bucket_mc cp --version-id "$CKPT_B" "b/${S3_BUCKET_NAME}/${KEY_B}" "b/${S3_BUCKET_NAME}/${KEY_B}" >/dev/null
+  object_versions "$KEY_A" >"$WORK/versions-a"
+  object_versions "$KEY_B" >"$WORK/versions-b"
+  cp "$WORK/versions-a" "$EVIDENCE_DIR/bucket-restored-a.txt"
+  cp "$WORK/versions-b" "$EVIDENCE_DIR/bucket-restored-b.txt"
+  [[ "$(wc -l <"$WORK/versions-a")" == 1 && "$(latest_field "$WORK/versions-a" 1)" == "$CKPT_A" ]] \
+    || fail "A latest is not its checkpoint version ${CKPT_A}"
+  # A copy is a new version; its bytes are checked end to end by sha256 below.
+  if [[ "$(wc -l <"$WORK/versions-b")" != 3 || "$(latest_field "$WORK/versions-b" 2)" != "$fixture_size" \
+    || "$(latest_field "$WORK/versions-b" 3)" != false ]] || ! grep -q "^${CKPT_B} " "$WORK/versions-b"; then
+    fail "B latest is not a copy of its checkpoint version ${CKPT_B}"
+  fi
+  verify_storage restored "${RB[@]}" "$OLD_TREE"
+  (( VS_STATUS == 0 )) || fail "verify-storage failed after restoring versions"
+  expect_storage_report 2 "" "" || fail "unexpected verify-storage report after restoring versions"
+  if ! VERIFY="$(project_compose "${RB[@]}" "$OLD_TREE" run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-secrets 2>&1)"; then
+    redact <<<"$VERIFY" >"$EVIDENCE_DIR/verify-secrets-rollback.log"
+    fail "verify-secrets failed on the restored database"
+  fi
+  redact <<<"$VERIFY" >"$EVIDENCE_DIR/verify-secrets-rollback.log"
+  no_server_started "after restored verify"
+  log_assert "versions restored (A latest = checkpoint ${CKPT_A}, B checkpoint ${CKPT_B} copied as a new latest); verify-storage checked 2 ok; verify-secrets ok; still no server: ok"
+  project_compose "${RB[@]}" "$OLD_TREE" up -d --wait server 2>&1 | redact >"$EVIDENCE_DIR/rollback-start.log"
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(running_ids "$ROLLBACK_PROJECT" server)" \
+    | grep -qx "S3_ENDPOINT=http://${silo_name}:9000" || fail "rollback server is not pointed at the original bucket"
+}
 
 # --- 6. Rollback: old checkout restore into a fresh project on the old image
 RB_PORT="$(pick_port)"
@@ -562,13 +878,17 @@ sed -e "s#^FVOCI_PUBLISH_PORT=.*#FVOCI_PUBLISH_PORT=${RB_PORT}#" \
   -e "s#^FVOCI_PUBLIC_ORIGIN=.*#FVOCI_PUBLIC_ORIGIN=${RB_BASE}#" "$BACKUP_ENV" >"$ROLLBACK_ENV"
 chmod 600 "$ROLLBACK_ENV"
 grep -qx "FVOCI_IMAGE=${OLD_TAG}" "$ROLLBACK_ENV" || fail "backup env copy does not name the old image"
-log_assert "== old checkout restore.sh into ${ROLLBACK_PROJECT} on ${OLD_TAG}"
-RESTORE_OUT="$(bash "$OLD_TREE/scripts/restore.sh" --project "$ROLLBACK_PROJECT" --env-file "$ROLLBACK_ENV" --input "$BACKUP_DIR" 2>&1)" \
-  || { redact <<<"$RESTORE_OUT" >"$EVIDENCE_DIR/restore.log"; fail "old restore.sh failed"; }
-redact <<<"$RESTORE_OUT" >"$EVIDENCE_DIR/restore.log"
-python3 -c 'import json,sys; assert json.loads(sys.argv[1].strip().splitlines()[-1]).get("secretsVerified") is True' "$RESTORE_OUT" \
-  || fail "restore did not verify secrets"
 RB=("$ROLLBACK_PROJECT" "$ROLLBACK_ENV")
+if [[ "$STORAGE" == local ]]; then
+  log_assert "== old checkout restore.sh into ${ROLLBACK_PROJECT} on ${OLD_TAG}"
+  RESTORE_OUT="$(bash "$OLD_TREE/scripts/restore.sh" --project "$ROLLBACK_PROJECT" --env-file "$ROLLBACK_ENV" --input "$BACKUP_DIR" 2>&1)" \
+    || { redact <<<"$RESTORE_OUT" >"$EVIDENCE_DIR/restore.log"; fail "old restore.sh failed"; }
+  redact <<<"$RESTORE_OUT" >"$EVIDENCE_DIR/restore.log"
+  python3 -c 'import json,sys; assert json.loads(sys.argv[1].strip().splitlines()[-1]).get("secretsVerified") is True' "$RESTORE_OUT" \
+    || fail "restore did not verify secrets"
+else
+  s3_rollback
+fi
 expect_service_image "$ROLLBACK_PROJECT" server "$OLD_IMAGE_ID"
 [[ "$(applied_versions "${RB[@]}" "$OLD_TREE")" == "$OLD_VERSIONS" ]] || fail "rollback schema is not $OLD_VERSIONS"
 wait_http "$RB_BASE"
