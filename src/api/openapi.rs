@@ -65,10 +65,11 @@ use crate::api::dto::{
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
-    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
-    GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
-    TemplateApplyBody, TemplateApplyOutput, TemplateCreateBody, TemplateListResponse,
-    TemplateOutput, WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
+    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSuggestedDocument,
+    AiSummarizeOutput, GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody,
+    GithubIssueLinkOutput, TemplateApplyBody, TemplateApplyOutput, TemplateCreateBody,
+    TemplateListResponse, TemplateOutput, WebhookCreateBody, WebhookCreatedOutput,
+    WebhookListResponse, WebhookOutput,
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
@@ -380,6 +381,7 @@ impl Modify for CookieSecurityAddon {
             AiSummarizeOutput,
             AiGenerateTasksOutput,
             AiSuggestLinksOutput,
+            AiSuggestedDocument,
             SetupStatusResponse,
             BrandingOutput,
             SetupBody,
@@ -5315,7 +5317,7 @@ fn ai_generate_tasks_path() {}
     params(("workspace_id" = String, description = "Workspace id")),
     request_body = AiDocumentBody,
     responses(
-        (status = 200, description = "Visible document ids", body = AiSuggestLinksOutput),
+        (status = 200, description = "Visible document ids and titles", body = AiSuggestLinksOutput),
         (status = 401, description = "Authentication required", body = ProblemResponse),
         (status = 404, description = "Not found", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),

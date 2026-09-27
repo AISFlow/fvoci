@@ -253,12 +253,12 @@ test("public features.ai gates the document AI menu; the server keeps its own AI
 type BodyNode = {
   type?: string;
   text?: string;
-  attrs?: { id?: string; name?: string };
+  attrs?: { id?: string; name?: string; label?: string };
   content?: BodyNode[];
 };
 
 /**
- * Top-level blocks of a stored body in order: a paragraph as its text (mentions as `@<id>`,
+ * Top-level blocks of a stored body in order: a paragraph as its text (mentions as `@<label>#<id>`,
  * emoji nodes as `:<name>:`, empty paragraphs as ""), any other block as `type[paragraph|texts]`.
  */
 function blocksOf(root: BodyNode): string[] {
@@ -266,7 +266,7 @@ function blocksOf(root: BodyNode): string[] {
     child.type === "text"
       ? (child.text ?? "")
       : child.type === "mention"
-        ? `@${child.attrs?.id ?? ""}`
+        ? `@${child.attrs?.label ?? ""}#${child.attrs?.id ?? ""}`
         : child.type === "emoji"
           ? `:${child.attrs?.name ?? ""}:`
           : (child.content ?? []).map(inline).join("");
@@ -307,11 +307,20 @@ test("confirmed AI results apply through the live editor and the project task ro
     });
     expect(linkRes.status(), await linkRes.text()).toBe(201);
     const linkDoc = (await linkRes.json()) as { id: string; number: number };
+    // A sibling project document: not in the wiki tree, so its label must come from the server.
+    const projectLinkRes = await page.request.post(
+      `/api/v1/workspaces/${wsId}/projects/${project.id}/documents`,
+      { data: { parentId: project.rootDocumentId, title: "연결 후보 프로젝트 문서" } },
+    );
+    expect(projectLinkRes.status(), await projectLinkRes.text()).toBe(201);
+    const projectLinkDoc = (await projectLinkRes.json()) as { id: string };
 
     // WHY: the server's own AI gate is off under e2e (the gate test above proves the real route
     // answers 503; the real summarize/generate/suggest outputs are covered by the Rust
-    // integrations tests). Only these three AI answers are stubbed — the apply path below uses the
-    // real editor, collab persistence, task route and authorization.
+    // integrations tests, including suggest-links `documents` titles from the permission-filtered
+    // query). Only these three AI answers are stubbed, with the titles the documents were created
+    // with — the apply path below uses the real editor, collab persistence, task route and
+    // authorization.
     const aiCalls: string[] = [];
     await page.route(/\/api\/v1\/workspaces\/[^/]+\/ai\/(summarize|generate-tasks|suggest-links)$/, (route) => {
       const kind = new URL(route.request().url()).pathname.split("/").pop()!;
@@ -322,7 +331,13 @@ test("confirmed AI results apply through the live editor and the project task ro
           ? { summary: "요약 첫 줄 🙂\n\n요약 둘째 줄" }
           : kind === "generate-tasks"
             ? { titles: ["AI 작업 가", "AI 작업 나", "AI 작업 다"] }
-            : { documentIds: [linkDoc.id] };
+            : {
+                documentIds: [linkDoc.id, projectLinkDoc.id],
+                documents: [
+                  { id: linkDoc.id, title: "연결 후보 문서" },
+                  { id: projectLinkDoc.id, title: "연결 후보 프로젝트 문서" },
+                ],
+              };
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
     });
 
@@ -359,9 +374,12 @@ test("confirmed AI results apply through the live editor and the project task ro
 
     // Links: document mentions appended after the summary.
     await aiMenu.getByRole("button", { name: "링크 제안", exact: true }).click();
-    await expect(preview.getByText("연결 후보 문서")).toBeVisible();
+    await expect(preview.getByText("연결 후보 문서", { exact: true })).toBeVisible();
+    await expect(preview.getByText("연결 후보 프로젝트 문서", { exact: true })).toBeVisible();
+    await expect(preview).not.toContainText(projectLinkDoc.id);
     await preview.getByRole("button", { name: "링크 삽입" }).click();
-    await expect(editor.locator("[data-mention]")).toHaveCount(1);
+    await expect(editor.locator("[data-mention]")).toHaveCount(2);
+    await expect(editor.locator("[data-mention]").nth(1)).toHaveText("@연결 후보 프로젝트 문서");
 
     await page.getByRole("button", { name: "저장", exact: true }).click();
     await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
@@ -373,7 +391,7 @@ test("confirmed AI results apply through the live editor and the project task ro
         "bulletList[항목 하나]",
         expect.stringMatching(/^요약 첫 줄 :[\w+-]+:$/),
         "요약 둘째 줄",
-        `@${linkDoc.id}`,
+        `@연결 후보 문서#${linkDoc.id} @연결 후보 프로젝트 문서#${projectLinkDoc.id}`,
       ]);
 
     // Tasks: the second create is rejected once (injected 422 before the server); the retry

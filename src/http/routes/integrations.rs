@@ -19,9 +19,10 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
-    GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
-    OkResponse, WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
+    AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSuggestedDocument,
+    AiSummarizeOutput, GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody,
+    GithubIssueLinkOutput, OkResponse, WebhookCreateBody, WebhookCreatedOutput,
+    WebhookListResponse, WebhookOutput,
 };
 use crate::auth::scopes::ApiTokenScope;
 use crate::db::integrations::{
@@ -633,11 +634,18 @@ async fn ai_suggest_links_route(
     .await
     .map_err(internal)?
     .ok_or_else(|| AppError::from_code(ProblemCode::NotFound))?;
-    let ids =
-        ai::visible_document_ids(&state.auth.db.pool, workspace_id, user_id, body.document_id)
+    let visible =
+        ai::visible_documents(&state.auth.db.pool, workspace_id, user_id, body.document_id)
             .await
             .map_err(internal)?;
     Ok(Json(AiSuggestLinksOutput {
-        document_ids: ids.into_iter().map(|id| id.to_string()).collect(),
+        document_ids: visible.iter().map(|(id, _)| id.to_string()).collect(),
+        documents: visible
+            .into_iter()
+            .map(|(id, title)| AiSuggestedDocument {
+                id: id.to_string(),
+                title,
+            })
+            .collect(),
     }))
 }

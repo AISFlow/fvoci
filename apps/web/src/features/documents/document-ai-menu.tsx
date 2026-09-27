@@ -22,7 +22,7 @@ type AiAction = "summarize" | "generateTasks" | "suggestLinks";
 type AiResult =
   | { action: "summarize"; lines: string[] }
   | { action: "generateTasks"; titles: string[]; states: TaskApplyState[] }
-  | { action: "suggestLinks"; documentIds: string[] };
+  | { action: "suggestLinks"; documents: Array<{ id: string; title: string }> };
 
 const ACTIONS: readonly AiAction[] = ["summarize", "generateTasks", "suggestLinks"];
 const MENU_LABEL: Record<AiAction, I18nKey> = {
@@ -105,10 +105,12 @@ export function DocumentAiMenu({
         );
         return { action, titles, states: titles.map(() => "pending") };
       }
-      const { documentIds } = await ensureOk(
+      // WHY: labels come from the server's permission-filtered titles, never from the wiki tree —
+      // project documents are not in it, and a raw id would persist as the mention label.
+      const { documents } = await ensureOk(
         await api.POST("/api/v1/workspaces/{workspace_id}/ai/suggest-links", init),
       );
-      return { action, documentIds };
+      return { action, documents };
     },
     onMutate: () => {
       setError(null);
@@ -178,14 +180,15 @@ export function DocumentAiMenu({
 
   if (aiEnabled.data !== true) return null;
 
+  // The wiki tree only adds a preview link for wiki documents; it never supplies the label.
   const nodes = new Map((tree.data?.items ?? []).map((node) => [node.id, node]));
   const links =
     result?.action === "suggestLinks"
-      ? result.documentIds.map((id) => {
+      ? result.documents.map(({ id, title }) => {
           const node = nodes.get(id);
           return {
             id,
-            label: node?.title || id,
+            label: title,
             href:
               node && node.projectId === null
                 ? documentPath(slug, wikiDisplayId(node.number))
@@ -238,10 +241,19 @@ export function DocumentAiMenu({
     // sentence being edited or lands inside a trailing list/code block. The insert is a normal
     // editor transaction, so Yjs syncs it like typing and keeps the existing body's history.
     applying.current = true;
+    let inserted = false;
     try {
-      editor.chain().insertContentAt(appendRange(editor.state.doc), content).focus("end").run();
+      inserted = editor
+        .chain()
+        .insertContentAt(appendRange(editor.state.doc), content)
+        .focus("end")
+        .run();
     } finally {
       applying.current = false;
+    }
+    if (!inserted) {
+      setError(t("ai.failed"));
+      return;
     }
     setResult(null);
     setNotice(t("ai.insert.done"));
