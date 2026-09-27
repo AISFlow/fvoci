@@ -26,8 +26,16 @@ WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
     "rust": ("fast", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
-    "install": ("install-smoke", "backup-restore-smoke"),
+    "install": ("install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"),
 }
+
+# Manual opt-in jobs: no path or event policy selects them (not even full mode or
+# a fatal plan). Only a workflow_dispatch whose boolean input of the same name is
+# exactly true selects the job; the gate re-derives that from the event file.
+OPT_IN_JOBS: dict[str, dict[str, str]] = {
+    "install": {"upgrade-smoke-arm64": "run_upgrade_smoke_arm"},
+}
+OPT_IN_RUNNER: dict[str, str] = {"upgrade-smoke-arm64": "ubuntu-24.04-arm"}
 
 WORKFLOW_YAML: dict[str, str] = {
     "web": "web.yml",
@@ -394,6 +402,8 @@ def decide_from_paths(paths: list[str]) -> SelectionDecision:
 
 
 def workflow_job_selected(workflow: str, job: str, decision: SelectionDecision) -> bool:
+    if job in OPT_IN_JOBS.get(workflow, {}):
+        return False
     if decision.mode == "full":
         return True
     family = next(iter(decision.families))
@@ -417,6 +427,7 @@ def build_plan(
     paths: list[str] | None,
     fatal_error: str | None = None,
     force_full_reason: str | None = None,
+    opt_in_inputs: frozenset[str] = frozenset(),
 ) -> dict:
     if workflow not in WORKFLOW_JOBS:
         raise SystemExit(f"unknown workflow: {workflow}")
@@ -444,6 +455,10 @@ def build_plan(
         job: {"selected": workflow_job_selected(workflow, job, decision)}
         for job in WORKFLOW_JOBS[workflow]
     }
+    if plan_ok and event_name == "workflow_dispatch":
+        for job, input_name in OPT_IN_JOBS.get(workflow, {}).items():
+            if input_name in opt_in_inputs:
+                jobs[job]["selected"] = True
 
     return {
         "version": PLAN_VERSION,
@@ -474,6 +489,34 @@ def event_shas(event: dict, event_name: str) -> tuple[str | None, str | None]:
 
 def load_event(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def dispatch_opt_ins(workflow: str, event_name: str, event: object) -> tuple[frozenset[str], str | None]:
+    """Boolean opt-in inputs chosen by a workflow_dispatch event, fail closed.
+
+    Every other event selects nothing, whatever its payload carries. GitHub writes
+    dispatch booleans into the event file as the strings "true"/"false"; a missing
+    input is not chosen, while an unknown input or any other value is an error.
+    """
+    if event_name != "workflow_dispatch":
+        return frozenset(), None
+    if not isinstance(event, dict):
+        return frozenset(), "DISPATCH_EVENT_INVALID"
+    raw = event.get("inputs")
+    if raw is None:
+        return frozenset(), None
+    if not isinstance(raw, dict):
+        return frozenset(), "DISPATCH_INPUTS_INVALID"
+    allowed = set(OPT_IN_JOBS.get(workflow, {}).values())
+    if set(raw) - allowed:
+        return frozenset(), "DISPATCH_INPUTS_UNKNOWN"
+    chosen: set[str] = set()
+    for name, value in raw.items():
+        if value is True or value == "true":
+            chosen.add(name)
+        elif not (value is False or value == "false"):
+            return frozenset(), "DISPATCH_INPUT_VALUE_INVALID"
+    return frozenset(chosen), None
 
 
 def resolve_selection_inputs(
@@ -1321,7 +1364,46 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         elif reserved_gate in jobs:
             errors.append(f"{workflow}: {reserved_gate} must be a mapping")
 
+        errors.extend(_verify_opt_in_wiring(workflow, data, jobs))
+
     errors.extend(verify_rust_suite_registry(repo_root))
+    return errors
+
+
+def _verify_opt_in_wiring(workflow: str, data: dict, jobs: dict) -> list[str]:
+    """workflow_dispatch declares exactly the opt-in booleans (default false)."""
+    errors: list[str] = []
+    triggers = data.get("on", data.get(True))
+    dispatch = triggers.get("workflow_dispatch") if isinstance(triggers, dict) else None
+    if not isinstance(triggers, dict) or "workflow_dispatch" not in triggers:
+        errors.append(f"{workflow}: workflow_dispatch trigger missing")
+        return errors
+    if dispatch is not None and not isinstance(dispatch, dict):
+        errors.append(f"{workflow}: workflow_dispatch must be a mapping")
+        return errors
+    inputs = (dispatch or {}).get("inputs")
+    if inputs is not None and not isinstance(inputs, dict):
+        errors.append(f"{workflow}: workflow_dispatch inputs must be a mapping")
+        return errors
+    opt_ins = OPT_IN_JOBS.get(workflow, {})
+    expected_inputs = set(opt_ins.values())
+    if set(inputs or {}) != expected_inputs:
+        errors.append(
+            f"{workflow}: workflow_dispatch inputs must be exactly {sorted(expected_inputs)}"
+        )
+        return errors
+    for name in expected_inputs:
+        spec = inputs[name]
+        if not isinstance(spec, dict) or spec.get("type") != "boolean" or spec.get("default") is not False:
+            errors.append(f"{workflow}: input {name} must be type boolean with default false")
+    for job in opt_ins:
+        spec = jobs.get(job)
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("runs-on") != OPT_IN_RUNNER[job]:
+            errors.append(f"{workflow}: {job} runs-on must be {OPT_IN_RUNNER[job]}")
+        if "strategy" in spec:
+            errors.append(f"{workflow}: {job} must be a single job without a matrix")
     return errors
 
 
@@ -1348,6 +1430,7 @@ def cmd_plan(argv: list[str] | None = None) -> int:
 
     event = load_event(args.event_json)
     resolved = resolve_selection_inputs(args.repo_root, event, event_name)
+    opt_ins, opt_in_err = dispatch_opt_ins(args.workflow, event_name, event)
 
     plan = build_plan(
         workflow=args.workflow,
@@ -1357,8 +1440,9 @@ def cmd_plan(argv: list[str] | None = None) -> int:
         merge_base_sha=resolved.merge_base_sha,
         tested_sha=resolved.tested_sha,
         paths=resolved.paths,
-        fatal_error=resolved.fatal_error,
+        fatal_error=resolved.fatal_error or opt_in_err,
         force_full_reason=resolved.force_full_reason,
+        opt_in_inputs=opt_ins,
     )
     args.output_plan.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     write_github_outputs(plan, args.github_output)
@@ -1480,6 +1564,30 @@ def _load_needs_context(raw: str, workflow: str) -> tuple[dict | None, dict[str,
     return plan, results, None
 
 
+def _gate_opt_in_error(workflow: str, plan: dict) -> str | None:
+    """Re-derive manual opt-ins from this run's event file; the plan cannot override them."""
+    opt_ins = OPT_IN_JOBS.get(workflow)
+    if not opt_ins:
+        return None
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip()
+    if event_name not in KNOWN_EVENTS:
+        return "EVENT_NAME"
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
+    if not event_path:
+        return "EVENT_PATH_MISSING"
+    try:
+        event = load_event(Path(event_path))
+    except (OSError, ValueError):
+        return "EVENT_MALFORMED"
+    chosen, err = dispatch_opt_ins(workflow, event_name, event)
+    if err:
+        return err
+    for job, input_name in opt_ins.items():
+        if plan["jobs"][job]["selected"] is not (input_name in chosen):
+            return f"OPT_IN_MISMATCH {job}"
+    return None
+
+
 def cmd_gate(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fail-closed gate for one workflow.")
     parser.add_argument("--workflow", required=True, choices=sorted(WORKFLOW_JOBS))
@@ -1509,6 +1617,11 @@ def cmd_gate(argv: list[str] | None = None) -> int:
 
     if plan.get("tested_sha") != args.tested_sha:
         print("gate: tested_sha mismatch", file=sys.stderr)
+        return 1
+
+    opt_in_err = _gate_opt_in_error(args.workflow, plan)
+    if opt_in_err:
+        print(f"gate: opt-in error {opt_in_err}", file=sys.stderr)
         return 1
 
     expected_jobs = WORKFLOW_JOBS[args.workflow]
