@@ -3,6 +3,7 @@ pub mod cookie;
 pub mod guard;
 pub mod json_input;
 pub mod rate_limit;
+pub mod request_trace;
 pub mod routes;
 pub mod security_headers;
 pub mod spa_head;
@@ -16,7 +17,6 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use tower_http::trace::TraceLayer;
 
 use axum::extract::State;
 use axum_extra::extract::CookieJar;
@@ -201,7 +201,7 @@ pub fn router_with_settings(
             response
         }
     }))
-    .layer(TraceLayer::new_for_http())
+    .layer(request_trace::layer())
 }
 
 #[cfg(test)]
@@ -217,5 +217,145 @@ mod consent_tests {
         assert!(!consent_exempt("/api/v1/auth/me"));
         assert!(!consent_exempt("/api/v1/instance"));
         assert!(!consent_exempt("/collab"));
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    use super::request_trace::{capture, UNMATCHED_ROUTE};
+    use super::router;
+    use super::state::AppState;
+
+    const SHARE_TOKEN: &str = "synthShareTok6d1e";
+    const ICS_TOKEN: &str = "synthIcsTok2a90";
+    const OIDC_CODE: &str = "synthOidcCode4b7c";
+    const OIDC_STATE: &str = "synthOidcState93f1";
+    const SPA_TOKEN: &str = "synthSpaShareTok5e08";
+    const ASSET_SEGMENT: &str = "synthAssetSeg0f3a";
+    const UNKNOWN_SEGMENT: &str = "synthUnknownSeg71cd";
+    const HEADER_SECRET: &str = "synthBasicSecret8c25";
+
+    /// Unreachable database: DB-backed handlers fail fast with 500.
+    fn app_state(storage_root: std::path::PathBuf) -> AppState {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://fvoci:fvoci@127.0.0.1:1/none")
+            .expect("lazy pool");
+        AppState {
+            auth: Arc::new(crate::auth::AuthService {
+                db: crate::db::Db::new(pool),
+                password_keys: crate::auth::password::Keyring::parse(
+                    r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                    "test",
+                )
+                .expect("pepper"),
+            }),
+            branding_name: "FVOCI".to_string(),
+            public_origin: "http://localhost".to_string(),
+            cookie_secure: false,
+            rate_limiter: super::rate_limit::RateLimiter::new(),
+            storage: crate::attachments::LocalStorage::new(storage_root).into(),
+            upload: crate::attachments::UploadLimits {
+                part_size_bytes: crate::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: crate::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: crate::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: crate::attachments::PartPutSlots::new(
+                    crate::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            quota: Default::default(),
+            streams: AppState::fresh_streams(),
+            mailer: Arc::new(crate::mail::Mailer::disabled()),
+        }
+    }
+
+    /// The production router (API routes, static/SPA fallback) at DEBUG:
+    /// share/ICS tokens, OIDC code/state and unmatched paths stay out of
+    /// the log while route templates, status, latency and failures remain.
+    #[tokio::test]
+    async fn production_router_trace_omits_request_secrets() {
+        let root = std::env::temp_dir().join(format!("fvoci-trace-test-{}", uuid::Uuid::now_v7()));
+        let static_dir = root.join("static");
+        std::fs::create_dir_all(&static_dir).expect("static dir");
+        std::fs::write(static_dir.join("index.html"), "<html></html>").expect("index");
+        let app = router(app_state(root.join("storage")), Some(static_dir));
+
+        let (captured, guard) = capture::logs();
+        let uris = [
+            format!("/api/v1/share/{SHARE_TOKEN}"),
+            format!("/api/v1/ics/{ICS_TOKEN}"),
+            format!("/api/v1/auth/oidc/google/callback?code={OIDC_CODE}&state={OIDC_STATE}"),
+            format!("/s/{SPA_TOKEN}?code={OIDC_CODE}"),
+            format!("/assets/{ASSET_SEGMENT}.js?state={OIDC_STATE}"),
+            format!("/api/v1/{UNKNOWN_SEGMENT}?code={OIDC_CODE}"),
+        ];
+        for uri in &uris {
+            let mut request = Request::builder()
+                .uri(uri.as_str())
+                .header("authorization", format!("Basic {HEADER_SECRET}"))
+                .body(Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+            let response = app.clone().oneshot(request).await.unwrap();
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let log = captured.text();
+        for secret in [
+            SHARE_TOKEN,
+            ICS_TOKEN,
+            OIDC_CODE,
+            OIDC_STATE,
+            SPA_TOKEN,
+            ASSET_SEGMENT,
+            UNKNOWN_SEGMENT,
+            HEADER_SECRET,
+            "uri=",
+        ] {
+            assert!(
+                !log.contains(secret),
+                "{secret:?} leaked into trace:\n{log}"
+            );
+        }
+        for route in [
+            "route=/api/v1/share/{token}",
+            "route=/api/v1/ics/{token}",
+            "route=/api/v1/auth/oidc/{provider}/callback",
+        ] {
+            assert!(log.contains(route), "{route} missing:\n{log}");
+        }
+        let unmatched = format!("route={UNMATCHED_ROUTE}");
+        assert!(log.contains(&unmatched), "{log}");
+        assert_eq!(
+            log.matches("finished processing request").count(),
+            uris.len(),
+            "{log}"
+        );
+        for field in ["method=GET", "status=", "latency="] {
+            assert!(log.contains(field), "{field} missing:\n{log}");
+        }
+        assert!(log.contains("response failed"), "{log}");
     }
 }
