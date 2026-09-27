@@ -467,7 +467,8 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   };
   async function createTask(title: string, dueDate: string | null): Promise<{ id: string; displayId: string }> {
     const res = await page.request.post(`${base}/projects/${project.id}/tasks`, {
-      data: { title, type: "task", statusId: workflow.statuses[0]!.id, dueDate },
+      // Create rejects an explicit null date; omit the field for an undated task.
+      data: { title, type: "task", statusId: workflow.statuses[0]!.id, ...(dueDate ? { dueDate } : {}) },
     });
     expect(res.status()).toBe(201);
     const body = (await res.json()) as { id: string; number: number };
