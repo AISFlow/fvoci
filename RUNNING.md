@@ -136,6 +136,33 @@ local driver stages the part and discards it instead. Uploads retain
 their original bytes separately from derived extraction results; native
 extraction job integration and search indexing are not yet accepted.
 
+Behind a reverse proxy or CDN (for example Cloudflare), every attachment part
+is its own HTTP request of at most `FVOCI_UPLOAD_PART_SIZE_BYTES` (default
+32 MiB) plus headers; the file size itself does not reach the proxy as one
+request. Keep the part size below the request-body cap the deployment actually
+enforces, including a cap an operator lowered on the zone or proxy: do not
+assume a universal 100 MB. Cloudflare's current plan table lists 100 MB for
+Free/Pro, 200 MB for Business and up to 5 GB for Enterprise, adjustable per zone
+([413](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/4xx-client-error/error-413/)).
+The server has no knob for, and does not detect, a proxy cap. A part refused
+with 413 fails the upload permanently in the web client (the part size is
+server-chosen, so a retry cannot shrink it); the proxy may also reset the
+connection instead, which the client treats as transport failure and gives up
+after its bounded part retries and one resume. Cloudflare's current defaults are
+a 125 s Proxy Read Timeout and a 30 s Proxy Write Timeout
+([524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/)).
+A part or complete answered 524/502/504 (or with a lost connection) is retried a
+bounded number of times; complete is idempotent, the client first checks
+whether the attachment is already stored, and a complete abandoned by the proxy
+publishes nothing until a later complete finishes it or the upload expires.
+Complete assembles the whole file before answering, so a very large file on
+slow storage can exceed the read timeout on every bounded retry and fail
+without data loss. Not verified against a real Cloudflare zone: request
+buffering, per-part upload duration against the write/read timeouts on slow
+uplinks, and assembly time for multi-GiB files. The regression
+`proxy_capped_parts_round_trip_exact_bytes_through_413_and_524` uses a local
+capped proxy stand-in only.
+
 Invalid upload-limit values fail startup instead of silently selecting defaults.
 After applying migration 006 to an existing Rust slice database, re-run
 `fvoci-migrate --grant-app-role` for the same application role before serving requests.
