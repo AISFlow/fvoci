@@ -1211,6 +1211,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description An API token needs the read scope of the attachment's parent: `documents.read` for a document attachment, `tasks.read` for a task attachment (the same domain's write scope also grants read). A token without it, or bound to another workspace, gets 404. */
         get: operations["get_attachment_meta"];
         put?: never;
         post?: never;
@@ -1243,6 +1244,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description An API token needs the read scope of the attachment's parent: `documents.read` for a document attachment, `tasks.read` for a task attachment (the same domain's write scope also grants read). A token without it, or bound to another workspace, gets 404. */
         get: operations["download_attachment"];
         put?: never;
         post?: never;
@@ -10245,6 +10247,15 @@ export interface operations {
             };
             /** @description Authentication required */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Attachment failed virus scan */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
