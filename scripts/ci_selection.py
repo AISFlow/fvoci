@@ -103,12 +103,16 @@ _MANIFEST_MARKERS: tuple[str, ...] = (
     "/yarn.lock",
 )
 
-# Explicit explanatory docs only (not build inputs).
+# Explicit explanatory docs only (not build inputs). Exact paths are checked
+# before the broaden prefixes so the agent role/environment records stay docs
+# while every other `.agents/` path (skills, references) remains full.
 _EXPLICIT_DOCS: frozenset[str] = frozenset(
     {
         "README.md",
         "RUNNING.md",
         "docs/rewrite.md",
+        "AGENTS.md",
+        ".agents/environment.md",
     }
 )
 
@@ -171,6 +175,8 @@ def _script_lines(text: str) -> list[str]:
 
 
 def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unknown"]:
+    if path in _EXPLICIT_DOCS:
+        return "docs"
     if path in _BROADEN_EXACT:
         return "broaden"
     for prefix in _BROADEN_PREFIXES:
@@ -179,8 +185,6 @@ def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unk
     for marker in _MANIFEST_MARKERS:
         if marker in path:
             return "broaden"
-    if path in _EXPLICIT_DOCS:
-        return "docs"
     if _starts_with(path, "docs/"):
         return "broaden"
     for prefix in _WEB_BROADEN_PREFIXES:

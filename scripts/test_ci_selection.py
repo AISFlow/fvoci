@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 CI_SELECTION_PY = ROOT / "scripts" / "ci_selection.py"
@@ -1231,6 +1232,280 @@ class RegistryMutationCliTest(unittest.TestCase):
         web.write_text(text.replace(marker, injected + marker, 1), encoding="utf-8")
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "must not duplicate scripts/test-ci-selection.sh")
+
+
+AGENT_DOCS = ("AGENTS.md", ".agents/environment.md")
+
+
+def plan_all_workflows(paths: list[str] | None, event_name: str = "pull_request", **kwargs: object) -> dict:
+    return {
+        workflow: SEL.build_plan(
+            workflow=workflow,
+            event_name=event_name,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            merge_base_sha="c" * 40,
+            tested_sha="b" * 40,
+            paths=paths,
+            **kwargs,
+        )
+        for workflow in SEL.WORKFLOW_JOBS
+    }
+
+
+class AgentDocsSelectionTest(unittest.TestCase):
+    """AGENTS.md and .agents/environment.md are role/environment records only."""
+
+    def assert_docs_only(self, paths: list[str]) -> None:
+        for workflow, plan in plan_all_workflows(paths).items():
+            self.assertEqual(plan["mode"], "narrow", (workflow, paths))
+            self.assertEqual(plan["reason_code"], "NARROW_DOCS", (workflow, paths))
+            self.assertTrue(plan["plan_ok"])
+            for job, meta in plan["jobs"].items():
+                self.assertFalse(meta["selected"], (workflow, job, paths))
+
+    def assert_full(self, paths: list[str], reason: str | None = None) -> None:
+        for workflow, plan in plan_all_workflows(paths).items():
+            self.assertEqual(plan["mode"], "full", (workflow, paths))
+            if reason is not None:
+                self.assertEqual(plan["reason_code"], reason, (workflow, paths))
+            for job, meta in plan["jobs"].items():
+                self.assertTrue(meta["selected"], (workflow, job, paths))
+
+    def test_exact_agent_docs_classify_as_docs(self) -> None:
+        for path in AGENT_DOCS:
+            self.assertEqual(SEL.classify_path(path), "docs", path)
+
+    def test_other_agents_paths_stay_broaden_or_unknown(self) -> None:
+        for path in (
+            ".agents/skills/fvoci-fast-verify/SKILL.md",
+            ".agents/skills/fvoci-standard-implementations/references/candidates.md",
+            ".agents/environment.md.bak",
+            ".agents/environment.mdx",
+            ".agents/other.md",
+            ".agents/",
+            ".agents/sub/environment.md",
+        ):
+            self.assertEqual(SEL.classify_path(path), "broaden", path)
+        for path in ("agents/environment.md", "AGENTS.MD", "apps/AGENTS.md", "AGENTS.md.orig"):
+            self.assertEqual(SEL.classify_path(path), "unknown", path)
+        self.assertEqual(SEL.classify_path("docs/AGENTS.md"), "broaden")
+        self.assertEqual(SEL.classify_path("scripts/AGENTS.md"), "broaden")
+
+    def test_explicit_docs_never_overlap_build_inputs(self) -> None:
+        for path in SEL._EXPLICIT_DOCS:
+            self.assertNotIn(path, SEL._BROADEN_EXACT)
+            for marker in SEL._MANIFEST_MARKERS:
+                self.assertNotIn(marker, path)
+            self.assertFalse(path.endswith("/"), path)
+            self.assertNotIn("*", path)
+
+    def test_pr135_cumulative_paths_docs_only(self) -> None:
+        self.assert_docs_only(["AGENTS.md"])
+        self.assert_docs_only([".agents/environment.md"])
+        self.assert_docs_only(["AGENTS.md", ".agents/environment.md"])
+        self.assert_docs_only([".agents/environment.md", "AGENTS.md", "docs/rewrite.md", "README.md"])
+
+    def test_agent_docs_with_code_or_selector_is_full(self) -> None:
+        for extra in (
+            "src/lib.rs",
+            "tests/db_integration.rs",
+            "migrations/0001_init.sql",
+            ".github/workflows/rust.yml",
+            ".github/workflows/web.yml",
+            "scripts/ci_selection.py",
+            "scripts/test_ci_selection.py",
+            "scripts/test-ci-selection.sh",
+            "scripts/ci_selection_requirements.txt",
+            ".agents/skills/fvoci-fast-verify/SKILL.md",
+        ):
+            self.assert_full([*AGENT_DOCS, extra], "FULL_PATH_BROADEN")
+
+    def test_agent_docs_with_executable_config_is_full(self) -> None:
+        for extra in (
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "Dockerfile",
+            ".dockerignore",
+            "infra/rust/Dockerfile",
+            "apps/web/package.json",
+            "apps/web/playwright.config.ts",
+            "crates/collab-engine/Cargo.toml",
+            "packages/editor/package.json",
+        ):
+            self.assert_full([*AGENT_DOCS, extra], "FULL_PATH_BROADEN")
+
+    def test_agent_docs_with_fixture_or_unknown_is_full(self) -> None:
+        self.assert_full([*AGENT_DOCS, "compat/fixtures/x.json"], "FULL_PATH_BROADEN")
+        self.assert_full([*AGENT_DOCS, "scripts/fixtures/web-e2e/x.sh"], "FULL_PATH_BROADEN")
+        self.assert_full([*AGENT_DOCS, "docs/other.md"], "FULL_PATH_BROADEN")
+        for extra in (".gitignore", "LICENSE", "third-party/x.md", "apps/AGENTS.md", "notes.md"):
+            self.assert_full([*AGENT_DOCS, extra], "FULL_UNKNOWN_PATH")
+
+    def test_agent_docs_with_frontend_is_mixed_full(self) -> None:
+        self.assert_full([*AGENT_DOCS, "apps/web/src/x.ts"], "FULL_MIXED_NARROW")
+
+    def test_always_full_events_ignore_agent_docs(self) -> None:
+        for event_name, reason in (
+            ("push", "FULL_EVENT_PUSH"),
+            ("merge_group", "FULL_EVENT_MERGE_GROUP"),
+            ("workflow_dispatch", "FULL_EVENT_WORKFLOW_DISPATCH"),
+        ):
+            for workflow, plan in plan_all_workflows(list(AGENT_DOCS), event_name).items():
+                self.assertEqual(plan["mode"], "full", (event_name, workflow))
+                self.assertEqual(plan["reason_code"], reason)
+                self.assertTrue(plan["plan_ok"])
+                self.assertTrue(all(meta["selected"] for meta in plan["jobs"].values()))
+
+    def test_diff_failure_fails_closed(self) -> None:
+        for fatal in ("GIT_DIFF_FAILED", "DIFF_TRUNCATED", "DIFF_TRUNCATED_RENAME", "FETCH_FAILED"):
+            for workflow, plan in plan_all_workflows(list(AGENT_DOCS), fatal_error=fatal).items():
+                self.assertEqual(plan["mode"], "full", (fatal, workflow))
+                self.assertEqual(plan["reason_code"], fatal)
+                self.assertFalse(plan["plan_ok"])
+                self.assertTrue(all(meta["selected"] for meta in plan["jobs"].values()))
+        for workflow, plan in plan_all_workflows(None).items():
+            self.assertEqual(plan["reason_code"], "FULL_MISSING_PATHS", workflow)
+            self.assertFalse(plan["plan_ok"])
+        paths, err = SEL.parse_name_status_z(b"M\0AGENTS.md\0M\0.agents/environment.md")
+        self.assertEqual((paths, err), ([], "DIFF_TRUNCATED"))
+        paths, err = SEL.parse_name_status_z(b"R100\0AGENTS.md\0")
+        self.assertEqual((paths, err), ([], "DIFF_TRUNCATED_RENAME"))
+
+    def test_git_diff_command_failure_fails_closed(self) -> None:
+        with GitRepoFixture() as fx:
+            base = fx.commit_file("AGENTS.md", "a\n")
+            paths, err, _ = SEL.diff_paths_for_pr(fx.repo, base, "f" * 40)
+            self.assertIsNone(paths)
+            self.assertIn(err, {"REV_PARSE_FAILED", "MERGE_BASE_FAILED"})
+            head = fx.commit_file(".agents/environment.md", "b\n")
+            real_git = SEL._git
+
+            def failing_diff(repo: Path, *args: str, text: bool = True):
+                if args and args[0] == "diff":
+                    return subprocess.CompletedProcess(["git", *args], 128, b"", b"boom")
+                return real_git(repo, *args, text=text)
+
+            with mock.patch.object(SEL, "_git", failing_diff):
+                paths, err, _ = SEL.diff_paths_for_pr(fx.repo, base, head)
+            self.assertIsNone(paths)
+            self.assertEqual(err, "GIT_DIFF_FAILED")
+
+    def _diff(self, fx: GitRepoFixture, base: str) -> list[str]:
+        paths, err, _ = SEL.diff_paths_for_pr(fx.repo, base, git_sha(fx.repo))
+        self.assertIsNone(err)
+        return paths or []
+
+    def test_real_diff_modify_agent_docs_is_docs_only(self) -> None:
+        with GitRepoFixture() as fx:
+            fx.commit_file("AGENTS.md", "a\n")
+            base = fx.commit_file(".agents/environment.md", "a\n")
+            fx.commit_file("AGENTS.md", "b\n")
+            fx.commit_file(".agents/environment.md", "b\n")
+            paths = self._diff(fx, base)
+            self.assertEqual(sorted(paths), [".agents/environment.md", "AGENTS.md"])
+            self.assertEqual(SEL.decide_from_paths(paths).reason_code, "NARROW_DOCS")
+
+    def test_real_diff_delete_agent_docs(self) -> None:
+        with GitRepoFixture() as fx:
+            fx.commit_file("AGENTS.md", "a\n")
+            base = fx.commit_file(".agents/skills/x/SKILL.md", "a\n")
+            fx.delete_file("AGENTS.md")
+            paths = self._diff(fx, base)
+            self.assertEqual(paths, ["AGENTS.md"])
+            self.assertEqual(SEL.decide_from_paths(paths).reason_code, "NARROW_DOCS")
+            fx.delete_file(".agents/skills/x/SKILL.md")
+            paths = self._diff(fx, base)
+            self.assertIn(".agents/skills/x/SKILL.md", paths)
+            self.assertEqual(SEL.decide_from_paths(paths).mode, "full")
+
+    def test_real_diff_rename_checks_old_and_new_names(self) -> None:
+        body = "role record line\n" * 20
+        cases = (
+            ("AGENTS.md", "notes/AGENTS.md", "FULL_UNKNOWN_PATH"),
+            (".agents/environment.md", ".agents/skills/environment.md", "FULL_PATH_BROADEN"),
+            (".agents/skills/x/SKILL.md", ".agents/environment.md", "FULL_PATH_BROADEN"),
+            ("src/env.md", "AGENTS.md", "FULL_PATH_BROADEN"),
+            ("AGENTS.md", "Cargo.toml", "FULL_PATH_BROADEN"),
+        )
+        for old, new, reason in cases:
+            with GitRepoFixture() as fx:
+                base = fx.commit_file(old, body)
+                (fx.repo / new).parent.mkdir(parents=True, exist_ok=True)
+                fx.rename_file(old, new)
+                paths = self._diff(fx, base)
+                self.assertEqual(paths, [old, new], (old, new))
+                decision = SEL.decide_from_paths(paths)
+                self.assertEqual(decision.mode, "full", (old, new))
+                self.assertEqual(decision.reason_code, reason, (old, new))
+
+    def test_real_diff_rename_between_agent_docs_stays_docs(self) -> None:
+        body = "role record line\n" * 20
+        with GitRepoFixture() as fx:
+            base = fx.commit_file(".agents/environment.md", body)
+            fx.rename_file(".agents/environment.md", "AGENTS.md")
+            paths = self._diff(fx, base)
+            self.assertEqual(paths, [".agents/environment.md", "AGENTS.md"])
+            self.assertEqual(SEL.decide_from_paths(paths).reason_code, "NARROW_DOCS")
+
+    def test_pr_merge_checkout_agent_docs_narrow_docs(self) -> None:
+        with PrCheckoutFixture() as fx:
+            git(fx.origin, "checkout", "-B", "pr", "main")
+            for rel in AGENT_DOCS:
+                write_file(fx.origin, rel, "role record\n")
+            git(fx.origin, "add", *AGENT_DOCS)
+            git(fx.origin, "commit", "-m", "agent docs")
+            head = git_sha(fx.origin)
+            git(fx.origin, "checkout", "main")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            event = fx.write_pr_event(fx.base_sha, head)
+            output = fx.work / "plan.json"
+            proc = fx.plan_cli(tested_sha=tested, event_path=event, output=output)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            plan = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(plan["mode"], "narrow")
+            self.assertEqual(plan["reason_code"], "NARROW_DOCS")
+            self.assertEqual(plan["path_count"], 2)
+            self.assertTrue(plan["plan_ok"])
+            self.assertFalse(any(meta["selected"] for meta in plan["jobs"].values()))
+
+
+class AgentDocsGateTest(unittest.TestCase):
+    """Docs-only plan: unselected jobs must be skipped; selected jobs must succeed."""
+
+    _plan = GateSchemaTest._plan
+    _needs = GateSchemaTest._needs
+    _gate = GateSchemaTest._gate
+
+    def test_docs_plan_all_skipped_passes(self) -> None:
+        for workflow in SEL.WORKFLOW_JOBS:
+            plan = self._plan(workflow, {})
+            self.assertEqual(self._gate(plan, workflow), 0, workflow)
+
+    def test_docs_plan_unselected_ran_rejected(self) -> None:
+        for workflow, jobs in SEL.WORKFLOW_JOBS.items():
+            for job in jobs:
+                for result in ("success", "failure", "cancelled"):
+                    plan = self._plan(workflow, {})
+                    self.assertEqual(self._gate(plan, workflow, {job: result}), 1, (workflow, job, result))
+
+    def test_full_plan_selected_bad_result_rejected(self) -> None:
+        for workflow, jobs in SEL.WORKFLOW_JOBS.items():
+            plan = self._plan(workflow, {job: True for job in jobs})
+            plan["mode"] = "full"
+            plan["reason_code"] = "FULL_PATH_BROADEN"
+            ok = {job: "success" for job in jobs}
+            self.assertEqual(self._gate(plan, workflow, ok), 0, workflow)
+            for job in jobs:
+                for result in ("failure", "cancelled", "skipped"):
+                    self.assertEqual(
+                        self._gate(plan, workflow, {**ok, job: result}), 1, (workflow, job, result)
+                    )
+                self.assertEqual(
+                    self._gate(plan, workflow, ok, omit_jobs=frozenset({job})), 1, (workflow, job)
+                )
 
 
 if __name__ == "__main__":
