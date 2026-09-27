@@ -47,6 +47,38 @@ impl RevisionTarget {
     }
 }
 
+/// Route a caller reached a revision target through. Wiki document routes use
+/// the wiki document permission; project document routes (`project_id` set)
+/// use the owning project's permission and require the document to belong to
+/// that project. Stored revisions are keyed by the target alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RevisionScope {
+    target: RevisionTarget,
+    project_id: Option<Uuid>,
+}
+
+impl RevisionScope {
+    pub fn project_document(project_id: Uuid, document_id: Uuid) -> Self {
+        Self {
+            target: RevisionTarget::Document(document_id),
+            project_id: Some(project_id),
+        }
+    }
+
+    pub fn target(self) -> RevisionTarget {
+        self.target
+    }
+}
+
+impl From<RevisionTarget> for RevisionScope {
+    fn from(target: RevisionTarget) -> Self {
+        Self {
+            target,
+            project_id: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RevisionMeta {
     pub id: Uuid,
@@ -273,6 +305,65 @@ async fn authorize_document(
     Ok(Ok(()))
 }
 
+/// Project document revision access: the owning project is share-locked with
+/// the caller's effective project permission (members and project group
+/// grants; wiki document grants never apply), and the live document must
+/// belong to the project named by the route. Writes refuse an archived
+/// project (source `assertProjectWritable`).
+async fn authorize_project_document(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    project_id: Uuid,
+    document_id: Uuid,
+    write: bool,
+) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+    if !workspace_is_live(&mut *tx, workspace_id).await? {
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let Some((permission, project_archived)) = crate::db::projects::share_lock_project_permission(
+        tx,
+        workspace_id,
+        actor_user_id,
+        project_id,
+    )
+    .await?
+    else {
+        return Ok(Err(RevisionDbError::NotFound));
+    };
+    // Checked after the project lock wait so a session revoked meanwhile is refused.
+    if !session_is_live(&mut *tx, actor_user_id, session_id).await? {
+        return Ok(Err(RevisionDbError::Forbidden));
+    }
+    let min = if write {
+        crate::projects::ProjectPermission::Edit
+    } else {
+        crate::projects::ProjectPermission::View
+    };
+    if !permission.at_least(min) {
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let document: Option<(Option<Uuid>,)> = sqlx::query_as(
+        r#"
+        SELECT project_id
+        FROM fvoci.documents
+        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if document.and_then(|(project,)| project) != Some(project_id) {
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    if write && project_archived {
+        return Ok(Err(RevisionDbError::ProjectArchived));
+    }
+    Ok(Ok(()))
+}
+
 /// Task revision access: a live task in a live project the caller can view
 /// (read) or edit (write). Writes also refuse an archived project or task
 /// (source `assertTaskWritable`). The project row is share-locked.
@@ -336,14 +427,26 @@ async fn authorize_target(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-    target: RevisionTarget,
+    scope: RevisionScope,
     write: bool,
 ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
-    match target {
-        RevisionTarget::Document(id) => {
+    match (scope.target, scope.project_id) {
+        (RevisionTarget::Document(id), None) => {
             authorize_document(tx, workspace_id, actor_user_id, session_id, id, write).await
         }
-        RevisionTarget::Task(id) => {
+        (RevisionTarget::Document(id), Some(project_id)) => {
+            authorize_project_document(
+                tx,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                project_id,
+                id,
+                write,
+            )
+            .await
+        }
+        (RevisionTarget::Task(id), _) => {
             authorize_task(tx, workspace_id, actor_user_id, session_id, id, write).await
         }
     }
@@ -355,9 +458,10 @@ pub async fn authorize_revision_target(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-    target: RevisionTarget,
+    scope: impl Into<RevisionScope>,
     write: bool,
 ) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+    let scope = scope.into();
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     let result = authorize_target(
@@ -365,7 +469,7 @@ pub async fn authorize_revision_target(
         workspace_id,
         actor_user_id,
         session_id,
-        target,
+        scope,
         write,
     )
     .await?;
@@ -447,10 +551,12 @@ pub async fn list_revisions(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-    target: RevisionTarget,
+    scope: impl Into<RevisionScope>,
     limit: i64,
     before: Option<RevisionCursor>,
 ) -> Result<Result<RevisionListPage, RevisionDbError>, sqlx::Error> {
+    let scope = scope.into();
+    let target = scope.target;
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_target(
@@ -458,7 +564,7 @@ pub async fn list_revisions(
         workspace_id,
         actor_user_id,
         session_id,
-        target,
+        scope,
         false,
     )
     .await?
@@ -565,9 +671,11 @@ pub async fn get_revision(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-    target: RevisionTarget,
+    scope: impl Into<RevisionScope>,
     revision_id: Uuid,
 ) -> Result<Result<RevisionDetail, RevisionDbError>, sqlx::Error> {
+    let scope = scope.into();
+    let target = scope.target;
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_target(
@@ -575,7 +683,7 @@ pub async fn get_revision(
         workspace_id,
         actor_user_id,
         session_id,
-        target,
+        scope,
         false,
     )
     .await?
@@ -648,9 +756,11 @@ pub async fn create_manual_revision(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-    target: RevisionTarget,
+    scope: impl Into<RevisionScope>,
     input: CreateRevisionInput,
 ) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+    let scope = scope.into();
+    let target = scope.target;
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_target(
@@ -658,7 +768,7 @@ pub async fn create_manual_revision(
         workspace_id,
         actor_user_id,
         session_id,
-        target,
+        scope,
         true,
     )
     .await?
@@ -1010,10 +1120,12 @@ pub async fn resolve_restore(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-    target: RevisionTarget,
+    scope: impl Into<RevisionScope>,
     revision_id: Uuid,
     client_ip: Option<&str>,
 ) -> Result<Result<Vec<u8>, RevisionDbError>, sqlx::Error> {
+    let scope = scope.into();
+    let target = scope.target;
     let _ = client_ip;
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
@@ -1022,7 +1134,7 @@ pub async fn resolve_restore(
         workspace_id,
         actor_user_id,
         session_id,
-        target,
+        scope,
         true,
     )
     .await?
@@ -1104,8 +1216,10 @@ pub async fn load_persisted_target_source(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     session_id: Uuid,
-    target: RevisionTarget,
+    scope: impl Into<RevisionScope>,
 ) -> Result<Result<PersistedCollabSource, RevisionDbError>, sqlx::Error> {
+    let scope = scope.into();
+    let target = scope.target;
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
     match authorize_target(
@@ -1113,7 +1227,7 @@ pub async fn load_persisted_target_source(
         workspace_id,
         actor_user_id,
         session_id,
-        target,
+        scope,
         true,
     )
     .await?

@@ -445,3 +445,236 @@ async fn document_move_into_project_keeps_room_until_project_access_is_revoked()
     )
     .await;
 }
+
+fn project_revisions_url(workspace_id: Uuid, project_id: &str, document_id: &str) -> String {
+    format!(
+        "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions"
+    )
+}
+
+async fn collab_http_json(
+    addr: std::net::SocketAddr,
+    method: reqwest::Method,
+    path: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let mut req = reqwest::Client::new()
+        .request(method, format!("http://{addr}{path}"))
+        .header("origin", crate::support::PUBLIC_ORIGIN)
+        .header("cookie", format!("fvoci_session={token}"));
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    let response = req.send().await.expect("http");
+    let status = response.status();
+    (
+        status,
+        response.json().await.unwrap_or(serde_json::Value::Null),
+    )
+}
+
+async fn collab_apply_and_persist(
+    addr: std::net::SocketAddr,
+    token: &str,
+    key: &str,
+    client_id: u32,
+    update: &[u8],
+) {
+    let mut ws = crate::support::connect_member(addr, token).await;
+    crate::support::auth_and_join(&mut ws, key, client_id).await;
+    crate::support::complete_sync_handshake(&mut ws, key).await;
+    ws.send(Message::Binary(
+        crate::support::sync_update_frame(key, update).into(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        crate::support::wait_for_sync_applied(&mut ws, Duration::from_secs(8)).await,
+        "update must apply"
+    );
+    let request_id = Uuid::now_v7();
+    ws.send(Message::Binary(
+        crate::support::stateless_frame(key, &format!("persist:{request_id}")).into(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        crate::support::wait_for_stateless_exact(
+            &mut ws,
+            &format!("persisted:{request_id}"),
+            Duration::from_secs(8)
+        )
+        .await,
+        "persist ack"
+    );
+    let _ = ws.close(None).await;
+}
+
+/// Durable collab write sequence of a document (advances on every appended update).
+async fn document_tail_seq(pool: &sqlx::PgPool, workspace_id: Uuid, document_id: Uuid) -> i64 {
+    let mut tx = pool.begin().await.unwrap();
+    fvoci_server::db::context::set_tenant(&mut tx, workspace_id)
+        .await
+        .unwrap();
+    let seq = sqlx::query_scalar(
+        "SELECT tail_seq FROM fvoci.document_states WHERE workspace_id = $1 AND document_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    seq
+}
+
+/// Project document revision create captures real collab state and restore
+/// goes through the room actor as a durable forward update; an archived
+/// project refuses restore without appending.
+#[tokio::test]
+async fn project_document_revision_create_and_forward_restore() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut run = crate::support::TestRun::new(crate::support::TestDb::bootstrap().await);
+        let owner = crate::support::setup_owner_session(&run.harness).await;
+        let project = fvoci_server::db::projects::create_project(
+            &owner.pool,
+            owner.workspace_id,
+            owner.user_id,
+            owner.session_id,
+            fvoci_server::db::projects::CreateProjectInput {
+                key: "PREV",
+                name: "Project revisions",
+                visibility: "private",
+                description: None,
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .expect("create project")
+        .expect("ok");
+        let document_id = project.root_document_id.expect("project root document");
+        let workspace_id = owner.workspace_id;
+        let (state, hub) = crate::support::collab_app_state(
+            &run.harness.app_url,
+            crate::support::test_collab_config(4, 60_000),
+        )
+        .await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(workspace_id, document_id);
+        let token = owner.session_token.clone();
+        collab_apply_and_persist(
+            addr,
+            &token,
+            &key,
+            1,
+            &crate::support::engine_fixture("structured.v1"),
+        )
+        .await;
+
+        let base = project_revisions_url(
+            workspace_id,
+            &project.id.to_string(),
+            &document_id.to_string(),
+        );
+        let wiki = format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions");
+        let (status, _) = collab_http_json(addr, reqwest::Method::POST, &wiki, &token, None).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+        let (status, created) =
+            collab_http_json(addr, reqwest::Method::POST, &base, &token, None).await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{created}");
+        let revision_id = created["id"].as_str().unwrap().to_string();
+        let (status, original) = collab_http_json(
+            addr,
+            reqwest::Method::GET,
+            &format!("{base}/{revision_id}"),
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{original}");
+
+        collab_apply_and_persist(
+            addr,
+            &token,
+            &key,
+            3,
+            &crate::support::engine_fixture("followup_edit.v1"),
+        )
+        .await;
+        let (status, edited) =
+            collab_http_json(addr, reqwest::Method::POST, &base, &token, None).await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{edited}");
+        let (_, edited) = collab_http_json(
+            addr,
+            reqwest::Method::GET,
+            &format!("{base}/{}", edited["id"].as_str().unwrap()),
+            &token,
+            None,
+        )
+        .await;
+        assert_ne!(edited["contentJson"], original["contentJson"]);
+
+        let before = document_tail_seq(&owner.pool, workspace_id, document_id).await;
+        let (status, restored) = collab_http_json(
+            addr,
+            reqwest::Method::POST,
+            &format!("{base}/{revision_id}/restore"),
+            &token,
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{restored}");
+        assert_eq!(restored["restored"], true);
+        let after = document_tail_seq(&owner.pool, workspace_id, document_id).await;
+        assert!(
+            after > before,
+            "restore must append a durable forward update"
+        );
+
+        let (status, current) =
+            collab_http_json(addr, reqwest::Method::POST, &base, &token, None).await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{current}");
+        let (_, current) = collab_http_json(
+            addr,
+            reqwest::Method::GET,
+            &format!("{base}/{}", current["id"].as_str().unwrap()),
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(current["contentJson"], original["contentJson"]);
+
+        let admin = sqlx::PgPool::connect(&run.harness.admin_url).await.unwrap();
+        sqlx::query(
+            "UPDATE fvoci.projects SET status = 'archived' WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(project.id)
+        .execute(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+        let before = document_tail_seq(&owner.pool, workspace_id, document_id).await;
+        let (status, body) = collab_http_json(
+            addr,
+            reqwest::Method::POST,
+            &format!("{base}/{revision_id}/restore"),
+            &token,
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "project_archived");
+        assert_eq!(
+            document_tail_seq(&owner.pool, workspace_id, document_id).await,
+            before
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await
+    .expect("project_document_revision_create_and_forward_restore hung");
+}

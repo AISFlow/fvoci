@@ -2453,3 +2453,241 @@ async fn project_document_move_rejects_descendant_cycle() {
 
     harness.cleanup().await;
 }
+
+fn project_revisions_url(workspace_id: Uuid, project_id: &str, document_id: &str) -> String {
+    format!(
+        "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions"
+    )
+}
+
+async fn insert_document_revision(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    document_id: &str,
+    text: &str,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding, content_json, text, reason
+        ) VALUES ($1, $2, 'document', $3, $4, 1, $5, $6, 'manual')
+        "#,
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .bind(Uuid::parse_str(document_id).unwrap())
+    .bind(text.as_bytes())
+    .bind(json!({"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]}))
+    .bind(text)
+    .execute(admin)
+    .await
+    .expect("insert revision");
+    id
+}
+
+/// Project document revisions use the owning project's permission on the
+/// project path: members and viewers read, only editors write, the wiki path
+/// and a mismatched project path refuse, and an archived project refuses
+/// writes with `project_archived`.
+#[tokio::test]
+async fn project_document_revisions_follow_project_permission() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lead = add_workspace_user(&admin, workspace_id, "member", "lead").await;
+    let viewer = add_workspace_user(&admin, workspace_id, "member", "viewer").await;
+    let outsider = add_workspace_user(&admin, workspace_id, "member", "outsider").await;
+
+    let project = create_project(app.clone(), &lead.cookie, workspace_id, "REV", "private").await;
+    let project_id = project["id"].as_str().unwrap().to_string();
+    let root_id = project["rootDocumentId"].as_str().unwrap().to_string();
+    let other = create_project(app.clone(), &lead.cookie, workspace_id, "OTH", "private").await;
+    let other_id = other["id"].as_str().unwrap().to_string();
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+        Some(json!({"userId": viewer.user_id.to_string(), "role": "viewer"})),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let (status, created) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents"),
+        Some(json!({"parentId": root_id, "title": "Spec"})),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let doc_id = created["id"].as_str().unwrap().to_string();
+
+    let rev = insert_document_revision(&admin, workspace_id, &doc_id, "first").await;
+    let sibling_rev = insert_document_revision(&admin, workspace_id, &root_id, "root").await;
+    let base = project_revisions_url(workspace_id, &project_id, &doc_id);
+
+    for cookie in [&lead.cookie, &viewer.cookie] {
+        let (status, list) = json_request(app.clone(), "GET", &base, None, Some(cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{list:?}");
+        let ids: Vec<&str> = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![rev.to_string().as_str()]);
+        let (status, detail) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/{rev}"),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail:?}");
+        assert_eq!(detail["targetId"], doc_id.as_str());
+        assert_eq!(
+            detail["contentJson"]["content"][0]["content"][0]["text"],
+            "first"
+        );
+    }
+
+    // A revision of another document is not reachable through this document.
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}/{sibling_rev}"),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Viewers cannot write; restore is refused before any collab work.
+    let (status, _) = json_request(app.clone(), "POST", &base, None, Some(&viewer.cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/{rev}/restore"),
+        Some(json!({})),
+        Some(&viewer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Private project: workspace owner without membership and other members see nothing.
+    for cookie in [&owner_cookie, &outsider.cookie] {
+        let (status, _) = json_request(app.clone(), "GET", &base, None, Some(cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/{rev}"),
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // The wiki path and a mismatched project path do not expose project documents.
+    for path in [
+        format!("/api/v1/workspaces/{workspace_id}/documents/{doc_id}/revisions"),
+        project_revisions_url(workspace_id, &other_id, &doc_id),
+    ] {
+        let (status, _) = json_request(app.clone(), "GET", &path, None, Some(&lead.cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        let (status, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{path}/{rev}"),
+            None,
+            Some(&lead.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        let (status, _) = json_request(app.clone(), "POST", &path, None, Some(&lead.cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{path}/{rev}/restore"),
+            Some(json!({})),
+            Some(&lead.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+
+    // Removing the viewer from the project revokes revision access.
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/members/{}",
+            viewer.user_id
+        ),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_request(app.clone(), "GET", &base, None, Some(&viewer.cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Archived project: reads stay, writes are refused with project_archived.
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/archive"),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_request(app.clone(), "GET", &base, None, Some(&lead.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = json_request(app.clone(), "POST", &base, None, Some(&lead.cookie)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
+    assert_eq!(body["code"], "project_archived");
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/{rev}/restore"),
+        Some(json!({})),
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
+    assert_eq!(body["code"], "project_archived");
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/unarchive"),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A trashed project document has no revision routes.
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{doc_id}/trash"
+        ),
+        None,
+        Some(&lead.cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body:?}");
+    let (status, _) = json_request(app.clone(), "GET", &base, None, Some(&lead.cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    admin.close().await;
+    harness.cleanup().await;
+}

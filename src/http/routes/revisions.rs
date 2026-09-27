@@ -26,7 +26,7 @@ use crate::db::revisions::{
     authorize_revision_target, create_manual_revision, decode_revision_cursor,
     get_revision as get_revision_for, list_revisions as list_revisions_for,
     load_persisted_target_source, resolve_restore, CreateRevisionInput, RevisionDbError,
-    RevisionDetail, RevisionMeta, RevisionTarget,
+    RevisionDetail, RevisionMeta, RevisionScope, RevisionTarget,
 };
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::authz::{require_request_auth, Access};
@@ -47,6 +47,18 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/revisions/{revision_id}/restore",
             post(restore_revision),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions",
+            get(list_project_document_revisions).post(create_project_document_revision),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}",
+            get(get_project_document_revision),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/documents/{document_id}/revisions/{revision_id}/restore",
+            post(restore_project_document_revision),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/tasks/{task_id}/revisions",
@@ -82,7 +94,7 @@ async fn create_task_revision(
         headers,
         jar,
         workspace_id,
-        RevisionTarget::Task(task_id),
+        RevisionTarget::Task(task_id).into(),
     )
     .await
 }
@@ -99,7 +111,7 @@ async fn list_task_revisions(
         headers,
         jar,
         workspace_id,
-        RevisionTarget::Task(task_id),
+        RevisionTarget::Task(task_id).into(),
         query,
     )
     .await
@@ -116,7 +128,7 @@ async fn get_task_revision(
         headers,
         jar,
         workspace_id,
-        RevisionTarget::Task(task_id),
+        RevisionTarget::Task(task_id).into(),
         revision_id,
     )
     .await
@@ -136,7 +148,81 @@ async fn restore_task_revision(
         headers,
         jar,
         workspace_id,
-        RevisionTarget::Task(task_id),
+        RevisionTarget::Task(task_id).into(),
+        revision_id,
+        body,
+    )
+    .await
+}
+
+async fn create_project_document_revision(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Result<Response, RevisionApiError> {
+    create_target_revision(
+        state,
+        peer,
+        headers,
+        jar,
+        workspace_id,
+        RevisionScope::project_document(project_id, document_id),
+    )
+    .await
+}
+
+async fn list_project_document_revisions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id)): Path<(Uuid, Uuid, Uuid)>,
+    query: Result<Query<RevisionListQuery>, QueryRejection>,
+) -> Result<Json<RevisionListResponse>, RevisionApiError> {
+    list_target_revisions(
+        state,
+        headers,
+        jar,
+        workspace_id,
+        RevisionScope::project_document(project_id, document_id),
+        query,
+    )
+    .await
+}
+
+async fn get_project_document_revision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id, revision_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+) -> Result<Json<RevisionDetailResponse>, RevisionApiError> {
+    get_target_revision(
+        state,
+        headers,
+        jar,
+        workspace_id,
+        RevisionScope::project_document(project_id, document_id),
+        revision_id,
+    )
+    .await
+}
+
+async fn restore_project_document_revision(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, project_id, document_id, revision_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    body: Bytes,
+) -> Result<Json<RevisionRestoreResponse>, RevisionApiError> {
+    restore_target_revision(
+        state,
+        peer,
+        headers,
+        jar,
+        workspace_id,
+        RevisionScope::project_document(project_id, document_id),
         revision_id,
         body,
     )
@@ -208,7 +294,7 @@ async fn create_revision(
         headers,
         jar,
         workspace_id,
-        RevisionTarget::Document(document_id),
+        RevisionTarget::Document(document_id).into(),
     )
     .await
 }
@@ -219,11 +305,11 @@ async fn create_target_revision(
     headers: HeaderMap,
     jar: CookieJar,
     workspace_id: Uuid,
-    target: RevisionTarget,
+    scope: RevisionScope,
 ) -> Result<Response, RevisionApiError> {
     check_origin(&headers, &state.public_origin)?;
     let (user_id, credential_id) =
-        revision_credential(&state, &headers, &jar, workspace_id, target, true).await?;
+        revision_credential(&state, &headers, &jar, workspace_id, scope.target(), true).await?;
     let _ = peer_ip(peer.ip());
     if let Err(retry_after) = state
         .rate_limiter
@@ -241,7 +327,7 @@ async fn create_target_revision(
         workspace_id,
         user_id,
         credential_id,
-        target,
+        scope,
         true,
     )
     .await
@@ -250,14 +336,14 @@ async fn create_target_revision(
         Ok(()) => {}
         Err(err) => return Err(map_revision_error(err)),
     }
-    let captured = capture_for_create(&state, workspace_id, user_id, credential_id, target).await?;
+    let captured = capture_for_create(&state, workspace_id, user_id, credential_id, scope).await?;
     let text = prepare_revision_text(&captured.content_json).map_err(|_| collab_unavailable())?;
     let result = create_manual_revision(
         &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
-        target,
+        scope,
         CreateRevisionInput {
             y_snapshot: captured.y_snapshot,
             content_json: captured.content_json,
@@ -289,7 +375,7 @@ async fn list_revisions(
         headers,
         jar,
         workspace_id,
-        RevisionTarget::Document(document_id),
+        RevisionTarget::Document(document_id).into(),
         query,
     )
     .await
@@ -300,7 +386,7 @@ async fn list_target_revisions(
     headers: HeaderMap,
     jar: CookieJar,
     workspace_id: Uuid,
-    target: RevisionTarget,
+    scope: RevisionScope,
     query: Result<Query<RevisionListQuery>, QueryRejection>,
 ) -> Result<Json<RevisionListResponse>, RevisionApiError> {
     let Query(query) = query.map_err(AppError::from)?;
@@ -316,13 +402,13 @@ async fn list_target_revisions(
         ),
     };
     let (user_id, credential_id) =
-        revision_credential(&state, &headers, &jar, workspace_id, target, false).await?;
+        revision_credential(&state, &headers, &jar, workspace_id, scope.target(), false).await?;
     let result = list_revisions_for(
         &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
-        target,
+        scope,
         limit,
         before,
     )
@@ -348,7 +434,7 @@ async fn get_revision(
         headers,
         jar,
         workspace_id,
-        RevisionTarget::Document(document_id),
+        RevisionTarget::Document(document_id).into(),
         revision_id,
     )
     .await
@@ -359,17 +445,17 @@ async fn get_target_revision(
     headers: HeaderMap,
     jar: CookieJar,
     workspace_id: Uuid,
-    target: RevisionTarget,
+    scope: RevisionScope,
     revision_id: Uuid,
 ) -> Result<Json<RevisionDetailResponse>, RevisionApiError> {
     let (user_id, credential_id) =
-        revision_credential(&state, &headers, &jar, workspace_id, target, false).await?;
+        revision_credential(&state, &headers, &jar, workspace_id, scope.target(), false).await?;
     let result = get_revision_for(
         &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
-        target,
+        scope,
         revision_id,
     )
     .await
@@ -394,7 +480,7 @@ async fn restore_revision(
         headers,
         jar,
         workspace_id,
-        RevisionTarget::Document(document_id),
+        RevisionTarget::Document(document_id).into(),
         revision_id,
         body,
     )
@@ -408,7 +494,7 @@ async fn restore_target_revision(
     headers: HeaderMap,
     jar: CookieJar,
     workspace_id: Uuid,
-    target: RevisionTarget,
+    scope: RevisionScope,
     revision_id: Uuid,
     body: Bytes,
 ) -> Result<Json<RevisionRestoreResponse>, RevisionApiError> {
@@ -421,7 +507,7 @@ async fn restore_target_revision(
         serde_json::from_slice(&body).map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?
     };
     let (user_id, credential_id) =
-        revision_credential(&state, &headers, &jar, workspace_id, target, true).await?;
+        revision_credential(&state, &headers, &jar, workspace_id, scope.target(), true).await?;
     let _ = peer_ip(peer.ip());
     if let Err(retry_after) = state
         .rate_limiter
@@ -439,7 +525,7 @@ async fn restore_target_revision(
         workspace_id,
         user_id,
         credential_id,
-        target,
+        scope,
         revision_id,
         None,
     )
@@ -453,8 +539,12 @@ async fn restore_target_revision(
         return Err(collab_unavailable());
     };
     let timeout = hub.rpc_timeout();
-    let restore =
-        hub.restore_revision(room_key(workspace_id, target), user_id, credential_id, snap);
+    let restore = hub.restore_revision(
+        room_key(workspace_id, scope.target()),
+        user_id,
+        credential_id,
+        snap,
+    );
     match tokio::time::timeout(timeout.max(Duration::from_millis(1)), restore).await {
         Ok(Ok(())) => Ok(Json(RevisionRestoreResponse { restored: true })),
         Ok(Err(RevisionRestoreError::Rejected)) => {
@@ -470,11 +560,11 @@ async fn capture_for_create(
     workspace_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
-    target: RevisionTarget,
+    scope: RevisionScope,
 ) -> Result<CapturedRevision, RevisionApiError> {
     if let Some(hub) = state.collab.as_ref() {
         if let Some(live) = hub
-            .capture_if_live(room_key(workspace_id, target), user_id, session_id)
+            .capture_if_live(room_key(workspace_id, scope.target()), user_id, session_id)
             .await
         {
             return live.map_err(|_| collab_unavailable());
@@ -485,7 +575,7 @@ async fn capture_for_create(
         workspace_id,
         user_id,
         session_id,
-        target,
+        scope,
     )
     .await
     .map_err(internal)?;
@@ -555,8 +645,8 @@ fn collab_unavailable() -> RevisionApiError {
     }
 }
 
-/// Task revisions accept the source's tasks.read/write PAT scopes. Document
-/// revision routes retain their existing cookie-only contract.
+/// Task revisions accept the source's tasks.read/write PAT scopes. Wiki and
+/// project document revision routes retain their existing cookie-only contract.
 async fn revision_credential(
     state: &AppState,
     headers: &HeaderMap,
