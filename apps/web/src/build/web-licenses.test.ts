@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -83,17 +82,4 @@ test("finalizeBrowserOpenSourceNotice appends FVOCI LICENSE and editor font OFL 
   for (const forbidden of FORBIDDEN_NOTICE_PACKAGE_HEADINGS) {
     assert.doesNotMatch(notice, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-});
-
-test("production dist notice excludes dev-tool headings", () => {
-  const distPath = path.join(repoRoot, "apps/web/dist/open-source-licenses.txt");
-  if (!fs.existsSync(distPath)) {
-    return;
-  }
-  const notice = fs.readFileSync(distPath, "utf8");
-  for (const forbidden of FORBIDDEN_NOTICE_PACKAGE_HEADINGS) {
-    assert.doesNotMatch(notice, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
-  assert.match(notice, /qrcode-generator - 1\.4\.4/);
-  assert.match(notice, /Permission is hereby granted/);
 });

@@ -5,6 +5,9 @@ import { expect, test, type Page } from "@playwright/test";
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const distLicense = path.join(repoRoot, "apps/web/dist/open-source-licenses.txt");
 
+/** Build regression guardrails only — not product license policy. */
+const FORBIDDEN_NOTICE_PACKAGE_HEADINGS = ["@m2d/", "@playwright/", "vite - "] as const;
+
 async function runSetup(page: Page): Promise<void> {
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
@@ -29,6 +32,13 @@ test("open-source-licenses.txt is discoverable, served verbatim, and linked from
     true,
   );
   const distBytes = fs.readFileSync(distLicense);
+  const distText = distBytes.toString("utf8");
+  for (const forbidden of FORBIDDEN_NOTICE_PACKAGE_HEADINGS) {
+    expect(distText).not.toMatch(new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  expect(distText).toMatch(/qrcode-generator - 1\.4\.4/);
+  expect(distText).toMatch(/Permission is hereby granted/);
+  expect(distText).toMatch(/packages\/editor\/src\/fonts\/NotoSansKR-OFL\.txt/);
 
   await runSetup(page);
 
