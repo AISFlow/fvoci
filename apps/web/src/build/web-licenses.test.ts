@@ -1,0 +1,85 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import test from "node:test";
+import {
+  applyBrowserLicenseSupplements,
+  assertBundledLicenseTexts,
+  finalizeBrowserOpenSourceNotice,
+  hasLicenseText,
+  loadBrowserLicenseManifest,
+  type LicenseEntry,
+} from "./web-licenses.ts";
+
+const repoRoot = path.resolve(import.meta.dirname, "../../../../");
+const manifestPath = path.join(repoRoot, "third-party/browser-licenses/manifest.json");
+
+/** Build regression guardrails only — not product license policy. */
+const FORBIDDEN_NOTICE_PACKAGE_HEADINGS = ["@m2d/", "@playwright/", "vite - "] as const;
+
+test("hasLicenseText treats whitespace-only stubs as missing", () => {
+  assert.equal(hasLicenseText("   "), false);
+  assert.equal(hasLicenseText("upstream LICENSE body"), true);
+});
+
+test("applyBrowserLicenseSupplements fills only when upstream text is absent", () => {
+  const supplements = loadBrowserLicenseManifest(manifestPath);
+  const entries: LicenseEntry[] = [
+    {
+      name: "qrcode-generator",
+      version: "1.4.4",
+      identifier: "MIT",
+    },
+    {
+      name: "react",
+      version: "19.3.0",
+      identifier: "MIT",
+      text: "preserve upstream bytes from Vite",
+    },
+  ];
+  const filled = applyBrowserLicenseSupplements(
+    entries,
+    supplements,
+    path.dirname(manifestPath),
+  );
+  assert.equal(filled[1]?.text, "preserve upstream bytes from Vite");
+  assert.match(filled[0]?.text ?? "", /Kazuhiko Arase/);
+  assert.match(filled[0]?.supplementSource ?? "", /^https:\/\//);
+  assert.doesNotThrow(() => assertBundledLicenseTexts(filled, supplements));
+});
+
+test("assertBundledLicenseTexts fails when a bundled id lacks text and supplement", () => {
+  const supplements = loadBrowserLicenseManifest(manifestPath);
+  const entries: LicenseEntry[] = [
+    { name: "example-missing", version: "1.0.0", identifier: "MIT" },
+  ];
+  assert.throws(
+    () => assertBundledLicenseTexts(entries, supplements),
+    /no license text and no supplement/,
+  );
+});
+
+test("finalizeBrowserOpenSourceNotice appends FVOCI LICENSE and editor font OFL files", () => {
+  const sampleJson = JSON.stringify([
+    {
+      name: "react",
+      version: "19.3.0",
+      identifier: "MIT",
+      text: "Permission is hereby granted, free of charge, to any person obtaining a copy\nTHE SOFTWARE IS PROVIDED",
+    },
+    {
+      name: "qrcode-generator",
+      version: "1.4.4",
+      identifier: "MIT",
+    },
+  ]);
+  const notice = finalizeBrowserOpenSourceNotice(sampleJson, repoRoot, manifestPath);
+  assert.match(notice, /## react - 19\.3\.0 \(MIT\)/);
+  assert.match(notice, /Kazuhiko Arase/);
+  assert.match(notice, /Supplement source: https:\/\/raw\.githubusercontent\.com\/kazuhikoarase\/qrcode-generator/);
+  assert.match(notice, /## FVOCI source: LICENSE/);
+  assert.match(notice, /## FVOCI source: packages\/editor\/src\/fonts\/NotoSansKR-OFL\.txt/);
+  assert.match(notice, /SIL OPEN FONT LICENSE/);
+  for (const forbidden of FORBIDDEN_NOTICE_PACKAGE_HEADINGS) {
+    assert.doesNotMatch(notice, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});

@@ -31,7 +31,8 @@ use fvoci_server::jobs::{
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{
-    admin_pool, app_pool, create_project, json_request, session_id_for_user, setup_session, TestDb,
+    admin_pool, app_pool, create_project, json_request, session_id_for_user, setup_session,
+    wait_for_query_blocked_by, TestDb,
 };
 use serde_json::json;
 use sqlx::{Connection, PgPool};
@@ -2033,73 +2034,120 @@ async fn gc_retains_manual_when_promotion_races_row_lock() {
     .execute(&admin)
     .await
     .expect("state");
-    let revision_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO fvoci.revisions (
-            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
-            content_json, text, reason, created_by
-        ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'auto', 'session', NULL)
-        "#,
-    )
-    .bind(revision_id)
-    .bind(workspace_id)
-    .bind(doc.id)
-    .bind(&y_snapshot)
-    .execute(&admin)
-    .await
-    .expect("session row");
+    let anchor = Utc::now();
     for i in 0..2 {
         sqlx::query(
             r#"
             INSERT INTO fvoci.revisions (
                 id, workspace_id, target_kind, target_id, y_snapshot, encoding,
-                content_json, text, reason, created_by
-            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'extra', 'session', NULL)
+                content_json, text, reason, created_by, created_at
+            ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'extra', 'session', NULL, $5)
             "#,
         )
         .bind(Uuid::now_v7())
         .bind(workspace_id)
         .bind(doc.id)
         .bind(vec![i as u8])
+        .bind(anchor + ChronoDuration::milliseconds(i as i64))
         .execute(&admin)
         .await
-        .expect("extra");
+        .expect("older auto");
     }
+    let revision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by, created_at
+        ) VALUES ($1, $2, 'document', $3, $4, 1, '{}'::jsonb, 'auto', 'session', NULL, $5)
+        "#,
+    )
+    .bind(revision_id)
+    .bind(workspace_id)
+    .bind(doc.id)
+    .bind(&y_snapshot)
+    .bind(anchor + ChronoDuration::milliseconds(100))
+    .execute(&admin)
+    .await
+    .expect("head session row");
     let mut hold = admin.begin().await.expect("tx");
-    sqlx::query("SELECT id FROM fvoci.revisions WHERE id = $1 FOR UPDATE")
-        .bind(revision_id)
+    let hold_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *hold)
         .await
-        .expect("lock");
-    let pool_gc = app_pool(&harness).await;
-    let cancel = CancellationToken::new();
-    let gc_task =
-        tokio::spawn(async move { run_automatic_revision_gc(&pool_gc, 0, None, &cancel).await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    create_manual_revision(
-        &pool,
-        workspace_id,
-        user_id,
-        session_id,
-        RevisionTarget::Document(doc.id),
-        CreateRevisionInput {
-            y_snapshot: y_snapshot.clone(),
-            content_json: json!({}),
-            text: "manual".into(),
-            reason: String::new(),
-        },
+        .expect("pid");
+    sqlx::query(
+        r#"
+        SELECT id FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2
+        ORDER BY created_at ASC
+        FOR UPDATE
+        "#,
     )
+    .bind(workspace_id)
+    .bind(doc.id)
+    .fetch_all(&mut *hold)
     .await
-    .expect("promote")
-    .expect("ok");
-    hold.commit().await.expect("release");
-    let (deleted, _, _) = gc_task.await.expect("join").expect("gc");
-    assert!(deleted >= 2);
-    let manual_count: i64 = sqlx::query_scalar(
+    .expect("lock revision rows");
+    let pool_promote = app_pool(&harness).await;
+    let document_id = doc.id;
+    let y_snapshot_promote = y_snapshot.clone();
+    let promote_task = tokio::spawn(async move {
+        create_manual_revision(
+            &pool_promote,
+            workspace_id,
+            user_id,
+            session_id,
+            RevisionTarget::Document(document_id),
+            CreateRevisionInput {
+                y_snapshot: y_snapshot_promote,
+                content_json: json!({}),
+                text: "manual".into(),
+                reason: String::new(),
+            },
+        )
+        .await
+    });
+    let promote_pid =
+        wait_for_query_blocked_by(&admin, hold_pid, "%ORDER BY created_at DESC%").await;
+    let pool_gc = app_pool(&harness).await;
+    let workspace_id_gc = workspace_id;
+    let gc_task = tokio::spawn(async move {
+        gc_automatic_revisions_batch(&pool_gc, workspace_id_gc, 0, 5_000).await
+    });
+    let gc_pid = wait_for_query_blocked_by(&admin, hold_pid, "%PARTITION BY target_kind%").await;
+    assert_ne!(
+        promote_pid, gc_pid,
+        "promotion and GC must be distinct waiters"
+    );
+    hold.commit().await.expect("release head lock");
+    let promoted = promote_task
+        .await
+        .expect("join promote")
+        .expect("promote")
+        .expect("ok");
+    let deleted = gc_task.await.expect("join gc").expect("gc");
+    assert_eq!(
+        promoted, revision_id,
+        "metadata promotion must reuse head row id"
+    );
+    assert_eq!(deleted, 2, "older automatic rows removed");
+    let row: (String, Option<Uuid>) = sqlx::query_as(
+        r#"
+        SELECT reason, created_by FROM fvoci.revisions
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(revision_id)
+    .fetch_one(&admin)
+    .await
+    .expect("promoted row");
+    assert_eq!(row.0, "manual");
+    assert_eq!(row.1, Some(user_id));
+    let remaining: i64 = sqlx::query_scalar(
         r#"
         SELECT count(*)::bigint FROM fvoci.revisions
-        WHERE workspace_id = $1 AND target_id = $2 AND reason = 'manual'
+        WHERE workspace_id = $1 AND target_id = $2
         "#,
     )
     .bind(workspace_id)
@@ -2107,7 +2155,7 @@ async fn gc_retains_manual_when_promotion_races_row_lock() {
     .fetch_one(&admin)
     .await
     .expect("count");
-    assert_eq!(manual_count, 1);
+    assert_eq!(remaining, 1);
     admin.close().await;
     pool.close().await;
     harness.cleanup().await;
