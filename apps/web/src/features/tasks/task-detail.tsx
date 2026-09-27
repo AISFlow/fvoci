@@ -97,7 +97,8 @@ function TaskDetailCollabConnected({
   const [archivePersistError, setArchivePersistError] = useState<string | null>(null);
   const archiveInFlight = useRef(false);
 
-  const readOnly = pageReadOnly || (session?.readOnly ?? false);
+  const readOnly =
+    pageReadOnly || (session?.readOnly ?? false) || archivePersisting;
   const pageEditable = !pageReadOnly && task.archivedAt == null;
 
   const handleArchiveToggle = async (archived: boolean) => {
