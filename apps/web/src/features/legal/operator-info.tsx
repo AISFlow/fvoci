@@ -84,6 +84,11 @@ export function ServiceInfoFooter({
           {doc.label}
         </Link>
       ))}
+      {import.meta.env.PROD ? (
+        <a className="auth-shell__footer-link" href="/open-source-licenses.txt">
+          {t("legal.openSourceNotices")}
+        </a>
+      ) : null}
     </footer>
   );
 }

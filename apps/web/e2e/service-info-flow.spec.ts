@@ -83,6 +83,10 @@ test("operator settings persist through admin API and surface on public service-
       "href",
       "/legal/privacy",
     );
+    await expect(emptyFooter.getByRole("link", { name: "오픈소스 고지" })).toHaveAttribute(
+      "href",
+      "/open-source-licenses.txt",
+    );
     await expect(emptyFooter.getByRole("link", { name: "서비스 정보" })).toHaveCount(0);
   });
 
