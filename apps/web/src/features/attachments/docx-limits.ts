@@ -21,9 +21,17 @@ type ByteStream = {
 
 /**
  * docx-preview inflates whole parts in memory with no size bound, so a small
- * ZIP could expand without limit. Stream-inflate every part with JSZip (the
- * renderer's own ZIP reader) and stop at the first byte past `maxExpanded`.
- * Declared sizes in the ZIP headers are not trusted.
+ * ZIP could expand without limit. Checked in bounded order with JSZip (the
+ * renderer's own ZIP reader):
+ *
+ * 1. central directory only (`checkCRC32: false` inflates nothing);
+ * 2. part count, then every part stream-inflated one at a time, stopping at
+ *    the first byte past `maxExpanded` — declared sizes are not trusted;
+ * 3. only then JSZip's whole-package CRC check. It inflates all parts at once,
+ *    which step 2 has just bounded.
+ *
+ * Cancellation (`isAlive() === false`) is honoured before any inflation and
+ * between steps and chunks.
  */
 export async function checkDocxPackage(
   bytes: Uint8Array,
@@ -31,12 +39,14 @@ export async function checkDocxPackage(
   maxExpanded: number = DOCX_MAX_EXPANDED_BYTES,
   maxEntries: number = DOCX_MAX_ENTRIES,
 ): Promise<DocxPackageCheck> {
+  if (!isAlive()) return "invalid";
   let zip: JSZip;
   try {
-    zip = await JSZip.loadAsync(bytes, { checkCRC32: true });
+    zip = await JSZip.loadAsync(bytes, { checkCRC32: false });
   } catch {
     return "invalid";
   }
+  if (!isAlive()) return "invalid";
   const parts = Object.values(zip.files).filter((entry) => !entry.dir);
   if (parts.length > maxEntries) return "tooLarge";
   let total = 0;
@@ -59,5 +69,11 @@ export async function checkDocxPackage(
     });
     if (result !== "ok") return result;
   }
-  return "ok";
+  if (!isAlive()) return "invalid";
+  try {
+    await JSZip.loadAsync(bytes, { checkCRC32: true });
+  } catch {
+    return "invalid";
+  }
+  return isAlive() ? "ok" : "invalid";
 }
