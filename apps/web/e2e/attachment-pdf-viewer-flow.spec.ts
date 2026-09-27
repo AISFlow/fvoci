@@ -104,6 +104,45 @@ async function probeCanvas(page: Page): Promise<CanvasProbe> {
   });
 }
 
+/**
+ * The Korean fixture line "한글 문서" at 36pt from x=40pt: each character
+ * advances one 36pt em cell (DW 1000). Returns a coarse bitmap signature
+ * per cell; fallback "tofu" boxes would make the Hangul cells identical.
+ */
+async function hangulCells(page: Page): Promise<{ dark: number; signature: string }[]> {
+  return page.locator("[data-pdf-viewer] canvas").evaluate((node) => {
+    const canvas = node as HTMLCanvasElement;
+    const ctx = canvas.getContext("2d")!;
+    const unit = canvas.width / 400;
+    const top = Math.floor(canvas.height * (1 - 168 / 300));
+    const bottom = Math.floor(canvas.height * (1 - 122 / 300));
+    const cells = [];
+    for (let i = 0; i < 5; i += 1) {
+      const left = Math.floor((40 + 36 * i) * unit);
+      const right = Math.floor((40 + 36 * (i + 1)) * unit);
+      const { data, width } = ctx.getImageData(left, top, right - left, bottom - top);
+      let dark = 0;
+      let signature = "";
+      const grid = 8;
+      for (let gy = 0; gy < grid; gy += 1) {
+        for (let gx = 0; gx < grid; gx += 1) {
+          let cellDark = 0;
+          for (let y = Math.floor((gy * (bottom - top)) / grid); y < Math.floor(((gy + 1) * (bottom - top)) / grid); y += 1) {
+            for (let x = Math.floor((gx * width) / grid); x < Math.floor(((gx + 1) * width) / grid); x += 1) {
+              const at = (y * width + x) * 4;
+              if (data[at]! < 90 && data[at + 1]! < 90 && data[at + 2]! < 90) cellDark += 1;
+            }
+          }
+          dark += cellDark;
+          signature += cellDark > 0 ? "1" : "0";
+        }
+      }
+      cells.push({ dark, signature });
+    }
+    return cells;
+  });
+}
+
 test("PDF attachment: page navigation, zoom, rendered content, doc switch, not found", async ({
   page,
 }) => {
@@ -244,6 +283,16 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   const korean = await probeCanvas(page);
   expect(korean.darkInTextBand).toBeGreaterThan(200);
   expect(korean.darkInEmptyBand).toBe(0);
+  // 한, 글, (space), 문, 서: four inked, mutually distinct glyphs and an empty space cell.
+  const cells = await hangulCells(page);
+  const glyphs = [cells[0]!, cells[1]!, cells[3]!, cells[4]!];
+  for (const glyph of glyphs) expect(glyph.dark).toBeGreaterThan(40);
+  expect(cells[2]!.dark).toBe(0);
+  expect(new Set(glyphs.map((glyph) => glyph.signature)).size).toBe(4);
+  await test.info().attach("korean-pdf-canvas", {
+    body: await page.locator("[data-pdf-viewer] canvas").screenshot(),
+    contentType: "image/png",
+  });
 
   // Production asset URLs, types and the scripting exclusion.
   for (const [rel, type] of [
