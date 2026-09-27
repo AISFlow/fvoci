@@ -4253,6 +4253,225 @@ async fn task_stream_notifies_viewers_on_other_user_task_create() {
 }
 
 #[tokio::test]
+async fn task_stream_notifies_other_viewer_on_task_meta_date_and_status_patch() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let owner = add_workspace_user(&admin, workspace_id, "member", "meta-owner").await;
+    let peer = add_workspace_user(&admin, workspace_id, "member", "meta-peer").await;
+    let lab = create_project(app.clone(), &owner.cookie, workspace_id, "MSE", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let task = create_task_with_title(
+        app.clone(),
+        &owner.cookie,
+        workspace_id,
+        project_id,
+        json!({"title": "meta stream"}),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap();
+    let statuses = workflow_status_ids(app.clone(), &owner.cookie, workspace_id, project_id).await;
+    let other_status = statuses
+        .iter()
+        .find(|(id, _)| id != task["statusId"].as_str().unwrap())
+        .unwrap()
+        .0
+        .clone();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+
+    for body in [
+        json!({"dueDate": "2026-04-01"}),
+        json!({"statusId": other_status}),
+    ] {
+        let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+        let listener = tokio::spawn(sse_listen(
+            app.clone(),
+            path.clone(),
+            owner.cookie.clone(),
+            Some(b"event: open".to_vec()),
+            Some(open_tx),
+            Some(b"event: task".to_vec()),
+            Duration::from_secs(20),
+        ));
+        assert!(
+            timeout(Duration::from_secs(5), open_rx)
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .is_some(),
+            "task stream should emit open before mutations"
+        );
+        let (status, _) = patch_task(
+            app.clone(),
+            workspace_id,
+            task_id,
+            body.clone(),
+            &peer.cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            listener.await.expect("listener task"),
+            "project stream should receive a task invalidation frame for {body}"
+        );
+    }
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+async fn poll_task_updates_until(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    cursor: &fvoci_server::streams::EventCursor,
+    min: usize,
+) -> Vec<fvoci_server::streams::StreamEventRow> {
+    let mut rows = Vec::new();
+    for _ in 0..30 {
+        rows = poll_task_events(pool, workspace_id, project_id, cursor, 100)
+            .await
+            .expect("poll");
+        if rows.len() >= min {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    rows
+}
+
+#[tokio::test]
+async fn task_meta_and_move_events_reach_only_their_project_poll() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let stranger = add_workspace_user(&admin, workspace_id, "member", "meta-stranger").await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "MPA", "private").await;
+    let project_a = lab["id"].as_str().unwrap().to_string();
+    let other = create_project(app.clone(), &cookie, workspace_id, "MPB", "workspace").await;
+    let project_b = Uuid::parse_str(other["id"].as_str().unwrap()).unwrap();
+    let project_a_id = Uuid::parse_str(&project_a).unwrap();
+    let task = create_task_with_title(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        &project_a,
+        json!({"title": "scoped"}),
+    )
+    .await;
+    let task_id = task["id"].as_str().unwrap();
+    let current_status = task["statusId"].as_str().unwrap().to_string();
+    let statuses = workflow_status_ids(app.clone(), &cookie, workspace_id, &project_a).await;
+    let next_status = statuses
+        .iter()
+        .find(|(id, _)| *id != current_status)
+        .unwrap()
+        .0
+        .clone();
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let cursor = initial_cursor(&app_pool, workspace_id)
+        .await
+        .expect("cursor");
+    let events_before = count_rows(&admin, "events").await;
+
+    // Denied, conflicting and no-op patches must not manufacture events.
+    let (status, _) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"dueDate": "2026-05-01"}),
+        &stranger.cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({
+            "dueDate": "2026-05-01",
+            "expectedDates": {"startDate": null, "dueDate": "2026-01-01", "dueAt": null}
+        }),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"statusId": current_status}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count_rows(&admin, "events").await, events_before);
+
+    let (status, _) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"dueDate": "2026-05-01"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"statusId": next_status}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = patch_task(
+        app.clone(),
+        workspace_id,
+        task_id,
+        json!({"assigneeIds": [owner_id.to_string()]}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/move"),
+        Some(json!({"statusId": current_status})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rows = poll_task_updates_until(&app_pool, workspace_id, project_a_id, &cursor, 4).await;
+    let updates: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r.verb == "task.updated")
+        .map(|r| &r.payload)
+        .collect();
+    assert_eq!(updates.len(), 4, "{rows:?}");
+    for payload in &updates {
+        assert_eq!(payload["taskId"], task_id);
+        assert_eq!(payload["projectId"], project_a);
+    }
+    assert_eq!(updates[0]["dueDate"], "2026-05-01");
+    assert_eq!(updates[1]["from"], current_status);
+    assert_eq!(updates[1]["to"], next_status);
+    assert_eq!(updates[2]["assigneeIds"], json!([owner_id.to_string()]));
+    assert_eq!(updates[3]["from"], next_status);
+    assert_eq!(updates[3]["to"], current_status);
+
+    let foreign = poll_task_events(&app_pool, workspace_id, project_b, &cursor, 100)
+        .await
+        .expect("poll other project");
+    assert!(foreign.is_empty(), "{foreign:?}");
+
+    app_pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn task_stream_denies_non_member_like_task_list() {
     let harness = TestDb::bootstrap().await;
     let (app, _cookie, _, workspace_id) = setup_session(&harness).await;

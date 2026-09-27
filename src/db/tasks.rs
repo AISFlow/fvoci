@@ -303,6 +303,7 @@ async fn replace_task_assignees(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     actor_user_id: Uuid,
+    project_id: Uuid,
     task_id: Uuid,
     assignee_ids: &[Uuid],
     client_ip: Option<&str>,
@@ -368,6 +369,7 @@ async fn replace_task_assignees(
                 target_id: task_id,
                 payload: json!({
                     "taskId": task_id.to_string(),
+                    "projectId": project_id.to_string(),
                     "assigneeIds": uuid_strings(&unique),
                     "addedAssigneeIds": uuid_strings(&added),
                 }),
@@ -453,6 +455,7 @@ async fn replace_task_labels(
                 target_id: task_id,
                 payload: json!({
                     "taskId": task_id.to_string(),
+                    "projectId": project_id.to_string(),
                     "labelIds": uuid_strings(&unique),
                 }),
                 client_ip,
@@ -2532,8 +2535,14 @@ pub async fn patch_task_meta(
     let mut bind_recurrence: Option<Option<Value>> = None;
     let mut bind_archived_at: Option<Option<DateTime<Utc>>> = None;
 
+    // The project stream filters task verbs by `projectId`; take it from the
+    // authorized, locked task row, never from the request.
     let mut payload = serde_json::Map::new();
     payload.insert("taskId".to_string(), json!(task_id.to_string()));
+    payload.insert(
+        "projectId".to_string(),
+        json!(task.record.project_id.to_string()),
+    );
 
     if let Some(title) = &input.title {
         sets.push(format!("title = ${bind_idx}"));
@@ -2739,6 +2748,7 @@ pub async fn patch_task_meta(
                 target_id: task_id,
                 payload: json!({
                     "taskId": task_id.to_string(),
+                    "projectId": task.record.project_id.to_string(),
                     "from": from_status_id.to_string(),
                     "to": row.status_id.to_string(),
                 }),
@@ -2767,6 +2777,7 @@ pub async fn patch_task_meta(
             &mut tx,
             workspace_id,
             actor_user_id,
+            row.project_id,
             task_id,
             assignee_ids,
             client_ip,
@@ -2904,6 +2915,7 @@ pub async fn move_task(
                 target_id: task_id,
                 payload: json!({
                     "taskId": task_id.to_string(),
+                    "projectId": task.record.project_id.to_string(),
                     "from": from_status_id.to_string(),
                     "to": input.status_id.to_string(),
                 }),
