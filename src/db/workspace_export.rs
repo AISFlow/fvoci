@@ -352,7 +352,7 @@ pub async fn recheck_comment_delivery(
     if let Some(document_id) = document_id {
         let mut tx = pool.begin().await?;
         set_tenant(&mut tx, workspace_id).await?;
-        let project_id: Option<Uuid> = sqlx::query_scalar(
+        let project_id: Option<Option<Uuid>> = sqlx::query_scalar(
             "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
         )
         .bind(workspace_id)
@@ -360,6 +360,10 @@ pub async fn recheck_comment_delivery(
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
+        let project_id = match project_id {
+            None => return Ok(Err(WorkspaceExportDbError::Forbidden)),
+            Some(project_id) => project_id,
+        };
         return recheck_document_delivery(
             pool,
             workspace_id,

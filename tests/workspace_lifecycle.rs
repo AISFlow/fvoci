@@ -484,6 +484,86 @@ async fn sweep_purges_expired_team_and_personal_immediately() {
     harness.cleanup().await;
 }
 
+fn write_local_attachment_payload(
+    storage_root: &std::path::Path,
+    key: &str,
+    payload: &[u8],
+) {
+    let dir = storage_root.join("objects").join(key);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("payload"), payload).unwrap();
+}
+
+async fn setup_session_with_storage(
+    harness: &TestDb,
+) -> (
+    axum::Router,
+    String,
+    Uuid,
+    Uuid,
+    std::path::PathBuf,
+) {
+    use axum::body::Body;
+    use axum::http::Request;
+    use fvoci_server::attachments::LocalStorage;
+    use tower::ServiceExt;
+
+    let storage_root = std::env::temp_dir().join(format!("fvoci-ws-export-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&storage_root).unwrap();
+    let mut state = project_harness::app_state(&harness.app_url).await;
+    state.storage = LocalStorage::new(storage_root.clone()).into();
+    let app = fvoci_server::http::router(state, None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup")
+                .header("content-type", "application/json")
+                .header("origin", "http://localhost")
+                .extension(axum::extract::ConnectInfo(project_harness::test_peer()))
+                .body(Body::from(
+                    json!({
+                        "email": "owner@example.com",
+                        "password": "supersecret1",
+                        "givenName": "Owner",
+                        "workspaceSlug": "acme",
+                        "workspaceName": "Acme"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("setup");
+    let cookie_hdr = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .expect("set-cookie")
+        .to_string();
+    let cookie = cookie_hdr
+        .split(';')
+        .next()
+        .unwrap()
+        .split('=')
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let admin = admin_pool(harness).await;
+    let user_id: (Uuid,) = sqlx::query_as("SELECT id FROM fvoci.users LIMIT 1")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    admin.close().await;
+    (app, cookie, user_id.0, workspace_id.0, storage_root)
+}
+
 async fn bytes_request(
     app: axum::Router,
     method: &str,
@@ -708,6 +788,7 @@ async fn workspace_zip_omits_private_project_without_membership() {
 }
 
 async fn insert_attachment_with_payload(
+    storage_root: &std::path::Path,
     admin: &sqlx::PgPool,
     workspace_id: Uuid,
     document_id: Uuid,
@@ -718,11 +799,7 @@ async fn insert_attachment_with_payload(
 ) -> Uuid {
     let id = Uuid::now_v7();
     let key = Uuid::now_v7().to_string();
-    let dir = std::env::temp_dir()
-        .join("fvoci-ws-export-objects")
-        .join(&key);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("payload"), payload).unwrap();
+    write_local_attachment_payload(storage_root, &key, payload);
     sqlx::query(
         r#"
         INSERT INTO fvoci.attachments (
@@ -748,11 +825,13 @@ async fn insert_attachment_with_payload(
 #[tokio::test]
 async fn workspace_zip_skips_infected_attachment_bytes() {
     let harness = TestDb::bootstrap().await;
-    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let (app, cookie, owner_id, workspace_id, storage_root) =
+        setup_session_with_storage(&harness).await;
     let admin = admin_pool(&harness).await;
     let wiki = create_wiki(app.clone(), &cookie, workspace_id, "첨부 검사").await;
     let document_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
     let infected_id = insert_attachment_with_payload(
+        &storage_root,
         &admin,
         workspace_id,
         document_id,
@@ -1024,7 +1103,7 @@ async fn workspace_zip_export_includes_task_and_project_document_comments() {
     let project = create_project(app.clone(), &cookie, workspace_id, "CMT", "workspace").await;
     let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
     let project_doc = Uuid::now_v7();
-    insert_project_document(&admin, workspace_id, project_id, project_doc, owner_id, 1).await;
+    insert_project_document(&admin, workspace_id, project_id, project_doc, owner_id, 2).await;
     let (status, task) = json_request(
         app.clone(),
         "POST",
@@ -1035,8 +1114,12 @@ async fn workspace_zip_export_includes_task_and_project_document_comments() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{task:?}");
     let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+    let wiki = create_wiki(app.clone(), &cookie, workspace_id, "위키 댓글").await;
+    let wiki_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
     let doc_comment_id =
         insert_document_comment(&admin, workspace_id, project_doc, owner_id, "프로젝트 문서 댓글").await;
+    let wiki_comment_id =
+        insert_document_comment(&admin, workspace_id, wiki_id, owner_id, "위키 문서 댓글").await;
     let task_comment_id =
         insert_task_comment(&admin, workspace_id, task_id, owner_id, "태스크 댓글").await;
 
@@ -1053,6 +1136,7 @@ async fn workspace_zip_export_includes_task_and_project_document_comments() {
         .map(|c| c["id"].as_str().unwrap().to_string())
         .collect();
     assert!(ids.contains(&doc_comment_id.to_string()));
+    assert!(ids.contains(&wiki_comment_id.to_string()));
     assert!(ids.contains(&task_comment_id.to_string()));
     let bodies: Vec<&str> = comments
         .as_array()
@@ -1061,6 +1145,7 @@ async fn workspace_zip_export_includes_task_and_project_document_comments() {
         .map(|c| c["body"].as_str().unwrap())
         .collect();
     assert!(bodies.contains(&"프로젝트 문서 댓글"));
+    assert!(bodies.contains(&"위키 문서 댓글"));
     assert!(bodies.contains(&"태스크 댓글"));
 
     admin.close().await;
@@ -1178,14 +1263,58 @@ async fn workspace_zip_export_negative_auth_and_limits() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_zip_export_rate_limited_after_five_exports() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/export");
+
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/admin/legal",
+        Some(json!({
+            "kind": "terms",
+            "title": "약관",
+            "bodyMarkdown": "# 약관",
+            "required": true,
+            "effectiveAt": "2026-10-01T00:00:00Z"
+        })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &path,
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    assert_eq!(body["code"], "consent_required");
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/consents",
+        Some(json!({"items": [{"kind": "terms", "version": 1}]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
     for i in 0..5 {
         let (status, _, _) = bytes_request(app.clone(), "GET", &path, Some(&cookie), &[]).await;
         assert_eq!(status, StatusCode::OK, "export {i} should succeed within rate window");
     }
-    let (status, _, _) = bytes_request(app.clone(), "GET", &path, Some(&cookie), &[]).await;
+    let (status, _, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 
-    admin.close().await;
     harness.cleanup().await;
 }
 
@@ -1286,11 +1415,13 @@ async fn workspace_zip_aborts_when_attachment_revoked_after_storage_open() {
     use fvoci_server::db::workspace_export::arm_attachment_payload_barrier;
 
     let harness = TestDb::bootstrap().await;
-    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let (app, cookie, owner_id, workspace_id, storage_root) =
+        setup_session_with_storage(&harness).await;
     let admin = admin_pool(&harness).await;
     let wiki = create_wiki(app.clone(), &cookie, workspace_id, "attach parent").await;
     let document_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
     let attachment_id = insert_attachment_with_payload(
+        &storage_root,
         &admin,
         workspace_id,
         document_id,
@@ -1338,7 +1469,7 @@ async fn workspace_zip_aborts_when_attachment_revoked_after_storage_open() {
                     .bind(document_id)
                     .execute(&admin)
                     .await
-                    .expect("revoke attachment parent");
+                    .expect("soft-delete wiki attachment parent");
                     if let Some(tx) = proceed_tx.take() {
                         tx.send(()).expect("release attachment barrier");
                     }
@@ -1357,6 +1488,7 @@ async fn workspace_zip_aborts_when_attachment_revoked_after_storage_open() {
             None => break,
         }
     }
+    assert!(barrier_done, "export must reach post-open attachment barrier");
     assert!(saw_error, "export must fail after post-open attachment recheck");
     assert!(
         !buf.windows(ATTACH_EXPORT_SECRET.len())

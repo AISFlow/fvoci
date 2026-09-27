@@ -36,37 +36,26 @@ static EXPORT_INFLIGHT: LazyLock<Mutex<HashSet<Uuid>>> =
 
 struct ExportInflightGuard {
     user_id: Uuid,
-    released: bool,
 }
 
 impl ExportInflightGuard {
     fn acquire(user_id: Uuid) -> Result<Self, AppError> {
         let mut inflight = EXPORT_INFLIGHT
             .lock()
-            .expect("workspace export inflight mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !inflight.insert(user_id) {
             return Err(AppError::rate_limited(WS_EXPORT_WINDOW.as_secs() as u32));
         }
-        Ok(Self {
-            user_id,
-            released: false,
-        })
-    }
-
-    fn release(&mut self) {
-        if self.released {
-            return;
-        }
-        if let Ok(mut inflight) = EXPORT_INFLIGHT.lock() {
-            inflight.remove(&self.user_id);
-        }
-        self.released = true;
+        Ok(Self { user_id })
     }
 }
 
 impl Drop for ExportInflightGuard {
     fn drop(&mut self) {
-        self.release();
+        let mut inflight = EXPORT_INFLIGHT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inflight.remove(&self.user_id);
     }
 }
 
