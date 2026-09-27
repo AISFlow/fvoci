@@ -3976,12 +3976,13 @@ async fn setup_session_with_hub(
     (app, cookie, owner_id.0, workspace_id.0, hub)
 }
 
-/// After `event: open`, wait on `gate` then read the rest of the body until disconnect.
+/// After `event: open`, signal `open_ready` then wait on `gate` and read until disconnect.
 async fn sse_collect_after_open_gate(
     app: axum::Router,
     path: String,
     cookie: String,
     gate: tokio::sync::oneshot::Receiver<()>,
+    open_ready: tokio::sync::oneshot::Sender<()>,
     within: Duration,
 ) -> Vec<u8> {
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -4018,6 +4019,7 @@ async fn sse_collect_after_open_gate(
             }
         }
         if saw_open {
+            let _ = open_ready.send(());
             let _ = gate.await;
             while let Some(chunk) = stream.next().await {
                 match chunk {
@@ -4573,13 +4575,22 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
     assert_eq!(status, StatusCode::CREATED);
     let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
     let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (open_ready_tx, open_ready_rx) = tokio::sync::oneshot::channel();
     let collector = tokio::spawn(sse_collect_after_open_gate(
         app.clone(),
         path,
         viewer.cookie.clone(),
         gate_rx,
+        open_ready_tx,
         Duration::from_secs(30),
     ));
+    assert!(
+        timeout(Duration::from_secs(15), open_ready_rx)
+            .await
+            .expect("open-ready timeout")
+            .is_ok(),
+        "collector must consume event: open before task mutations"
+    );
     for i in 0..10 {
         let (status, _) = json_request(
             app.clone(),
