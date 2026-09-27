@@ -233,7 +233,7 @@ premerge 통합 tree와 같다(merge SHA는 원격 PR 대조). `2caf90d9`의 mai
   HWP 편집·인가된 사본 저장 [#189](https://github.com/AISFlow/fvoci/pull/189)(`4cc67bd4`; 현재 CI에 collaboration-arm64 실패 1건 관측, 통과 아님),
   S3 이미지 업그레이드·versioned rollback 스크립트 witness [#190](https://github.com/AISFlow/fvoci/pull/190)(`fdab3903`; 실제 클라우드 S3·ARM64 아님),
   수동 opt-in native ARM64 이미지 업그레이드 CI job [#192](https://github.com/AISFlow/fvoci/pull/192)(`1f0addd8`; job 등록은 실행 증거가 아니며
-  실제 ARM64 실행은 방금 배정돼 결과 없음). 원격 CI 전체 성공과 통합 수락 전 수락으로 표시하지 않는다. 기존 PDF·DOCX·XLSX·변환·백업 수락 범위를 취소하지 않는다.
+  실제 ARM64 실행 run [36351751670](https://github.com/AISFlow/fvoci/actions/runs/36351751670)(`1f0addd8`)은 2026-09-27 21:27 UTC 관측 시 queued·미실행으로 결과 없음). 원격 CI 전체 성공과 통합 수락 전 수락으로 표시하지 않는다. 기존 PDF·DOCX·XLSX·변환·백업 수락 범위를 취소하지 않는다.
 - 분류 근거·행별 종료 조건: `/home/kinesis/orca/fvoci-evidence/opus-decision-status-cleanup.md`.
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
   제품 런타임과 별개다. 필수 백업·복원 자체 검증은 Rust이며 pg_dump/pg_restore·얇은 실행 스크립트는 유지한다.
@@ -241,7 +241,7 @@ premerge 통합 tree와 같다(merge SHA는 원격 PR 대조). `2caf90d9`의 mai
 - 잔여 기능·검증: 실제 브라우저 PushManager 및 외부 푸시 서비스(FCM 등) 발송(F),
   #77 외부 제공자 검증의 미실행 범위(F), wiki 컬렉션 권한 N+1(#76 S3·S4, 현재 코드 재확인 전),
   첨부 viewer의 PPTX(C #188)·HWP 보기/편집(C #187·#189) layout 표시(DOCX·세션 chunk 보조 표시는 #180, XLSX는 #186 수락),
-  S3 rollback(C #190 스크립트 witness; 실제 클라우드 S3는 F)·ARM64 이미지 간 업그레이드 실행(C #192 등록, 실행 결과 없음),
+  S3 rollback 실제 실행(C #190 로컬 S3 호환 silo 실제 실행 witness; 실제 클라우드 제공자는 미검증 한계)·ARM64 이미지 간 업그레이드 실제 실행(F; C #192 job 등록, 실행 결과 없음),
   추가 DB(G 추적). 이미지 간 업그레이드·init 실패 복구 로컬 x64(#181)와 PostgreSQL 16/17 x64 matrix(#175; UUID 호환 #177)는 수락.
   수락(anchor): `i18n.overrides`(#165), 태스크 목록·layout `dueBefore` actor 시간대(#168), calendar drag(#162·#167), 첨부 PAT 다운로드(#164),
   운영 TLS·업그레이드 안내 문서(#169); anchor 이후 AI 결과 적용 UI(#170).
@@ -292,9 +292,9 @@ G 선택·미승인·원본 부재(새 요구 없이 만들지 않음). 각 행�
 | 공유·즐겨찾기·최근·태그·컬렉션 | 해당 routes | 공유 링크 권한 | 수락 | #70, #72, #76, #84, #138, #142, #162, #167, #168 | 수락: 즐겨찾기·최근·공유 링크·공개 공유 페이지·PDF, 공유 정책(#72), 태그·컬렉션·저장 view(#76), 대화상자 정책·`/s/:token` head meta(#84), 공유 첨부 preview(#80). 수락: `HEAD /s/:token` 보안 헤더·빈 본문(#138). 수락(기준 이후): board 그룹 paging·drag-and-drop(#142), calendar view drag(#162)와 stream 갱신 후 충돌 검사 영구 회귀(#167), 태스크 목록·layout의 `dueBefore` actor 시간대(#168; 컬렉션 query는 이미 actor 시간대). 수락: 컬렉션 저장 시간대 UTC fallback(#172, #168 검토 F1 해소). 수락: 공개 공유 첨부 deep-link UI(#176) |
 | 동의·감사·사용권·관리 | legal, auth.consents, admin.audit, packages/ee | 동의 gate·증거·권한 | 수락 | #72, #84, #159, #165 | 수락: 관리 API·instance settings·법률 문서·동의·428 gate·branding(#72), 관리자 사용자 삭제 예약/취소(#84). 수락: 사용자가 원본 정책 보존을 확정한 사용권·quota(#110), 운영자 정보(#119), security.txt(#120), 브라우저 오픈소스 고지(#122). 수락: settings `embed`(#124)·`attachmentPreview`(#80) 소비, 문서 메뉴 `features.ai` 소비(#159), 서버 메시지 `i18n.overrides` 사용 시점 적용(#165). G: 사용권 issuer trust(원본도 비어 있음) |
 | 제품 MCP·CLI·백업·복구 | init.ts, backup.ts, doctor.ts, MCP | 프로토콜·복원 | 수락 | #32, #31, #35, #63, #81, #84, #90, #109 | 수락: 컨테이너 설치 백업·복구(outbox cursor 재기준·검색 rebuild 포함), S3는 스크립트 백업 거부·복구 후 `--verify-storage`(#63, branding #84). 수락: 제품 MCP·CLI·doctor(#81), 키 fingerprint·`--verify-secrets`(#90), Rust 백업 manifest/preflight·키 검증 공유(#109). 개발 Python oracle는 유지. A: 남은 차이 없음 |
-| 설치·배포 산출물 | infra/app, compose | 비특권 실행·migrate/grant 분리·helper 포함 | 부분 | #17, #20, #29, #32, #35, #169, #175, #177, #181 | 수락: 운영 TLS/secure cookie 안내와 같은 volume의 이미지 간 업그레이드·init 실패·이전 이미지 복귀 절차 문서(#169), PostgreSQL 16/17 `uuidv7()` 제품 호환(#177), 이미지 간 업그레이드·init 실패 재시도·이전 이미지 복원 smoke(#181, 로컬 x64 고정 이미지 쌍), PostgreSQL 16/17 x64 DB suite matrix와 기존 PG18 ARM64 유지(#175; PG16/17 ARM64·운영 백업/복구 아님). C: S3 이미지 업그레이드·versioned rollback 스크립트 witness(#190), 수동 opt-in ARM64 이미지 업그레이드 job(#192, 실행 결과 없음). F: 실제 클라우드 S3 rollback, ARM64 이미지 간 실제 실행. 종료: C 수락, F 실행 증거 |
+| 설치·배포 산출물 | infra/app, compose | 비특권 실행·migrate/grant 분리·helper 포함 | 부분 | #17, #20, #29, #32, #35, #169, #175, #177, #181 | 수락: 운영 TLS/secure cookie 안내와 같은 volume의 이미지 간 업그레이드·init 실패·이전 이미지 복귀 절차 문서(#169), PostgreSQL 16/17 `uuidv7()` 제품 호환(#177), 이미지 간 업그레이드·init 실패 재시도·이전 이미지 복원 smoke(#181, 로컬 x64 고정 이미지 쌍), PostgreSQL 16/17 x64 DB suite matrix와 기존 PG18 ARM64 유지(#175; PG16/17 ARM64·운영 백업/복구 아님). C: S3 이미지 업그레이드·versioned rollback 실제 실행 witness(#190, 로컬 S3 호환 silo·x64; 실제 클라우드 제공자는 미검증 한계), 수동 opt-in ARM64 이미지 업그레이드 job(#192, 등록만·실행 결과 없음). F: ARM64 이미지 간 실제 실행. 종료: C 수락, F 실행 증거 |
 | 추가 DB·플랫폼 | PR999 packages/db (SQLite/libSQL/Turso) | 원본 제공 범위와 목표 구분 | 미착수 | — | PG 우선; 원본 다중 DB를 완료로 간주하지 않음. G(추적 유지): 원본도 SQLite·libSQL·Turso를 목표로만 두고 전체 앱 백엔드로 선택할 수 없음. 제외하지 않으며 원본 계약 범위가 정해지면 B |
-| 프론트엔드 | apps/web, packages/editor | 한국어·접근성·기존 흐름 | 부분 | 각 PR E2E | B: 위 B 항목의 UI. 종료: 각 B 항목 UI |
+| 프론트엔드 | apps/web, packages/editor | 한국어·접근성·기존 흐름 | 부분 | 각 PR E2E | C: 첨부 PPTX viewer(#188)·HWP viewer(#187)·HWP 편집 사본 저장 UI(#189). 종료: C 수락 |
 
 A 전환 근거(수락 PR merge, 2026-09-27 대조):
 워크스페이스 [#56](https://github.com/AISFlow/fvoci/pull/56) `179a96e14ff66a41f5140b3feb0eb4e17af8b43c`,
