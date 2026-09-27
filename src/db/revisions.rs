@@ -1188,24 +1188,41 @@ type ScheduledRevisionListingRow = (
 pub async fn list_live_workspace_ids_batch(
     pool: &PgPool,
     after: Option<Uuid>,
+    inclusive_after: bool,
     limit: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_system(&mut tx).await?;
     let rows: Vec<(Uuid,)> = if let Some(after) = after {
-        sqlx::query_as(
-            r#"
-            SELECT id
-            FROM fvoci.workspaces
-            WHERE deleted_at IS NULL AND id > $1
-            ORDER BY id ASC
-            LIMIT $2
-            "#,
-        )
-        .bind(after)
-        .bind(limit)
-        .fetch_all(&mut *tx)
-        .await?
+        if inclusive_after {
+            sqlx::query_as(
+                r#"
+                SELECT id
+                FROM fvoci.workspaces
+                WHERE deleted_at IS NULL AND id >= $1
+                ORDER BY id ASC
+                LIMIT $2
+                "#,
+            )
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_as(
+                r#"
+                SELECT id
+                FROM fvoci.workspaces
+                WHERE deleted_at IS NULL AND id > $1
+                ORDER BY id ASC
+                LIMIT $2
+                "#,
+            )
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?
+        }
     } else {
         sqlx::query_as(
             r#"
@@ -1455,7 +1472,7 @@ pub async fn gc_automatic_revisions_batch(
         "#,
     )
     .bind(workspace_id)
-    .bind(keep as i32)
+    .bind(i64::from(keep))
     .bind(batch)
     .execute(&mut *tx)
     .await?

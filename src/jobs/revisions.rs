@@ -20,6 +20,8 @@ use crate::db::revisions::{
 use super::claim::{JobClaim, JOB_KEY_REVISIONS};
 
 pub const SCHEDULED_REVISION_TARGET_BATCH: usize = 16;
+/// Max collab targets examined (including predicate skips) per maintenance batch.
+pub const SCHEDULED_REVISION_EXAMINE_BATCH: usize = 64;
 pub const REVISION_GC_DELETE_BATCH: i32 = 5_000;
 pub const REVISION_GC_ROUNDS: u32 = 30;
 pub const WORKSPACE_SCAN_BATCH: i64 = 8;
@@ -50,6 +52,13 @@ pub struct RevisionMaintenanceStats {
 pub struct RevisionMaintenanceResume {
     pub workspace_id: Option<Uuid>,
     pub target: Option<ScheduledRevisionCursor>,
+    pub gc_workspace_after: Option<Uuid>,
+}
+
+impl RevisionMaintenanceResume {
+    pub fn sweep_complete(&self) -> bool {
+        self.workspace_id.is_none() && self.target.is_none() && self.gc_workspace_after.is_none()
+    }
 }
 
 /// Claim the revision maintenance lock and run one bounded batch (scheduled
@@ -91,8 +100,15 @@ pub async fn run_revision_maintenance_batch(
     }
 
     if !cancel.is_cancelled() {
-        stats.revisions_deleted =
-            run_automatic_revision_gc(pool, params.settings.keep, cancel).await?;
+        let (deleted, gc_resume) = run_automatic_revision_gc(
+            pool,
+            params.settings.keep,
+            next_resume.gc_workspace_after,
+            cancel,
+        )
+        .await?;
+        stats.revisions_deleted = deleted;
+        next_resume.gc_workspace_after = gc_resume;
     }
 
     Ok((stats, next_resume))
@@ -109,6 +125,18 @@ struct ScheduledSweep {
     resume: RevisionMaintenanceResume,
 }
 
+fn snapshot_resume(
+    workspace_id: Option<Uuid>,
+    target: Option<ScheduledRevisionCursor>,
+    gc_workspace_after: Option<Uuid>,
+) -> RevisionMaintenanceResume {
+    RevisionMaintenanceResume {
+        workspace_id,
+        target,
+        gc_workspace_after,
+    }
+}
+
 async fn run_scheduled_snapshots(
     pool: &PgPool,
     engine: &RevisionMaintenanceEngine,
@@ -117,78 +145,100 @@ async fn run_scheduled_snapshots(
     cancel: &CancellationToken,
 ) -> Result<ScheduledSweep, sqlx::Error> {
     let mut stats = RevisionMaintenanceStats::default();
+    let gc_hold = resume.gc_workspace_after;
     let mut workspace_after = resume.workspace_id;
     let mut target_cursor = resume.target;
-    let mut remaining = SCHEDULED_REVISION_TARGET_BATCH;
+    let mut attempts_remaining = SCHEDULED_REVISION_TARGET_BATCH;
+    let mut examined_remaining = SCHEDULED_REVISION_EXAMINE_BATCH;
 
-    while remaining > 0 && !cancel.is_cancelled() {
-        let workspaces =
-            list_live_workspace_ids_batch(pool, workspace_after, WORKSPACE_SCAN_BATCH).await?;
+    while examined_remaining > 0 && attempts_remaining > 0 && !cancel.is_cancelled() {
+        let inclusive_workspace = target_cursor.is_some();
+        let workspaces = list_live_workspace_ids_batch(
+            pool,
+            workspace_after,
+            inclusive_workspace,
+            WORKSPACE_SCAN_BATCH,
+        )
+        .await?;
         if workspaces.is_empty() {
             return Ok(ScheduledSweep {
                 stats,
-                resume: RevisionMaintenanceResume::default(),
+                resume: snapshot_resume(None, None, gc_hold),
             });
         }
         let workspace_count = workspaces.len();
         for workspace_id in workspaces {
-            if cancel.is_cancelled() || remaining == 0 {
+            if cancel.is_cancelled() || attempts_remaining == 0 || examined_remaining == 0 {
                 break;
             }
-            let cursor = if workspace_after == Some(workspace_id) {
+            let mut cursor = if workspace_after == Some(workspace_id) {
                 target_cursor
             } else {
                 None
             };
-            let candidates = list_scheduled_revision_candidates_for_workspace(
-                pool,
-                workspace_id,
-                cursor,
-                remaining as i64,
-            )
-            .await?;
-            if candidates.is_empty() {
-                workspace_after = Some(workspace_id);
-                target_cursor = None;
-                continue;
-            }
-            for candidate in candidates {
-                if cancel.is_cancelled() || remaining == 0 {
+            while examined_remaining > 0 && attempts_remaining > 0 && !cancel.is_cancelled() {
+                let candidates = list_scheduled_revision_candidates_for_workspace(
+                    pool,
+                    workspace_id,
+                    cursor,
+                    SCHEDULED_REVISION_TARGET_BATCH as i64,
+                )
+                .await?;
+                if candidates.is_empty() {
+                    workspace_after = Some(workspace_id);
+                    target_cursor = None;
                     break;
                 }
-                remaining -= 1;
-                workspace_after = Some(workspace_id);
-                target_cursor = Some(scheduled_revision_cursor(&candidate));
-                if candidate.anchor_at >= cutoff
-                    || candidate.state_updated_at <= candidate.anchor_at
-                {
-                    stats.snapshots_skipped += 1;
-                    continue;
+                let page_len = candidates.len();
+                let mut advanced = false;
+                for candidate in candidates {
+                    if cancel.is_cancelled() || attempts_remaining == 0 || examined_remaining == 0 {
+                        break;
+                    }
+                    examined_remaining -= 1;
+                    advanced = true;
+                    workspace_after = Some(workspace_id);
+                    let next = scheduled_revision_cursor(&candidate);
+                    target_cursor = Some(next);
+                    cursor = Some(next);
+                    if candidate.anchor_at >= cutoff
+                        || candidate.state_updated_at <= candidate.anchor_at
+                    {
+                        stats.snapshots_skipped += 1;
+                        continue;
+                    }
+                    attempts_remaining -= 1;
+                    stats.snapshots_attempted += 1;
+                    match try_scheduled_snapshot(pool, engine, candidate, cancel).await {
+                        ScheduledOutcome::Created => stats.snapshots_created += 1,
+                        ScheduledOutcome::Deduped => stats.snapshots_deduped += 1,
+                        ScheduledOutcome::Skipped => stats.snapshots_skipped += 1,
+                        ScheduledOutcome::Failed => stats.snapshots_failed += 1,
+                        ScheduledOutcome::Cancelled => break,
+                    }
                 }
-                stats.snapshots_attempted += 1;
-                match try_scheduled_snapshot(pool, engine, candidate, cancel).await {
-                    ScheduledOutcome::Created => stats.snapshots_created += 1,
-                    ScheduledOutcome::Deduped => stats.snapshots_deduped += 1,
-                    ScheduledOutcome::Skipped => stats.snapshots_skipped += 1,
-                    ScheduledOutcome::Failed => stats.snapshots_failed += 1,
-                    ScheduledOutcome::Cancelled => break,
+                if !advanced {
+                    break;
+                }
+                if page_len < SCHEDULED_REVISION_TARGET_BATCH {
+                    break;
                 }
             }
+        }
+        if attempts_remaining == 0 || examined_remaining == 0 {
+            break;
         }
         if workspace_count < WORKSPACE_SCAN_BATCH as usize {
             return Ok(ScheduledSweep {
                 stats,
-                resume: RevisionMaintenanceResume::default(),
+                resume: snapshot_resume(None, None, gc_hold),
             });
         }
     }
 
     Ok(ScheduledSweep {
         stats,
-        resume: RevisionMaintenanceResume {
-            workspace_id: workspace_after,
-            target: target_cursor,
-        },
+        resume: snapshot_resume(workspace_after, target_cursor, gc_hold),
     })
 }
 
@@ -301,18 +351,20 @@ async fn try_scheduled_snapshot(
 pub async fn run_automatic_revision_gc(
     pool: &PgPool,
     keep: u32,
+    resume_after: Option<Uuid>,
     cancel: &CancellationToken,
-) -> Result<u32, sqlx::Error> {
+) -> Result<(u32, Option<Uuid>), sqlx::Error> {
     let mut deleted = 0u32;
-    let mut workspace_after: Option<Uuid> = None;
+    let mut workspace_after = resume_after;
     for _ in 0..REVISION_GC_ROUNDS {
         if cancel.is_cancelled() {
             break;
         }
         let workspaces =
-            list_live_workspace_ids_batch(pool, workspace_after, WORKSPACE_SCAN_BATCH).await?;
+            list_live_workspace_ids_batch(pool, workspace_after, false, WORKSPACE_SCAN_BATCH)
+                .await?;
         if workspaces.is_empty() {
-            break;
+            return Ok((deleted, None));
         }
         let workspace_count = workspaces.len();
         for workspace_id in workspaces {
@@ -338,8 +390,8 @@ pub async fn run_automatic_revision_gc(
             }
         }
         if workspace_count < WORKSPACE_SCAN_BATCH as usize {
-            break;
+            return Ok((deleted, None));
         }
     }
-    Ok(deleted)
+    Ok((deleted, workspace_after))
 }

@@ -9,8 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use collab_engine::Limits;
 use fvoci_server::attachments::ObjectStorage;
 use fvoci_server::auth::token::hash_token;
+use fvoci_server::collab::config::require_collab_engine_for_tests;
+use fvoci_server::config::RevisionSettings;
 use fvoci_server::db::documents::{create_wiki_document, CreateDocumentInput};
 use fvoci_server::db::magic::issue_password_reset_token;
 use fvoci_server::db::outbox::mark_processed;
@@ -20,9 +23,11 @@ use fvoci_server::db::revisions::{
 use fvoci_server::jobs::run_automatic_revision_gc;
 use fvoci_server::jobs::{
     run_daily_sweep, run_document_trash_purge, run_document_trash_purge_with, run_ics_token_gc,
-    run_magic_token_gc, run_notification_gc, run_processed_gc, run_stale_upload_gc,
-    run_stale_upload_sweep, run_workspace_purge, spawn_maintenance, DocumentPurgeLimits, JobClaim,
-    MaintenanceSettings, JOB_KEY_DAILY, JOB_KEY_UPLOADS,
+    run_magic_token_gc, run_notification_gc, run_processed_gc, run_revision_maintenance_batch,
+    run_revision_maintenance_sweep, run_stale_upload_gc, run_stale_upload_sweep,
+    run_workspace_purge, spawn_maintenance, DocumentPurgeLimits, JobClaim, MaintenanceSettings,
+    RevisionMaintenanceEngine, RevisionMaintenanceParams, RevisionMaintenanceResume, JOB_KEY_DAILY,
+    JOB_KEY_REVISIONS, JOB_KEY_UPLOADS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
 use project_harness::{
@@ -1710,7 +1715,7 @@ async fn gc_skips_row_promoted_to_manual_under_lock() {
         .expect("extra session");
     }
     let cancel = CancellationToken::new();
-    let deleted = run_automatic_revision_gc(&pool, 0, &cancel)
+    let (deleted, _) = run_automatic_revision_gc(&pool, 0, None, &cancel)
         .await
         .expect("gc sweep");
     assert!(deleted >= 2);
@@ -1817,6 +1822,62 @@ async fn manual_revision_promotes_task_scheduled_head_without_body_change() {
     assert_eq!(row.3, session_json);
     assert_eq!(row.4, session_text);
     admin.close().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+fn revision_maintenance_params_zero_snapshots() -> RevisionMaintenanceParams {
+    RevisionMaintenanceParams {
+        settings: RevisionSettings {
+            session_snapshot_enabled: false,
+            keep: 200,
+            snapshot_interval_hours: 0,
+        },
+        engine: Some(RevisionMaintenanceEngine {
+            engine_bin: require_collab_engine_for_tests(),
+            limits: Limits::for_tests(),
+        }),
+    }
+}
+
+#[tokio::test]
+async fn revision_maintenance_sweep_skips_when_claim_held() {
+    let harness = TestDb::bootstrap().await;
+    let pool = app_pool(&harness).await;
+    let held = JobClaim::try_claim(&pool, JOB_KEY_REVISIONS)
+        .await
+        .unwrap()
+        .expect("claim");
+    let skipped = run_revision_maintenance_sweep(
+        &pool,
+        &revision_maintenance_params_zero_snapshots(),
+        RevisionMaintenanceResume::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(skipped.is_none());
+    held.release().await;
+    pool.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn revision_maintenance_batch_honors_cancellation() {
+    let harness = TestDb::bootstrap().await;
+    let pool = app_pool(&harness).await;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let (stats, _) = run_revision_maintenance_batch(
+        &pool,
+        &revision_maintenance_params_zero_snapshots(),
+        RevisionMaintenanceResume::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.snapshots_attempted, 0);
+    assert_eq!(stats.revisions_deleted, 0);
     pool.close().await;
     harness.cleanup().await;
 }

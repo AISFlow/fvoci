@@ -47,7 +47,7 @@ pub use retention::{
 pub use revisions::{
     run_automatic_revision_gc, run_revision_maintenance_batch, run_revision_maintenance_sweep,
     RevisionMaintenanceEngine, RevisionMaintenanceParams, RevisionMaintenanceResume,
-    RevisionMaintenanceStats,
+    RevisionMaintenanceStats, SCHEDULED_REVISION_TARGET_BATCH,
 };
 pub use tokens::{run_ics_token_gc, run_magic_token_gc, TOKEN_GC_BATCH};
 pub use uploads::{run_stale_upload_gc, StaleUploadGcStats, UPLOAD_GC_BATCH};
@@ -224,8 +224,10 @@ async fn run_maintenance_loop(
                     .await
                     {
                         Ok(Some((stats, resume))) => {
-                            last_revision_sweep = Some(Instant::now());
                             revision_resume = resume;
+                            if resume.sweep_complete() {
+                                last_revision_sweep = Some(Instant::now());
+                            }
                             if stats.snapshots_created > 0
                                 || stats.snapshots_deduped > 0
                                 || stats.revisions_deleted > 0
