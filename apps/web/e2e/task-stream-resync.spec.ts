@@ -121,6 +121,45 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   await expect(peerTaskLink).toBeVisible();
   await expect(peerTaskLink).toHaveAttribute("href", /\/w\/tsre2e\/TSR-\d+$/);
 
+  // Peer meta edits (title/date, then status) reach the viewer through the live stream.
+  const tasksRes = await memberPage.request.get(
+    `/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`,
+  );
+  expect(tasksRes.ok()).toBe(true);
+  const peerTask = (await tasksRes.json()).items.find(
+    (item: { title: string }) => item.title === "다른 탭 반영",
+  ) as { id: string; statusId: string };
+  expect(peerTask).toBeTruthy();
+  const workflowRes = await memberPage.request.get(
+    `/api/v1/workspaces/${wsId}/projects/${projectId}/workflow`,
+  );
+  expect(workflowRes.ok()).toBe(true);
+  const nextStatus = (await workflowRes.json()).statuses.find(
+    (status: { id: string }) => status.id !== peerTask.statusId,
+  ) as { id: string; name: string };
+  expect(nextStatus).toBeTruthy();
+
+  const metaRes = await memberPage.request.patch(`/api/v1/workspaces/${wsId}/tasks/${peerTask.id}`, {
+    data: { title: "원격 수정", dueDate: "2027-01-15" },
+  });
+  expect(metaRes.ok(), await metaRes.text()).toBe(true);
+  await expect(
+    viewerTaskList.locator(".task-row__title", { hasText: "원격 수정" }),
+  ).toBeVisible({ timeout: 25_000 });
+
+  const statusRes = await memberPage.request.patch(
+    `/api/v1/workspaces/${wsId}/tasks/${peerTask.id}`,
+    { data: { statusId: nextStatus.id } },
+  );
+  expect(statusRes.ok(), await statusRes.text()).toBe(true);
+  const nextSection = viewerTab
+    .locator("section.task-status")
+    .filter({ has: viewerTab.locator(".task-status__toggle", { hasText: nextStatus.name }) });
+  await expect(nextSection.getByTestId(`task-row-${peerTask.id}`)).toBeVisible({
+    timeout: 25_000,
+  });
+  await expect(viewerTab).toHaveURL(viewerListUrl);
+
   await ownerContext.close();
   await memberContext.close();
 });
