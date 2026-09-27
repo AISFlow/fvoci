@@ -700,6 +700,37 @@ loses writes made after that backup; preserve the failed install for diagnosis.
 CI does not run this image-to-image upgrade; `install-smoke.sh` recreates the
 server on the same image.
 
+#### Upgrade validation
+
+`scripts/upgrade-smoke.sh --old <sha> --new <sha>` runs these steps with local
+storage in isolated Compose projects. Both SHAs must be on the first-parent
+history of `origin/main` (`--main-ref`), and old must be an ancestor of new. New
+must add at least two migrations, including its newest one. Each image is built
+from a `git archive` of its SHA, not the working tree. It is labelled with
+`org.opencontainers.image.revision` and the Dockerfile and recipe hashes. The
+recipe differs from that SHA's Dockerfile only by `ENV CARGO_BUILD_JOBS`
+(`--build-jobs`, default 2). A tag with matching labels is reused, and the
+images are kept. The script refuses equal image IDs and stops before a build if
+the Docker root has less than `--min-free-gib` free. `--plan-only` runs only the
+source, migration, recipe and disk checks.
+
+The smoke seeds the old image with a login, a collab wiki body, an HWPX
+attachment (sha256 and extraction), a comment, and a TOTP secret sealed with
+`ENCRYPTION_KEYS`. It runs the old checkout's `backup.sh --leave-stopped`, then
+pre-creates the first table of the newest migration so the new image's `init`
+fails. The server must stay stopped: no running container and no HTTP answer.
+Only that migration may be missing. After the table is dropped, one rerun of
+step 3 must succeed. The server then runs the new image, with no old-image
+container left in the project. Doctor passes, the seeded data and extraction are
+intact, and `--verify-secrets` opens the secret. The same probe with a different
+key must fail. Next the smoke stops the upgraded server and runs the old
+checkout's `restore.sh` into a fresh project on the old image. The seeded data
+must be back and the write made after the upgrade must be gone. The old image
+never runs on the migrated database. On success the trap removes both projects.
+On failure it keeps them and the 0600 env files for diagnosis. Logs in
+`--evidence-dir` have the generated secrets redacted. S3 upgrade and rollback
+are not covered. CI does not run this smoke.
+
 ## Backup and restore
 
 This is the logical backup for the Compose install above (the source advanced
