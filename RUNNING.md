@@ -2,7 +2,8 @@
 
 This slice initializes a new PostgreSQL database. Importing an existing TypeScript FVOCI installation is not supported.
 The Rust server has forward schema migrations (see "Migrate and grant before server" and, for the Compose
-install, "Upgrade", including its unexecuted image-to-image validation scope). Downgrading a migrated database is not supported.
+install, "Upgrade"; the developer smoke in "Upgrade validation" exercises one image pair per run with local
+storage, one injected init failure and old-image rollback; S3 upgrade and rollback are not covered and CI does not run it). Downgrading a migrated database is not supported.
 
 ## Toolchain
 
@@ -699,6 +700,58 @@ storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
 loses writes made after that backup; preserve the failed install for diagnosis.
 CI does not run this image-to-image upgrade; `install-smoke.sh` recreates the
 server on the same image.
+
+#### Upgrade validation
+
+`scripts/upgrade-smoke.sh --old <sha> --new <sha>` runs these steps with local
+storage in isolated Compose projects. Both SHAs must be on the first-parent
+history of `origin/main` (`--main-ref`), and old must be an ancestor of new. New
+must add at least two migrations, including its newest one. Each image is built
+from a `git archive` of its SHA, not the working tree. It is labelled with
+`org.opencontainers.image.revision` and the Dockerfile and recipe hashes. The
+recipe differs from that SHA's Dockerfile only by `ENV CARGO_BUILD_JOBS`
+(`--build-jobs`, default 2). A tag with matching labels is reused, and the
+images are kept. The script refuses equal image IDs and stops before a build if
+the Docker root has less than `--min-free-gib` free. `--plan-only` runs only the
+source, migration and recipe checks, plus that disk gate for each image that
+would need a build (a reused image is not built, so no disk claim is made for
+it); it builds, starts and tears down nothing. A reused tag is trusted on its
+revision and recipe labels, which anyone with Docker access can set.
+
+The smoke seeds the old image with a login, a collab wiki body, an HWPX
+attachment (sha256 and extraction), a comment, and a TOTP secret sealed with
+`ENCRYPTION_KEYS`. It runs the old checkout's `backup.sh --leave-stopped`, then
+pre-creates the first table of the newest migration so the new image's `init`
+fails. The server must stay stopped: no running container and no HTTP answer.
+Only that migration may be missing. After the table is dropped, one rerun of
+step 3 must succeed. The server then runs the new image, with no old-image
+container left in the project. Doctor passes, the seeded data and extraction are
+intact, and `--verify-secrets` opens the secret. The same probe with a different
+k1 must fail and report the MFA secret `invalid`, not a missing key or a
+database error. Next the smoke stops the upgraded server and runs the old
+checkout's `restore.sh` into a fresh project on the old image. The seeded data
+must be back and the write made after the upgrade must be gone. The old image
+never runs on the migrated database.
+
+On success the trap runs `down -v` for each project with the compose file of
+the source tree that started it, then checks that no container, volume or
+network with that project label remains. Only then does it delete the work dir
+and its 0600 env files. A failed `down` or a leftover fails the run and keeps
+the work dir. On any other failure after a project started, it keeps the
+projects and the work dir for diagnosis and prints the cleanup commands. The
+evidence dir holds logs with the generated secrets redacted. It is kept on
+success and on failure, including build failures. It defaults to a new 0700
+directory under `TMPDIR`, and `--evidence-dir` overrides it. Generated secrets
+reach the redactor through its environment, not argv. The wrong key of the
+negative control does appear in a `docker compose run -e` argument, and the
+fixed test login appears in curl arguments. Use a single-user host.
+
+A run proves only what it ran: one old/new pair, the host architecture, local
+storage, and one injected failure (a pre-created table of the newest migration,
+not an interrupted migrate or a crash). It does not compare search indexes or
+doctor output with the old install. S3 upgrade and rollback are not covered,
+and CI does not run this smoke. Record the pair, image IDs, architecture and
+logs of a run with the change it supports; this guide does not.
 
 ## Backup and restore
 
