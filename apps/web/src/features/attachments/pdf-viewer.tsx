@@ -12,6 +12,7 @@ import {
   zoomIn,
   zoomOut,
 } from "./pdf-limits";
+import { pdfjsAssetBase } from "./pdf-assets";
 import {
   ViewerErrorPane,
   ViewerLoadingPane,
@@ -22,7 +23,10 @@ type PdfJs = typeof import("pdfjs-dist");
 
 let pdfJs: Promise<PdfJs> | null = null;
 
-/** pdf.js and its worker load only when a PDF is opened; the worker is a same-origin asset. */
+/**
+ * pdf.js and its worker load only when a PDF is opened. The worker and the
+ * CMap/standard-font/wasm/ICC data it fetches are same-origin build assets.
+ */
 function loadPdfJs(): Promise<PdfJs> {
   pdfJs ??= Promise.all([
     import("pdfjs-dist"),
@@ -86,10 +90,19 @@ export function PdfViewer({ downloadUrl }: { downloadUrl: string }): ReactNode {
         }
         const pdfjs = await loadPdfJs();
         if (!alive) return;
+        const assets = new URL(
+          `${import.meta.env.BASE_URL}${pdfjsAssetBase(pdfjs.version)}`,
+          window.location.href,
+        ).href;
         task = pdfjs.getDocument({
           data: body.bytes,
           enableXfa: false,
           maxImageSize: PDF_MAX_IMAGE_PIXELS,
+          cMapUrl: `${assets}cmaps/`,
+          cMapPacked: true,
+          standardFontDataUrl: `${assets}standard_fonts/`,
+          wasmUrl: `${assets}wasm/`,
+          iccUrl: `${assets}iccs/`,
         });
         const doc = await task.promise;
         if (alive) setState({ status: "ready", doc });

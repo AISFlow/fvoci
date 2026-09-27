@@ -1,4 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
+import {
+  buildFixturePdf,
+  FIXTURE_PAGE_W,
+} from "../src/features/attachments/pdf-test-fixture";
 import { watchCspViolations } from "./helpers";
 
 const owner = {
@@ -10,61 +14,15 @@ const owner = {
   workspaceName: "PDF Viewer",
 };
 
-/** Page geometry in PDF points; the canvas at 100% is this many CSS px. */
-const PAGE_W = 400;
-const PAGE_H = 300;
-
-/**
- * Minimal synthetic PDF: one Helvetica (standard 14, not embedded) text line
- * per page plus a colour band that marks which page is on screen — red across
- * the top of page 1, blue across the bottom of page 2.
- */
-function buildPdf(pages: { text: string; band: "top-red" | "bottom-blue" }[]): Buffer {
-  const objects: string[] = [];
-  const add = (body: string) => {
-    objects.push(body);
-    return objects.length;
-  };
-  const catalog = add("");
-  const pagesId = add("");
-  const font = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
-  const kids: number[] = [];
-  for (const page of pages) {
-    const band =
-      page.band === "top-red"
-        ? `1 0 0 rg 20 220 ${PAGE_W - 40} 60 re f`
-        : `0 0 1 rg 20 20 ${PAGE_W - 40} 60 re f`;
-    const stream = `${band}\n0 0 0 rg BT /F1 36 Tf 40 130 Td (${page.text}) Tj ET\n`;
-    const content = add(`<< /Length ${Buffer.byteLength(stream, "latin1")} >>\nstream\n${stream}endstream`);
-    kids.push(
-      add(
-        `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${PAGE_W} ${PAGE_H}] ` +
-          `/Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`,
-      ),
-    );
-  }
-  objects[catalog - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
-  objects[pagesId - 1] = `<< /Type /Pages /Kids [${kids.map((k) => `${k} 0 R`).join(" ")}] /Count ${kids.length} >>`;
-
-  let out = "%PDF-1.4\n";
-  const offsets: number[] = [];
-  objects.forEach((body, index) => {
-    offsets.push(Buffer.byteLength(out, "latin1"));
-    out += `${index + 1} 0 obj\n${body}\nendobj\n`;
-  });
-  const xref = Buffer.byteLength(out, "latin1");
-  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  for (const offset of offsets) out += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  out += `trailer\n<< /Size ${objects.length + 1} /Root ${catalog} 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
-  return Buffer.from(out, "latin1");
-}
+const PAGE_W = FIXTURE_PAGE_W;
+const PDFJS_ASSETS = "/assets/pdfjs-dist-6.3.289/";
 
 async function uploadAttachment(
   page: Page,
   wsId: string,
   documentId: string,
   name: string,
-  bytes: Buffer,
+  bytes: Buffer | Uint8Array,
 ): Promise<string> {
   const uploadRes = await page.request.post(
     `/api/v1/workspaces/${wsId}/documents/${documentId}/uploads`,
@@ -151,6 +109,13 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
 }) => {
   test.setTimeout(90_000);
   const csp = watchCspViolations(page);
+  // pdf.js reports missing CMap/standard-font/wasm data as console warnings.
+  const pdfjsDataWarnings: string[] = [];
+  page.on("console", (message) => {
+    if (/cMapUrl|standardFontDataUrl|wasmUrl|iccUrl|Failed to fetch file/.test(message.text())) {
+      pdfjsDataWarnings.push(message.text());
+    }
+  });
 
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
@@ -178,9 +143,9 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
     wsId,
     documentId,
     "report.pdf",
-    buildPdf([
-      { text: "FVOCI PAGE ONE", band: "top-red" },
-      { text: "FVOCI PAGE TWO", band: "bottom-blue" },
+    buildFixturePdf([
+      { text: "FVOCI PAGE ONE", script: "latin", band: "top-red" },
+      { text: "FVOCI PAGE TWO", script: "latin", band: "bottom-blue" },
     ]),
   );
   const textName = "notes.txt";
@@ -260,10 +225,48 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   await expect(page.locator("canvas")).toHaveCount(0);
   await page.unroute(`**/api/v1/workspaces/${wsId}/attachments/${pdfId}/download`);
 
+  // Korean text in a non-embedded Adobe-Korea1 font renders through the
+  // packed CMaps shipped as same-origin build assets.
+  const koreanId = await uploadAttachment(
+    page,
+    wsId,
+    documentId,
+    "korean.pdf",
+    buildFixturePdf([{ text: "한글 문서", script: "korean", band: "top-red" }]),
+  );
+  const cmapResponse = page.waitForResponse((response) =>
+    response.url().endsWith(`${PDFJS_ASSETS}cmaps/UniKS-UCS2-H.bcmap`),
+  );
+  await page.goto(`/w/acme/a/${koreanId}/view`);
+  expect((await cmapResponse).status()).toBe(200);
+  await expect(page.locator("[data-pdf-viewer]")).toBeVisible({ timeout: 20_000 });
+  await expect.poll(async () => (await probeCanvas(page)).at.topBand).toBe("red");
+  const korean = await probeCanvas(page);
+  expect(korean.darkInTextBand).toBeGreaterThan(200);
+  expect(korean.darkInEmptyBand).toBe(0);
+
+  // Production asset URLs, types and the scripting exclusion.
+  for (const [rel, type] of [
+    ["cmaps/UniKS-UCS2-H.bcmap", "application/octet-stream"],
+    ["cmaps/LICENSE", null],
+    ["standard_fonts/LiberationSans-Regular.ttf", null],
+    ["standard_fonts/LICENSE_FOXIT", null],
+    ["wasm/openjpeg.wasm", "application/wasm"],
+    ["wasm/openjpeg_nowasm_fallback.js", "javascript"],
+    ["iccs/CGATS001Compat-v2-micro.icc", null],
+  ] as const) {
+    const res = await page.request.get(`${PDFJS_ASSETS}${rel}`);
+    expect(res.status(), rel).toBe(200);
+    if (type) expect(res.headers()["content-type"], rel).toContain(type);
+    expect(res.headers()["x-content-type-options"], rel).toBe("nosniff");
+  }
+  expect((await page.request.get(`${PDFJS_ASSETS}wasm/quickjs-eval.wasm`)).status()).toBe(404);
+
   // Unknown (or unauthorized) attachment: visible error, no viewer body.
   await page.goto(`/w/acme/a/00000000-0000-4000-8000-000000000000/view`);
   await expect(page.getByText("접근 권한이 없거나 존재하지 않는 항목입니다.")).toBeVisible();
   await expect(page.locator("[data-pdf-viewer]")).toHaveCount(0);
 
   expect(csp).toEqual([]);
+  expect(pdfjsDataWarnings).toEqual([]);
 });
