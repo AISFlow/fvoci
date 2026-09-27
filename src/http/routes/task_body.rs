@@ -27,6 +27,7 @@ use crate::api::documents_dto::PatchBlockInput;
 use crate::api::dto::{CreateTaskBody, TaskMetaOutput};
 use crate::api::tasks_dto::{
     DocumentTaskCreateBody, DocumentTaskCreateOutput, TaskOriginItemOutput, TaskOriginListResponse,
+    TaskProjectOutput, TaskProjectPickerResponse,
 };
 use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::collab::derived_body::{prepare_derived_body, DerivedBodyError};
@@ -34,8 +35,8 @@ use crate::collab::room::{BodyWriteError, RoomKey};
 use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::revisions::{authorize_revision_target, RevisionDbError, RevisionTarget};
 use crate::db::task_origins::{
-    create_document_task, get_task_origin, origin_request_hash, DocumentTaskRequest,
-    TaskOriginDbError, TASK_ORIGIN_ANCHOR_MAX_CHARS,
+    create_document_task, get_task_origin, list_document_task_origins, origin_request_hash,
+    task_projects, DocumentTaskRequest, TaskOriginDbError, TASK_ORIGIN_ANCHOR_MAX_CHARS,
 };
 use crate::db::tasks::{get_task, CreateTaskInput};
 use crate::documents::blocks::{replace_node_by_id, BlockNode};
@@ -65,6 +66,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/documents/{document_id}/tasks",
             post(create_task_from_document),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-projects",
+            get(document_task_projects),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/documents/{document_id}/task-origins",
+            get(document_task_origins),
         )
 }
 
@@ -418,6 +427,101 @@ struct OriginQuery {
     limit: Option<i64>,
 }
 
+async fn document_task_projects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<TaskProjectPickerResponse>, TaskApiError> {
+    let auth = auth(
+        &state,
+        &headers,
+        &jar,
+        ApiTokenScope::DocumentsRead,
+        workspace_id,
+    )
+    .await?;
+    let picker = task_projects(
+        &state.auth.db.pool,
+        workspace_id,
+        auth.user_id,
+        auth.credential_id,
+        document_id,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_origin_error)?;
+    Ok(Json(TaskProjectPickerResponse {
+        items: picker
+            .items
+            .into_iter()
+            .map(|item| TaskProjectOutput {
+                id: item.id.to_string(),
+                name: item.name,
+                key: item.key,
+            })
+            .collect(),
+        suggested_id: picker.suggested_id.map(|id| id.to_string()),
+        can_create_project: picker.can_create_project,
+    }))
+}
+
+async fn document_task_origins(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((workspace_id, document_id)): Path<(Uuid, Uuid)>,
+    query: Result<Query<OriginQuery>, QueryRejection>,
+) -> Result<Json<TaskOriginListResponse>, TaskApiError> {
+    let Query(query) = query.map_err(AppError::from)?;
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(AppError::from_code(ProblemCode::InvalidInput).into());
+    }
+    let auth = auth(
+        &state,
+        &headers,
+        &jar,
+        ApiTokenScope::DocumentsRead,
+        workspace_id,
+    )
+    .await?;
+    require_extra_scope(&auth, ApiTokenScope::TasksRead)?;
+    let page = list_document_task_origins(
+        &state.auth.db.pool,
+        workspace_id,
+        auth.user_id,
+        auth.credential_id,
+        document_id,
+        query.after,
+        limit,
+    )
+    .await
+    .map_err(internal)?
+    .map_err(map_origin_error)?;
+    Ok(Json(origin_response(page)))
+}
+
+fn origin_response(page: crate::db::task_origins::TaskOriginPage) -> TaskOriginListResponse {
+    TaskOriginListResponse {
+        count: page.count,
+        items: page
+            .items
+            .into_iter()
+            .map(|item| TaskOriginItemOutput {
+                task_id: item.task_id.to_string(),
+                document_id: item.document_id.to_string(),
+                task_display_id: item.task_display_id,
+                document_display_id: item.document_display_id,
+                task_title: item.task_title,
+                document_title: item.document_title,
+                anchor: item.anchor,
+            })
+            .collect(),
+        next_cursor: page.next_cursor.map(|id| id.to_string()),
+    }
+}
+
 async fn task_origin(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -451,22 +555,5 @@ async fn task_origin(
     .await
     .map_err(internal)?
     .map_err(map_origin_error)?;
-    let items: Vec<TaskOriginItemOutput> = page
-        .items
-        .into_iter()
-        .map(|item| TaskOriginItemOutput {
-            task_id: item.task_id.to_string(),
-            document_id: item.document_id.to_string(),
-            task_display_id: item.task_display_id,
-            document_display_id: item.document_display_id,
-            task_title: item.task_title,
-            document_title: item.document_title,
-            anchor: item.anchor,
-        })
-        .collect();
-    Ok(Json(TaskOriginListResponse {
-        count: items.len(),
-        items,
-        next_cursor: page.next_cursor.map(|id| id.to_string()),
-    }))
+    Ok(Json(origin_response(page)))
 }

@@ -10,6 +10,7 @@ import { StarToggle } from "@/features/share/star-toggle";
 import { TaskCollectionProperties } from "@/features/collections/task-collection-properties";
 import { TaskAttachmentsPanel } from "./task-attachments";
 import { TaskBacklinks } from "./task-backlinks";
+import { OriginPanel } from "@/features/collections/origin-panel";
 import { TaskBodyEditor } from "./task-body-editor";
 import { TaskTimeEntries } from "./task-time-entries";
 import { Button } from "@/components/ui/button";
@@ -197,6 +198,7 @@ export function TaskDetailView({
         />
       ) : null}
       <TaskBacklinks slug={slug} workspaceId={workspaceId} taskId={task.id} />
+      <OriginPanel slug={slug} workspaceId={workspaceId} taskId={task.id} hideWhenEmpty />
     </div>
   );
 }
