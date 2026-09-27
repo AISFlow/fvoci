@@ -1,5 +1,4 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useState } from "react";
 import {
   createBrowserRouter,
   createRoutesFromElements,
@@ -53,140 +52,140 @@ const queryClient = new QueryClient({
   },
 });
 
+// A data router, so pages can hold navigation behind unsaved edits (`useBlocker`).
+// Built once per page load, outside React, so StrictMode does not start a second one.
+const router = createBrowserRouter(
+  createRoutesFromElements(
+    <>
+      <Route path="/setup" element={<SetupPage />} />
+      {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
+      <Route path="/s/:token" element={<PublicSharePage />} />
+      <Route path="/s/:token/attachments/:attachmentId/view" element={<ShareAttachmentViewPage />} />
+      <Route
+        path="/invite/:token"
+        element={
+          <SetupGuard>
+            <InvitePage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/login"
+        element={
+          <SetupGuard>
+            <LoginPage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/reset-password"
+        element={
+          <SetupGuard>
+            <ResetPasswordPage />
+          </SetupGuard>
+        }
+      />
+      <Route path="/consent" element={<ConsentPage />} />
+      <Route path="/service-info" element={<ServiceInfoPage />} />
+      <Route path="/legal/:kind" element={<LegalPage />} />
+      <Route
+        path="/settings/admin"
+        element={
+          <SetupGuard>
+            <AdminPage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/settings/audit"
+        element={
+          <SetupGuard>
+            <AdminAuditPage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/settings/legal"
+        element={
+          <SetupGuard>
+            <AdminLegalPage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/magic-link"
+        element={
+          <SetupGuard>
+            <MagicLinkPage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/confirm-email"
+        element={
+          <SetupGuard>
+            <ConfirmEmailPage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/cancel-withdraw"
+        element={
+          <SetupGuard>
+            <CancelWithdrawPage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/settings/account"
+        element={
+          <SetupGuard>
+            <AccountSettingsPage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/"
+        element={
+          <SetupGuard>
+            <HomePage />
+          </SetupGuard>
+        }
+      />
+      <Route
+        path="/w/:slug"
+        element={
+          <SetupGuard>
+            <WorkspaceLayout />
+          </SetupGuard>
+        }
+      >
+        <Route index element={<WorkspaceHomePage />} />
+        <Route path="projects" element={<ProjectsPage />} />
+        <Route path="my-tasks" element={<MyTasksPage />} />
+        <Route path="wiki" element={<WikiPage />} />
+        <Route path="search" element={<SearchPage />} />
+        <Route path="trash" element={<TrashPage />} />
+        <Route path="settings" element={<WorkspaceSettingsPage />} />
+        <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
+        <Route path="settings/templates" element={<TemplatesSettingsPage />} />
+        <Route path="notifications" element={<NotificationsPage />} />
+        <Route path="a/:attachmentId/view" element={<AttachmentViewPage />} />
+        <Route path=":ref/tasks" element={<ProjectTasksPage />} />
+        <Route path=":ref/table" element={<ProjectCollectionPage type="table" />} />
+        <Route path=":ref/board" element={<ProjectCollectionPage type="board" />} />
+        <Route path=":ref/calendar" element={<ProjectCollectionPage type="calendar" />} />
+        <Route path=":ref/gantt" element={<ProjectGanttPage />} />
+        <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
+        <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
+        <Route path=":ref" element={<WorkspaceRefPage />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </>,
+  ),
+);
+
 export function App() {
-  // A data router, so pages can hold navigation behind unsaved edits (`useBlocker`).
-  const [router] = useState(() =>
-    createBrowserRouter(
-      createRoutesFromElements(
-        <>
-          <Route path="/setup" element={<SetupPage />} />
-          {/* Public share reader: no session and no setup guard (it must not redirect to /login). */}
-          <Route path="/s/:token" element={<PublicSharePage />} />
-          <Route path="/s/:token/attachments/:attachmentId/view" element={<ShareAttachmentViewPage />} />
-          <Route
-            path="/invite/:token"
-            element={
-              <SetupGuard>
-                <InvitePage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/login"
-            element={
-              <SetupGuard>
-                <LoginPage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/reset-password"
-            element={
-              <SetupGuard>
-                <ResetPasswordPage />
-              </SetupGuard>
-            }
-          />
-          <Route path="/consent" element={<ConsentPage />} />
-          <Route path="/service-info" element={<ServiceInfoPage />} />
-          <Route path="/legal/:kind" element={<LegalPage />} />
-          <Route
-            path="/settings/admin"
-            element={
-              <SetupGuard>
-                <AdminPage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/settings/audit"
-            element={
-              <SetupGuard>
-                <AdminAuditPage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/settings/legal"
-            element={
-              <SetupGuard>
-                <AdminLegalPage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/magic-link"
-            element={
-              <SetupGuard>
-                <MagicLinkPage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/confirm-email"
-            element={
-              <SetupGuard>
-                <ConfirmEmailPage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/cancel-withdraw"
-            element={
-              <SetupGuard>
-                <CancelWithdrawPage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/settings/account"
-            element={
-              <SetupGuard>
-                <AccountSettingsPage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/"
-            element={
-              <SetupGuard>
-                <HomePage />
-              </SetupGuard>
-            }
-          />
-          <Route
-            path="/w/:slug"
-            element={
-              <SetupGuard>
-                <WorkspaceLayout />
-              </SetupGuard>
-            }
-          >
-            <Route index element={<WorkspaceHomePage />} />
-            <Route path="projects" element={<ProjectsPage />} />
-            <Route path="my-tasks" element={<MyTasksPage />} />
-            <Route path="wiki" element={<WikiPage />} />
-            <Route path="search" element={<SearchPage />} />
-            <Route path="trash" element={<TrashPage />} />
-            <Route path="settings" element={<WorkspaceSettingsPage />} />
-            <Route path="settings/document-tags" element={<DocumentTagsSettingsPage />} />
-            <Route path="settings/templates" element={<TemplatesSettingsPage />} />
-            <Route path="notifications" element={<NotificationsPage />} />
-            <Route path="a/:attachmentId/view" element={<AttachmentViewPage />} />
-            <Route path=":ref/tasks" element={<ProjectTasksPage />} />
-            <Route path=":ref/table" element={<ProjectCollectionPage type="table" />} />
-            <Route path=":ref/board" element={<ProjectCollectionPage type="board" />} />
-            <Route path=":ref/calendar" element={<ProjectCollectionPage type="calendar" />} />
-            <Route path=":ref/gantt" element={<ProjectGanttPage />} />
-            <Route path=":ref/settings/fields" element={<ProjectFieldsPage />} />
-            <Route path=":ref/settings/workflow" element={<ProjectWorkflowPage />} />
-            <Route path=":ref" element={<WorkspaceRefPage />} />
-          </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </>,
-      ),
-    ),
-  );
   return (
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />

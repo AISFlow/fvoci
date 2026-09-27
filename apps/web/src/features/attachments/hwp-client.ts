@@ -134,14 +134,28 @@ export class HwpDocumentClient {
     return response.svg;
   }
 
-  /** Replaces the first (`all` false) or every case-sensitive match of `find`. */
+  /**
+   * Replaces the first (`all` false) or every case-insensitive match of
+   * `find`. A replace that failed inside rhwp may have left the document half
+   * edited, so that failure terminates the worker: nothing after it can
+   * render, export or save that document.
+   */
   async replace(
     find: string,
     replacement: string,
     all: boolean,
   ): Promise<{ outcome: HwpReplaceOutcome; pageCount: number }> {
-    const response = await this.#request({ op: "replace", find, replacement, all }, this.#requestTimeoutMs);
-    if (response.op !== "replace") throw new HwpClientError("failed");
+    let response: HwpResponse & { ok: true };
+    try {
+      response = await this.#request({ op: "replace", find, replacement, all }, this.#requestTimeoutMs);
+    } catch (error) {
+      this.close();
+      throw error;
+    }
+    if (response.op !== "replace") {
+      this.close();
+      throw new HwpClientError("failed");
+    }
     return { outcome: response.outcome, pageCount: response.pageCount };
   }
 

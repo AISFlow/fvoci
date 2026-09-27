@@ -57,10 +57,13 @@ export type RhwpApi = {
  * the worker is terminated, which is what releases rhwp's memory.
  *
  * Edits (source `HwpViewer` 간단 편집) change only this in-memory document:
- * `replace` runs rhwp's case-sensitive find/replace, `revert` re-parses the
+ * `replace` runs rhwp's case-insensitive find/replace (`case_sensitive`
+ * false, as the source calls it), `revert` re-parses the
  * checked original bytes kept here, and `export` writes the current document
  * as HWP or HWPX. An export larger than the viewer's own download budget is
- * refused, since the copy could not be opened again.
+ * refused, since the copy could not be opened again. A replace that throws
+ * (a wasm trap) may have applied part of its edit, so the document is dropped
+ * and every later request fails: a half-edited document is never exported.
  */
 export function createHwpSession(api: RhwpApi): (request: HwpRequest) => Promise<HwpResponse> {
   let doc: RhwpDocument | null = null;
@@ -110,6 +113,14 @@ export function createHwpSession(api: RhwpApi): (request: HwpRequest) => Promise
         pageCount = visiblePageCount(doc.pageCount());
         return { id, ok: true, op: "replace", outcome: "changed", pageCount };
       } catch {
+        const poisoned = doc;
+        doc = null;
+        original = null;
+        try {
+          poisoned.free();
+        } catch {
+          // The worker is terminated next; its memory goes with it.
+        }
         return { id, ok: false, error: "failed" };
       }
     }

@@ -143,27 +143,48 @@ function stubApi(doc: Partial<RhwpDocument>, opens: { count: number; fail?: numb
   };
 }
 
-test("malformed mutation answers are refused without an edit; a trap fails the request only", async () => {
+test("malformed mutation answers are refused without an edit, and the document stays usable", async () => {
   for (const raw of ["not-json", "[]", '{"ok":true,"count":-1}', '{"ok":true,"count":"2"}']) {
     const session = await openSession(new Uint8Array([9]), stubApi({ replaceAll: () => raw }));
     assert.equal(await replace(session, "a", "b", true), "rejected", raw);
+    assert.equal((await exported(session, "hwp")).length, 1, raw);
   }
+});
+
+test("a replace that traps drops the half-edited document: nothing renders, exports or reverts after it", async () => {
+  // The stand-in applies part of its edit before trapping, as a wasm panic mid-replace can.
+  let text = "original";
+  const exports: string[] = [];
+  let freed = 0;
   const session = await openSession(
     new Uint8Array([9]),
     stubApi({
-      replaceOne: () => {
+      replaceAll: () => {
+        text = "half-edited";
         throw new Error("unreachable");
       },
+      exportHwp: () => {
+        exports.push(text);
+        return new TextEncoder().encode(text);
+      },
+      free: () => void (freed += 1),
     }),
   );
-  assert.deepEqual(await call(session, { op: "replace", find: "a", replacement: "b", all: false }), {
+  assert.deepEqual(await call(session, { op: "replace", find: "a", replacement: "b", all: true }), {
     id: nextId,
     ok: false,
     error: "failed",
   });
-  // The document is still there.
-  const rendered = await call(session, { op: "render", page: 0 });
-  assert.ok(rendered.ok && rendered.op === "render");
+  assert.equal(freed, 1);
+  for (const body of [
+    { op: "export", format: "hwp" },
+    { op: "render", page: 0 },
+    { op: "revert" },
+    { op: "replace", find: "a", replacement: "b", all: false },
+  ]) {
+    assert.deepEqual(await call(session, body), { id: nextId, ok: false, error: "failed" }, body.op);
+  }
+  assert.deepEqual(exports, []);
 });
 
 test("an export that throws, is empty, or exceeds the viewer's budget is refused", async () => {

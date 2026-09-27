@@ -191,7 +191,7 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await expect(viewer.getByText("2 / 3")).toBeVisible();
   await expect.poll(() => pageInk(page)).not.toBe(page2Before);
 
-  // Unsaved edits hold in-app navigation: link and history back stay put on 취소.
+  // Unsaved edits hold in-app navigation: a link click stays put on 취소 (or Escape).
   await searchLink.click();
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("heading")).toHaveText("저장하지 않은 본문이 있습니다");
@@ -199,13 +199,15 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
   await dialog.getByRole("button", { name: "취소" }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
-  await page.evaluate(() => window.history.back());
+  await searchLink.click();
   await expect(dialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
   await expect(saveButton).toBeEnabled();
-  // Forward (to the search page) is held too; 나가기 discards the edits and goes.
+  // History forward to the search page (the router's own entry from the link click
+  // above) is held too; 나가기 discards the edits and goes. History back is checked
+  // after save-copy, whose navigation gives the viewer a router entry behind it.
   await page.evaluate(() => window.history.forward());
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "나가기" }).click();
@@ -290,9 +292,26 @@ test("HWP/HWPX 간단 편집: replace, 0-count, revert, draft download, save-cop
     await (await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpxId}/download`)).body(),
   );
   expect(sha256(original)).toBe(sha256(threePageHwpx));
-  // Back to the untouched original with nothing pending.
-  await page.goBack();
+  // History back from the copy with unsaved edits is held: Escape stays on the copy,
+  // 나가기 returns to the untouched original.
+  const copyPath = `/w/acme/a/${copyId}/view`;
+  await viewer.getByRole("button", { name: "간단 편집" }).click();
+  await find.fill("첫째");
+  await replacement.fill("처음");
+  await bar.getByRole("button", { name: "하나 바꾸기" }).click();
+  await expect(saveButton).toBeEnabled();
+  await page.evaluate(() => window.history.back());
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`${copyPath}$`));
+  await expect(saveButton).toBeEnabled();
+  await page.evaluate(() => window.history.back());
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "나가기" }).click();
   await expect(page).toHaveURL(new RegExp(`${viewPath}$`));
+  await expect(page.locator(".attachment-viewer__name")).toHaveText("품의서.hwpx");
+  await expect(viewer.getByText("1 / 3")).toBeVisible({ timeout: 30_000 });
   await expect(dialog).toHaveCount(0);
 
   // Binary HWP keeps its format: the copy is HWP 5.0 (OLE compound file).

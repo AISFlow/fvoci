@@ -254,7 +254,7 @@ test("edits travel through the worker; a revert gets the open deadline, a replac
   assert.equal(f.worker.terminated, 1);
 });
 
-test("a failed edit answer rejects only that request", async () => {
+test("a failed export rejects only that request; a failed replace terminates the worker", async () => {
   const f = fake((request) =>
     request.op === "open"
       ? { id: request.id, ok: true, op: "open", pageCount: 1 }
@@ -264,8 +264,13 @@ test("a failed edit answer rejects only that request", async () => {
   );
   const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker });
   await rejectsWith(client.exportDocument("hwp"), "tooLarge");
-  await rejectsWith(client.replace("a", "b", true), "failed");
   assert.equal(client.closed, false);
   assert.equal(f.worker.terminated, 0);
-  client.close();
+  // The document may be half edited: it is gone, and the export after it never reaches the worker.
+  await rejectsWith(client.replace("a", "b", true), "failed");
+  assert.equal(client.closed, true);
+  assert.equal(f.worker.terminated, 1);
+  const sent = f.worker.received.length;
+  await rejectsWith(client.exportDocument("hwp"), "closed");
+  assert.equal(f.worker.received.length, sent);
 });
