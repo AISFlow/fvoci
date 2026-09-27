@@ -2,6 +2,7 @@ import { t } from "@fvoci/i18n";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Label } from "@/components/ui/label";
+import { subscribeWhenActive } from "@/features/notifications/push-activation";
 import {
   attempted,
   boundTo,
@@ -68,7 +69,9 @@ async function subscribe(workspaceId: string, publicKey: string, userId: string)
   if (leftover && readPushOwner(localStore()) !== userId) {
     await leftover.unsubscribe();
   }
-  const subscription = await registration.pushManager.subscribe({
+  // A first registration is still installing; subscribing before it is
+  // active fails, and nothing is stored until it succeeds.
+  const subscription = await subscribeWhenActive(registration, {
     userVisibleOnly: true,
     applicationServerKey: decodeKey(publicKey),
   });
