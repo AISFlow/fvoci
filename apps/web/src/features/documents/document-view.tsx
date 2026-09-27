@@ -561,14 +561,13 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
             {collabSession ? (
               <CollabPresence peers={collabSession.peers} onJump={flashBlock} />
             ) : null}
-            {project ? null : (
-              <RevisionPanel
-                workspaceId={workspaceId}
-                documentId={documentId}
-                readOnly={readOnly}
-                persistNow={canPersist ? persistBody : undefined}
-              />
-            )}
+            <RevisionPanel
+              workspaceId={workspaceId}
+              documentId={documentId}
+              projectId={project?.id ?? null}
+              readOnly={readOnly}
+              persistNow={canPersist ? persistBody : undefined}
+            />
           </div>
           {saveError ? <p role="alert" className="document-page__error">{saveError}</p> : null}
           {persistError ? <p role="alert" className="document-page__error">{persistError}</p> : null}
