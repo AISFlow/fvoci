@@ -176,16 +176,31 @@ type Rgb = [number, number, number];
 const BLUE_PICTURE_INTERIOR = { x: 482, y: 402, width: 92, height: 44 } as const;
 
 /**
+ * The linked picture's placeholder box (640, 400, 48 × 48) inset 2 px, and
+ * the bands beside it on the rows of its label, up to the blue picture and to
+ * x 900. The renderer centres a ~450 px label on the box; bounded, it paints
+ * inside the box only.
+ */
+const PLACEHOLDER = {
+  inside: { x: 642, y: 402, width: 44, height: 44 },
+  beside: [
+    { x: 578, y: 402, width: 60, height: 44 },
+    { x: 690, y: 402, width: 210, height: 44 },
+  ],
+} as const;
+
+/**
  * Colours of the rendered slide at slide-space points, from a screenshot of
  * the `<img>` (a canvas would be tainted by the SVG's foreignObject text),
  * and how many slide px of the blue picture's interior are not its colour:
- * one point can fall between the glyphs of text drawn over the picture.
+ * one point can fall between the glyphs of text drawn over the picture; and
+ * the linked placeholder's label ink inside its box and paint beside it.
  */
 async function sampleSlide(page: Page, points: Record<string, [number, number]>) {
   const img = page.locator("[data-pptx-viewer] img.pptx-viewer__slide");
   const png = await img.screenshot();
   return page.evaluate(
-    async ({ data, points, slideWidth, box, blue }) => {
+    async ({ data, points, slideWidth, box, blue, placeholderBox }) => {
       const image = new Image();
       image.src = `data:image/png;base64,${data}`;
       await image.decode();
@@ -208,11 +223,26 @@ async function sampleSlide(page: Page, points: Record<string, [number, number]>)
           if (!blue.every((c, k) => Math.abs(rgb[k]! - c) <= 24)) offBlue += 1;
         }
       }
+      const count = (r: { x: number; y: number; width: number; height: number }, hit: (rgb: Uint8ClampedArray) => boolean) => {
+        let n = 0;
+        for (let y = r.y; y < r.y + r.height; y += 1) {
+          for (let x = r.x; x < r.x + r.width; x += 1) {
+            if (hit(ctx.getImageData(Math.round((x + 0.5) * px), Math.round((y + 0.5) * px), 1, 1).data)) n += 1;
+          }
+        }
+        return n;
+      };
+      const dark = (rgb: Uint8ClampedArray) => rgb[0]! + rgb[1]! + rgb[2]! < 384;
+      const notWhite = (rgb: Uint8ClampedArray) => rgb[0]! < 250 || rgb[1]! < 250 || rgb[2]! < 250;
+      const placeholder = {
+        ink: count(placeholderBox.inside, dark),
+        beside: placeholderBox.beside.reduce((n, r) => n + count(r, notWhite), 0),
+      };
       // Dark pixels in the title box: glyphs were drawn (whatever font the host has).
       const title = ctx.getImageData(Math.round(40 * px), Math.round(24 * px), Math.round(880 * px), Math.round(60 * px)).data;
       let ink = 0;
       for (let i = 0; i < title.length; i += 4) if (title[i]! + title[i + 1]! + title[i + 2]! < 240) ink += 1;
-      return { colors: out, titleInk: ink, offBlue };
+      return { colors: out, titleInk: ink, offBlue, placeholder };
     },
     {
       data: png.toString("base64"),
@@ -220,6 +250,7 @@ async function sampleSlide(page: Page, points: Record<string, [number, number]>)
       slideWidth: FIXTURE_PPTX_SLIDE_W,
       box: BLUE_PICTURE_INTERIOR,
       blue: FIXTURE_PPTX_COLORS.blue,
+      placeholderBox: PLACEHOLDER,
     },
   );
 }
@@ -393,6 +424,7 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
     orange: [320, 420],
     blue: [528, 424],
     white: [900, 500],
+    placeholder: [646, 406],
   });
   const slide1Png = await img.screenshot();
   await test.info().attach("pptx-slide-1", { body: slide1Png, contentType: "image/png" });
@@ -403,6 +435,11 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   expect(near(samples.colors.orange!, FIXTURE_PPTX_COLORS.orange)).toBe(true);
   expect(near(samples.colors.blue!, FIXTURE_PPTX_COLORS.blue)).toBe(true);
   expect(samples.offBlue).toBe(0);
+  // The linked picture stays a visible placeholder (its fill, its label cut to the box), and its
+  // label paints nothing beside the box.
+  expect(near(samples.colors.placeholder!, [0xf3, 0xf4, 0xf6], 4)).toBe(true);
+  expect(samples.placeholder.ink).toBeGreaterThan(20);
+  expect(samples.placeholder.beside).toBe(0);
   expect(near(samples.colors.white!, [255, 255, 255])).toBe(true);
   expect(samples.titleInk).toBeGreaterThan(200);
 

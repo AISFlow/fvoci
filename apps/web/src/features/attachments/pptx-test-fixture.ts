@@ -60,8 +60,12 @@ const textBox = (id: number, name: string, x: number, y: number, w: number, h: n
 const shape = (id: number, name: string, preset: string, x: number, y: number, w: number, h: number, fill: string) =>
   `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${name}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>${xfrm(x, y, w, h)}<a:prstGeom prst="${preset}"><a:avLst/></a:prstGeom>${solid(fill)}<a:ln><a:noFill/></a:ln></p:spPr></p:sp>`;
 
-const picture = (id: number, name: string, blip: string, x: number, y: number, w: number, h: number) =>
-  `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="${name}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill>${blip}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>${xfrm(x, y, w, h)}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+const picture = (id: number, name: string, blip: string, x: number, y: number, w: number, h: number, rot = 0) =>
+  `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="${name}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill>${blip}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>${rot ? xfrm(x, y, w, h).replace("<a:xfrm>", `<a:xfrm rot="${rot * 60000}">`) : xfrm(x, y, w, h)}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+
+/** A group whose children are laid out in `child` coordinates and scaled onto `outer`. */
+const group = (id: number, outer: [number, number, number, number], child: [number, number, number, number], shapes: string) =>
+  `<p:grpSp><p:nvGrpSpPr><p:cNvPr id="${id}" name="Group ${id}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="${px(outer[0])}" y="${px(outer[1])}"/><a:ext cx="${px(outer[2])}" cy="${px(outer[3])}"/><a:chOff x="${px(child[0])}" y="${px(child[1])}"/><a:chExt cx="${px(child[2])}" cy="${px(child[3])}"/></a:xfrm></p:grpSpPr>${shapes}</p:grpSp>`;
 
 const bullet = (text: string, level: number) =>
   `<a:p><a:pPr lvl="${level}" marL="${px(24 + level * 32)}" indent="${px(-18)}"><a:buFont typeface="Arial"/><a:buChar char="${level === 0 ? "•" : "–"}"/></a:pPr>${run(text)}</a:p>`;
@@ -112,9 +116,16 @@ const LAYOUT = `${XML}<p:sldLayout xmlns:a="${A}" xmlns:r="${R}" xmlns:p="${P}" 
 /** One filler paragraph (≈ 94 bytes of slide XML). */
 export const FIXTURE_PPTX_FILLER = `<a:p><a:r><a:rPr lang="ko-KR" sz="1000"/><a:t>가나다라마바사 filler text 0123456789</a:t></a:r></a:p>`;
 
+/**
+ * `slide2Fallbacks` adds pictures the renderer can only draw as placeholders
+ * to slide 2: a linked picture in a group scaled ×2 (child box 24×24 at
+ * 10,10 → 48×48 at 120,320 on the slide), one rotated 90° (48×48 at
+ * 400,300), an embed whose media part is missing (48×48 at 600,300) and a
+ * linked one of zero size (at 800,300; the renderer draws nothing for it).
+ */
 export function buildFixturePptx(
   text: PptxFixtureText = DEFAULT_PPTX_TEXT,
-  { slide2Paragraphs = 0 }: { slide2Paragraphs?: number } = {},
+  { slide2Paragraphs = 0, slide2Fallbacks = false }: { slide2Paragraphs?: number; slide2Fallbacks?: boolean } = {},
 ): Uint8Array {
   const enc = (s: string) => new TextEncoder().encode(s);
   const contentTypes = `${XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`;
@@ -139,11 +150,22 @@ export function buildFixturePptx(
       shape(7, "Green rectangle", "rect", 40, 380, 160, 80, hexOf(FIXTURE_PPTX_COLORS.green)),
       shape(8, "Orange ellipse", "ellipse", 240, 380, 160, 80, hexOf(FIXTURE_PPTX_COLORS.orange)),
       picture(9, "Blue picture", '<a:blip r:embed="rIdImage"/>', 480, 400, 96, 48),
-      // Below the shapes row: its fallback label is wider than the box and would cover the blue picture.
-      picture(10, "Linked picture", '<a:blip r:link="rIdLinkedImage"/>', 560, 480, 48, 48),
+      picture(10, "Linked picture", '<a:blip r:link="rIdLinkedImage"/>', 640, 400, 48, 48),
     ].join(""),
   );
-  const slide2 = slideXml(textBox(2, "Second", 40, 40, 880, 60, `<a:p>${run(text.secondSlide, { size: 3200 })}</a:p>${FIXTURE_PPTX_FILLER.repeat(slide2Paragraphs)}`));
+  const linked = '<a:blip r:link="rIdLinkedImage"/>';
+  const fallbacks = slide2Fallbacks
+    ? [
+        group(3, [100, 300, 96, 96], [0, 0, 48, 48], picture(4, "Grouped linked picture", linked, 10, 10, 24, 24)),
+        picture(5, "Rotated linked picture", linked, 400, 300, 48, 48, 90),
+        picture(6, "Missing picture", '<a:blip r:embed="rIdMissing"/>', 600, 300, 48, 48),
+        picture(7, "Empty linked picture", linked, 800, 300, 0, 0),
+      ].join("")
+    : "";
+  const slide2 = slideXml(
+    textBox(2, "Second", 40, 40, 880, 60, `<a:p>${run(text.secondSlide, { size: 3200 })}</a:p>${FIXTURE_PPTX_FILLER.repeat(slide2Paragraphs)}`) +
+      fallbacks,
+  );
 
   return writeZip([
     { name: "[Content_Types].xml", bytes: enc(contentTypes) },
@@ -187,7 +209,14 @@ export function buildFixturePptx(
     { name: "ppt/slides/slide2.xml", bytes: enc(slide2) },
     {
       name: "ppt/slides/_rels/slide2.xml.rels",
-      bytes: enc(rels([rel("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml")])),
+      bytes: enc(
+        rels([
+          rel("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"),
+          ...(slide2Fallbacks
+            ? [rel("rIdLinkedImage", "image", FIXTURE_PPTX_EXTERNAL_IMAGE, true), rel("rIdMissing", "image", "../media/missing.png")]
+            : []),
+        ]),
+      ),
     },
     { name: "ppt/media/blue.png", bytes: solidPng(4, 2, [...FIXTURE_PPTX_COLORS.blue]) },
   ]);

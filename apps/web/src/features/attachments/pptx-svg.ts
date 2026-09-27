@@ -5,7 +5,11 @@
  *
  * `@office-kit/pptx-preview` interpolates some deck strings into its markup
  * unescaped (chart number-format prefixes, for one), so its output is treated
- * as hostile markup and never parsed, filtered or rewritten here. SVG that an
+ * as hostile markup and never filtered or rewritten here. The one change
+ * made to it before this wrapper, in the worker, is `pptx-fallback.ts`: a
+ * standard XML tokenizer finds the renderer's placeholder labels, and each
+ * is enclosed in a viewport of its own box. That is layout, not a security
+ * measure; the boundary is what follows. SVG that an
  * `<image>` element references is processed as an image (SVG Integration):
  * no script, no external loads, no links or other interaction. That holds for
  * the inner slide wherever the outer blob is shown: through the viewer's
