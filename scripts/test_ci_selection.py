@@ -141,6 +141,16 @@ def run_cli(
     )
 
 
+def is_opt_in(workflow: str, job: str) -> bool:
+    return job in SEL.OPT_IN_JOBS.get(workflow, {})
+
+
+def assert_full_selection(case: unittest.TestCase, workflow: str, plan: dict, context: object) -> None:
+    """Full mode selects every job except manual opt-ins, which stay unselected."""
+    for job, meta in plan["jobs"].items():
+        case.assertIs(meta["selected"], not is_opt_in(workflow, job), (workflow, job, context))
+
+
 def dummy_event_path(directory: Path) -> Path:
     path = directory / "event.json"
     path.write_text("{}", encoding="utf-8")
@@ -534,21 +544,41 @@ class GateSchemaTest(unittest.TestCase):
         results: dict[str, str] | None = None,
         tested: str = "a" * 40,
         needs_json: str | None = None,
+        event_name: str | None = None,
+        event: object = None,
         **needs_kwargs: object,
     ) -> int:
         payload = needs_json if needs_json is not None else self._needs(
             plan, workflow, results, **needs_kwargs
         )
-        return SEL.cmd_gate(
-            [
-                "--workflow",
-                workflow,
-                "--needs-json",
-                payload,
-                "--tested-sha",
-                tested,
-            ]
-        )
+        if event_name is None:
+            # Default: the event that legitimately produced this plan's opt-ins.
+            chosen = {
+                name: "true"
+                for job, name in SEL.OPT_IN_JOBS.get(workflow, {}).items()
+                if isinstance(plan, dict)
+                and isinstance(plan.get("jobs"), dict)
+                and (plan["jobs"].get(job) or {}).get("selected") is True
+            }
+            event_name, event = ("workflow_dispatch", {"inputs": chosen}) if chosen else ("pull_request", {})
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "event.json"
+            event_path.write_text(
+                event if isinstance(event, str) else json.dumps(event), encoding="utf-8"
+            )
+            with mock.patch.dict(
+                os.environ, {"GITHUB_EVENT_NAME": event_name, "GITHUB_EVENT_PATH": str(event_path)}
+            ):
+                return SEL.cmd_gate(
+                    [
+                        "--workflow",
+                        workflow,
+                        "--needs-json",
+                        payload,
+                        "--tested-sha",
+                        tested,
+                    ]
+                )
 
     def test_unselected_must_be_skipped(self) -> None:
         plan = self._plan("web", {"web-checks": False})
@@ -706,6 +736,120 @@ class GateSchemaTest(unittest.TestCase):
         plan["mode"] = "full"
         rc = self._gate(plan, "documents", {"native-extraction": "success"}, tested="b" * 40)
         self.assertEqual(rc, 1)
+
+
+class OptInSelectionTest(unittest.TestCase):
+    """upgrade-smoke-arm64 runs only on an explicit manual dispatch opt-in."""
+
+    def _install_plan(self, event_name: str, *, event: object = None, paths=None, **kwargs: object) -> dict:
+        opt_ins, err = SEL.dispatch_opt_ins("install", event_name, event if event is not None else {})
+        return SEL.build_plan(
+            workflow="install",
+            event_name=event_name,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            merge_base_sha="c" * 40,
+            tested_sha="b" * 40,
+            paths=paths,
+            fatal_error=kwargs.pop("fatal_error", None) or err,
+            opt_in_inputs=opt_ins,
+            **kwargs,
+        )
+
+    def test_ordinary_events_never_select_upgrade(self) -> None:
+        opt_in_event = {"inputs": {"run_upgrade_smoke_arm": "true"}}
+        cases = [
+            ("pull_request", ["apps/web/src/x.ts"]),
+            ("pull_request", ["docs/rewrite.md"]),
+            ("pull_request", ["src/main.rs"]),
+            ("pull_request", ["scripts/upgrade-smoke.sh"]),
+            ("push", ["src/main.rs"]),
+            ("merge_group", ["src/main.rs"]),
+        ]
+        for event_name, paths in cases:
+            for event in ({}, opt_in_event):
+                plan = self._install_plan(event_name, event=event, paths=paths)
+                self.assertFalse(plan["jobs"]["upgrade-smoke-arm64"]["selected"], (event_name, paths))
+        frontend = self._install_plan("pull_request", paths=["apps/web/src/x.ts"])
+        self.assertTrue(frontend["jobs"]["install-smoke"]["selected"])
+        self.assertTrue(frontend["jobs"]["backup-restore-smoke"]["selected"])
+
+    def test_manual_dispatch_off_by_default(self) -> None:
+        for event in ({}, {"inputs": None}, {"inputs": {}}, {"inputs": {"run_upgrade_smoke_arm": "false"}},
+                      {"inputs": {"run_upgrade_smoke_arm": False}}):
+            plan = self._install_plan("workflow_dispatch", event=event)
+            self.assertTrue(plan["plan_ok"], event)
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_WORKFLOW_DISPATCH")
+            self.assertFalse(plan["jobs"]["upgrade-smoke-arm64"]["selected"], event)
+            self.assertTrue(plan["jobs"]["install-smoke"]["selected"])
+            self.assertTrue(plan["jobs"]["backup-restore-smoke"]["selected"])
+
+    def test_manual_dispatch_opt_in_selects_upgrade(self) -> None:
+        for value in ("true", True):
+            plan = self._install_plan("workflow_dispatch", event={"inputs": {"run_upgrade_smoke_arm": value}})
+            self.assertTrue(plan["plan_ok"])
+            self.assertEqual(
+                {job: meta["selected"] for job, meta in plan["jobs"].items()},
+                {"install-smoke": True, "backup-restore-smoke": True, "upgrade-smoke-arm64": True},
+            )
+
+    def test_opt_in_input_ignored_by_other_workflows_and_fatal_plans(self) -> None:
+        plan = SEL.build_plan(
+            workflow="install",
+            event_name="workflow_dispatch",
+            base_sha=None,
+            head_sha=None,
+            merge_base_sha=None,
+            tested_sha="b" * 40,
+            paths=None,
+            fatal_error="TESTED_SHA_MISMATCH",
+            opt_in_inputs=frozenset({"run_upgrade_smoke_arm"}),
+        )
+        self.assertFalse(plan["plan_ok"])
+        self.assertFalse(plan["jobs"]["upgrade-smoke-arm64"]["selected"])
+        _, err = SEL.dispatch_opt_ins("web", "workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": "true"}})
+        self.assertEqual(err, "DISPATCH_INPUTS_UNKNOWN")
+
+    def test_malformed_dispatch_inputs_fail_plan(self) -> None:
+        for event, code in (
+            ([], "DISPATCH_EVENT_INVALID"),
+            ({"inputs": "true"}, "DISPATCH_INPUTS_INVALID"),
+            ({"inputs": {"run_upgrade_smoke_arm": "TRUE"}}, "DISPATCH_INPUT_VALUE_INVALID"),
+            ({"inputs": {"run_upgrade_smoke_arm": 1}}, "DISPATCH_INPUT_VALUE_INVALID"),
+            ({"inputs": {"run_upgrade_smoke_arm": None}}, "DISPATCH_INPUT_VALUE_INVALID"),
+            ({"inputs": {"run_upgrade_smoke_arm": "true", "old": "d" * 40}}, "DISPATCH_INPUTS_UNKNOWN"),
+        ):
+            plan = self._install_plan("workflow_dispatch", event=event)
+            self.assertFalse(plan["plan_ok"], event)
+            self.assertEqual(plan["reason_code"], code)
+            self.assertFalse(plan["jobs"]["upgrade-smoke-arm64"]["selected"], event)
+
+    def test_plan_cli_dispatch_opt_in_outputs(self) -> None:
+        with GitRepoFixture() as fx:
+            copy_workflows(fx.repo)
+            write_minimal_rust_registry_stub(fx.repo)
+            sha = fx.commit_file("README.md")
+            for inputs, expected, plan_ok in (
+                ({"run_upgrade_smoke_arm": "true"}, "true", "true"),
+                ({"run_upgrade_smoke_arm": "false"}, "false", "true"),
+                ({"run_upgrade_smoke_arm": "maybe"}, "false", "false"),
+            ):
+                event = fx.repo / "event.json"
+                event.write_text(json.dumps({"inputs": inputs}), encoding="utf-8")
+                gh_out = fx.repo / "gh-out.txt"
+                proc = run_cli(
+                    [
+                        "plan", "--workflow", "install", "--repo-root", str(fx.repo),
+                        "--event-json", str(event), "--output-plan", str(fx.repo / "plan.json"),
+                        "--github-output", str(gh_out),
+                    ],
+                    env={"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": sha},
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                lines = gh_out.read_text(encoding="utf-8").splitlines()
+                self.assertIn(f"select_upgrade_smoke_arm64={expected}", lines, inputs)
+                self.assertIn(f"plan_ok={plan_ok}", lines, inputs)
+                self.assertIn("select_install_smoke=true", lines)
 
 
 class WorkflowRegistryTest(unittest.TestCase):
@@ -1076,6 +1220,63 @@ class RegistryMutationCliTest(unittest.TestCase):
         proc, output = self._plan_against(root)
         self._assert_no_green_outputs(proc, output, "unregistered job id new-suite")
 
+    def _mutate_install(self, root: Path, old: str, new: str) -> None:
+        path = root / ".github" / "workflows" / "install.yml"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count(old), 1, old)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+    def test_install_opt_in_wiring_mutations_rejected_before_outputs(self) -> None:
+        cases = (
+            ("        default: false\n", "        default: true\n", "input run_upgrade_smoke_arm must be"),
+            ("        type: boolean\n", "        type: string\n", "input run_upgrade_smoke_arm must be"),
+            (
+                "      run_upgrade_smoke_arm:\n",
+                "      upgrade_old:\n        type: string\n      run_upgrade_smoke_arm:\n",
+                "workflow_dispatch inputs must be exactly",
+            ),
+            (
+                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-24.04-arm\n",
+                "  upgrade-smoke-arm64:\n    needs: ci-plan\n    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n    runs-on: ubuntu-24.04\n",
+                "upgrade-smoke-arm64 runs-on must be ubuntu-24.04-arm",
+            ),
+            (
+                "    if: needs.ci-plan.outputs.select_upgrade_smoke_arm64 == 'true'\n",
+                "    if: github.event_name == 'workflow_dispatch'\n",
+                "upgrade-smoke-arm64 if must be",
+            ),
+            (
+                "    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]\n",
+                "    needs: [ci-plan, install-smoke, backup-restore-smoke]\n",
+                "install-ci-gate needs must be",
+            ),
+            (
+                "      select_upgrade_smoke_arm64: ${{ steps.plan.outputs.select_upgrade_smoke_arm64 }}\n",
+                "",
+                "missing selector output select_upgrade_smoke_arm64",
+            ),
+        )
+        for old, new, needle in cases:
+            root = self._mutated_root()
+            self._mutate_install(root, old, new)
+            proc, output = self._plan_against(root)
+            self._assert_no_green_outputs(proc, output, needle)
+
+    def test_opt_in_input_on_other_workflow_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        web = root / ".github" / "workflows" / "web.yml"
+        text = web.read_text(encoding="utf-8")
+        web.write_text(
+            text.replace(
+                "  workflow_dispatch:\n",
+                "  workflow_dispatch:\n    inputs:\n      run_upgrade_smoke_arm:\n        type: boolean\n        default: false\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "web: workflow_dispatch inputs must be exactly []")
+
     def test_gate_suffixed_product_job_rejected_before_outputs(self) -> None:
         root = self._mutated_root()
         web = root / ".github" / "workflows" / "web.yml"
@@ -1269,8 +1470,7 @@ class AgentDocsSelectionTest(unittest.TestCase):
             self.assertEqual(plan["mode"], "full", (workflow, paths))
             if reason is not None:
                 self.assertEqual(plan["reason_code"], reason, (workflow, paths))
-            for job, meta in plan["jobs"].items():
-                self.assertTrue(meta["selected"], (workflow, job, paths))
+            assert_full_selection(self, workflow, plan, paths)
 
     def test_exact_agent_docs_classify_as_docs(self) -> None:
         for path in AGENT_DOCS:
@@ -1356,7 +1556,7 @@ class AgentDocsSelectionTest(unittest.TestCase):
                 self.assertEqual(plan["mode"], "full", (event_name, workflow))
                 self.assertEqual(plan["reason_code"], reason)
                 self.assertTrue(plan["plan_ok"])
-                self.assertTrue(all(meta["selected"] for meta in plan["jobs"].values()))
+                assert_full_selection(self, workflow, plan, event_name)
 
     def test_diff_failure_fails_closed(self) -> None:
         for fatal in ("GIT_DIFF_FAILED", "DIFF_TRUNCATED", "DIFF_TRUNCATED_RENAME", "FETCH_FAILED"):
@@ -1364,7 +1564,7 @@ class AgentDocsSelectionTest(unittest.TestCase):
                 self.assertEqual(plan["mode"], "full", (fatal, workflow))
                 self.assertEqual(plan["reason_code"], fatal)
                 self.assertFalse(plan["plan_ok"])
-                self.assertTrue(all(meta["selected"] for meta in plan["jobs"].values()))
+                assert_full_selection(self, workflow, plan, fatal)
         for workflow, plan in plan_all_workflows(None).items():
             self.assertEqual(plan["reason_code"], "FULL_MISSING_PATHS", workflow)
             self.assertFalse(plan["plan_ok"])
@@ -1478,6 +1678,86 @@ class AgentDocsGateTest(unittest.TestCase):
     _plan = GateSchemaTest._plan
     _needs = GateSchemaTest._needs
     _gate = GateSchemaTest._gate
+
+    def test_opt_in_gate_selected_bad_result_or_missing_rejected(self) -> None:
+        plan = self._plan("install", {"upgrade-smoke-arm64": True})
+        ok = {"upgrade-smoke-arm64": "success"}
+        self.assertEqual(self._gate(plan, "install", ok), 0)
+        for result in ("failure", "cancelled", "skipped"):
+            self.assertEqual(self._gate(plan, "install", {"upgrade-smoke-arm64": result}), 1, result)
+        self.assertEqual(
+            self._gate(plan, "install", ok, omit_jobs=frozenset({"upgrade-smoke-arm64"})), 1
+        )
+
+    def test_opt_in_gate_unchosen_ran_rejected(self) -> None:
+        plan = self._plan("install", {})
+        for event_name, event in (
+            ("pull_request", {}),
+            ("push", {}),
+            ("merge_group", {}),
+            ("workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": "false"}}),
+        ):
+            self.assertEqual(self._gate(plan, "install", event_name=event_name, event=event), 0)
+            for result in ("success", "failure", "cancelled"):
+                rc = self._gate(
+                    plan,
+                    "install",
+                    {"upgrade-smoke-arm64": result},
+                    event_name=event_name,
+                    event=event,
+                )
+                self.assertEqual(rc, 1, (event_name, result))
+
+    def test_opt_in_gate_rejects_plan_override(self) -> None:
+        # A plan that selects the job without the event opt-in, or drops a real
+        # opt-in, fails even when the job result matches the plan.
+        forced = self._plan("install", {"upgrade-smoke-arm64": True})
+        for event_name, event in (
+            ("pull_request", {"inputs": {"run_upgrade_smoke_arm": "true"}}),
+            ("push", {}),
+            ("merge_group", {}),
+            ("workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": "false"}}),
+            ("workflow_dispatch", {}),
+        ):
+            rc = self._gate(
+                forced,
+                "install",
+                {"upgrade-smoke-arm64": "success"},
+                event_name=event_name,
+                event=event,
+            )
+            self.assertEqual(rc, 1, (event_name, event))
+        dropped = self._plan("install", {})
+        rc = self._gate(
+            dropped,
+            "install",
+            event_name="workflow_dispatch",
+            event={"inputs": {"run_upgrade_smoke_arm": "true"}},
+        )
+        self.assertEqual(rc, 1)
+
+    def test_opt_in_gate_malformed_event_rejected(self) -> None:
+        plan = self._plan("install", {})
+        for event_name, event in (
+            ("workflow_dispatch", "{bad"),
+            ("workflow_dispatch", []),
+            ("workflow_dispatch", {"inputs": []}),
+            ("workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": "yes"}}),
+            ("workflow_dispatch", {"inputs": {"run_upgrade_smoke_arm": 1}}),
+            ("workflow_dispatch", {"inputs": {"other": "true"}}),
+            ("schedule", {}),
+        ):
+            self.assertEqual(
+                self._gate(plan, "install", event_name=event_name, event=event), 1, (event_name, event)
+            )
+        payload = self._needs(plan, "install")
+        for missing in ("GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH"):
+            with mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": "/nonexistent"}):
+                os.environ.pop(missing)
+                rc = SEL.cmd_gate(
+                    ["--workflow", "install", "--needs-json", payload, "--tested-sha", "a" * 40]
+                )
+            self.assertEqual(rc, 1, missing)
 
     def test_docs_plan_all_skipped_passes(self) -> None:
         for workflow in SEL.WORKFLOW_JOBS:

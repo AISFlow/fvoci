@@ -4,7 +4,8 @@ This slice initializes a new PostgreSQL database. Importing an existing TypeScri
 The Rust server has forward schema migrations (see "Migrate and grant before server" and, for the Compose
 install, "Upgrade"; the developer smoke in "Upgrade validation" exercises one image pair per run with local
 storage or, with `--storage s3`, the documented S3 procedure against a local run-owned bucket, one injected init
-failure and old-image rollback; CI does not run it). Downgrading a migrated database is not supported.
+failure and old-image rollback; ordinary PR and main CI does not run it, only an optional manual
+`workflow_dispatch`). Downgrading a migrated database is not supported.
 
 ## Toolchain
 
@@ -701,8 +702,9 @@ storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
 loses writes made after that backup; preserve the failed install for diagnosis,
 but with S3 keep it stopped and never start it again with the same `S3_*`
 settings, since its sweeps would delete objects the restored install uses.
-CI does not run this image-to-image upgrade; `install-smoke.sh` recreates the
-server on the same image.
+Ordinary PR and main CI does not run this image-to-image upgrade;
+`install-smoke.sh` recreates the server on the same image. An optional manual
+run is described under "Upgrade validation".
 
 #### Upgrade validation
 
@@ -785,8 +787,12 @@ works from versions of the same local silo bucket. It does not cover
 replication, a second region, a cloud provider's versioning or backup service,
 lifecycle rules, or the presigned direct mode, which is not implemented.
 `--verify-storage` compares attachment sizes only, so a same-size overwrite is
-not detected before start. CI does not run this smoke. Record the pair, image IDs, architecture and
-logs of a run with the change it supports; this guide does not.
+not detected before start. Ordinary PR and main CI does not run this smoke. A manual dispatch of the
+Container install workflow with `run_upgrade_smoke_arm=true`
+(`gh workflow run install.yml --ref <branch> -f run_upgrade_smoke_arm=true`) runs it once on native
+`ubuntu-24.04-arm` with local storage, for the fixed pair in the `upgrade-smoke-arm64` job and the
+tested commit as `--main-ref`. The job being registered is not a result. Record the pair, image IDs,
+architecture and logs of a run with the change it supports; this guide does not.
 
 ## Backup and restore
 
