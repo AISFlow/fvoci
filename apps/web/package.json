@@ -13,7 +13,7 @@
     "@fvoci/editor": "file:../../packages/editor",
     "@fvoci/i18n": "file:../../packages/i18n",
     "@hocuspocus/provider": "4.6.0",
-    "@hocuspocus/provider-react": "4.6.0",
+    "@hocuspocus/provider-react": "4.7.0",
     "@hookform/resolvers": "^5.9.1",
     "@tanstack/react-query": "^5.103.2",
     "clsx": "^2.1.1",
