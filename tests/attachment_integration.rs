@@ -2857,7 +2857,7 @@ async fn proxy_capped_parts_round_trip_exact_bytes_through_413_and_524() {
         let (path, body) = (complete_path.clone(), complete_body.clone());
         async move { via_proxy_json(&client, &edge, Method::POST, &path, &cookie, Some(body)).await }
     });
-    tokio::time::timeout(Duration::from_secs(30), barrier.wait_entered())
+    tokio::time::timeout(Duration::from_secs(5), barrier.wait_entered())
         .await
         .expect("complete reached the pre-mark barrier")
         .expect("barrier entered");
