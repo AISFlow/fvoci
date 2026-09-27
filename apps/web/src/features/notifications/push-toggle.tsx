@@ -62,6 +62,12 @@ async function subscribe(workspaceId: string, publicKey: string, userId: string)
     throw new PermissionBlocked();
   }
   const registration = await navigator.serviceWorker.register(SW_URL);
+  // A subscription left by another account (or of unknown owner) is replaced,
+  // never re-bound: subscribe() would return the same endpoint otherwise.
+  const leftover = await registration.pushManager.getSubscription();
+  if (leftover && readPushOwner(localStore()) !== userId) {
+    await leftover.unsubscribe();
+  }
   const subscription = await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: decodeKey(publicKey),
@@ -108,18 +114,16 @@ export function PushToggle({ workspaceId }: { workspaceId: string }) {
     let live = true;
     void (async () => {
       const subscription = await currentSubscription();
-      if (subscription) {
-        if (readPushOwner(localStore()) !== userId) {
-          // Left behind by another account (or an unknown owner) in this
-          // browser profile: never deliver its pushes to the current user.
-          await subscription.unsubscribe();
-          writePushOwner(localStore(), null);
-        } else if (!boundTo(subscription.options.applicationServerKey, publicKey)) {
+      // A subscription left by another account (or of unknown owner) shows as
+      // off and is not touched until this user enables push.
+      if (subscription && readPushOwner(localStore()) === userId) {
+        if (!boundTo(subscription.options.applicationServerKey, publicKey)) {
           // VAPID was rotated: the old subscription can never deliver again.
           await subscription.unsubscribe();
           await subscribe(workspaceId, publicKey, userId);
         } else {
-          // Re-bind to this session so its logout disconnects this browser.
+          // Re-bind to this session: sends need a live bound session, and its
+          // logout disconnects this browser.
           await storeSubscription(workspaceId, subscription, userId);
         }
       }
@@ -150,7 +154,7 @@ export function PushToggle({ workspaceId }: { workspaceId: string }) {
       try {
         if (next) {
           await subscribe(workspaceId, publicKey, userId);
-        } else {
+        } else if (readPushOwner(localStore()) === userId) {
           writePushOwner(localStore(), null);
           await (await currentSubscription())?.unsubscribe();
         }
@@ -185,4 +189,37 @@ export function PushToggle({ workspaceId }: { workspaceId: string }) {
       ) : null}
     </>
   );
+}
+
+/**
+ * Once per session, re-binds this browser's own subscription to the current
+ * session (sends need a live bound session). Another account's subscription
+ * is left alone. Failures are ignored: the settings toggle shows the state.
+ */
+export function usePushSessionRebind(workspaceId: string): void {
+  const instance = useQuery(publicInstanceQuery);
+  const me = useQuery(meQuery);
+  const userId = me.data?.userId ?? null;
+  const sessionId = me.data?.sessionId ?? null;
+  const publicKey = instance.data?.values.webPushPublicKey ?? null;
+  useEffect(() => {
+    if (!pushSupported() || publicKey === null || userId === null || sessionId === null) return;
+    if (readPushOwner(localStore()) !== userId) return;
+    const marker = `fvoci.push.rebound.${sessionId}`;
+    try {
+      if (sessionStorage.getItem(marker) !== null) return;
+    } catch {
+      /* fall through: re-binding twice is harmless */
+    }
+    void (async () => {
+      const subscription = await currentSubscription();
+      if (!subscription || !boundTo(subscription.options.applicationServerKey, publicKey)) return;
+      await storeSubscription(workspaceId, subscription, userId);
+      try {
+        sessionStorage.setItem(marker, "1");
+      } catch {
+        /* ignore */
+      }
+    })().catch(() => undefined);
+  }, [publicKey, sessionId, userId, workspaceId]);
 }

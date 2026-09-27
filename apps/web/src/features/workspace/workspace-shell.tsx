@@ -8,6 +8,7 @@ import { AuthenticatedLegalNav } from "@/features/legal/operator-info";
 import { SearchCommand } from "@/features/workspace/search-command";
 import { NotificationBell } from "@/features/notifications/notification-bell";
 import { logout as logoutRequest } from "@/features/notifications/push-logout";
+import { usePushSessionRebind } from "@/features/notifications/push-toggle";
 import {
   myTasksPath,
   projectsPath,
@@ -60,6 +61,7 @@ export function WorkspaceShell({
   const workspaces = useQuery(workspacesQuery);
   const items = workspaces.data?.items ?? [];
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  usePushSessionRebind(workspaceId);
 
   async function logout() {
     setLogoutError(null);

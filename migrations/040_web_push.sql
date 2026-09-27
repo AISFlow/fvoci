@@ -20,8 +20,10 @@ CREATE TABLE fvoci.push_subscriptions (
     auth text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    -- Session that last registered this browser: its logout disconnects it.
-    session_id uuid,
+    -- Session that last registered this browser. Its logout disconnects the
+    -- browser, and sends require it to be live (expired, revoked, reset and
+    -- revoke-all sessions no longer authorize delivery).
+    session_id uuid NOT NULL REFERENCES fvoci.sessions (id) ON DELETE CASCADE,
     CONSTRAINT push_subscriptions_user_endpoint_unique UNIQUE (user_id, endpoint),
     CONSTRAINT push_subscriptions_endpoint_len CHECK (octet_length(endpoint) <= 2048),
     -- Unpadded base64url length locks (65-byte P-256 public, 16-byte auth secret).
@@ -35,22 +37,28 @@ CREATE INDEX push_subscriptions_user_updated_idx
 CREATE INDEX push_subscriptions_endpoint_idx
     ON fvoci.push_subscriptions (endpoint);
 
-CREATE INDEX push_subscriptions_user_session_idx
-    ON fvoci.push_subscriptions (user_id, session_id);
+CREATE INDEX push_subscriptions_session_idx
+    ON fvoci.push_subscriptions (session_id);
 
 -- Pending sends fanned out by the `push` outbox consumer in the same
--- transaction as its processed mark. The sender claims rows, re-checks the
--- recipient right before each POST, and deletes them after the attempt.
+-- transaction as its processed mark. Holds no endpoint, key or content: the
+-- sender reads the subscription and rebuilds the payload when it re-checks
+-- the recipient. `attempt` fences a claim; `handed_off_at` marks rows that
+-- passed that check and may be sending.
 CREATE TABLE fvoci.push_deliveries (
     id uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
     event_id uuid NOT NULL,
     workspace_id uuid NOT NULL REFERENCES fvoci.workspaces (id) ON DELETE CASCADE,
     user_id uuid NOT NULL REFERENCES fvoci.users (id) ON DELETE CASCADE,
-    endpoint text NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
+    subscription_id uuid NOT NULL REFERENCES fvoci.push_subscriptions (id) ON DELETE CASCADE,
+    attempt integer NOT NULL DEFAULT 0,
     claimed_until timestamptz,
-    CONSTRAINT push_deliveries_event_user_endpoint_unique UNIQUE (event_id, user_id, endpoint)
+    handed_off_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT push_deliveries_event_subscription_unique UNIQUE (event_id, subscription_id)
 );
+
+CREATE INDEX push_deliveries_subscription_idx ON fvoci.push_deliveries (subscription_id);
 
 ALTER TABLE fvoci.push_deliveries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fvoci.push_deliveries FORCE ROW LEVEL SECURITY;

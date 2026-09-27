@@ -76,7 +76,7 @@ pub async fn register_subscription(
     upsert_subscription(
         &mut tx,
         user_id,
-        Some(session_id),
+        session_id,
         &subscription.endpoint,
         &subscription.p256dh,
         &subscription.auth,
@@ -92,7 +92,7 @@ pub async fn register_subscription(
 pub async fn upsert_subscription(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
-    session_id: Option<Uuid>,
+    session_id: Uuid,
     endpoint: &str,
     p256dh: &str,
     auth: &str,
@@ -133,11 +133,11 @@ pub async fn upsert_subscription(
 }
 
 /// Logout disconnect: removes the logged-out user's rows for this browser,
-/// that is rows registered by the ending session plus the endpoint the
-/// browser reported. Keyed by the user, so another account's row for the same
+/// that is rows bound to the ending session plus the endpoint the browser
+/// reported. Keyed by the user, so another account's row for the same
 /// endpoint and this user's other devices stay. Runs in the logout
-/// transaction; a send holding the row lock finishes first, and no send starts
-/// after the logout commits (the sender re-reads the row before each POST).
+/// transaction; pending deliveries for those rows cascade. A send whose
+/// final check already passed may still complete (see `push::sender`).
 pub async fn disconnect_browser(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,

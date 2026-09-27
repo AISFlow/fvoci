@@ -5,8 +5,9 @@
 //! (independent of `notifications` and `mail`), each event becomes one
 //! `push_deliveries` row per (recipient, subscription). Recipients are the
 //! `notify_for_event` rows whose `inApp` pref is on and whose user is active.
-//! The sender re-checks all of this right before each POST, so the fan-out
-//! only has to be complete, not final.
+//! Only subscriptions bound to a live session are queued. The sender checks
+//! all of this again right before handing a row off, so the fan-out only has
+//! to be complete, not final.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -110,12 +111,15 @@ async fn fan_out(
     let users: Vec<Uuid> = recipients.keys().copied().collect();
     Ok(sqlx::query(
         r#"
-        INSERT INTO fvoci.push_deliveries (event_id, workspace_id, user_id, endpoint)
-        SELECT $1, $2, s.user_id, s.endpoint
+        INSERT INTO fvoci.push_deliveries (event_id, workspace_id, user_id, subscription_id)
+        SELECT $1, $2, s.user_id, s.id
         FROM fvoci.push_subscriptions AS s
+        INNER JOIN fvoci.sessions AS se ON se.id = s.session_id
         WHERE s.user_id = ANY($3)
+          AND se.revoked_at IS NULL
+          AND se.expires_at > clock_timestamp()
         ORDER BY s.user_id, s.id
-        ON CONFLICT (event_id, user_id, endpoint) DO NOTHING
+        ON CONFLICT (event_id, subscription_id) DO NOTHING
         "#,
     )
     .bind(event.id)

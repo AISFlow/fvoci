@@ -897,20 +897,29 @@ serve the unhashed `/sw.js` (the web build copies `apps/web/public/sw.js`).
   workspace notification settings shows "not available". Notifications created
   while keys are missing are not pushed later.
 - **Delivery.** The `push` outbox consumer queues one `push_deliveries` row per
-  recipient device in the same transaction as its processed mark; an
-  in-process sender claims up to 8 rows (60 s claim lease) and, right before
-  posting, re-checks the event's current recipients (membership, resource
-  access, in-app preference), that the user is not deleted or suspended, and
-  that the subscription row still exists. Each device gets one attempt with a
-  5 s timeout; 404/410 remove the endpoint, other failures are logged with the
-  endpoint origin only. A crash or a failed record after a send re-sends that
-  batch once the lease expires (at least once per device). Rows older than
-  24 h are dropped unsent.
-- **Logout.** Logging out removes this browser's subscription for that user in
-  the logout transaction: the row registered by the ending session plus the
-  endpoint the browser reports in the logout request, never other accounts'
-  rows or the user's other devices. The browser then unsubscribes. A send
-  already in flight for that row finishes first; none starts after logout.
+  recipient device (no endpoint, key or content) in the same transaction as
+  its processed mark. An in-process sender claims up to 8 rows (30 s lease)
+  and, in one short transaction, re-checks each row: the event's current
+  recipients (membership, resource access, in-app preference), a user who is
+  not deleted or suspended, and the subscription with the session that
+  registered it still live. It commits, then posts outside any transaction
+  (5 s timeout each) and acknowledges. Every device gets one attempt; 404/410
+  remove the endpoint, other failures are logged with the endpoint origin
+  only. A crash or failed acknowledgement repeats only that batch after the
+  lease, after the same check (at least once per device).
+- **Sessions and logout.** A subscription is bound to the session that last
+  registered it; the web client re-binds it once per new session. Expired or
+  revoked sessions (logout, password reset, revoke-all, suspension) no longer
+  authorize sends. Logging out also deletes this browser's rows for that user
+  in the logout transaction (the ending session's rows plus the endpoint the
+  browser reports), never other accounts' rows or the user's other devices,
+  and the browser then unsubscribes (best effort). A logout committed before
+  a row's final check prevents that send; a send already past the check
+  completes, and messages a push service already accepted can still be shown.
+  Another account signing in on the same browser profile without a logout
+  sees the toggle off; that account's subscription keeps delivering until its
+  session ends or the new user enables push, which replaces the browser
+  subscription.
 - **Rotation.** `fvoci-migrate --rotate-vapid` (server environment, app role)
   stores a new keypair, deletes every browser subscription (push services
   reject old-key subscriptions with 401/403, which the sender does not clean

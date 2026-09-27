@@ -274,11 +274,17 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
   expect((await pushLog()).at(-1)).toBe("unsubscribe-failed");
 
   // The next account in this browser profile never sees the leftover
-  // subscription as its own: shown off, and removed from the browser.
+  // subscription as its own: it shows off and is left alone, and enabling
+  // replaces it with a new subscription instead of re-binding it.
   await login(page, owner.email, owner.password);
   await page.goto(`/w/${owner.workspaceSlug}/settings`);
   await expect(page.getByLabel("브라우저 푸시")).toBeEnabled({ timeout: 15_000 });
   await expect(page.getByLabel("브라우저 푸시")).not.toBeChecked();
-  await expect.poll(async () => (await pushLog()).at(-1)).toBe("unsubscribe");
-  expect(await page.evaluate(() => sessionStorage.getItem("e2e-push-subscription"))).toBeNull();
+  expect((await pushLog()).at(-1)).toBe("unsubscribe-failed");
+  const ownerPut = page.waitForResponse(isPut);
+  await page.getByLabel("브라우저 푸시").click();
+  const ownerBody = (await ownerPut).request().postDataJSON();
+  expect(ownerBody.endpoint).not.toBe(endpoint);
+  await expect(page.getByLabel("브라우저 푸시")).toBeChecked();
+  expect((await pushLog()).slice(-2)).toEqual(["unsubscribe", "subscribe:87"]);
 }

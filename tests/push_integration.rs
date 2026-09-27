@@ -378,12 +378,14 @@ async fn vapid_bootstrap_rotation_and_secret_check() {
     .execute(&admin)
     .await
     .unwrap();
+    let owner_session = project_harness::session_id_for_user(&admin, owner_id).await;
+    let (_, other_session) = extra_session(&admin, other_user).await;
     let mut tx = pool.begin().await.unwrap();
     set_system(&mut tx).await.unwrap();
-    upsert_subscription(&mut tx, owner_id, None, ENDPOINT, P256DH, AUTH)
+    upsert_subscription(&mut tx, owner_id, owner_session, ENDPOINT, P256DH, AUTH)
         .await
         .unwrap();
-    upsert_subscription(&mut tx, other_user, None, ENDPOINT, P256DH, AUTH)
+    upsert_subscription(&mut tx, other_user, other_session, ENDPOINT, P256DH, AUTH)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -576,11 +578,11 @@ impl Device {
 }
 
 /// Stores a subscription directly (the loopback receiver is not an https
-/// endpoint the PUT route accepts), optionally bound to a session.
+/// endpoint the PUT route accepts), bound to `session_id`.
 async fn store_bound(
     pool: &PgPool,
     user_id: Uuid,
-    session_id: Option<Uuid>,
+    session_id: Uuid,
     endpoint: &str,
     device: &Device,
 ) {
@@ -599,8 +601,10 @@ async fn store_bound(
     tx.commit().await.unwrap();
 }
 
-async fn store(pool: &PgPool, user_id: Uuid, endpoint: &str, device: &Device) {
-    store_bound(pool, user_id, None, endpoint, device).await;
+/// `store_bound` with the user's latest session.
+async fn store(pool: &PgPool, admin: &PgPool, user_id: Uuid, endpoint: &str, device: &Device) {
+    let session_id = project_harness::session_id_for_user(admin, user_id).await;
+    store_bound(pool, user_id, session_id, endpoint, device).await;
 }
 
 fn test_outbound() -> Outbound {
@@ -823,7 +827,7 @@ async fn push_pipeline_sends_through_outbound_and_cleans_gone_endpoints() {
         // Same gone endpoint held by a user this event does not target.
         (bystander.user_id, "gone", &other),
     ] {
-        store(&pool, user, &format!("{base}/push/{name}"), device).await;
+        store(&pool, &admin, user, &format!("{base}/push/{name}"), device).await;
     }
     let settings = sender_settings(8, Duration::from_secs(5));
 
@@ -1010,7 +1014,14 @@ async fn product_outbound_refuses_loopback_push_endpoints() {
     let (base, received) = start_receiver().await;
     let device = Device::new(3);
     // A row that bypassed the https PUT check (e.g. restored data).
-    store(&pool, member.user_id, &format!("{base}/push/ok"), &device).await;
+    store(
+        &pool,
+        &admin,
+        member.user_id,
+        &format!("{base}/push/ok"),
+        &device,
+    )
+    .await;
     ensure_vapid_keys(&pool, Some(&keys)).await.unwrap();
     let (event_id, _) =
         comment_event(&app, &admin, workspace_id, &owner_cookie, &[member.user_id]).await;
@@ -1112,6 +1123,28 @@ async fn logout_disconnects_only_this_browser() {
     assert!(rows_for(&admin, owner_id).await.is_empty());
     assert_eq!(rows_for(&admin, member.user_id).await.len(), 2);
 
+    // Same account, same browser, new session: the re-PUT re-binds the one
+    // row to the new session. Logging out the old session no longer owns it;
+    // logging out the new one disconnects it. Another account is untouched.
+    const REBOUND: &str = "https://push.example.com/rebound";
+    let (old_cookie, _) = extra_session(&admin, member.user_id).await;
+    let (new_cookie, new_session) = extra_session(&admin, member.user_id).await;
+    put(old_cookie.clone(), REBOUND).await;
+    put(new_cookie.clone(), REBOUND).await;
+    let bound: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT session_id FROM fvoci.push_subscriptions WHERE user_id = $1 AND endpoint = $2",
+    )
+    .bind(member.user_id)
+    .bind(REBOUND)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(bound, vec![new_session], "one row, bound to the newest session");
+    assert_eq!(logout(&app, &old_cookie, None).await, StatusCode::NO_CONTENT);
+    assert_eq!(rows_for(&admin, member.user_id).await.len(), 3);
+    assert_eq!(logout(&app, &new_cookie, None).await, StatusCode::NO_CONTENT);
+    assert_eq!(rows_for(&admin, member.user_id).await.len(), 2);
+
     // Logout without a live session touches nothing.
     assert_eq!(
         logout(&app, "not-a-session", Some(json!({ "pushEndpoint": THIS }))).await,
@@ -1134,6 +1167,8 @@ async fn sender_rechecks_recipients_right_before_sending() {
     let logged_out = add_workspace_user(&admin, workspace_id, "member", "push-logout").await;
     let suspended = add_workspace_user(&admin, workspace_id, "member", "push-suspended").await;
     let removed = add_workspace_user(&admin, workspace_id, "member", "push-removed").await;
+    let expired = add_workspace_user(&admin, workspace_id, "member", "push-expired").await;
+    let reset = add_workspace_user(&admin, workspace_id, "member", "push-reset").await;
     let kept = add_workspace_user(&admin, workspace_id, "member", "push-kept").await;
     let (base, received) = start_receiver().await;
     let device = Device::new(4);
@@ -1141,10 +1176,29 @@ async fn sender_rechecks_recipients_right_before_sending() {
         (&logged_out, "logged-out"),
         (&suspended, "suspended"),
         (&removed, "removed"),
+        (&expired, "expired"),
+        (&reset, "reset"),
         (&kept, "kept"),
     ] {
-        store(&pool, user.user_id, &format!("{base}/push/{name}"), &device).await;
+        store(
+            &pool,
+            &admin,
+            user.user_id,
+            &format!("{base}/push/{name}"),
+            &device,
+        )
+        .await;
     }
+    // `expired` also has a live session on another device: its row stays valid.
+    let (_, expired_other_session) = extra_session(&admin, expired.user_id).await;
+    store_bound(
+        &pool,
+        expired.user_id,
+        expired_other_session,
+        &format!("{base}/push/expired-other-device"),
+        &device,
+    )
+    .await;
     let (event_id, _) = comment_event(
         &app,
         &admin,
@@ -1154,6 +1208,8 @@ async fn sender_rechecks_recipients_right_before_sending() {
             logged_out.user_id,
             suspended.user_id,
             removed.user_id,
+            expired.user_id,
+            reset.user_id,
             kept.user_id,
         ],
     )
@@ -1163,16 +1219,11 @@ async fn sender_rechecks_recipients_right_before_sending() {
     let pipeline = Pipeline::start(&pool, None, Vec::new());
     wait_processed(&admin, "push", event_id).await;
     pipeline.stop().await;
-    assert_eq!(ledger_len(&admin).await, 4);
+    assert_eq!(ledger_len(&admin).await, 7);
 
-    // Revocations committed after the fan-out and before the send.
+    // Revocations committed after the fan-out and before the final check.
     assert_eq!(
-        logout(
-            &app,
-            &logged_out.cookie,
-            Some(json!({ "pushEndpoint": format!("{base}/push/logged-out") }))
-        )
-        .await,
+        logout(&app, &logged_out.cookie, None).await,
         StatusCode::NO_CONTENT
     );
     sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
@@ -1186,24 +1237,56 @@ async fn sender_rechecks_recipients_right_before_sending() {
         .execute(&admin)
         .await
         .unwrap();
+    let expired_session = project_harness::session_id_for_user(&admin, expired.user_id).await;
+    let expired_first: Uuid = sqlx::query_scalar(
+        "SELECT session_id FROM fvoci.push_subscriptions WHERE user_id = $1 AND endpoint LIKE '%/expired'",
+    )
+    .bind(expired.user_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_ne!(
+        expired_session, expired_first,
+        "the newer session is the other device's"
+    );
+    sqlx::query("UPDATE fvoci.sessions SET expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(expired_first)
+        .execute(&admin)
+        .await
+        .unwrap();
+    // Password reset / revoke-all: every session of the user is revoked.
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(reset.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
 
     let sender = start_sender(&pool, keys, sender_settings(8, Duration::from_secs(5)));
     wait_ledger_empty(&admin).await;
     stop_sender(sender).await;
-    let paths: Vec<String> = received
+    let mut paths: Vec<String> = received
         .lock()
         .unwrap()
         .iter()
         .map(|r| r.path.clone())
         .collect();
-    assert_eq!(paths, vec!["/push/kept".to_string()]);
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec![
+            "/push/expired-other-device".to_string(),
+            "/push/kept".to_string()
+        ]
+    );
+    // Rows of dead sessions are not deleted, only no longer used.
+    assert_eq!(rows_for(&admin, reset.user_id).await.len(), 1);
 
     admin.close().await;
     harness.cleanup().await;
 }
 
 #[tokio::test]
-async fn logout_waits_for_an_in_flight_send_and_blocks_later_ones() {
+async fn logout_before_the_final_check_prevents_the_send() {
     let harness = TestDb::bootstrap().await;
     let (app, owner_cookie, _owner_id, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
@@ -1213,14 +1296,16 @@ async fn logout_waits_for_an_in_flight_send_and_blocks_later_ones() {
     let alice = add_workspace_user(&admin, workspace_id, "member", "push-alice").await;
     let bob = add_workspace_user(&admin, workspace_id, "member", "push-bob").await;
     let alice_session = project_harness::session_id_for_user(&admin, alice.user_id).await;
+    let (_, alice_other_session) = extra_session(&admin, alice.user_id).await;
     let bob_session = project_harness::session_id_for_user(&admin, bob.user_id).await;
     let (base, received) = start_receiver().await;
     let device = Device::new(5);
     // Alice: another device first (slow), then this browser (bound to the
     // session that logs out). Bob: only this browser, slow.
-    store(
+    store_bound(
         &pool,
         alice.user_id,
+        alice_other_session,
         &format!("{base}/push/slow-alice-other"),
         &device,
     )
@@ -1228,7 +1313,7 @@ async fn logout_waits_for_an_in_flight_send_and_blocks_later_ones() {
     store_bound(
         &pool,
         alice.user_id,
-        Some(alice_session),
+        alice_session,
         &format!("{base}/push/alice-this"),
         &device,
     )
@@ -1236,7 +1321,7 @@ async fn logout_waits_for_an_in_flight_send_and_blocks_later_ones() {
     store_bound(
         &pool,
         bob.user_id,
-        Some(bob_session),
+        bob_session,
         &format!("{base}/push/slow-bob-this"),
         &device,
     )
@@ -1260,27 +1345,29 @@ async fn logout_waits_for_an_in_flight_send_and_blocks_later_ones() {
         received_count(&received, "/push/slow-alice-other") == 1
     })
     .await;
-    // This browser's row is not the one in flight: logout returns at once and
-    // the queued send for it never starts.
+    // Logout commits before this browser's row reaches its final check: its
+    // send never starts. Nothing is locked, so logout returns at once.
+    let started = std::time::Instant::now();
     assert_eq!(
         logout(&app, &alice.cookie, None).await,
         StatusCode::NO_CONTENT
     );
+    assert!(started.elapsed() < Duration::from_millis(1000));
 
     wait_until("bob's browser to be in flight", async || {
         received_count(&received, "/push/slow-bob-this") == 1
     })
     .await;
-    // The row being sent is locked: Bob's logout waits for that attempt.
+    // Bob's send passed its final check before the logout: it is in flight,
+    // completes once and is not repeated. Logout does not wait for it.
     let started = std::time::Instant::now();
     assert_eq!(
         logout(&app, &bob.cookie, None).await,
         StatusCode::NO_CONTENT
     );
     assert!(
-        started.elapsed() >= Duration::from_millis(700),
-        "logout waited for the in-flight send ({:?})",
-        started.elapsed()
+        started.elapsed() < Duration::from_millis(1000),
+        "logout never waits on the network"
     );
     wait_ledger_empty(&admin).await;
     stop_sender(sender).await;
@@ -1288,13 +1375,13 @@ async fn logout_waits_for_an_in_flight_send_and_blocks_later_ones() {
     assert_eq!(
         received_count(&received, "/push/alice-this"),
         0,
-        "no send after logout"
+        "no handoff after logout"
     );
     assert_eq!(received_count(&received, "/push/slow-alice-other"), 1);
     assert_eq!(
         received_count(&received, "/push/slow-bob-this"),
         1,
-        "sent once, not repeated"
+        "in flight: once"
     );
     assert_eq!(
         rows_for(&admin, alice.user_id).await.len(),
@@ -1323,6 +1410,7 @@ async fn stalled_endpoints_delay_but_never_drop_later_recipients() {
     for n in 0..9 {
         store(
             &pool,
+            &admin,
             staller.user_id,
             &format!("{base}/push/stall-{n}"),
             &device,
@@ -1331,6 +1419,7 @@ async fn stalled_endpoints_delay_but_never_drop_later_recipients() {
     }
     store(
         &pool,
+        &admin,
         healthy.user_id,
         &format!("{base}/push/healthy"),
         &device,
@@ -1375,67 +1464,101 @@ async fn stalled_endpoints_delay_but_never_drop_later_recipients() {
 }
 
 #[tokio::test]
-async fn record_failure_resends_only_that_batch() {
+async fn ack_failure_repeats_only_that_batch_and_rechecks_first() {
     let harness = TestDb::bootstrap().await;
     let (app, owner_cookie, _owner_id, workspace_id) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
     let pool = app_pool(&harness).await;
     let keys = encryption_keys();
     ensure_vapid_keys(&pool, Some(&keys)).await.unwrap();
-    let member = add_workspace_user(&admin, workspace_id, "member", "push-flaky").await;
+    // Created in ledger order: live, revoked, then an ordinary recipient.
+    let live = add_workspace_user(&admin, workspace_id, "member", "push-ack-live").await;
+    let revoked = add_workspace_user(&admin, workspace_id, "member", "push-ack-revoked").await;
+    let plain = add_workspace_user(&admin, workspace_id, "member", "push-ack-plain").await;
     let (base, received) = start_receiver().await;
     let device = Device::new(7);
-    for name in ["first", "flaky", "last"] {
+    for (user, name) in [
+        (&live, "flaky-live"),
+        (&revoked, "flaky-revoked"),
+        (&plain, "plain"),
+    ] {
         store(
             &pool,
-            member.user_id,
+            &admin,
+            user.user_id,
             &format!("{base}/push/{name}"),
             &device,
         )
         .await;
     }
-    // The first attempt to record the `flaky` send fails (the sequence is not
-    // rolled back with the failed transaction).
+    // The first ack of each flaky row fails (sequences are not rolled back
+    // with the failed transaction).
     sqlx::raw_sql(
         r#"
-        CREATE SEQUENCE fvoci.test_push_record_fail;
-        CREATE FUNCTION fvoci.test_push_record_fail() RETURNS trigger
+        CREATE SEQUENCE fvoci.test_push_ack_live;
+        CREATE SEQUENCE fvoci.test_push_ack_revoked;
+        CREATE FUNCTION fvoci.test_push_ack_fail() RETURNS trigger
         LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        DECLARE
+            target text;
         BEGIN
-            IF OLD.endpoint LIKE '%/flaky' AND nextval('fvoci.test_push_record_fail') = 1 THEN
-                RAISE EXCEPTION 'injected record failure';
+            SELECT s.endpoint INTO target FROM fvoci.push_subscriptions AS s WHERE s.id = OLD.subscription_id;
+            IF OLD.handed_off_at IS NOT NULL AND (
+                (target LIKE '%/flaky-live' AND nextval('fvoci.test_push_ack_live') = 1)
+                OR (target LIKE '%/flaky-revoked' AND nextval('fvoci.test_push_ack_revoked') = 1)
+            ) THEN
+                RAISE EXCEPTION 'injected ack failure';
             END IF;
             RETURN OLD;
         END $$;
-        CREATE TRIGGER test_push_record_fail BEFORE DELETE ON fvoci.push_deliveries
-            FOR EACH ROW EXECUTE FUNCTION fvoci.test_push_record_fail();
+        CREATE TRIGGER test_push_ack_fail BEFORE DELETE ON fvoci.push_deliveries
+            FOR EACH ROW EXECUTE FUNCTION fvoci.test_push_ack_fail();
         "#,
     )
     .execute(&admin)
     .await
     .unwrap();
-    let (event_id, _) =
-        comment_event(&app, &admin, workspace_id, &owner_cookie, &[member.user_id]).await;
+    let (event_id, _) = comment_event(
+        &app,
+        &admin,
+        workspace_id,
+        &owner_cookie,
+        &[live.user_id, revoked.user_id, plain.user_id],
+    )
+    .await;
+    let mut settings = sender_settings(1, Duration::from_secs(5));
+    settings.claim_lease = Duration::from_secs(3);
     let pipeline = Pipeline::start(
         &pool,
-        Some((
-            test_outbound(),
-            Some(keys),
-            sender_settings(1, Duration::from_secs(5)),
-        )),
+        Some((test_outbound(), Some(keys), settings)),
         Vec::new(),
     );
     wait_processed(&admin, "push", event_id).await;
+    // The revoked user's session ends between the first attempt and its
+    // return after the lease.
+    wait_until("the first revoked-user attempt", async || {
+        received_count(&received, "/push/flaky-revoked") == 1
+    })
+    .await;
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(revoked.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
     wait_ledger_empty(&admin).await;
     pipeline.stop().await;
-    assert_eq!(received_count(&received, "/push/first"), 1);
     assert_eq!(
-        received_count(&received, "/push/flaky"),
+        received_count(&received, "/push/flaky-live"),
         2,
-        "the unrecorded attempt is sent again after the claim lease (at least once)"
+        "an unacknowledged send returns after the lease (at least once)"
     );
     assert_eq!(
-        received_count(&received, "/push/last"),
+        received_count(&received, "/push/flaky-revoked"),
+        1,
+        "the returning row is checked again and the revoked session stops it"
+    );
+    assert_eq!(
+        received_count(&received, "/push/plain"),
         1,
         "no replay of the whole event"
     );
