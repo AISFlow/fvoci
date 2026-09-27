@@ -53,46 +53,6 @@ pub fn capture_revision_offline(
     })
 }
 
-/// Semantic equality of revision snapshot bytes (source `Y.equalSnapshots`).
-pub fn revision_snapshots_semantically_equal_offline(
-    engine_bin: PathBuf,
-    limits: Limits,
-    left: &[u8],
-    right: &[u8],
-) -> bool {
-    if left == right {
-        return true;
-    }
-    let mut session = match EngineSession::spawn(SpawnRequest {
-        engine_bin,
-        limits,
-        slot_kind: collab_engine::process::ChildSlotKind::Primary,
-        slot_wait: None,
-        test_hang_ms: None,
-        test_exit_after_read: None,
-        test_close_stdout_hang_ms: None,
-        test_exit_after_write: None,
-    }) {
-        Ok(session) => session,
-        Err(_) => return false,
-    };
-    match session
-        .call(&Request::RevisionSnapshotsEqual {
-            left_b64: left.to_vec(),
-            right_b64: right.to_vec(),
-        })
-        .outcome
-    {
-        EngineStatus::Ok {
-            update_b64: Some(bytes_b64),
-            ..
-        } => collab_engine::b64::decode(&bytes_b64)
-            .ok()
-            .is_some_and(|bytes| bytes.first() == Some(&1)),
-        _ => false,
-    }
-}
-
 pub fn prepare_revision_text(content_json: &Value) -> Result<String, RevisionCaptureError> {
     crate::collab::derived_body::prepare_derived_body(content_json.clone())
         .map(|body| body.text().to_string())

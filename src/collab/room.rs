@@ -408,6 +408,44 @@ async fn pause_for_append_projection_barrier(document_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
+static SESSION_REVISION_PERSIST_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_session_revision_persist_barrier(
+    document_id: Uuid,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    SESSION_REVISION_PERSIST_BARRIERS.lock().await.insert(
+        document_id,
+        AppendRevokeBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_session_revision_persist_barrier(document_id: Uuid) {
+    SESSION_REVISION_PERSIST_BARRIERS.lock().await.remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_session_revision_persist_barrier(document_id: Uuid) {
+    let barrier = SESSION_REVISION_PERSIST_BARRIERS
+        .lock()
+        .await
+        .remove(&document_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
+#[cfg(feature = "db-tests")]
 static ACTOR_PANIC_ON_FRAME: std::sync::LazyLock<
     tokio::sync::Mutex<std::collections::HashSet<Uuid>>,
 > = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
@@ -512,9 +550,36 @@ pub async fn disarm_join_channel_admission_witness(conn_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
+static NEXT_JOIN_MAILBOX_WITNESS: std::sync::LazyLock<
+    tokio::sync::Mutex<Option<oneshot::Sender<Uuid>>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
+
+/// Fires when the next join is admitted to the room actor mailbox (before `handle_join` runs).
+#[cfg(feature = "db-tests")]
+pub async fn arm_next_join_mailbox_witness() -> oneshot::Receiver<Uuid> {
+    let (tx, rx) = oneshot::channel();
+    assert!(
+        NEXT_JOIN_MAILBOX_WITNESS
+            .lock()
+            .await
+            .replace(tx)
+            .is_none()
+    );
+    rx
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_next_join_mailbox_witness() {
+    NEXT_JOIN_MAILBOX_WITNESS.lock().await.take();
+}
+
+#[cfg(feature = "db-tests")]
 async fn signal_join_channel_admitted(conn_id: Uuid) {
     if let Some(tx) = JOIN_CHANNEL_ADMISSIONS.lock().await.remove(&conn_id) {
         let _ = tx.send(());
+    }
+    if let Some(tx) = NEXT_JOIN_MAILBOX_WITNESS.lock().await.take() {
+        let _ = tx.send(conn_id);
     }
 }
 
@@ -881,6 +946,8 @@ impl std::fmt::Debug for JoinDelivery {
 #[derive(Clone)]
 pub struct RoomHandle {
     tx: mpsc::Sender<RoomCommand>,
+    /// Set before `Shutdown` is enqueued so in-flight session snapshot work can abort.
+    session_cancel: watch::Sender<bool>,
 }
 
 impl RoomHandle {
@@ -927,6 +994,7 @@ impl RoomHandle {
     }
 
     pub async fn shutdown(&self) {
+        let _ = self.session_cancel.send(true);
         let _ = self.tx.send(RoomCommand::Shutdown).await;
     }
 
@@ -1116,12 +1184,14 @@ struct RoomActor {
     /// Set when the dedicated fence connection is lost; actor exits once empty.
     fence_lost: bool,
     user_reject_budgets: HashMap<Uuid, UserRejectBudget>,
-    /// Session snapshot work in progress (`captured` filled after committed reload).
+    session_cancel_rx: watch::Receiver<bool>,
+    /// Last-disconnect session snapshot (`captured` set after durable reload + primary capture).
     session_revision: Option<SessionRevisionState>,
 }
 
 struct SessionRevisionState {
     writer_generation: i64,
+    /// Set after capture; retained across `StaleRevisionHead` retries without recapture.
     captured: Option<CapturedRevision>,
     head_retries: u32,
 }
@@ -1149,6 +1219,7 @@ pub async fn spawn_room(
         }
     };
     let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
+    let (session_cancel_tx, session_cancel_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = oneshot::channel();
     let actor = RoomActor {
         workspace_id,
@@ -1181,6 +1252,7 @@ pub async fn spawn_room(
         flushing_awareness: false,
         fence_lost: false,
         user_reject_budgets: HashMap::new(),
+        session_cancel_rx,
         session_revision: None,
     };
     tokio::spawn(async move {
@@ -1201,7 +1273,10 @@ pub async fn spawn_room(
             let _ = finished_tx.send(());
         }
     });
-    Ok((RoomHandle { tx }, finished_rx))
+    Ok((RoomHandle {
+        tx,
+        session_cancel: session_cancel_tx,
+    }, finished_rx))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1326,7 +1401,7 @@ impl RoomActor {
                         }
                         Some(RoomCommand::Shutdown) => {
                             self.shutting_down = true;
-                            self.session_revision = None;
+                            self.abort_session_revision_work();
                             break;
                         }
                         #[cfg(feature = "db-tests")]
@@ -1528,7 +1603,7 @@ impl RoomActor {
         }
     }
 
-    fn session_revision_aborted(&self) -> bool {
+    fn session_revision_scheduling_blocked(&self) -> bool {
         self.shutting_down
             || self.fence_lost
             || !self.connections.is_empty()
@@ -1536,7 +1611,13 @@ impl RoomActor {
     }
 
     fn session_revision_cancelled(&self) -> bool {
-        self.shutting_down || self.fence_lost
+        self.shutting_down
+            || self.fence_lost
+            || *self.session_cancel_rx.borrow()
+    }
+
+    fn abort_session_revision_work(&mut self) {
+        self.session_revision = None;
     }
 
     async fn capture_committed_revision_primary(
@@ -1637,7 +1718,7 @@ impl RoomActor {
         if self.session_revision.is_some() {
             return;
         }
-        if self.session_revision_aborted() {
+        if self.session_revision_scheduling_blocked() {
             return;
         }
         let Some(writer_generation) = self.writer_generation else {
@@ -1650,10 +1731,10 @@ impl RoomActor {
         });
     }
 
-    /// One async step per actor turn: capture once, then head/compare/insert (`StaleRevisionHead` retries head only).
+    /// Linear capture → compare → insert on the room primary (`StaleRevisionHead` retries head only).
     async fn advance_session_revision(&mut self) -> bool {
-        if self.session_revision_aborted() || self.session_revision_cancelled() {
-            self.session_revision = None;
+        if self.session_revision_cancelled() {
+            self.abort_session_revision_work();
             return true;
         }
         let Some(mut work) = self.session_revision.take() else {
@@ -1665,11 +1746,7 @@ impl RoomActor {
 
         if work.captured.is_none() {
             match self.capture_committed_revision_primary().await {
-                Ok(captured) => {
-                    work.captured = Some(captured);
-                    self.session_revision = Some(work);
-                    return false;
-                }
+                Ok(captured) => work.captured = Some(captured),
                 Err(_) => {
                     tracing::warn!(
                         workspace_id = %workspace_id,
@@ -1677,6 +1754,7 @@ impl RoomActor {
                         target_id = %target.id(),
                         "collab.session_revision_capture_failed"
                     );
+                    self.abort_session_revision_work();
                     return true;
                 }
             }
@@ -1684,6 +1762,7 @@ impl RoomActor {
 
         let captured = work.captured.as_ref().expect("captured");
         if self.session_revision_cancelled() {
+            self.abort_session_revision_work();
             return true;
         }
 
@@ -1697,6 +1776,7 @@ impl RoomActor {
                     error = %err,
                     "collab.session_revision_head_read_failed"
                 );
+                self.abort_session_revision_work();
                 return true;
             }
         };
@@ -1704,13 +1784,17 @@ impl RoomActor {
 
         if let Some((_, prev_snap)) = &latest {
             if self.session_revision_cancelled() {
+                self.abort_session_revision_work();
                 return true;
             }
             match self
                 .revision_snapshots_equal_primary(prev_snap, &captured.y_snapshot)
                 .await
             {
-                Ok(true) => return true,
+                Ok(true) => {
+                    self.abort_session_revision_work();
+                    return true;
+                }
                 Ok(false) => {}
                 Err(_) => {
                     tracing::warn!(
@@ -1719,12 +1803,14 @@ impl RoomActor {
                         target_id = %target.id(),
                         "collab.session_revision_compare_failed"
                     );
+                    self.abort_session_revision_work();
                     return true;
                 }
             }
         }
 
         if self.session_revision_cancelled() {
+            self.abort_session_revision_work();
             return true;
         }
 
@@ -1737,6 +1823,7 @@ impl RoomActor {
                     target_id = %target.id(),
                     "collab.session_revision_text_failed"
                 );
+                self.abort_session_revision_work();
                 return true;
             }
         };
@@ -1746,6 +1833,12 @@ impl RoomActor {
             text,
             reason: "session".into(),
         };
+        #[cfg(feature = "db-tests")]
+        pause_for_session_revision_persist_barrier(self.document_id).await;
+        if self.session_revision_cancelled() {
+            self.abort_session_revision_work();
+            return true;
+        }
         let done = match create_system_revision(
             &pool,
             workspace_id,
@@ -1785,7 +1878,7 @@ impl RoomActor {
             }
         };
         if done {
-            self.session_revision = None;
+            self.abort_session_revision_work();
         }
         done
     }

@@ -751,7 +751,7 @@ pub async fn connect_member(
         .0
 }
 
-fn auth_token_frame(routing_key: &str, client_id: u32) -> Vec<u8> {
+pub fn auth_token_frame(routing_key: &str, client_id: u32) -> Vec<u8> {
     encode(&WireFrame::Document {
         routing_key: routing_key.to_string(),
         room: CollabRoomName::parse(routing_key),
@@ -763,7 +763,7 @@ fn auth_token_frame(routing_key: &str, client_id: u32) -> Vec<u8> {
     .expect("encode auth")
 }
 
-pub async fn auth_and_join(
+pub async fn send_auth_token(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
@@ -775,6 +775,13 @@ pub async fn auth_and_join(
     ))
     .await
     .unwrap();
+}
+
+pub async fn wait_auth_authenticated(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
     let msg = tokio::time::timeout(Duration::from_secs(10), ws.next())
         .await
         .expect("timeout")
@@ -791,6 +798,17 @@ pub async fn auth_and_join(
             ..
         }
     ));
+}
+
+pub async fn auth_and_join(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    routing_key: &str,
+    client_id: u32,
+) {
+    send_auth_token(ws, routing_key, client_id).await;
+    wait_auth_authenticated(ws).await;
 }
 
 pub fn sync_step1_frame(routing_key: &str, state_vector: &[u8]) -> Vec<u8> {
