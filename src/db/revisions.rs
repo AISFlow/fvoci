@@ -1266,7 +1266,7 @@ pub async fn list_scheduled_revision_candidates_for_workspace(
     {
         let sql = if doc_after.is_some() {
             r#"
-                SELECT ds.document_id, ds.updated_at, ds.writer_generation, d.created_at, lr.created_at
+                SELECT ds.document_id, ds.updated_at, ds.writer_generation, ds.created_at, lr.created_at
                 FROM fvoci.document_states ds
                 INNER JOIN fvoci.documents d
                     ON d.workspace_id = ds.workspace_id
@@ -1287,7 +1287,7 @@ pub async fn list_scheduled_revision_candidates_for_workspace(
                 "#
         } else {
             r#"
-                SELECT ds.document_id, ds.updated_at, ds.writer_generation, d.created_at, lr.created_at
+                SELECT ds.document_id, ds.updated_at, ds.writer_generation, ds.created_at, lr.created_at
                 FROM fvoci.document_states ds
                 INNER JOIN fvoci.documents d
                     ON d.workspace_id = ds.workspace_id
@@ -1351,7 +1351,7 @@ pub async fn list_scheduled_revision_candidates_for_workspace(
         };
         let task_sql = if task_after.is_some() {
             r#"
-            SELECT ts.task_id, ts.updated_at, ts.writer_generation, t.created_at, lr.created_at
+            SELECT ts.task_id, ts.updated_at, ts.writer_generation, ts.created_at, lr.created_at
             FROM fvoci.task_states ts
             INNER JOIN fvoci.tasks t
                 ON t.workspace_id = ts.workspace_id
@@ -1372,7 +1372,7 @@ pub async fn list_scheduled_revision_candidates_for_workspace(
             "#
         } else {
             r#"
-            SELECT ts.task_id, ts.updated_at, ts.writer_generation, t.created_at, lr.created_at
+            SELECT ts.task_id, ts.updated_at, ts.writer_generation, ts.created_at, lr.created_at
             FROM fvoci.task_states ts
             INNER JOIN fvoci.tasks t
                 ON t.workspace_id = ts.workspace_id
@@ -1447,6 +1447,7 @@ pub async fn gc_automatic_revisions_batch(
         r#"
         WITH ranked AS (
             SELECT id,
+                created_at,
                 row_number() OVER (
                     PARTITION BY target_kind, target_id
                     ORDER BY created_at DESC, id DESC
@@ -1455,7 +1456,11 @@ pub async fn gc_automatic_revisions_batch(
             WHERE workspace_id = $1 AND reason IN ('session', 'scheduled')
         ),
         doomed AS (
-            SELECT id FROM ranked WHERE rn > $2 LIMIT $3
+            SELECT id
+            FROM ranked
+            WHERE rn > $2
+            ORDER BY created_at ASC, id ASC
+            LIMIT $3
         ),
         locked AS (
             SELECT r.id, r.reason
