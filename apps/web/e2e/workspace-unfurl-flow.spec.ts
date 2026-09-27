@@ -77,7 +77,7 @@ test("editor URL embed shows authenticated unfurl card", async ({ page }) => {
   await expect(editor).toBeVisible({ timeout: 15_000 });
   await editor.click();
   await editor.pressSequentially("/https://example.com/preview", { delay: 20 });
-  await page.getByText("URL 임베드", { exact: true }).click();
+  await page.getByRole("option", { name: "URL 임베드" }).click();
   await expect(page.getByText("미리보기 제목")).toBeVisible();
   await expect(page.getByText("미리보기 설명")).toBeVisible();
   await expect(page.getByRole("link", { name: "링크 열기" })).toBeVisible();
