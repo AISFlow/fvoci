@@ -2174,7 +2174,12 @@ async fn patch_i18n(app: axum::Router, cookie: &str, value: Value) -> (StatusCod
     .await
 }
 
-async fn clone_task_title(app: axum::Router, cookie: &str, workspace_id: Uuid, task: &Value) -> String {
+async fn clone_task_title(
+    app: axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    task: &Value,
+) -> String {
     let (status, copy) = json_request(
         app,
         "POST",
@@ -2360,7 +2365,13 @@ async fn i18n_overrides_seed_new_workflows_and_label_task_clones() {
     let after = create_project(app.clone(), &cookie, workspace_id, "AFT", "workspace").await;
     assert_eq!(
         status_names(
-            &workflow(app.clone(), &cookie, workspace_id, after["id"].as_str().unwrap()).await
+            &workflow(
+                app.clone(),
+                &cookie,
+                workspace_id,
+                after["id"].as_str().unwrap()
+            )
+            .await
         ),
         defaults
     );
