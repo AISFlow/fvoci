@@ -171,6 +171,21 @@ fn hostname(value: String) -> Option<String> {
     ((1..=253).contains(&len) && HOSTNAME_RE.is_match(&trimmed)).then_some(trimmed)
 }
 
+fn normalize_https_security_contact(trimmed: &str) -> Option<String> {
+    if !trimmed.starts_with("https://") {
+        return None;
+    }
+    if trimmed.contains('\\') || trimmed.contains(' ') {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed).ok()?;
+    if parsed.scheme() != "https" || parsed.host().is_none() {
+        return None;
+    }
+    let canonical = parsed.as_str().to_string();
+    (utf16_len(&canonical) <= 320).then_some(canonical)
+}
+
 fn security_contact(value: String) -> Option<String> {
     let trimmed = value.trim().to_string();
     if utf16_len(&trimmed) > 320 || !no_control(&trimmed) || trimmed.is_empty() {
@@ -178,10 +193,7 @@ fn security_contact(value: String) -> Option<String> {
     }
     match trimmed.strip_prefix("mailto:") {
         Some(address) => is_zod_email(address).then_some(trimmed),
-        None => {
-            let parsed = url::Url::parse(&trimmed).ok()?;
-            (parsed.scheme() == "https" && parsed.host().is_some()).then_some(trimmed)
-        }
+        None => normalize_https_security_contact(&trimmed),
     }
 }
 
@@ -744,13 +756,39 @@ mod tests {
     #[test]
     fn security_contact_and_operator_urls() {
         let c = |v: &str| json!({"contact": v});
-        assert!(parse_patch_value(SettingsKey::Security, &c("mailto:sec@example.com")).is_some());
-        assert!(parse_patch_value(SettingsKey::Security, &c("https://example.com/sec")).is_some());
+        let contact = |v: &str| {
+            parse_patch_value(SettingsKey::Security, &c(v)).unwrap()["contact"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(contact("mailto:sec@example.com"), "mailto:sec@example.com");
+        assert_eq!(
+            contact("https://example.com/sec"),
+            "https://example.com/sec"
+        );
         assert!(parse_patch_value(SettingsKey::Security, &c("https://")).is_none());
-        assert!(parse_patch_value(SettingsKey::Security, &c("https://example.com")).is_some());
+        assert_eq!(contact("https://example.com"), "https://example.com/");
         assert!(parse_patch_value(SettingsKey::Security, &c("mailto:nope")).is_none());
         assert!(parse_patch_value(SettingsKey::Security, &c("mailto:sec\r@example.com")).is_none());
         assert!(parse_patch_value(SettingsKey::Security, &c("http://example.com")).is_none());
+        for bad in [
+            "https:example.com",
+            "https://example.com/a b",
+            "https://example.com\\foo",
+        ] {
+            assert!(
+                parse_patch_value(SettingsKey::Security, &c(bad)).is_none(),
+                "{bad}"
+            );
+        }
+        let encoded = "https://example.com/%EB%B3%B4%EC%95%88";
+        assert_eq!(contact(encoded), encoded);
+        let unicode_path = "https://example.com/보안";
+        assert_eq!(contact(unicode_path), encoded);
+        assert_eq!(contact(encoded), contact(unicode_path));
+        let over = format!("https://example.com/{}", "a".repeat(320));
+        assert!(parse_patch_value(SettingsKey::Security, &c(&over)).is_none());
         let mut op = serde_json::to_value(OperatorSettings::default()).unwrap();
         op["businessInfoUrl"] = json!("javascript:alert(1)");
         assert!(parse_patch_value(SettingsKey::Operator, &op).is_none());

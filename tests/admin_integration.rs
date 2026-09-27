@@ -2755,14 +2755,51 @@ async fn well_known_security_txt_follows_instance_security_contact() {
     let https = "https://example.com/security";
     let set_https = patch(json!({"security": {"contact": https}})).await;
     assert_eq!(set_https.status, StatusCode::OK, "{}", set_https.json);
+    let settings = get(
+        &h.app,
+        "/api/v1/admin/instance-settings",
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(settings.status, StatusCode::OK);
+    assert_eq!(settings.json["values"]["security"]["contact"], https);
     let https_txt = get(&h.app, path, None).await;
     assert_eq!(https_txt.status, StatusCode::OK);
     assert_eq!(security_txt_fields(&https_txt.bytes)["Contact"], https);
 
+    let canonical_host = "https://example.com/";
+    let set_host = patch(json!({"security": {"contact": "https://example.com"}})).await;
+    assert_eq!(set_host.status, StatusCode::OK, "{}", set_host.json);
+    assert_eq!(
+        get(
+            &h.app,
+            "/api/v1/admin/instance-settings",
+            Some(&h.admin_cookie),
+        )
+        .await
+        .json["values"]["security"]["contact"],
+        canonical_host
+    );
+    let host_txt = get(&h.app, path, None).await;
+    assert_eq!(
+        security_txt_fields(&host_txt.bytes)["Contact"],
+        canonical_host
+    );
+
+    let malformed = patch(json!({"security": {"contact": "https:example.com"}})).await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        security_txt_fields(&get(&h.app, path, None).await.bytes)["Contact"],
+        canonical_host
+    );
+
     let bad = patch(json!({"security": {"contact": "mailto:sec\r@example.com"}})).await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
     let still_https = get(&h.app, path, None).await;
-    assert_eq!(security_txt_fields(&still_https.bytes)["Contact"], https);
+    assert_eq!(
+        security_txt_fields(&still_https.bytes)["Contact"],
+        canonical_host
+    );
 
     let reset = patch(json!({"security": null})).await;
     assert_eq!(reset.status, StatusCode::OK, "{}", reset.json);
