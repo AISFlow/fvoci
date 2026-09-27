@@ -3798,7 +3798,8 @@ fn complete_attachment_upload() {}
     get,
     path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}",
     tag = "attachments",
-    security(("fvoci_session" = [])),
+    description = "An API token needs the read scope of the attachment's parent: `documents.read` for a document attachment, `tasks.read` for a task attachment (the same domain's write scope also grants read). A token without it, or bound to another workspace, gets 404.",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("attachment_id" = String, description = "Attachment id"),
@@ -3816,7 +3817,8 @@ fn get_attachment_meta() {}
     get,
     path = "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download",
     tag = "attachments",
-    security(("fvoci_session" = [])),
+    description = "An API token needs the read scope of the attachment's parent: `documents.read` for a document attachment, `tasks.read` for a task attachment (the same domain's write scope also grants read). A token without it, or bound to another workspace, gets 404.",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
     params(
         ("workspace_id" = String, description = "Workspace id"),
         ("attachment_id" = String, description = "Attachment id"),
@@ -3828,6 +3830,7 @@ fn get_attachment_meta() {}
         (status = 304, description = "Preview not modified (If-None-Match)"),
         (status = 400, description = "Invalid download variant", body = ProblemResponse),
         (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 403, description = "Attachment failed virus scan", body = ProblemResponse),
         (status = 404, description = "Not found or forbidden", body = ProblemResponse),
         (status = 416, description = "Range not satisfiable", body = ProblemResponse),
     )
@@ -5100,12 +5103,26 @@ mod tests {
             "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download",
             "get",
         );
-        for status in ["200", "206", "400", "401", "404", "416"] {
+        for status in ["200", "206", "400", "401", "403", "404", "416"] {
             assert!(
                 download.iter().any(|s| s == status),
                 "download missing {status}"
             );
         }
+        for path in [
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}",
+            "/api/v1/workspaces/{workspace_id}/attachments/{attachment_id}/download",
+        ] {
+            assert_eq!(
+                spec["paths"][path]["get"]["security"],
+                json!([{"fvoci_session": []}, {"bearer_api_token": []}]),
+                "{path}"
+            );
+        }
+        assert!(
+            meta.iter().all(|s| s != "403"),
+            "metadata never checks the scan"
+        );
     }
 }
 

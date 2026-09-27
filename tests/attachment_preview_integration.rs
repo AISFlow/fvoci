@@ -84,6 +84,7 @@ struct Ctx {
     harness: TestDb,
     app: axum::Router,
     cookie: String,
+    owner: Uuid,
     ws: Uuid,
     admin: PgPool,
     pool: PgPool,
@@ -92,7 +93,7 @@ struct Ctx {
 
 async fn ctx() -> Ctx {
     let harness = TestDb::bootstrap().await;
-    let (app, cookie, _owner, ws) = setup_session(&harness).await;
+    let (app, cookie, owner, ws) = setup_session(&harness).await;
     let admin = admin_pool(&harness).await;
     // The router's storage root is private to its AppState; rebuild the app
     // on one state so the job and the routes share storage.
@@ -105,6 +106,7 @@ async fn ctx() -> Ctx {
         harness,
         app: app2,
         cookie,
+        owner,
         ws,
         admin,
         pool,
@@ -452,6 +454,449 @@ async fn hostile_images_fail_without_a_preview() {
         .await
         .unwrap();
     assert_eq!(journal, 0, "no object was written for a failed preview");
+    c.done().await;
+}
+
+async fn create_token(
+    app: &axum::Router,
+    cookie: &str,
+    ws: Uuid,
+    scopes: &[&str],
+) -> (String, String) {
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/api-tokens"),
+        Some(json!({"name": format!("t-{}", Uuid::now_v7().simple()), "scopes": scopes})),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    (
+        body["id"].as_str().unwrap().to_string(),
+        body["token"].as_str().unwrap().to_string(),
+    )
+}
+
+/// A bearer request that keeps the raw body (the harness only parses JSON).
+async fn bearer_raw(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    secret: &str,
+    extra: &[(&str, &str)],
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    use tower::ServiceExt;
+    let mut builder = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {secret}"));
+    for (name, value) in extra {
+        builder = builder.header(*name, *value);
+    }
+    let mut request = builder.body(axum::body::Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(project_harness::test_peer()));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+#[tokio::test]
+async fn api_tokens_download_originals_and_previews_with_the_parent_read_scope() {
+    let c = ctx().await;
+    let doc = c.wiki_doc().await;
+    let doc_png = png(64, 48);
+    let doc_att = c
+        .upload(
+            &format!("/api/v1/workspaces/{}/documents/{doc}/uploads", c.ws),
+            "doc.png",
+            &doc_png,
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let project = create_project(c.app.clone(), &c.cookie, c.ws, "PAT", "workspace").await;
+    let (status, task) = json_request(
+        c.app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{}/projects/{}/tasks",
+            c.ws,
+            project["id"].as_str().unwrap()
+        ),
+        Some(json!({"title": "T"})),
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_png = png(40, 30);
+    let task_att = c
+        .upload(
+            &format!(
+                "/api/v1/workspaces/{}/tasks/{}/uploads",
+                c.ws,
+                task["id"].as_str().unwrap()
+            ),
+            "task.png",
+            &task_png,
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(c.run_job().await);
+    assert!(c.run_job().await);
+
+    let original = |id: &str| format!("/api/v1/workspaces/{}/attachments/{id}/download", c.ws);
+    let preview = |id: &str| {
+        format!(
+            "/api/v1/workspaces/{}/attachments/{id}/download?variant=preview",
+            c.ws
+        )
+    };
+    let (_, docs_read) = create_token(&c.app, &c.cookie, c.ws, &["documents.read"]).await;
+    let (_, docs_write) = create_token(&c.app, &c.cookie, c.ws, &["documents.write"]).await;
+    let (_, tasks_read) = create_token(&c.app, &c.cookie, c.ws, &["tasks.read"]).await;
+    let (_, projects_read) = create_token(&c.app, &c.cookie, c.ws, &["projects.read"]).await;
+
+    // Original: full GET, HEAD and a single range, with the member headers.
+    let (status, headers, body) =
+        bearer_raw(&c.app, "GET", &original(&doc_att), &docs_read, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, doc_png);
+    assert_eq!(headers["content-type"], "application/octet-stream");
+    assert!(headers["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment; filename=\"doc.png\""));
+    assert_eq!(headers["cache-control"], "private, no-store");
+    assert_eq!(headers["content-security-policy"], "sandbox");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["accept-ranges"], "bytes");
+    let (status, headers, body) =
+        bearer_raw(&c.app, "HEAD", &original(&doc_att), &docs_read, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty());
+    assert_eq!(
+        headers["content-length"],
+        doc_png.len().to_string().as_str()
+    );
+    let (status, headers, body) = bearer_raw(
+        &c.app,
+        "GET",
+        &original(&doc_att),
+        &docs_read,
+        &[("range", "bytes=0-3")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, doc_png[..4]);
+    assert_eq!(
+        headers["content-range"],
+        format!("bytes 0-3/{}", doc_png.len()).as_str()
+    );
+    let (status, _, _) = bearer_raw(
+        &c.app,
+        "HEAD",
+        &original(&doc_att),
+        &docs_read,
+        &[("range", "bytes=0-3")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    let (status, headers, _) = bearer_raw(
+        &c.app,
+        "GET",
+        &original(&doc_att),
+        &docs_read,
+        &[("range", "bytes=999999-")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        headers["content-range"],
+        format!("bytes */{}", doc_png.len()).as_str()
+    );
+
+    // Preview: GET, HEAD and a weak If-None-Match revalidation.
+    let (status, headers, body) =
+        bearer_raw(&c.app, "GET", &preview(&doc_att), &docs_read, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/webp");
+    assert_eq!(headers["content-disposition"], "inline");
+    assert_eq!(headers["cache-control"], "private, max-age=3600");
+    let decoded = image::load_from_memory_with_format(&body, image::ImageFormat::WebP).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (64, 48));
+    let etag = headers["etag"].to_str().unwrap().to_string();
+    let (status, headers, body) =
+        bearer_raw(&c.app, "HEAD", &preview(&doc_att), &docs_read, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty());
+    assert_eq!(headers["etag"].to_str().unwrap(), etag);
+    let weak = format!("W/{etag}");
+    let (status, _, _) = bearer_raw(
+        &c.app,
+        "GET",
+        &preview(&doc_att),
+        &docs_read,
+        &[("if-none-match", weak.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+
+    // Write implies the same domain's read; the task domain needs tasks.*.
+    let (status, _, body) = bearer_raw(&c.app, "GET", &original(&doc_att), &docs_write, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, doc_png);
+    let (status, _, body) = bearer_raw(&c.app, "GET", &original(&task_att), &tasks_read, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, task_png);
+    let (status, _, _) = bearer_raw(&c.app, "HEAD", &preview(&task_att), &tasks_read, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    for (path, secret) in [
+        (original(&task_att), &docs_read),
+        (preview(&task_att), &docs_read),
+        (original(&doc_att), &tasks_read),
+        (preview(&doc_att), &tasks_read),
+        (original(&doc_att), &projects_read),
+        (original(&task_att), &projects_read),
+    ] {
+        for method in ["GET", "HEAD"] {
+            let (status, _, body) = bearer_raw(&c.app, method, &path, secret, &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+            assert_ne!(body, doc_png);
+            assert_ne!(body, task_png);
+        }
+    }
+
+    // The session path is untouched.
+    let (status, _, _) = http_request(
+        c.app.clone(),
+        "GET",
+        &original(&task_att),
+        None,
+        None,
+        Some(&c.cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A token bound to another workspace of the same member cannot reach this one.
+    let other_ws = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, 'Other')")
+        .bind(other_ws)
+        .bind(format!("w-{}", &other_ws.simple().to_string()[20..]))
+        .execute(&c.admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.memberships (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(other_ws)
+    .bind(c.owner)
+    .execute(&c.admin)
+    .await
+    .unwrap();
+    let (_, other_docs) = create_token(&c.app, &c.cookie, other_ws, &["documents.read"]).await;
+    for method in ["GET", "HEAD"] {
+        let (status, _, _) =
+            bearer_raw(&c.app, method, &original(&doc_att), &other_docs, &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method}");
+    }
+
+    // Infected: the scan verdict answers only after the parent scope passed.
+    let scan: String =
+        sqlx::query_scalar("SELECT scan_status FROM fvoci.attachments WHERE id = $1")
+            .bind(Uuid::parse_str(&doc_att).unwrap())
+            .fetch_one(&c.admin)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE fvoci.attachments SET scan_status = 'infected' WHERE id = $1")
+        .bind(Uuid::parse_str(&doc_att).unwrap())
+        .execute(&c.admin)
+        .await
+        .unwrap();
+    let (status, _, _) = bearer_raw(&c.app, "GET", &original(&doc_att), &docs_read, &[]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = bearer_raw(&c.app, "GET", &preview(&doc_att), &docs_read, &[]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = bearer_raw(&c.app, "GET", &original(&doc_att), &tasks_read, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    sqlx::query("UPDATE fvoci.attachments SET scan_status = $2 WHERE id = $1")
+        .bind(Uuid::parse_str(&doc_att).unwrap())
+        .bind(&scan)
+        .execute(&c.admin)
+        .await
+        .unwrap();
+
+    // Expired and revoked tokens stop.
+    let (expired_id, expired) = create_token(&c.app, &c.cookie, c.ws, &["documents.read"]).await;
+    sqlx::query(
+        "UPDATE fvoci.api_tokens SET expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&expired_id).unwrap())
+    .execute(&c.admin)
+    .await
+    .unwrap();
+    let (status, _, _) = bearer_raw(&c.app, "GET", &original(&doc_att), &expired, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (revoked_id, revoked) = create_token(&c.app, &c.cookie, c.ws, &["documents.read"]).await;
+    let (status, _, _) = bearer_raw(&c.app, "HEAD", &original(&doc_att), &revoked, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_request(
+        c.app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{}/api-tokens/{revoked_id}", c.ws),
+        None,
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = bearer_raw(&c.app, "HEAD", &original(&doc_att), &revoked, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A member's token follows the member's current state.
+    let member = add_workspace_user(&c.admin, c.ws, "admin", "member").await;
+    let (_, member_docs) = create_token(&c.app, &member.cookie, c.ws, &["documents.read"]).await;
+    let (status, _, _) = bearer_raw(&c.app, "GET", &original(&doc_att), &member_docs, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("UPDATE fvoci.users SET suspended_at = now() WHERE id = $1")
+        .bind(member.user_id)
+        .execute(&c.admin)
+        .await
+        .unwrap();
+    let (status, _, _) = bearer_raw(&c.app, "GET", &original(&doc_att), &member_docs, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    sqlx::query("UPDATE fvoci.users SET suspended_at = NULL WHERE id = $1")
+        .bind(member.user_id)
+        .execute(&c.admin)
+        .await
+        .unwrap();
+    let (status, _, _) = bearer_raw(&c.app, "GET", &preview(&doc_att), &member_docs, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+        .bind(c.ws)
+        .bind(member.user_id)
+        .execute(&c.admin)
+        .await
+        .unwrap();
+    // Removing the membership drops the token itself.
+    for path in [original(&doc_att), preview(&doc_att)] {
+        let (status, _, body) = bearer_raw(&c.app, "GET", &path, &member_docs, &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        assert!(body != doc_png);
+    }
+
+    // Losing the parent project's view is rechecked in the download tx.
+    let private = create_project(c.app.clone(), &c.cookie, c.ws, "PRV", "private").await;
+    let private_id = Uuid::parse_str(private["id"].as_str().unwrap()).unwrap();
+    let (status, private_task) = json_request(
+        c.app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{}/projects/{private_id}/tasks", c.ws),
+        Some(json!({"title": "P"})),
+        Some(&c.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let private_att = c
+        .upload(
+            &format!(
+                "/api/v1/workspaces/{}/tasks/{}/uploads",
+                c.ws,
+                private_task["id"].as_str().unwrap()
+            ),
+            "private.png",
+            &task_png,
+        )
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(c.run_job().await);
+    // Only admins issue tokens; the holder is then demoted to a plain member.
+    let viewer = add_workspace_user(&c.admin, c.ws, "admin", "viewer").await;
+    let (_, viewer_tasks) = create_token(&c.app, &viewer.cookie, c.ws, &["tasks.read"]).await;
+    sqlx::query(
+        "UPDATE fvoci.memberships SET role = 'member' WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(c.ws)
+    .bind(viewer.user_id)
+    .execute(&c.admin)
+    .await
+    .unwrap();
+    let (status, _, _) =
+        bearer_raw(&c.app, "GET", &original(&private_att), &viewer_tasks, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "no project view yet");
+    sqlx::query(
+        "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES ($1, $2, $3, $4, 'viewer')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(c.ws)
+    .bind(private_id)
+    .bind(viewer.user_id)
+    .execute(&c.admin)
+    .await
+    .unwrap();
+    let (status, _, body) =
+        bearer_raw(&c.app, "GET", &original(&private_att), &viewer_tasks, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, task_png);
+    let (status, _, _) =
+        bearer_raw(&c.app, "HEAD", &preview(&private_att), &viewer_tasks, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("DELETE FROM fvoci.project_members WHERE project_id = $1 AND user_id = $2")
+        .bind(private_id)
+        .bind(viewer.user_id)
+        .execute(&c.admin)
+        .await
+        .unwrap();
+    for path in [original(&private_att), preview(&private_att)] {
+        for method in ["GET", "HEAD"] {
+            let (status, _, body) = bearer_raw(&c.app, method, &path, &viewer_tasks, &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+            assert!(body != task_png);
+        }
+    }
+
+    // Revocation after the token resolved but before the download tx: the
+    // attachment table lock parks the request past authentication.
+    let (race_id, race) = create_token(&c.app, &c.cookie, c.ws, &["documents.read"]).await;
+    let mut barrier = c.admin.begin().await.unwrap();
+    sqlx::query("LOCK TABLE fvoci.attachments IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    let app_bg = c.app.clone();
+    let path_bg = original(&doc_att);
+    let download =
+        tokio::spawn(async move { bearer_raw(&app_bg, "GET", &path_bg, &race, &[]).await });
+    project_harness::wait_for_query_blocked_by(&c.admin, blocker_pid, "%attachments%").await;
+    sqlx::query("DELETE FROM fvoci.api_tokens WHERE id = $1")
+        .bind(Uuid::parse_str(&race_id).unwrap())
+        .execute(&c.admin)
+        .await
+        .unwrap();
+    barrier.rollback().await.unwrap();
+    let (status, _, body) = tokio::time::timeout(Duration::from_secs(10), download)
+        .await
+        .expect("download finished")
+        .expect("join");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body != doc_png);
     c.done().await;
 }
 

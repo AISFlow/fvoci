@@ -5551,6 +5551,7 @@
         "tags": [
           "attachments"
         ],
+        "description": "An API token needs the read scope of the attachment's parent: `documents.read` for a document attachment, `tasks.read` for a task attachment (the same domain's write scope also grants read). A token without it, or bound to another workspace, gets 404.",
         "operationId": "get_attachment_meta",
         "parameters": [
           {
@@ -5607,6 +5608,9 @@
         "security": [
           {
             "fvoci_session": []
+          },
+          {
+            "bearer_api_token": []
           }
         ]
       },
@@ -5794,6 +5798,7 @@
         "tags": [
           "attachments"
         ],
+        "description": "An API token needs the read scope of the attachment's parent: `documents.read` for a document attachment, `tasks.read` for a task attachment (the same domain's write scope also grants read). A token without it, or bound to another workspace, gets 404.",
         "operationId": "download_attachment",
         "parameters": [
           {
@@ -5860,6 +5865,16 @@
               }
             }
           },
+          "403": {
+            "description": "Attachment failed virus scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Not found or forbidden",
             "content": {
@@ -5884,6 +5899,9 @@
         "security": [
           {
             "fvoci_session": []
+          },
+          {
+            "bearer_api_token": []
           }
         ]
       }
