@@ -2793,6 +2793,23 @@ async fn well_known_security_txt_follows_instance_security_contact() {
         canonical_host
     );
 
+    let invalid_contact = patch(json!({"security": {"contact": "https://example.com/%zz"}})).await;
+    assert_eq!(invalid_contact.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        get(
+            &h.app,
+            "/api/v1/admin/instance-settings",
+            Some(&h.admin_cookie),
+        )
+        .await
+        .json["values"]["security"]["contact"],
+        canonical_host
+    );
+    assert_eq!(
+        security_txt_fields(&get(&h.app, path, None).await.bytes)["Contact"],
+        canonical_host
+    );
+
     let bad = patch(json!({"security": {"contact": "mailto:sec\r@example.com"}})).await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
     let still_https = get(&h.app, path, None).await;
