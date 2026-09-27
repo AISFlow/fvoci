@@ -617,19 +617,24 @@ RUST_POSTGRES_RUNNER_ARCH: dict[str, str] = {
 RUST_INTEGRATION_MANUAL_TARGETS: frozenset[str] = frozenset({"collab_capacity_probe"})
 RUST_DB_TESTS_FEATURE = "db-tests"
 RUST_POSTGRES_INTEGRATION_STEP = "PostgreSQL integration tests"
-RUST_POSTGRES_INTEGRATION_RUN = (
-    "cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}"
-)
 RUST_S3_INTEGRATION_STEP = "S3-compatible storage integration tests (pinned test server)"
-RUST_S3_INTEGRATION_RUN = (
-    "bash scripts/start-test-minio.sh cargo test --locked --offline --no-fail-fast "
-    "--features db-tests --test attachment_s3_integration"
-)
 RUST_COLLAB_INTEGRATION_STEP = "WebSocket, PostgreSQL and native helper integration tests"
 RUST_COLLAB_INTEGRATION_RUN = "bash scripts/run-rust-collaboration-ci-tests.sh"
 RUST_COLLAB_MATRIX_RUNNERS = frozenset({"ubuntu-24.04", "ubuntu-24.04-arm"})
+RUST_S3_INTEGRATION_STEP_IF = "matrix.shard == 'b'"
+RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS: frozenset[str] = frozenset(
+    {
+        "collab_wire",
+        "markdown_process",
+        "docx_export_process",
+        "pdf_export_process",
+        "pptx_export_process",
+        "doctor_conversion",
+        "office_extract_process",
+        "static_api",
+    }
+)
 CARGO_TEST_FLAG_RE = re.compile(r"(?:^|\s)--test\s+([A-Za-z0-9_-]+)")
-AUTOTEST_DB_TESTS_CFG_PREFIX_LINES = 12
 
 
 def _package_autotests_enabled(cargo_data: dict) -> bool:
@@ -639,17 +644,20 @@ def _package_autotests_enabled(cargo_data: dict) -> bool:
     return True
 
 
-def _autotest_declares_db_tests_only(path: Path) -> bool:
-    for line in path.read_text(encoding="utf-8").splitlines()[:AUTOTEST_DB_TESTS_CFG_PREFIX_LINES]:
+def _autotest_crate_attributes(path: Path) -> list[str]:
+    attrs: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if not stripped.startswith("#!["):
-            continue
-        if "extract-native-tests" in stripped:
+        if stripped.startswith("#!["):
+            attrs.append(stripped)
+    return attrs
+
+
+def _autotest_declares_db_tests(path: Path) -> bool:
+    for attr in _autotest_crate_attributes(path):
+        if "extract-native-tests" in attr:
             return False
-        if (
-            'feature = "db-tests"' in stripped
-            or "feature=\"db-tests\"" in stripped
-        ):
+        if 'feature = "db-tests"' in attr or 'feature="db-tests"' in attr:
             return True
     return False
 
@@ -682,8 +690,20 @@ def root_db_integration_registry_targets(repo_root: Path) -> tuple[set[str] | No
         tests_dir = repo_root / "tests"
         if tests_dir.is_dir():
             for path in sorted(tests_dir.glob("*.rs")):
-                if _autotest_declares_db_tests_only(path):
-                    targets.add(path.stem)
+                stem = path.stem
+                if _autotest_declares_db_tests(path):
+                    targets.add(stem)
+                    continue
+                attrs = _autotest_crate_attributes(path)
+                if any("extract-native-tests" in attr for attr in attrs):
+                    continue
+                if stem in RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS:
+                    continue
+                if attrs or path.read_text(encoding="utf-8").strip():
+                    return None, (
+                        f"rust: tests/{stem}.rs is not registered and has no crate "
+                        "#![cfg(feature = \"db-tests\")]; add CI inventory or an explicit fast/native exclusion"
+                    )
     return targets, None
 
 
@@ -722,10 +742,7 @@ def _postgres_matrix_rows(postgres_job: dict) -> tuple[list[dict] | None, str | 
     return rows, None
 
 
-def postgres_matrix_inventory(repo_root: Path) -> tuple[dict[str, set[str]], str | None]:
-    jobs, err = _rust_workflow_jobs(repo_root)
-    if err:
-        return {}, err
+def postgres_matrix_inventory(jobs: dict) -> tuple[dict[str, set[str]], str | None]:
     postgres_job = jobs.get("postgres")
     if not isinstance(postgres_job, dict):
         return {}, "rust: postgres job missing"
@@ -745,80 +762,140 @@ def postgres_matrix_inventory(repo_root: Path) -> tuple[dict[str, set[str]], str
     return per_arch, None
 
 
-def _postgres_job_steps(repo_root: Path) -> tuple[dict | None, list[dict] | None, str | None]:
-    jobs, err = _rust_workflow_jobs(repo_root)
-    if err:
-        return None, None, err
+def _postgres_job_steps(jobs: dict) -> tuple[list[dict] | None, str | None]:
     postgres_job = jobs.get("postgres")
     if not isinstance(postgres_job, dict):
-        return None, None, "rust: postgres job missing"
+        return None, "rust: postgres job missing"
     steps = postgres_job.get("steps")
     if not isinstance(steps, list):
-        return postgres_job, None, "rust: postgres job steps missing"
-    return postgres_job, steps, None
+        return None, "rust: postgres job steps missing"
+    return steps, None
 
 
-def _step_run_by_name(
+def _unique_named_step(
     steps: list[dict], step_name: str, *, job: str
-) -> tuple[str | None, str | None]:
+) -> tuple[dict | None, str | None]:
     matches = 0
-    run_value: str | None = None
+    found: dict | None = None
     for step in steps:
         if not isinstance(step, dict):
             continue
         if step.get("name") != step_name:
             continue
         matches += 1
-        run = step.get("run")
-        if not isinstance(run, str):
-            return None, f"rust: {job} step {step_name!r} must have a string run command"
-        run_value = run
+        found = step
     if matches == 0:
         return None, f"rust: missing {job} step {step_name!r}"
     if matches != 1:
         return None, f"rust: {job} step {step_name!r} must appear exactly once"
-    return run_value, None
+    return found, None
 
 
-def verify_postgres_integration_execution(repo_root: Path) -> list[str]:
-    _, steps, err = _postgres_job_steps(repo_root)
+def _execution_step_masked(step: dict, *, job: str, step_name: str) -> str | None:
+    if step.get("continue-on-error") is True:
+        return f"rust: {job} step {step_name!r} must not use continue-on-error"
+    return None
+
+
+def _verify_postgres_integration_run(run: str) -> str | None:
+    norm = _normalize_run_script(run).strip()
+    if norm.startswith("echo "):
+        return (
+            "rust: PostgreSQL integration step must execute "
+            "cargo test with --features db-tests and ${{ matrix.tests }}"
+        )
+    if not norm.startswith("cargo test"):
+        return (
+            "rust: PostgreSQL integration step must execute "
+            "cargo test with --features db-tests and ${{ matrix.tests }}"
+        )
+    if "--features db-tests" not in norm:
+        return (
+            "rust: PostgreSQL integration step must execute "
+            "cargo test with --features db-tests and ${{ matrix.tests }}"
+        )
+    if "${{ matrix.tests }}" not in norm:
+        return (
+            "rust: PostgreSQL integration step must execute "
+            "cargo test with --features db-tests and ${{ matrix.tests }}"
+        )
+    return None
+
+
+def _verify_s3_integration_run(run: str) -> str | None:
+    norm = _normalize_run_script(run).strip()
+    if norm.startswith("echo "):
+        return (
+            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+        )
+    if not norm.startswith("bash scripts/start-test-minio.sh cargo test"):
+        return (
+            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+        )
+    if "--features db-tests" not in norm:
+        return (
+            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+        )
+    if "--test attachment_s3_integration" not in norm:
+        return (
+            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+        )
+    return None
+
+
+def verify_postgres_integration_execution(jobs: dict) -> list[str]:
+    steps, err = _postgres_job_steps(jobs)
     if err:
         return [err]
     assert steps is not None
-    run_value, step_err = _step_run_by_name(
-        steps, RUST_POSTGRES_INTEGRATION_STEP, job="postgres"
-    )
+    step, step_err = _unique_named_step(steps, RUST_POSTGRES_INTEGRATION_STEP, job="postgres")
     if step_err:
         return [step_err]
-    assert run_value is not None
-    if _normalize_run_script(run_value) != _normalize_run_script(RUST_POSTGRES_INTEGRATION_RUN):
+    assert step is not None
+    masked = _execution_step_masked(step, job="postgres", step_name=RUST_POSTGRES_INTEGRATION_STEP)
+    if masked:
+        return [masked]
+    if "if" in step:
         return [
-            "rust: PostgreSQL integration step must execute "
-            "cargo test with --features db-tests and ${{ matrix.tests }}"
+            f"rust: postgres step {RUST_POSTGRES_INTEGRATION_STEP!r} must not have an if condition"
         ]
-    return []
+    run = step.get("run")
+    if not isinstance(run, str):
+        return [
+            f"rust: postgres step {RUST_POSTGRES_INTEGRATION_STEP!r} must have a string run command"
+        ]
+    run_err = _verify_postgres_integration_run(run)
+    return [run_err] if run_err else []
 
 
-def postgres_s3_inventory(repo_root: Path) -> tuple[set[str], str | None]:
-    _, steps, err = _postgres_job_steps(repo_root)
+def postgres_s3_inventory(jobs: dict) -> tuple[set[str], str | None]:
+    steps, err = _postgres_job_steps(jobs)
     if err:
         return set(), err
     assert steps is not None
-    run_value, step_err = _step_run_by_name(steps, RUST_S3_INTEGRATION_STEP, job="postgres")
+    step, step_err = _unique_named_step(steps, RUST_S3_INTEGRATION_STEP, job="postgres")
     if step_err:
         return set(), step_err
-    assert run_value is not None
-    if _normalize_run_script(run_value) != _normalize_run_script(RUST_S3_INTEGRATION_RUN):
+    assert step is not None
+    masked = _execution_step_masked(step, job="postgres", step_name=RUST_S3_INTEGRATION_STEP)
+    if masked:
+        return set(), masked
+    step_if = step.get("if")
+    if step_if != RUST_S3_INTEGRATION_STEP_IF:
         return set(), (
-            "rust: S3 integration step must invoke start-test-minio.sh with a db-tests cargo test"
+            f"rust: S3 integration step if must be {RUST_S3_INTEGRATION_STEP_IF!r}, "
+            f"got {step_if!r}"
         )
-    return cargo_test_flags_in_text(run_value), None
+    run = step.get("run")
+    if not isinstance(run, str):
+        return set(), f"rust: postgres step {RUST_S3_INTEGRATION_STEP!r} must have a string run command"
+    run_err = _verify_s3_integration_run(run)
+    if run_err:
+        return set(), run_err
+    return cargo_test_flags_in_text(run), None
 
 
-def verify_collaboration_workflow_execution(repo_root: Path) -> list[str]:
-    jobs, err = _rust_workflow_jobs(repo_root)
-    if err:
-        return [err]
+def verify_collaboration_workflow_execution(jobs: dict) -> list[str]:
     collab_job = jobs.get("collaboration")
     if not isinstance(collab_job, dict):
         return ["rust: collaboration job missing"]
@@ -847,12 +924,26 @@ def verify_collaboration_workflow_execution(repo_root: Path) -> list[str]:
     steps = collab_job.get("steps")
     if not isinstance(steps, list):
         return ["rust: collaboration job steps missing"]
-    run_value, step_err = _step_run_by_name(
+    step, step_err = _unique_named_step(
         steps, RUST_COLLAB_INTEGRATION_STEP, job="collaboration"
     )
     if step_err:
         return [step_err]
-    assert run_value is not None
+    assert step is not None
+    masked = _execution_step_masked(
+        step, job="collaboration", step_name=RUST_COLLAB_INTEGRATION_STEP
+    )
+    if masked:
+        return [masked]
+    if "if" in step:
+        return [
+            "rust: collaboration integration step must not have an if condition"
+        ]
+    run_value = step.get("run")
+    if not isinstance(run_value, str):
+        return [
+            f"rust: collaboration step {RUST_COLLAB_INTEGRATION_STEP!r} must have a string run command"
+        ]
     if _normalize_run_script(run_value) != _normalize_run_script(RUST_COLLAB_INTEGRATION_RUN):
         return [
             "rust: collaboration integration step must execute "
@@ -913,19 +1004,25 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
         return errors
     assert cargo_targets is not None
 
-    errors.extend(verify_postgres_integration_execution(repo_root))
+    jobs, jobs_err = _rust_workflow_jobs(repo_root)
+    if jobs_err:
+        errors.append(jobs_err)
+        return errors
+    assert jobs is not None
 
-    per_arch, matrix_err = postgres_matrix_inventory(repo_root)
+    errors.extend(verify_postgres_integration_execution(jobs))
+
+    per_arch, matrix_err = postgres_matrix_inventory(jobs)
     if matrix_err:
         errors.append(matrix_err)
         return errors
 
-    s3_tests, s3_err = postgres_s3_inventory(repo_root)
+    s3_tests, s3_err = postgres_s3_inventory(jobs)
     if s3_err:
         errors.append(s3_err)
         return errors
 
-    errors.extend(verify_collaboration_workflow_execution(repo_root))
+    errors.extend(verify_collaboration_workflow_execution(jobs))
 
     collab_tests, collab_err = collaboration_script_inventory(repo_root)
     if collab_err:
