@@ -1,4 +1,5 @@
 #![cfg(feature = "db-tests")]
+#![allow(dead_code)]
 
 //! Workspace unfurl HTTP contracts: auth, membership, revocation, SSRF,
 //! live `embed.hosts`, and rate limits. Outbound GETs use an injected client
