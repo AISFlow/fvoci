@@ -23,7 +23,16 @@ async fn raw_get(
     path: &str,
     headers: &[(&str, &str)],
 ) -> (StatusCode, HeaderMap, Vec<u8>) {
-    let mut builder = Request::builder().method("GET").uri(path);
+    raw_request(app, "GET", path, headers).await
+}
+
+async fn raw_request(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder().method(method).uri(path);
     for (name, value) in headers {
         builder = builder.header(*name, *value);
     }
@@ -1814,6 +1823,33 @@ fn meta_content<'a>(html: &'a str, attr: &str) -> Option<&'a str> {
     Some(&html[start..start + end])
 }
 
+/// `HEAD /s/{token}`: the GET shell's status and private headers with an
+/// empty body and no Content-Length (the GET length depends on the head tags).
+async fn assert_share_head_matches_get(site: &axum::Router, path: &str) {
+    let (get_status, get_headers, get_body) = raw_get(site.clone(), path, &[]).await;
+    let (status, headers, body) = raw_request(site.clone(), "HEAD", path, &[]).await;
+    assert_eq!(status, get_status, "{path}");
+    assert!(body.is_empty(), "{path}");
+    assert_eq!(
+        headers["content-type"], "text/html; charset=utf-8",
+        "{path}"
+    );
+    assert_eq!(headers["cache-control"], "private, no-store", "{path}");
+    assert_eq!(headers["x-robots-tag"], "noindex", "{path}");
+    assert_eq!(headers["referrer-policy"], "no-referrer", "{path}");
+    assert!(!headers.contains_key("retry-after"), "{path}");
+    assert!(!headers.contains_key("content-length"), "{path}");
+    assert!(!get_body.is_empty(), "{path}");
+    for name in [
+        "content-type",
+        "cache-control",
+        "x-robots-tag",
+        "referrer-policy",
+    ] {
+        assert_eq!(headers[name], get_headers[name], "{path} {name}");
+    }
+}
+
 /// Source server.ts `/s/:token` SPA fallback + spa-html.ts `injectShareOg`:
 /// the shell gets the share's title and OG tags (escaped, one line, excerpt
 /// cut at 200 UTF-16 units), is never cached and not indexed; invalid tokens,
@@ -1900,6 +1936,10 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
     assert!(!raw_description.contains('\u{FFFD}'));
     assert!(!html.contains("<script>alert"));
 
+    // HEAD: the same private headers without the body.
+    assert_share_head_matches_get(&site, &format!("/s/{token}")).await;
+    assert_share_head_matches_get(&site, &format!("/s/{token}/")).await;
+
     // Trailing slash is the same root; sub-paths are not.
     let (_, _, bytes) = raw_get(site.clone(), &format!("/s/{token}/"), &[]).await;
     assert!(String::from_utf8(bytes).unwrap().contains("og:title"));
@@ -1908,6 +1948,16 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
     assert_eq!(status, StatusCode::OK);
     assert!(!headers.contains_key("x-robots-tag"));
     assert_eq!(bytes, SHELL_INDEX.as_bytes());
+    let (status, headers, bytes) = raw_request(
+        site.clone(),
+        "HEAD",
+        &format!("/s/{token}/attachments/x"),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key("x-robots-tag"));
+    assert!(bytes.is_empty());
 
     // An unknown token: the plain shell with the same private headers.
     let (status, headers, bytes) = raw_get(site.clone(), "/s/not-a-token", &[]).await;
@@ -1915,6 +1965,7 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
     assert_eq!(headers["x-robots-tag"], "noindex");
     assert_eq!(headers["cache-control"], "private, no-store");
     assert_eq!(bytes, SHELL_INDEX.as_bytes());
+    assert_share_head_matches_get(&site, "/s/not-a-token").await;
 
     // A project share: project name, empty description.
     let project = create_project(app.clone(), &cookie, ws, "OGP", "workspace").await;
@@ -1947,6 +1998,7 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
         .unwrap();
     let (_, _, bytes) = raw_get(site.clone(), &format!("/s/{project_token}"), &[]).await;
     assert_eq!(bytes, SHELL_INDEX.as_bytes());
+    assert_share_head_matches_get(&site, &format!("/s/{project_token}")).await;
 
     // Sharing disabled by the instance policy: nothing is injected.
     let (status, body) = json_request(
@@ -1962,6 +2014,7 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["x-robots-tag"], "noindex");
     assert_eq!(bytes, SHELL_INDEX.as_bytes());
+    assert_share_head_matches_get(&site, &format!("/s/{token}")).await;
     let (status, body) = json_request(
         app.clone(),
         "PATCH",
@@ -1982,6 +2035,7 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
     assert_eq!(status, StatusCode::OK);
     assert!(!headers.contains_key("retry-after"));
     assert_eq!(bytes, SHELL_INDEX.as_bytes());
+    assert_share_head_matches_get(&limited, &format!("/s/{token}")).await;
     // The fresh app (own limiter) still injects after the policy reset.
     let (_, _, bytes) = raw_get(site.clone(), &format!("/s/{token}"), &[]).await;
     assert!(String::from_utf8(bytes).unwrap().contains("og:title"));
