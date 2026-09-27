@@ -374,11 +374,7 @@ fn vimeo_id(url: &Url) -> Option<String> {
     if host != "vimeo.com" && host != "player.vimeo.com" {
         return None;
     }
-    let id = url
-        .path()
-        .split('/')
-        .rfind(|p| !p.is_empty())
-        .unwrap_or("");
+    let id = url.path().split('/').rfind(|p| !p.is_empty()).unwrap_or("");
     id.chars()
         .all(|c| c.is_ascii_digit())
         .then(|| id.to_string())
