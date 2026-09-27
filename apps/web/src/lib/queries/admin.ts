@@ -36,7 +36,9 @@ export const adminAuditQuery = queryOptions({
 
 export const publicInstanceQuery = queryOptions({
   queryKey: ["instance"] as const,
-  queryFn: async () => ensureOk(await api.GET("/api/v1/instance")),
+  queryFn: async () =>
+    ensureOk(await api.GET("/api/v1/instance", { cache: "no-cache" })),
+  retry: false,
 });
 
 /**
