@@ -16,7 +16,8 @@ use fvoci_server::collab::room::CapturedRevision;
 use fvoci_server::collab::room::{
     arm_append_revoke_barrier, arm_join_channel_admission_witness,
     arm_session_revision_persist_barrier, disarm_join_channel_admission_witness,
-    disarm_session_revision_persist_barrier, AuthenticatedConnection, CollabSession, RoomJoin,
+    disarm_session_revision_persist_barrier, session_revision_persist_barrier_armed,
+    AuthenticatedConnection, CollabSession, RoomJoin,
 };
 use fvoci_server::collab::seed::SeedEngine;
 use fvoci_server::collab::wire::{CollabKind, CollabRoomName};
@@ -43,9 +44,10 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use support::{
     auth_and_join, collab_app_state, complete_sync_handshake, connect_member, engine_fixture,
-    setup_owner_session, setup_wiki_doc, setup_wiki_doc_batch, stateless_frame, sync_update_frame,
-    test_collab_config, wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update,
-    wait_for_ws_close_code, SessionFixture, TestRun, WikiDocFixture, PEPPER, PUBLIC_ORIGIN,
+    setup_owner_session, setup_wiki_doc, setup_wiki_doc_batch, stateless_frame, sync_step1_frame,
+    sync_update_frame, test_collab_config, wait_for_stateless_exact, wait_for_sync_applied,
+    wait_for_sync_update, wait_for_ws_close_code, SessionFixture, TestRun, WikiDocFixture, PEPPER,
+    PUBLIC_ORIGIN,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -77,6 +79,31 @@ async fn hub_join_with_conn(
 ) -> Result<fvoci_server::collab::room::ConnectionLease, fvoci_server::collab::room::JoinError> {
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
     tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
+    hub_join_with_events(
+        hub,
+        workspace_id,
+        document_id,
+        session_id,
+        user_id,
+        client_id,
+        conn_id,
+        events_tx,
+    )
+    .await
+}
+
+/// Hub join whose outbound events go to `events`; the caller decides whether they are drained.
+#[allow(clippy::too_many_arguments)]
+async fn hub_join_with_events(
+    hub: &CollabHub,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    session_id: Uuid,
+    user_id: Uuid,
+    client_id: u32,
+    conn_id: Uuid,
+    events_tx: tokio::sync::mpsc::Sender<fvoci_server::collab::room::RoomClientEvent>,
+) -> Result<fvoci_server::collab::room::ConnectionLease, fvoci_server::collab::room::JoinError> {
     let routing_key = routing_key(workspace_id, document_id);
     let join = RoomJoin {
         conn: AuthenticatedConnection {
@@ -971,6 +998,44 @@ async fn wait_session_revision_count(
     }
 }
 
+/// Bounded wait for the armed last-leave persist barrier; on timeout names the stage that stopped short.
+async fn await_session_persist_barrier(
+    hub: &CollabHub,
+    harness: &support::TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    reached: tokio::sync::oneshot::Receiver<()>,
+) {
+    let Ok(reached) = tokio::time::timeout(Duration::from_secs(8), reached).await else {
+        let armed = session_revision_persist_barrier_armed(document_id).await;
+        let probe = tokio::time::timeout(
+            Duration::from_secs(5),
+            hub.probe_actor(room_key(workspace_id, document_id)),
+        )
+        .await;
+        let count = tokio::time::timeout(
+            Duration::from_secs(5),
+            count_session_revisions(harness, workspace_id, document_id),
+        )
+        .await
+        .ok();
+        let stage = match (armed, &probe) {
+            (false, _) => "barrier consumed without a reached signal",
+            (true, Err(_)) => "room actor stalled before the persist pause (capture/recycle/head read)",
+            (true, Ok(_)) if count.is_some_and(|count| count > 0) => {
+                "last-leave work deduped against an existing session revision before the persist pause"
+            }
+            (true, Ok(_)) => {
+                "last-leave work never scheduled or aborted before the persist pause (capture/compare/text)"
+            }
+        };
+        panic!(
+            "session revision persist barrier not reached: {stage}; armed={armed} probe={probe:?} session_count={count:?}"
+        );
+    };
+    reached.expect("session revision persist barrier");
+}
+
 #[tokio::test]
 async fn session_revision_on_last_disconnect_two_clients() {
     run_test("session_revision_on_last_disconnect_two_clients", async {
@@ -1438,9 +1503,14 @@ async fn session_revision_persists_through_immediate_reconnect() {
             let (persist_reached, persist_proceed) =
                 arm_session_revision_persist_barrier(wiki.document_id).await;
             let _ = ws.close(None).await;
-            persist_reached
-                .await
-                .expect("session revision persist barrier");
+            await_session_persist_barrier(
+                &hub,
+                &run.harness,
+                workspace_id,
+                document_id,
+                persist_reached,
+            )
+            .await;
             assert_eq!(
                 count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id,)
                     .await,
@@ -1522,6 +1592,235 @@ async fn session_revision_persists_through_immediate_reconnect() {
                     .await,
                 1,
                 "unchanged content after reconnect leave must dedupe, not erase prior snapshot"
+            );
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// Transport enqueues `Leave` and then drops the lease; the actor may select the lease drop first.
+/// The trailing `Leave` for the already-evicted connection must not schedule another capture.
+#[tokio::test]
+async fn session_revision_stale_leave_after_lease_drop_does_not_reschedule() {
+    run_test(
+        "session_revision_stale_leave_after_lease_drop_does_not_reschedule",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let (state, hub) =
+                collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+            let hub = hub.clone();
+            let addr = run.spawn_router_state(state, hub.clone()).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+            apply_and_persist(
+                addr,
+                &wiki.session.session_token,
+                &key,
+                1,
+                &engine_fixture("structured.v1"),
+            )
+            .await;
+            wait_session_revision_count(
+                &run.harness,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                1,
+            )
+            .await;
+
+            let room = room_key(wiki.session.workspace_id, wiki.document_id);
+            let conn_id = Uuid::now_v7();
+            let lease = hub_join_with_conn(
+                &hub,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                wiki.session.session_id,
+                wiki.session.user_id,
+                20,
+                conn_id,
+            )
+            .await
+            .expect("hub join");
+            drop(lease);
+            // The first probe drains the lease drop; the second is served only after that
+            // turn's session revision work has finished.
+            hub.probe_actor(room).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            assert_eq!(
+                count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                    .await,
+                1,
+                "unchanged lease-drop leave must dedupe"
+            );
+
+            clear_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                .await;
+            hub.leave_room(room, conn_id).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            assert_eq!(
+                count_session_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id)
+                    .await,
+                0,
+                "stale leave for an evicted connection must not schedule a session revision"
+            );
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+async fn assert_session_revision_matches(
+    harness: &support::TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    expected: &CapturedRevision,
+) {
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let row: (Vec<u8>, Value) = sqlx::query_as(
+        r#"
+        SELECT y_snapshot, content_json FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_id = $2 AND reason = 'session'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    assert_eq!(row.0, expected.y_snapshot);
+    assert_eq!(row.1, expected.content_json);
+}
+
+/// The sole connection is evicted with 1009 because a sync reply exceeds its outbound byte
+/// budget. The transport then sends a stale `Leave`; the eviction itself must schedule the
+/// last-disconnect session revision.
+#[tokio::test]
+async fn session_revision_on_last_connection_backpressure_close() {
+    run_test(
+        "session_revision_on_last_connection_backpressure_close",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let workspace_id = wiki.session.workspace_id;
+            let document_id = wiki.document_id;
+            append_outside_room(&wiki.session, document_id, "structured.v1").await;
+            let mut cfg = test_collab_config(4, 60_000);
+            // Step2 carries the whole document (> 831 bytes); small frames still fit.
+            cfg.max_outbound_bytes_per_connection = 512;
+            let expected = expected_committed_session_capture(
+                &wiki.session.pool,
+                workspace_id,
+                document_id,
+                &cfg,
+            )
+            .await;
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            let key = routing_key(workspace_id, document_id);
+
+            let mut ws = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut ws, &key, 30).await;
+            ws.send(Message::Binary(sync_step1_frame(&key, &[0, 0]).into()))
+                .await
+                .unwrap();
+            wait_for_ws_close_code(
+                &mut ws,
+                1009,
+                Duration::from_secs(8),
+                false,
+                Some("outbound queue full"),
+            )
+            .await;
+
+            wait_session_revision_count(&run.harness, workspace_id, document_id, 1).await;
+            assert_session_revision_matches(&run.harness, workspace_id, document_id, &expected)
+                .await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+/// Frame-permit backpressure evicts the last hub connection, then the lease drop and a stale
+/// `Leave` arrive in that order. The eviction turn captures the session revision; the lease drop
+/// and the stale `Leave` must not schedule another one.
+#[tokio::test]
+async fn session_revision_backpressure_eviction_then_lease_drop_then_stale_leave() {
+    run_test(
+        "session_revision_backpressure_eviction_then_lease_drop_then_stale_leave",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let workspace_id = wiki.session.workspace_id;
+            let document_id = wiki.document_id;
+            append_outside_room(&wiki.session, document_id, "structured.v1").await;
+            let mut cfg = test_collab_config(4, 60_000);
+            // Step1 is answered with Step2 then Step1; the undrained second frame has no permit.
+            cfg.max_outbound_frames_per_connection = 1;
+            let expected = expected_committed_session_capture(
+                &wiki.session.pool,
+                workspace_id,
+                document_id,
+                &cfg,
+            )
+            .await;
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg).await;
+            let hub = hub.clone();
+            let _addr = run.spawn_router_state(state, hub.clone()).await;
+            let room = room_key(workspace_id, document_id);
+            let key = routing_key(workspace_id, document_id);
+
+            let conn_id = Uuid::now_v7();
+            let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
+            let lease = hub_join_with_events(
+                &hub,
+                workspace_id,
+                document_id,
+                wiki.session.session_id,
+                wiki.session.user_id,
+                31,
+                conn_id,
+                events_tx,
+            )
+            .await
+            .expect("hub join");
+            let handle = hub.ensure_live_room(room).await.expect("live room");
+            handle.frame(conn_id, sync_step1_frame(&key, &[0, 0])).await;
+            // Served after the frame turn, including its loop-tail session revision work.
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            let mut saw_close = false;
+            while let Ok(event) = events_rx.try_recv() {
+                if let fvoci_server::collab::room::RoomClientEvent::Close { code, .. } = event {
+                    assert_eq!(code, 1009);
+                    saw_close = true;
+                }
+            }
+            assert!(saw_close, "backpressure eviction must close with 1009");
+            assert_eq!(
+                count_session_revisions(&run.harness, workspace_id, document_id).await,
+                1,
+                "last-connection backpressure eviction must capture a session revision"
+            );
+            assert_session_revision_matches(&run.harness, workspace_id, document_id, &expected)
+                .await;
+
+            clear_session_revisions(&run.harness, workspace_id, document_id).await;
+            drop(lease);
+            // The first probe drains the lease drop; the second follows that turn's loop tail.
+            hub.probe_actor(room).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            hub.leave_room(room, conn_id).await;
+            assert_eq!(hub.probe_actor(room).await.connections, 0);
+            assert_eq!(
+                count_session_revisions(&run.harness, workspace_id, document_id).await,
+                0,
+                "lease drop and stale leave after eviction must not schedule another capture"
             );
             run.finish().await.expect("cleanup");
         },

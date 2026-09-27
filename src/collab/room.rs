@@ -437,6 +437,14 @@ pub async fn disarm_session_revision_persist_barrier(document_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
+pub async fn session_revision_persist_barrier_armed(document_id: Uuid) -> bool {
+    SESSION_REVISION_PERSIST_BARRIERS
+        .lock()
+        .await
+        .contains_key(&document_id)
+}
+
+#[cfg(feature = "db-tests")]
 async fn pause_for_session_revision_persist_barrier(document_id: Uuid) {
     let barrier = SESSION_REVISION_PERSIST_BARRIERS
         .lock()
@@ -2199,6 +2207,11 @@ impl RoomActor {
     }
 
     async fn handle_leave(&mut self, conn_id: Uuid) {
+        // The lease drop may already have evicted this connection; a stale Leave must not
+        // schedule another session revision capture.
+        if !self.connections.contains_key(&conn_id) {
+            return;
+        }
         self.close_connection(conn_id, 1000, "client leave").await;
     }
 
@@ -3985,6 +3998,18 @@ impl RoomActor {
         self.flushing_awareness = false;
     }
 
+    /// 1009 eviction from `deliver_outbound`. The tombstone is left for the caller's awareness
+    /// flush (this runs inside it); the session revision is scheduled like any other close.
+    async fn evict_for_backpressure(&mut self, conn_id: Uuid) {
+        if let Some(tombstone) = self
+            .evict_connection(conn_id, 1009, "outbound queue full")
+            .await
+        {
+            self.pending_awareness.push_back(tombstone);
+        }
+        self.try_schedule_session_revision();
+    }
+
     async fn deliver_outbound(&mut self, conn_id: Uuid, bytes: Vec<u8>, kind: OutboundKind) {
         if self
             .connections
@@ -4002,33 +4027,18 @@ impl RoomActor {
             return;
         };
         if accounted_bytes > budget.max_bytes {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
             return;
         }
         let current = budget.queued_bytes.load(Ordering::Relaxed);
         if current + accounted_bytes > budget.max_bytes {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
             return;
         }
         let frame_permit = match budget.frame_sem.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                if let Some(tombstone) = self
-                    .evict_connection(conn_id, 1009, "outbound queue full")
-                    .await
-                {
-                    self.pending_awareness.push_back(tombstone);
-                }
+                self.evict_for_backpressure(conn_id).await;
                 return;
             }
         };
@@ -4050,12 +4060,7 @@ impl RoomActor {
             permit: Some(delivery_permit),
         };
         if events.try_send(RoomClientEvent::Outbound(frame)).is_err() {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
         }
     }
 
