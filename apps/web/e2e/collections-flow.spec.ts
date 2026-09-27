@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { login } from "./helpers";
+import { createTasksViaApi, login } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -228,4 +228,190 @@ test("document tags, project collection fields/views and saved task views round-
       return ((await res.json()) as { items: { config: unknown }[] }).items[0]?.config;
     })
     .toEqual({ filters: { openOnly: true }, sort: [{ field: "title", direction: "asc" }] });
+});
+
+test("grouped board pages each column and moves cards by drag or select through the API", async ({
+  page,
+}) => {
+  await ensureSetup(page);
+  const wsId = await workspaceId(page);
+  const slug = admin.workspaceSlug;
+  const base = `/api/v1/workspaces/${wsId}`;
+
+  const projectRes = await page.request.post(`${base}/projects`, {
+    data: { key: "BRD", name: "보드 프로젝트", visibility: "workspace" },
+  });
+  expect(projectRes.status()).toBe(201);
+  const project = (await projectRes.json()) as { id: string };
+  const workflow = (await (await page.request.get(`${base}/projects/${project.id}/workflow`)).json()) as {
+    id: string;
+    statuses: { id: string; name: string }[];
+  };
+  const [statusA, statusB] = workflow.statuses;
+  expect(statusA && statusB).toBeTruthy();
+  const titlesA = Array.from({ length: 60 }, (_, index) => `보드 A ${String(index + 1).padStart(3, "0")}`);
+  await createTasksViaApi(page, wsId, project.id, titlesA, statusA!.id);
+  await createTasksViaApi(page, wsId, project.id, ["보드 B 001", "보드 B 002"], statusB!.id);
+
+  const collection = (await (
+    await page.request.get(`${base}/projects/${project.id}/collection`)
+  ).json()) as { id: string };
+  const fieldRes = await page.request.post(`${base}/collections/${collection.id}/fields`, {
+    data: { name: "단계", key: "stage", type: "select", options: ["설계", "구현"] },
+  });
+  expect(fieldRes.status()).toBe(201);
+  const field = (await fieldRes.json()) as {
+    id: string;
+    version: number;
+    options: { id: string; label: string }[];
+  };
+  const design = field.options.find((option) => option.label === "설계")!;
+  const build = field.options.find((option) => option.label === "구현")!;
+
+  type Row = { id: string; displayId: string; statusId: string | null; values: Record<string, unknown>; version: number };
+  async function itemRow(displayId: string): Promise<Row> {
+    const res = await page.request.post(`${base}/collections/${collection.id}/query`, {
+      data: { config: { query: { filters: {}, sort: [] }, groupBy: null, dateBy: null }, limit: 100 },
+    });
+    expect(res.ok()).toBe(true);
+    const row = ((await res.json()) as { items: Row[] }).items.find((item) => item.displayId === displayId);
+    expect(row).toBeTruthy();
+    return row!;
+  }
+  // Grab the card by its padding (its centre is the keyboard select) and drop on the column head.
+  const dragPoints = { sourcePosition: { x: 4, y: 4 }, targetPosition: { x: 20, y: 10 } };
+  const cards = (column: ReturnType<Page["getByRole"]>) => column.locator('[data-testid^="collection-card-"]');
+  async function cardIds(column: ReturnType<Page["getByRole"]>): Promise<string[]> {
+    return cards(column).evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-testid")!.replace("collection-card-", "")),
+    );
+  }
+  const querySpy: { group: unknown; cursor: boolean }[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith(`/collections/${collection.id}/query`)) {
+      const body = request.postDataJSON() as { group?: unknown; cursor?: string };
+      querySpy.push({ group: "group" in body ? body.group : "(all)", cursor: Boolean(body.cursor) });
+    }
+  });
+
+  // 1. Status board: each column pages its own group; loading more is per column.
+  // A viewport taller than a 60-card column keeps real mouse drags free of scrolling.
+  await page.setViewportSize({ width: 1600, height: 7000 });
+  await page.goto(`/w/${slug}/BRD/board`);
+  const columnA = page.getByRole("region", { name: statusA!.name, exact: true });
+  const columnB = page.getByRole("region", { name: statusB!.name, exact: true });
+  await expect(cards(columnA)).toHaveCount(50);
+  await expect(columnA.locator(".collection-board__head")).toContainText("60");
+  await expect(cards(columnB)).toHaveCount(2);
+  await expect(columnB.getByRole("button", { name: `${statusB!.name} · 더 보기` })).toHaveCount(0);
+  await columnA.getByRole("button", { name: `${statusA!.name} · 더 보기` }).click();
+  await expect(cards(columnA)).toHaveCount(60);
+  expect(new Set(await cardIds(columnA)).size).toBe(60);
+  await expect(columnA.getByRole("button", { name: `${statusA!.name} · 더 보기` })).toHaveCount(0);
+  await expect(cards(columnB)).toHaveCount(2);
+  // One catalog request without a group; every other request names its column.
+  expect(querySpy.filter((entry) => entry.group === "(all)" && !entry.cursor).length).toBeGreaterThan(0);
+  expect(querySpy.filter((entry) => entry.cursor).every((entry) => entry.group === statusA!.id)).toBe(true);
+
+  // 2. Drag a second-page card to another status; it persists and survives reload.
+  const movedId = (await cardIds(columnA)).at(-1)!;
+  await columnA.getByTestId(`collection-card-${movedId}`).dragTo(columnB, dragPoints);
+  await expect(columnB.getByTestId(`collection-card-${movedId}`)).toBeVisible();
+  await expect(columnA.getByTestId(`collection-card-${movedId}`)).toHaveCount(0);
+  await expect(cards(columnA)).toHaveCount(59);
+  await expect.poll(async () => (await itemRow(movedId)).statusId).toBe(statusB!.id);
+  await page.reload();
+  await expect(cards(columnB)).toHaveCount(3);
+  await expect(columnB.getByTestId(`collection-card-${movedId}`)).toBeVisible();
+  await expect(page.getByTestId(`collection-card-${movedId}`)).toHaveCount(1);
+  await expect(columnA.locator(".collection-board__head")).toContainText("59");
+
+  // 3. A rejected move (WIP limit) shows the server error and leaves the card in place.
+  const wipRes = await page.request.patch(
+    `${base}/workflows/${workflow.id}/statuses/${statusB!.id}`,
+    { data: { wipLimit: 3 } },
+  );
+  expect(wipRes.ok()).toBe(true);
+  const blockedId = (await cardIds(columnA))[0]!;
+  await columnA.getByTestId(`collection-card-${blockedId}`).dragTo(columnB, dragPoints);
+  await expect(page.getByRole("alert").filter({ hasText: "진행 중 제한" })).toBeVisible();
+  await expect(columnA.getByTestId(`collection-card-${blockedId}`)).toBeVisible();
+  await expect(columnB.getByTestId(`collection-card-${blockedId}`)).toHaveCount(0);
+  expect((await itemRow(blockedId)).statusId).toBe(statusA!.id);
+  expect(
+    (await page.request.patch(`${base}/workflows/${workflow.id}/statuses/${statusB!.id}`, {
+      data: { wipLimit: null },
+    })).ok(),
+  ).toBe(true);
+
+  // 4. Group by the select field: option columns plus the unassigned column, each paged.
+  await page
+    .locator('section[data-testid="collection-board"] > .collection-toolbar')
+    .getByLabel("그룹 기준", { exact: true })
+    .selectOption({ label: "단계" });
+  const designColumn = page.getByRole("region", { name: "설계", exact: true });
+  const buildColumn = page.getByRole("region", { name: "구현", exact: true });
+  const noneColumn = page.getByRole("region", { name: "미지정", exact: true });
+  await expect(cards(noneColumn)).toHaveCount(50);
+  await expect(noneColumn.locator(".collection-board__head")).toContainText("62");
+  await expect(designColumn.getByText("현재 결과에 표시할 자료가 없습니다")).toBeVisible();
+  await noneColumn.getByRole("button", { name: "미지정 · 더 보기" }).click();
+  await expect(cards(noneColumn)).toHaveCount(62);
+  expect(new Set(await cardIds(noneColumn)).size).toBe(62);
+
+  // Drag from the unassigned second page into an option.
+  const dragged = (await cardIds(noneColumn)).at(-1)!;
+  await noneColumn.getByTestId(`collection-card-${dragged}`).dragTo(buildColumn, dragPoints);
+  await expect(buildColumn.getByTestId(`collection-card-${dragged}`)).toBeVisible();
+  await expect(cards(noneColumn)).toHaveCount(61);
+  await expect.poll(async () => (await itemRow(dragged)).values[field.id]).toEqual({ options: [build.id] });
+
+  // Keyboard alternative: the per-card select moves into an option and back to unassigned.
+  const keyed = (await cardIds(noneColumn))[0]!;
+  await noneColumn.getByLabel(`그룹 기준 · ${keyed}`, { exact: true }).selectOption({ label: "설계" });
+  await expect(designColumn.getByTestId(`collection-card-${keyed}`)).toBeVisible();
+  await expect.poll(async () => (await itemRow(keyed)).values[field.id]).toEqual({ options: [design.id] });
+  await buildColumn.getByLabel(`그룹 기준 · ${dragged}`, { exact: true }).selectOption({ label: "미지정" });
+  await expect(noneColumn.getByTestId(`collection-card-${dragged}`)).toBeVisible();
+  await expect(buildColumn.getByText("현재 결과에 표시할 자료가 없습니다")).toBeVisible();
+  await expect.poll(async () => (await itemRow(dragged)).values[field.id] ?? null).toBeNull();
+  await expect(page.getByTestId(`collection-card-${dragged}`)).toHaveCount(1);
+
+  // 5. Stale version (changed elsewhere): the move is rejected, the error stays visible
+  //    and the board shows the server value instead of a false success.
+  const stale = await itemRow(keyed);
+  const elsewhere = await page.request.put(`${base}/collections/${collection.id}/items/${stale.id}/values`, {
+    data: {
+      fieldId: field.id,
+      expectedVersion: stale.version,
+      expectedFieldVersion: field.version,
+      value: { options: [build.id] },
+    },
+  });
+  expect(elsewhere.ok()).toBe(true);
+  await designColumn.getByTestId(`collection-card-${keyed}`).dragTo(noneColumn, dragPoints);
+  await expect(page.getByRole("alert").filter({ hasText: "다른 곳에서 먼저 수정되었습니다" })).toBeVisible();
+  await expect(buildColumn.getByTestId(`collection-card-${keyed}`)).toBeVisible();
+  await expect(noneColumn.getByTestId(`collection-card-${keyed}`)).toHaveCount(0);
+  expect((await itemRow(keyed)).values[field.id]).toEqual({ options: [build.id] });
+
+  // Reload: select grouping persisted server side.
+  await page.reload();
+  await page
+    .locator('section[data-testid="collection-board"] > .collection-toolbar')
+    .getByLabel("그룹 기준", { exact: true })
+    .selectOption({ label: "단계" });
+  await expect(buildColumn.getByTestId(`collection-card-${keyed}`)).toBeVisible();
+  await expect(noneColumn.locator(".collection-board__head")).toContainText("61");
+
+  // 6. Archived project: cards are read-only (no drag, no select) and a drag changes nothing.
+  expect((await page.request.post(`${base}/projects/${project.id}/archive`)).ok()).toBe(true);
+  await page.reload();
+  await expect(cards(columnA)).toHaveCount(50);
+  await expect(page.locator('[data-testid^="collection-card-"][draggable="true"]')).toHaveCount(0);
+  await expect(page.getByLabel(/^그룹 기준 · BRD-/)).toHaveCount(0);
+  const frozen = (await cardIds(columnA))[0]!;
+  await columnA.getByTestId(`collection-card-${frozen}`).dragTo(columnB, dragPoints);
+  await expect(columnA.getByTestId(`collection-card-${frozen}`)).toBeVisible();
+  expect((await itemRow(frozen)).statusId).toBe(statusA!.id);
 });

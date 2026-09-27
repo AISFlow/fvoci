@@ -259,3 +259,15 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+
+/* Grouped board drag-and-drop: a column that accepts the dragged card. */
+.collection-board__column[data-drop-over="true"] {
+	outline: 2px dashed var(--ring, var(--primary));
+	outline-offset: -2px;
+}
+.collection-card[draggable="true"] {
+	cursor: grab;
+}
+.collection-card[aria-busy="true"] {
+	opacity: 0.7;
+}
