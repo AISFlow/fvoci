@@ -15,11 +15,12 @@ use fvoci_server::db::pool;
 use fvoci_server::http::routes::streams::{
     reset_task_stream_task_hint_enqueue_count, task_stream_task_hint_enqueue_count,
 };
-use fvoci_server::streams::{initial_cursor, poll_task_events, EventCursor, StreamHub};
+use fvoci_server::streams::{initial_cursor, poll_task_events, StreamHub};
 use project_harness::{
-    add_workspace_user, admin_pool, app_state, count_rows, create_project, drop_insert_fail_trigger,
-    insert_minimal_project, insert_project_document, install_insert_fail_trigger, json_request,
-    setup_session, test_peer, wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
+    add_workspace_user, admin_pool, app_state, count_rows, create_project,
+    drop_insert_fail_trigger, insert_minimal_project, insert_project_document,
+    install_insert_fail_trigger, json_request, setup_session, test_peer, wait_for_query_blocked_by,
+    wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
 use tokio::time::timeout;
@@ -4125,9 +4126,7 @@ async fn sse_listen(
     request.extensions_mut().insert(ConnectInfo(test_peer()));
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
-    let open_needle = open_needle;
     let open_notify = open_notify;
-    let hit_needle = hit_needle;
     let wait_for_hit = hit_needle.is_some();
     tokio::spawn(async move {
         let response = app.oneshot(request).await.expect("sse response");
@@ -4533,17 +4532,12 @@ async fn task_stream_poll_skips_uncommitted_events_until_commit() {
     );
     tx.commit().await.expect("commit");
     let mut seen = false;
-    let mut cursor = cursor;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let rows = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
             .await
             .expect("poll");
-        if let Some(row) = rows.into_iter().find(|r| r.verb == "task.updated") {
-            cursor = EventCursor {
-                xact: row.xact.clone(),
-                seq: row.seq,
-            };
+        if rows.iter().any(|r| r.verb == "task.updated") {
             seen = true;
             break;
         }
@@ -4625,7 +4619,8 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
     gate_tx.send(()).ok();
     let body = collector.await.expect("collector");
     assert!(
-        body.windows(b"event: open".len()).any(|w| w == b"event: open"),
+        body.windows(b"event: open".len())
+            .any(|w| w == b"event: open"),
         "open must be delivered before revoke witness gate"
     );
     assert!(
