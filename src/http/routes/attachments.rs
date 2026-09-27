@@ -797,7 +797,8 @@ async fn serve_download(
     head_only: bool,
 ) -> Result<Response, AppError> {
     let preview = wants_preview(query)?;
-    let auth = require_auth(state, headers, jar, Access::Session, None).await?;
+    let auth = require_auth(state, headers, jar, Access::Any, Some(workspace_id)).await?;
+    require_target_scope(state, &auth, workspace_id, attachment_id, false).await?;
     let (user_id, session_id) = (auth.user_id, auth.credential_id);
     let result = open_download(
         &state.auth.db.pool,
