@@ -228,10 +228,33 @@ pub async fn recheck_attachment_delivery(
         }
     }
     if let Some(document_id) = document_id {
-        if !document_permission(&mut tx, workspace_id, actor_user_id, document_id, true)
-            .await?
-            .at_least(ProjectPermission::View)
-        {
+        let project_id: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL",
+        )
+        .bind(workspace_id)
+        .bind(document_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let project_id = match project_id {
+            None => {
+                tx.rollback().await?;
+                return Ok(Err(WorkspaceExportDbError::Forbidden));
+            }
+            Some(project_id) => project_id,
+        };
+        let visible = match project_id {
+            Some(pid) => {
+                let permission =
+                    project_permission_by_id(&mut tx, workspace_id, actor_user_id, pid).await?;
+                permission
+                    .map(|p| p.at_least(ProjectPermission::View))
+                    .unwrap_or(false)
+            }
+            None => document_permission(&mut tx, workspace_id, actor_user_id, document_id, true)
+                .await?
+                .at_least(ProjectPermission::View),
+        };
+        if !visible {
             tx.rollback().await?;
             return Ok(Err(WorkspaceExportDbError::Forbidden));
         }

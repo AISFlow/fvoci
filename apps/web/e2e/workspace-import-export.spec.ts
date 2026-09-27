@@ -1,7 +1,9 @@
 import path from "node:path";
 import { crc32 } from "node:zlib";
 import { expect, type Page, test } from "@playwright/test";
-import { watchCspViolations } from "./helpers";
+import { login, watchCspViolations } from "./helpers";
+
+test.describe.configure({ mode: "serial" });
 
 const owner = {
   email: "Admin@Example.COM",
@@ -13,6 +15,33 @@ const owner = {
 };
 
 const importZip = path.resolve(import.meta.dirname, "fixtures/markdown-import.zip");
+
+async function ensureOwnerSession(page: Page): Promise<void> {
+  await page.goto("/");
+  await expect(
+    page
+      .getByRole("button", { name: "시작하기" })
+      .or(page.getByRole("button", { name: "로그아웃" }))
+      .or(page.getByRole("button", { name: "로그인", exact: true })),
+  ).toBeVisible();
+  if ((await page.getByRole("button", { name: "시작하기" }).count()) > 0) {
+    await page.getByLabel("성").fill(owner.familyName);
+    await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
+    await page.getByLabel("이메일").fill(owner.email);
+    await page.getByLabel("비밀번호").fill(owner.password);
+    await page.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
+    await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
+    await page.getByRole("button", { name: "시작하기" }).click();
+    await expect(page).toHaveURL(/\/$/);
+    return;
+  }
+  if (
+    page.url().includes("/login") ||
+    (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
+  ) {
+    await login(page, owner.email, owner.password);
+  }
+}
 
 async function workspaceId(page: Page, slug: string): Promise<string> {
   const res = await page.request.get("/api/v1/me/workspaces");
@@ -180,16 +209,7 @@ test("member does not see workspace export in settings", async ({ page, browser 
   };
   const memberContext = await browser.newContext();
   const memberPage = await memberContext.newPage();
-  await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-  await page.getByLabel("성").fill(owner.familyName);
-  await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
-  await page.getByLabel("이메일").fill(owner.email);
-  await page.getByLabel("비밀번호").fill(owner.password);
-  await page.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
-  await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
-  await page.getByRole("button", { name: "시작하기" }).click();
-  await expect(page).toHaveURL(/\/$/);
+  await ensureOwnerSession(page);
 
   await page.goto("/w/acme/settings");
   await page.locator("summary").filter({ hasText: /^멤버$/ }).click();
@@ -220,17 +240,7 @@ test("member does not see workspace export in settings", async ({ page, browser 
 
 test("owner downloads workspace zip from settings", async ({ page }) => {
   test.setTimeout(60_000);
-  await page.goto("/");
-  await expect(page).toHaveURL(/\/setup$/, { timeout: 15_000 });
-
-  await page.getByLabel("성").fill(owner.familyName);
-  await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
-  await page.getByLabel("이메일").fill(owner.email);
-  await page.getByLabel("비밀번호").fill(owner.password);
-  await page.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
-  await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
-  await page.getByRole("button", { name: "시작하기" }).click();
-  await expect(page).toHaveURL(/\/$/);
+  await ensureOwnerSession(page);
 
   await page.goto("/w/acme/settings");
   const downloadPromise = page.waitForEvent("download");

@@ -1409,6 +1409,49 @@ async fn workspace_zip_skips_missing_storage_object() {
 }
 
 const ATTACH_EXPORT_SECRET: &str = "ATTACH_EXPORT_SECRET_PAYLOAD";
+const PROJECT_DOC_ATTACHMENT_PAYLOAD: &[u8] = b"project-doc-attachment-payload";
+
+#[tokio::test]
+async fn workspace_zip_includes_project_document_attachment_bytes() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id, storage_root) =
+        setup_session_with_storage(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "PAD", "workspace").await;
+    let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+    let project_doc = Uuid::now_v7();
+    insert_project_document(&admin, workspace_id, project_id, project_doc, owner_id, 2).await;
+    let attachment_id = insert_attachment_with_payload(
+        &storage_root,
+        &admin,
+        workspace_id,
+        project_doc,
+        owner_id,
+        "proj-doc.bin",
+        "clean",
+        PROJECT_DOC_ATTACHMENT_PAYLOAD,
+    )
+    .await;
+
+    let path = format!("/api/v1/workspaces/{workspace_id}/export");
+    let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    external_zip_check(&body);
+    let names = read_zip_names(&body);
+    assert!(
+        names.iter().any(|n| n.contains(&attachment_id.to_string())),
+        "project document attachment bytes must be packed: {names:?}"
+    );
+    let packed = names
+        .iter()
+        .find(|n| n.contains(&attachment_id.to_string()))
+        .expect("attachment entry");
+    let bytes = read_zip_entry(&body, packed).expect("attachment payload");
+    assert_eq!(bytes, PROJECT_DOC_ATTACHMENT_PAYLOAD);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
 
 #[tokio::test]
 async fn workspace_zip_aborts_when_attachment_revoked_after_storage_open() {
