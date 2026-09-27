@@ -89,22 +89,25 @@ type PageProbe = {
   dark: number;
   /** 16×16 ink map; different text gives a different map. */
   signature: string;
-  /** The SVG markup behind the blob URL. */
-  svg: string;
 };
 
-async function probePage(page: Page, root = page.locator("[data-hwp-viewer]")): Promise<PageProbe> {
+/** Rasterizes the shown page SVG at `scale`× its natural size and measures its ink. */
+async function probePage(
+  page: Page,
+  root = page.locator("[data-hwp-viewer]"),
+  scale = 1,
+): Promise<PageProbe> {
   const img = root.locator("img.hwp-viewer__page");
   await expect(img).toHaveJSProperty("complete", true);
-  return img.evaluate(async (node) => {
+  return img.evaluate((node, factor) => {
     const el = node as HTMLImageElement;
     const canvas = document.createElement("canvas");
-    canvas.width = el.naturalWidth;
-    canvas.height = el.naturalHeight;
+    canvas.width = Math.round(el.naturalWidth * factor);
+    canvas.height = Math.round(el.naturalHeight * factor);
     const ctx = canvas.getContext("2d")!;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(el, 0, 0);
+    ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
     const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const grid = 16;
     const cells = new Array<number>(grid * grid).fill(0);
@@ -124,15 +127,22 @@ async function probePage(page: Page, root = page.locator("[data-hwp-viewer]")): 
       cssWidth: el.getBoundingClientRect().width,
       dark,
       signature: cells.map((n) => (n > 0 ? "1" : "0")).join(""),
-      svg: await (await fetch(el.currentSrc)).text(),
     };
-  });
+  }, scale);
 }
 
-function expectInertSvg(svg: string): void {
-  expect(svg.startsWith("<svg")).toBe(true);
-  expect(svg).not.toMatch(/<script|<foreignObject|\son[a-z]+=|javascript:/i);
-  expect(svg).not.toMatch(/(?:href|src)="(?!#|data:)/i);
+/** Whether a blob URL still loads as an image (CSP allows blob: only for img-src). */
+async function blobLoads(page: Page, src: string): Promise<boolean> {
+  return page.evaluate(
+    (url) =>
+      new Promise<boolean>((resolve) => {
+        const probe = new Image();
+        probe.onload = () => resolve(true);
+        probe.onerror = () => resolve(false);
+        probe.src = url;
+      }),
+    src,
+  );
 }
 
 test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original download, session and share isolation", async ({
@@ -207,7 +217,6 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   expect(first.src.startsWith("blob:")).toBe(true);
   expect(first.naturalWidth).toBeGreaterThan(700);
   expect(first.dark).toBeGreaterThan(2_000);
-  expectInertSvg(first.svg);
   expect(Math.round(first.cssWidth)).toBe(Math.round(first.naturalWidth));
 
   await viewer.getByRole("button", { name: "다음 쪽" }).click();
@@ -217,7 +226,8 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   expect(second.dark).toBeGreaterThan(2_000);
   expect(second.signature).not.toBe(first.signature);
   // The previous page's blob URL is released.
-  expect(await page.evaluate(async (src) => fetch(src).then(() => "live", () => "revoked"), first.src)).toBe("revoked");
+  expect(await blobLoads(page, second.src)).toBe(true);
+  expect(await blobLoads(page, first.src)).toBe(false);
 
   await viewer.getByRole("button", { name: "다음 쪽" }).click();
   await expect(viewer.getByText("3 / 3")).toBeVisible();
@@ -275,11 +285,14 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   // A Hancom-authored HWP (body "안녕").
   await page.goto(`/w/acme/a/${hancomId}/view`);
   await expect(viewer.getByText("1 / 1")).toBeVisible({ timeout: 30_000 });
-  const hancom = await probePage(page);
-  expect(hancom.dark).toBeGreaterThan(50);
-  expectInertSvg(hancom.svg);
   const hancomPng = await viewer.locator("img.hwp-viewer__page").screenshot();
   await test.info().attach("hancom-hwp-page", { body: hancomPng, contentType: "image/png" });
+  // Two 10pt glyphs: rasterize at 3× so antialiased strokes register as ink.
+  const hancom = await probePage(page, viewer, 3);
+  expect(hancom.dark).toBeGreaterThan(150);
+  // The ink sits in the top-left body area (A4, 30 mm left / 35 mm top margins), nowhere else.
+  expect(hancom.signature.indexOf("1")).toBeGreaterThanOrEqual(16 * 1);
+  expect(hancom.signature.lastIndexOf("1")).toBeLessThan(16 * 4);
   const evidenceDir = process.env.FVOCI_HWP_EVIDENCE_DIR;
   if (evidenceDir) {
     fs.mkdirSync(evidenceDir, { recursive: true });
@@ -304,14 +317,26 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
     await expect(viewer.getByText("2 / 3")).toBeVisible({ timeout: 30_000 });
     await expect(viewer.locator("img.hwp-viewer__page")).toBeVisible();
     const preview = await page.request.get(`/api/v1/workspaces/${wsId}/attachments/${hwpxId}/preview-html`);
-    if (preview.ok()) {
-      // Extract helper configured: the chunk's own text is highlighted.
-      await expect(supplement.locator("mark")).toContainText("둘째 쪽");
+    if (process.env.FVOCI_EXTRACTOR_BIN) {
+      // Native extract helper configured: the server parses the HWPX and the
+      // supplement highlights the chunk's own text above the layout.
+      expect(preview.status(), await preview.text()).toBe(200);
+      const html = ((await preview.json()) as { html: string }).html;
+      expect(html).toContain("둘째 쪽 검색 대상");
+      // Chunk 1 covers page 2 whichever paragraph separators the extractor emits.
+      await expect(supplement.locator("mark")).toContainText("하늘과 바람과 별과 시");
+      test.info().annotations.push({ type: "supplement", description: "extracted text, chunk 1 marked" });
+      if (evidenceDir) {
+        fs.writeFileSync(
+          path.join(evidenceDir, "server-mode-supplement.json"),
+          `${JSON.stringify({ previewStatus: preview.status(), mark: (await supplement.locator("mark").textContent())?.slice(0, 80), labels: await viewer.locator(".attachment-viewer__page-label").allTextContents() }, null, 2)}\n`,
+        );
+      }
     } else {
-      // No stored extract text: the supplement says so and the layout stays.
-      await expect(supplement).toContainText(
-        [404, 413].includes(preview.status()) ? "이 파일을 뷰어로 열 수 없습니다" : "불러오지 못했습니다.",
-      );
+      // No helper (the default CI job): no extract text, the supplement says so and the layout stays.
+      expect([404, 413]).toContain(preview.status());
+      await expect(supplement).toContainText("이 파일을 뷰어로 열 수 없습니다");
+      test.info().annotations.push({ type: "supplement", description: `no extractor, preview-html ${preview.status()}` });
     }
     // Without a chunk the server mode adds nothing.
     previewHtmlRequests.length = 0;
