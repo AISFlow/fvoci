@@ -3,7 +3,8 @@
 This slice initializes a new PostgreSQL database. Importing an existing TypeScript FVOCI installation is not supported.
 The Rust server has forward schema migrations (see "Migrate and grant before server" and, for the Compose
 install, "Upgrade"; the developer smoke in "Upgrade validation" exercises one image pair per run with local
-storage, one injected init failure and old-image rollback; S3 upgrade and rollback are not covered and CI does not run it). Downgrading a migrated database is not supported.
+storage or, with `--storage s3`, the documented S3 procedure against a local run-owned bucket, one injected init
+failure and old-image rollback; CI does not run it). Downgrading a migrated database is not supported.
 
 ## Toolchain
 
@@ -697,7 +698,9 @@ and the grant commits all or nothing. To go back to the old build, stop the
 upgraded server first; do not start the old image on the migrated database.
 Restore the pre-upgrade backup into a new project with the old image (local
 storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
-loses writes made after that backup; preserve the failed install for diagnosis.
+loses writes made after that backup; preserve the failed install for diagnosis,
+but with S3 keep it stopped and never start it again with the same `S3_*`
+settings, since its sweeps would delete objects the restored install uses.
 CI does not run this image-to-image upgrade; `install-smoke.sh` recreates the
 server on the same image.
 
@@ -733,6 +736,34 @@ checkout's `restore.sh` into a fresh project on the old image. The seeded data
 must be back and the write made after the upgrade must be gone. The old image
 never runs on the migrated database.
 
+`--storage s3` runs the same flow with `infra/rust/compose.s3.yml`. It follows
+"Upgrade" step 2 for S3 and "S3 storage backup", not `backup.sh`/`restore.sh`.
+It uses the project's own pinned silo and a run-owned bucket and credentials.
+It enables bucket versioning before seeding and stores two HWPX attachments.
+
+1. **Backup:** the old `backup.sh` must refuse the S3 install. It must write no
+   output and leave the server running. The smoke then runs the documented
+   `stop -t 45 server`, checks that no other client sessions remain, and takes
+   the same `pg_dump` as `backup.sh`. It records each object's checkpoint
+   version ID.
+2. **Upgrade:** the upgrade and its checks are unchanged. In addition, the new
+   image's `--verify-storage` must report both objects.
+3. **Damage:** the upgrade project's `postgres` and `meilisearch` are stopped,
+   so only its silo runs. Then one object is deleted (a delete marker) and the
+   other is overwritten with other bytes.
+4. **Restore:** the dump is restored into a fresh database on the old image with
+   the old `restore.sh` steps minus the volume archive (app role, `pg_restore`,
+   `init`, `--recover-outbox`, `--rebuild-search`). That project's server joins
+   the upgrade project's local Docker network and points at the same bucket.
+5. **Checks before start:** `--verify-storage` must fail at HeadBucket for a
+   wrong bucket. For the damaged bucket it must exit non-zero with exactly the
+   deleted attachment `missing` and the overwritten one in `sizeMismatch`. No
+   server container may exist and nothing may answer HTTP.
+6. **Version restore:** the smoke removes the delete marker and copies the
+   checkpoint version back. `--verify-storage` and `--verify-secrets` must then
+   pass before the server starts. Both attachments must download with their
+   original sha256.
+
 On success the trap runs `down -v` for each project with the compose file of
 the source tree that started it, then checks that no container, volume or
 network with that project label remains. Only then does it delete the work dir
@@ -746,11 +777,15 @@ reach the redactor through its environment, not argv. The wrong key of the
 negative control does appear in a `docker compose run -e` argument, and the
 fixed test login appears in curl arguments. Use a single-user host.
 
-A run proves only what it ran: one old/new pair, the host architecture, local
-storage, and one injected failure (a pre-created table of the newest migration,
-not an interrupted migrate or a crash). It does not compare search indexes or
-doctor output with the old install. S3 upgrade and rollback are not covered,
-and CI does not run this smoke. Record the pair, image IDs, architecture and
+A run proves only what it ran: one old/new pair, the host architecture, the
+selected storage, and one injected failure (a pre-created table of the newest
+migration, not an interrupted migrate or a crash). It does not compare search
+indexes or doctor output with the old install. The S3 mode proves that restore
+works from versions of the same local silo bucket. It does not cover
+replication, a second region, a cloud provider's versioning or backup service,
+lifecycle rules, or the presigned direct mode, which is not implemented.
+`--verify-storage` compares attachment sizes only, so a same-size overwrite is
+not detected before start. CI does not run this smoke. Record the pair, image IDs, architecture and
 logs of a run with the change it supports; this guide does not.
 
 ## Backup and restore
@@ -901,23 +936,80 @@ with `STORAGE_DRIVER=s3`. The supported model for S3 is:
    server-generated UUIDs.
 2. **Database:** a `pg_dump` of schemas `public` and `fvoci` taken the same way
    as `scripts/backup.sh` does (custom format, owner role, server stopped so the
-   dump is quiesced). Objects deleted by workspace purge after the dump are
-   recoverable only from bucket versions.
-3. **Restore:** restore the dump, point the server at the bucket (or the
-   replica), and before starting the server run the storage check with the
-   server's environment:
+   dump is quiesced). Record the UTC time, in whole seconds, at which the dump
+   finished; restore needs it. Objects deleted by workspace purge after the dump
+   are recoverable only from bucket versions.
+3. **Restore:** `scripts/restore.sh` needs a volume archive and a manifest, so
+   run its database steps by hand into a **fresh** Compose project. Use the
+   image that took the dump (`FVOCI_IMAGE` in the env file set to that tag), and
+   run the commands below from the checkout that built it so `$C` uses its
+   Compose files. After a failed upgrade this is the old image and checkout;
+   never start it on the migrated database.
 
-   ```sh
-   docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml \
-     --project-name <project> --env-file <env> \
-     run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
-   ```
+   Only one install may use a bucket. Its background sweeps (abandoned-upload
+   cleanup, trashed-document and workspace purge) delete bucket objects based on
+   its own database, so two installs whose databases diverged delete objects
+   the other still references, silently and after `--verify-storage` has
+   passed. Before starting the restored server, stop every other install that
+   uses these `S3_*` settings (the source, or a failed or migrated upgrade), and
+   never start that install again with them. A restore drill must use an
+   independent replica or copy of the bucket, never the live one, and must not
+   hold production integration credentials: `--ack-external-replay` below
+   re-sends external events. You need these inputs:
+   - the dump;
+   - `<dump-utc>`: the UTC time recorded when the dump finished, truncated to
+     the second (`date -u +%Y-%m-%dT%H:%M:%SZ`). There is no manifest to
+     recover it from. If it was not recorded, stop instead of guessing;
+   - an env file with the original `POSTGRES_USER`, `POSTGRES_DB` and
+     `FVOCI_APP_ROLE` names;
+   - the same `PASSWORD_PEPPER_KEYS` / `PASSWORD_PEPPER_ACTIVE_KEY_ID`;
+   - `ENCRYPTION_KEYS` with every original key id unchanged (a superset is
+     fine). Nothing compares a fingerprint here; only `--verify-secrets` below
+     checks the keyring;
+   - `S3_*` pointing at the bucket (or the replica), used by no other install.
 
-   It prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
-   and exits non-zero when any stored attachment is missing or has a different
-   size, when a branding asset referenced by the instance settings
-   (`logo`/`favicon`, uploaded in the admin console) is missing or does not
-   match its recorded SHA-256, or when the bucket cannot be read (credentials,
+   Then, with `C="docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --project-name <new-project> --env-file <env>"`:
+
+   1. Run `$C up -d --wait postgres meilisearch`. Then, as `scripts/restore.sh`
+      does:
+      - confirm the database is empty (no user relations outside
+        `pg_catalog`/`information_schema`); stop if it is not;
+      - create `FVOCI_APP_ROLE` (`LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, password
+        `FVOCI_APP_PASSWORD`);
+      - copy the dump into the postgres container;
+      - run `pg_restore --exit-on-error --single-transaction --no-owner` with a
+        `--use-list` that drops the `SCHEMA - public` entry.
+   2. Run `$C run --rm init`. This does migrate, `--grant-app-role` and
+      `--ensure-meili-key`. Only the `init` service receives the owner
+      `DATABASE_URL`.
+   3. Rebase the outbox and rebuild search with the same bounds `restore.sh`
+      derives from its manifest. Set `<snapshot>` = `<dump-utc>` + 1 s, and
+      `<since>` = `<snapshot>` − 29 days (the widest window
+      `--recover-outbox` accepts):
+
+      ```sh
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
+        --recover-outbox --since <since> --snapshot-at <snapshot> \
+        --apply --reason "restore into <new-project>" --ack-external-replay
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --rebuild-search
+      ```
+
+   4. Before any server starts, run the storage check and then the secrets
+      check. Both use the server's environment (app role only, no owner URL):
+
+      ```sh
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-storage
+      $C run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --verify-secrets
+      ```
+
+   5. Start the server with `$C up -d --wait server`, and only after both
+      checks pass.
+
+   `--verify-storage` prints `{"checked":N,"missing":[...],"sizeMismatch":[...],"previewChecked":P,"previewMissing":[...],"previewSizeMismatch":[...],"brandingChecked":M,"brandingMissing":[...],"brandingMismatch":[...]}`
+   and exits non-zero when any stored attachment or published preview is
+   missing or has a different size, when a branding asset referenced by the
+   instance settings (`logo`/`favicon`, uploaded in the admin console) is
+   missing or does not match its recorded SHA-256, or when the bucket cannot be read (credentials,
    wrong bucket, network). Restore the listed objects from bucket versions
    before starting the server. Branding assets are stored like attachments
    (same driver, key from the setting), so the local volume archive and the S3
