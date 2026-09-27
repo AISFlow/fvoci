@@ -5,12 +5,13 @@
  * scratch document (no browsing context: nothing loads, nothing runs), the
  * result is sanitized, then copied into a sandboxed iframe without
  * `allow-scripts` whose CSP forbids every fetch except `data:` images and
- * fonts. Styles may be inline there: with no script and no network, document
- * CSS can only restyle its own frame.
+ * fonts. A `srcdoc` frame also inherits the app CSP (`style-src 'self'`), and
+ * policies only add up, so document CSS goes in as constructed stylesheets
+ * and inline styles through the CSSOM — neither is a CSP-checked inline style.
  */
 
 export const DOCX_FRAME_CSP =
-  "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'";
+  "default-src 'none'; script-src 'none'; style-src 'none'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'";
 
 const FRAME_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${DOCX_FRAME_CSP}"></head><body></body></html>`;
 
@@ -105,6 +106,40 @@ export function sanitizeRenderedDocx(root: Element | DocumentFragment): void {
         el.setAttribute("style", neutralizeCssUrls(attr.value));
       }
     }
+  }
+}
+
+/** Adopts `cssTexts` into the frame document as constructed stylesheets of the frame's realm. */
+export function adoptFrameStyles(doc: Document, win: Window, cssTexts: string[]): void {
+  const Sheet = (win as Window & { CSSStyleSheet: typeof CSSStyleSheet }).CSSStyleSheet;
+  const sheets = cssTexts
+    .map((text) => text.trim())
+    .filter((text) => text.length > 0)
+    .map((text) => {
+      const sheet = new Sheet();
+      sheet.replaceSync(neutralizeCssUrls(text));
+      return sheet;
+    });
+  doc.adoptedStyleSheets = [...doc.adoptedStyleSheets, ...sheets];
+}
+
+/**
+ * Re-applies each element's inline style through the CSSOM after
+ * `importNode` (source `transferInlineStyles`); `source` and `destination`
+ * are the same tree.
+ */
+export function transferInlineStyles(source: Element, destination: Element): void {
+  const from = source as HTMLElement;
+  const to = destination as HTMLElement;
+  if (from.style && to.style) {
+    const text = from.style.cssText;
+    to.removeAttribute("style");
+    if (text) to.style.cssText = text;
+  }
+  const sourceKids = source.children;
+  const destKids = destination.children;
+  for (let i = 0; i < sourceKids.length && i < destKids.length; i += 1) {
+    transferInlineStyles(sourceKids[i]!, destKids[i]!);
   }
 }
 

@@ -78,6 +78,8 @@ type LayoutProbe = {
   redCell: string;
   cellBorder: string;
   images: { src: string; width: number; height: number; natural: number }[];
+  styleElements: number;
+  boxSizing: string;
 };
 
 async function probeLayout(page: Page, text: typeof DEFAULT_DOCX_TEXT): Promise<LayoutProbe> {
@@ -91,10 +93,11 @@ async function probeLayout(page: Page, text: typeof DEFAULT_DOCX_TEXT): Promise<
     const byText = (value: string) =>
       [...doc.querySelectorAll<HTMLElement>("span, a, p, td")].find((el) => el.textContent?.trim() === value.trim());
     const link = [...doc.querySelectorAll("a")].find((a) => a.textContent?.includes(text.link));
+    // Paragraph content-box start: OOXML w:ind/@w:left as laid out (marker width excluded).
     const textLeft = (value: string) => {
       const p = [...doc.querySelectorAll("p")].find((el) => el.textContent?.includes(value))!;
-      const span = [...p.querySelectorAll("span")].find((el) => el.textContent?.includes(value)) ?? p;
-      return span.getBoundingClientRect().left;
+      const css = win.getComputedStyle(p);
+      return p.getBoundingClientRect().left + parseFloat(css.borderLeftWidth) + parseFloat(css.paddingLeft);
     };
     const listParagraph = (value: string) => [...doc.querySelectorAll("p")].find((el) => el.textContent?.includes(value))!;
     const firstCell = doc.querySelector("td")!;
@@ -135,6 +138,8 @@ async function probeLayout(page: Page, text: typeof DEFAULT_DOCX_TEXT): Promise<
         height: img.getBoundingClientRect().height,
         natural: img.naturalWidth,
       })),
+      styleElements: doc.querySelectorAll("style").length,
+      boxSizing: win.getComputedStyle(shown).boxSizing,
     };
   }, text);
 }
@@ -201,6 +206,12 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   await expect(viewer.getByRole("button", { name: "이전 쪽" })).toBeDisabled();
 
   const first = await probeLayout(page, text);
+  const frame = page.locator("[data-docx-viewer] iframe");
+  const page1Png = await frame.screenshot();
+  await test.info().attach("docx-page-1", { body: page1Png, contentType: "image/png" });
+  evidence("docx-page-1.png", page1Png);
+  evidence("docx-page-1-probe.json", `${JSON.stringify(first, null, 2)}\n`);
+  evidence("csp-at-page-1.json", `${JSON.stringify(csp, null, 2)}\n`);
   expect(first.sandbox).toBe("allow-same-origin");
   expect(first.csp).toContain("default-src 'none'");
   expect(first.csp).toContain("script-src 'none'");
@@ -228,12 +239,6 @@ test("DOCX attachment: layout, isolation, pages, zoom, original bytes, chunk sup
   expect(first.images.filter((img) => img.src.startsWith("data:image/png"))).toEqual([
     { src: "data:image/png;base64,", width: 96, height: 48, natural: 4 },
   ]);
-
-  const frame = page.locator("[data-docx-viewer] iframe");
-  const page1Png = await frame.screenshot();
-  await test.info().attach("docx-page-1", { body: page1Png, contentType: "image/png" });
-  evidence("docx-page-1.png", page1Png);
-  evidence("docx-page-1-probe.json", `${JSON.stringify(first, null, 2)}\n`);
 
   // Clicking a (stripped) link navigates nowhere.
   const before = page.url();

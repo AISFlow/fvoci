@@ -3,10 +3,12 @@ import { renderAsync } from "docx-preview";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import {
+  adoptFrameStyles,
   createDocxFrame,
   DOCX_FRAME_BASE_CSS,
   inertElementFactory,
   sanitizeRenderedDocx,
+  transferInlineStyles,
 } from "./docx-frame";
 import { checkDocxPackage, DOCX_MAX_BYTES } from "./docx-limits";
 import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, readCapped, zoomIn, zoomOut } from "./pdf-limits";
@@ -94,15 +96,16 @@ export function DocxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
         mount.replaceChildren(frame);
         await ready;
         const doc = frame.contentDocument;
-        if (!alive || !doc) return;
-        const base = doc.createElement("style");
-        base.textContent = DOCX_FRAME_BASE_CSS;
-        doc.head.appendChild(base);
-        for (const style of styleHost.querySelectorAll("style")) {
-          doc.head.appendChild(doc.importNode(style, true));
-        }
-        for (const child of [...scratch.body.childNodes]) {
-          doc.body.appendChild(doc.importNode(child, true));
+        const win = frame.contentWindow;
+        if (!alive || !doc || !win) return;
+        adoptFrameStyles(doc, win, [
+          DOCX_FRAME_BASE_CSS,
+          ...[...styleHost.querySelectorAll("style")].map((style) => style.textContent ?? ""),
+        ]);
+        for (const child of [...scratch.body.children]) {
+          const copy = doc.importNode(child, true);
+          doc.body.appendChild(copy);
+          transferInlineStyles(child, copy);
         }
         const pages = [...doc.querySelectorAll<HTMLElement>(PAGE_SELECTOR)];
         if (pages.length === 0) {
