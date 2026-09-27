@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import {
   buildFixturePdf,
@@ -290,10 +292,15 @@ test("PDF attachment: page navigation, zoom, rendered content, doc switch, not f
   for (const glyph of glyphs) expect(glyph.dark).toBeGreaterThan(40);
   expect(cells[2]!.dark).toBe(0);
   expect(new Set(glyphs.map((glyph) => glyph.signature)).size).toBe(4);
-  await test.info().attach("korean-pdf-canvas", {
-    body: await page.locator("[data-pdf-viewer] canvas").screenshot(),
-    contentType: "image/png",
-  });
+  const koreanPng = await page.locator("[data-pdf-viewer] canvas").screenshot();
+  await test.info().attach("korean-pdf-canvas", { body: koreanPng, contentType: "image/png" });
+  // Opt-in durable copy for review evidence; runner output is removed on success.
+  const evidenceDir = process.env.FVOCI_PDF_EVIDENCE_DIR;
+  if (evidenceDir) {
+    fs.mkdirSync(evidenceDir, { recursive: true });
+    fs.writeFileSync(path.join(evidenceDir, "korean-pdf-canvas.png"), koreanPng);
+    fs.writeFileSync(path.join(evidenceDir, "korean-pdf-cells.json"), `${JSON.stringify(cells, null, 2)}\n`);
+  }
 
   // Production asset URLs, types and the scripting exclusion.
   for (const [rel, type] of [
