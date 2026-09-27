@@ -52,6 +52,18 @@ const scriptsBombHwpx = Buffer.from(
   ]),
 );
 
+/**
+ * A valid HWPX whose parse is slow on its own (about 18 s in Node for rhwp
+ * 0.8.6; about 235 KB on disk, well inside the package budget), so the spec
+ * can leave the viewer while the worker is still parsing — no test hook.
+ */
+const slowHwpx = Buffer.from(
+  buildFixtureHwpx(
+    new Uint8Array(hancomHwpx),
+    Array.from({ length: 15_000 }, (_, n) => `${n + 1}쪽 ${"가나다라마바사아자차 ".repeat(90)}`.trim()),
+  ),
+);
+
 /** Running rhwp document workers (one per open HWP viewer). */
 function hwpWorkers(page: Page): number {
   return page.workers().filter((worker) => /\/assets\/hwp-worker-[^/]+\.js$/.test(new URL(worker.url()).pathname))
@@ -412,6 +424,19 @@ test("HWP/HWPX attachments: rhwp layout pages, zoom, chunk jump, original downlo
   await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
   await page.unroute(hwpDownload);
   expect(hwpWorkers(page)).toBe(0);
+
+  // Leaving mid-parse terminates the worker at once, not when the parse or its deadline ends.
+  const slowId = await uploadAttachment(page, wsId, documentId, "긴문서.hwpx", slowHwpx);
+  await page.goto(`/w/acme/a/${slowId}/view`);
+  await expect.poll(() => hwpWorkers(page), { timeout: 30_000 }).toBe(1);
+  await expect(viewer).toHaveCount(0);
+  await page.evaluate((to) => {
+    window.history.pushState({}, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/w/acme/a/${textId}/view`);
+  await expect(page.getByText("plain attachment body")).toBeVisible();
+  await expect.poll(() => hwpWorkers(page), { timeout: 3_000 }).toBe(0);
+  await expect(page.locator("img.hwp-viewer__page")).toHaveCount(0);
 
   // Share: the anonymous reader gets the same layout from share URLs only.
   const shareRes = await page.request.post(

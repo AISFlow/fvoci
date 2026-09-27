@@ -29,6 +29,8 @@ export type HwpClientOptions = {
   createWorker?: () => HwpWorkerPort;
   openTimeoutMs?: number;
   requestTimeoutMs?: number;
+  /** Aborting terminates the worker at once, even mid-parse; `open` fails with `closed`. */
+  signal?: AbortSignal;
 };
 
 type Pending = {
@@ -49,9 +51,9 @@ type RequestBody =
 /**
  * One HWP/HWPX document in its own module worker. rhwp's wasm memory only
  * grows, and a parse cannot be interrupted, so the worker — not the document
- * — is the unit of cleanup: `close()` terminates it (unmount, attachment
- * switch, retry), and a request past its deadline terminates it too. After
- * that every request fails with `closed`.
+ * — is the unit of cleanup: aborting the open's signal or `close()`
+ * terminates it (unmount, attachment switch, retry), and a request past its
+ * deadline terminates it too. After that every request fails with `closed`.
  */
 export class HwpDocumentClient {
   readonly #worker: HwpWorkerPort;
@@ -70,17 +72,22 @@ export class HwpDocumentClient {
 
   /**
    * Starts a worker and opens `bytes` (transferred to it) there. A failure
-   * terminates the worker before rejecting.
+   * or an abort of `options.signal` terminates the worker before rejecting;
+   * an already aborted signal starts no worker.
    */
   static async open(
     bytes: Uint8Array,
     module: WebAssembly.Module,
     options: HwpClientOptions = {},
   ): Promise<{ client: HwpDocumentClient; pageCount: number }> {
+    const { signal } = options;
+    if (signal?.aborted) throw new HwpClientError("closed");
     const client = new HwpDocumentClient(
       (options.createWorker ?? createHwpWorker)(),
       options.requestTimeoutMs ?? HWP_REQUEST_TIMEOUT_MS,
     );
+    const abort = () => client.close();
+    signal?.addEventListener("abort", abort, { once: true });
     try {
       const opened = await client.#request(
         { op: "open", bytes, module },
@@ -92,6 +99,9 @@ export class HwpDocumentClient {
     } catch (error) {
       client.close();
       throw error instanceof HwpClientError ? error : new HwpClientError("failed");
+    } finally {
+      // Past the open the caller owns the client and closes it.
+      signal?.removeEventListener("abort", abort);
     }
   }
 

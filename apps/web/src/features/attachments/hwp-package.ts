@@ -3,9 +3,13 @@ import { checkDocxPackage } from "./docx-limits.ts";
 
 /**
  * Total inflated size of an HWPX package, checked before rhwp sees it. Half
- * the DOCX budget, since rhwp holds about twice what it inflates (growing
- * read buffers); it still admits the largest real XML part rhwp cites (a
+ * the DOCX budget; it still admits the largest real XML part rhwp cites (a
  * 75 MB section, `MAX_XML_SIZE` notes) with room for the rest of the package.
+ * It bounds package bytes, not rhwp's memory: dense section XML was measured
+ * to retain about 8.8 times its inflated size in wasm, and a section repeated
+ * in the spine is parsed once per reference. That memory is bounded by the
+ * per-document worker (`hwp-client.ts`) — its open deadline, wasm32's 4 GiB
+ * and termination — not by this budget.
  */
 export const HWPX_MAX_EXPANDED_BYTES = 128 * 1024 * 1024;
 

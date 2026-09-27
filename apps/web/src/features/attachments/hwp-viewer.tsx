@@ -67,7 +67,8 @@ export function HwpViewer({ downloadUrl, chunk }: { downloadUrl: string; chunk?:
         }
         const module = await loadRhwpModule();
         if (!alive) return;
-        const opened = await HwpDocumentClient.open(body.bytes, module);
+        // The signal terminates the worker mid-parse, before a client exists here.
+        const opened = await HwpDocumentClient.open(body.bytes, module, { signal: controller.signal });
         if (!alive) {
           opened.client.close();
           return;

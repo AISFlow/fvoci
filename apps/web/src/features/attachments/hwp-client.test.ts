@@ -97,6 +97,48 @@ test("a parse past its deadline is terminated", async () => {
   assert.equal(f.worker.terminated, 1);
 });
 
+test("aborting a pending open terminates the worker at once, not at the deadline", async () => {
+  const f = fake(() => null);
+  const controller = new AbortController();
+  const open = HwpDocumentClient.open(new Uint8Array(1), module, {
+    createWorker: f.createWorker,
+    openTimeoutMs: 60_000,
+    signal: controller.signal,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(f.worker.terminated, 0);
+  controller.abort();
+  assert.equal(f.worker.terminated, 1);
+  assert.equal(f.worker.onmessage, null);
+  assert.equal(f.worker.onerror, null);
+  assert.equal(f.worker.onmessageerror, null);
+  await rejectsWith(open, "closed");
+  assert.equal(f.worker.terminated, 1);
+});
+
+test("an already aborted signal starts no worker; one aborted after the open leaves the client open", async () => {
+  FakeWorker.all = [];
+  const aborted = AbortSignal.abort();
+  const f = fake(opened);
+  await rejectsWith(
+    HwpDocumentClient.open(new Uint8Array(1), module, { createWorker: f.createWorker, signal: aborted }),
+    "closed",
+  );
+  assert.deepEqual(FakeWorker.all, []);
+
+  const controller = new AbortController();
+  const g = fake(opened);
+  const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, {
+    createWorker: g.createWorker,
+    signal: controller.signal,
+  });
+  controller.abort();
+  assert.equal(client.closed, false);
+  assert.equal(await client.startPage(0), 2);
+  client.close();
+  assert.equal(g.worker.terminated, 1);
+});
+
 test("a render past its deadline terminates the worker and fails later requests", async () => {
   const f = fake((request) => (request.op === "render" ? null : opened(request)));
   const { client } = await HwpDocumentClient.open(new Uint8Array(1), module, {
