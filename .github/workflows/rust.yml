@@ -94,29 +94,63 @@ jobs:
       matrix:
         # Two shards per architecture, balanced by measured suite time; each
         # PostgreSQL suite runs in exactly one shard. Keep both lists in sync
-        # when adding a suite.
+        # when adding a suite. PostgreSQL 18 runs on both architectures; the
+        # other source-supported majors (16, 17) run both shards on x64 only.
+        # Keep image pins in sync with scripts/start-test-postgres.sh.
         include:
           - runner: ubuntu-24.04
+            pg_major: "18"
+            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
             check: postgres
             shard: a
             tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili
           - runner: ubuntu-24.04
+            pg_major: "18"
+            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
             check: postgres-b
             shard: b
             tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
           - runner: ubuntu-24.04-arm
+            pg_major: "18"
+            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
             check: postgres-arm64
             shard: a
             tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili
           - runner: ubuntu-24.04-arm
+            pg_major: "18"
+            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
             check: postgres-arm64-b
+            shard: b
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
+          - runner: ubuntu-24.04
+            pg_major: "16"
+            postgres_image: postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+            check: postgres-pg16
+            shard: a
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili
+          - runner: ubuntu-24.04
+            pg_major: "16"
+            postgres_image: postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+            check: postgres-pg16-b
+            shard: b
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
+          - runner: ubuntu-24.04
+            pg_major: "17"
+            postgres_image: postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+            check: postgres-pg17
+            shard: a
+            tests: --test db_integration --test task_integration --test collab_integration --test invitation_integration --test search_index --test comment_integration --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili
+          - runner: ubuntu-24.04
+            pg_major: "17"
+            postgres_image: postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+            check: postgres-pg17-b
             shard: b
             tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+        image: ${{ matrix.postgres_image }}
         env:
           POSTGRES_PASSWORD: ci-ephemeral-only
         ports:
@@ -137,6 +171,19 @@ jobs:
           --health-interval 2s --health-timeout 3s --health-retries 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: PostgreSQL service major matches matrix
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          EXPECTED_PG_MAJOR: ${{ matrix.pg_major }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_PG_MAJOR" =~ ^(16|17|18)$ ]] || { echo "unsupported pg_major: $EXPECTED_PG_MAJOR" >&2; exit 1; }
+          num="$(docker exec "$PG_CONTAINER" psql -U postgres -tAc 'SHOW server_version_num')"
+          echo "server_version_num=$num"
+          [[ "$num" =~ ^${EXPECTED_PG_MAJOR}[0-9]{4}$ ]] || {
+            echo "PostgreSQL major mismatch: expected $EXPECTED_PG_MAJOR, got $num" >&2
+            exit 1
+          }
       - run: rustup toolchain install 1.98.1 --profile minimal
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
