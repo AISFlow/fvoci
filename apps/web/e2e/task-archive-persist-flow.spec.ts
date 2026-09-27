@@ -119,13 +119,13 @@ async function taskJson(page: Page, wsId: string, taskId: string) {
 async function openEditableTask(
   page: Page,
   wire: CollabWireLog,
+  projectKey: string,
 ): Promise<{ wsId: string; task: { id: string; number: number }; bodyText: string }> {
   const workspacesRes = await page.request.get("/api/v1/me/workspaces");
   const wsId = (await workspacesRes.json()).items.find(
     (item: { slug: string }) => item.slug === admin.workspaceSlug,
   ).id as string;
 
-  const projectKey = `ZT${(Date.now() % 900) + 100}`;
   const projectRes = await page.request.post(`/api/v1/workspaces/${wsId}/projects`, {
     data: { key: projectKey, name: "Archive Persist", visibility: "workspace" },
   });
@@ -179,7 +179,7 @@ function holdArchivePatch(page: Page, wsId: string, taskId: string): { release: 
 test("archive persists collaborative body then restores after unarchive", async ({ page }) => {
   const wire = attachCollabWire(page);
   await ensureSetup(page);
-  const { wsId, task, bodyText } = await openEditableTask(page, wire);
+  const { wsId, task, bodyText } = await openEditableTask(page, wire, "ZT701");
   const body = page.getByTestId("task-body");
   const editor = body.locator(".fvoci-editor .ProseMirror");
 
@@ -217,7 +217,7 @@ test("archive holds editor read-only while persist and archive PATCH are in flig
 }) => {
   const wire = attachCollabWire(page);
   await ensureSetup(page);
-  const { wsId, task, bodyText } = await openEditableTask(page, wire);
+  const { wsId, task, bodyText } = await openEditableTask(page, wire, "ZT702");
   const patchHold = holdArchivePatch(page, wsId, task.id);
   const editor = page.getByTestId("task-body").locator(".fvoci-editor .ProseMirror");
   const archiveButton = page.getByRole("button", { name: "보관", exact: true });
@@ -261,7 +261,7 @@ test("failed archive persist shows error, keeps task active and restores editing
   const persistHold = installPersistAckHold(page);
   await ensureSetup(page);
   const wire = attachCollabWire(page);
-  const { wsId, task, bodyText } = await openEditableTask(page, wire);
+  const { wsId, task, bodyText } = await openEditableTask(page, wire, "ZT703");
   const editor = page.getByTestId("task-body").locator(".fvoci-editor .ProseMirror");
   const archiveButton = page.getByRole("button", { name: "보관", exact: true });
 
