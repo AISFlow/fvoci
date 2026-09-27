@@ -119,4 +119,3 @@ export async function openXlsx(bytes: Uint8Array, limits: XlsxLimits = XLSX_LIMI
     },
   };
 }
-
