@@ -8,7 +8,8 @@ import { crc32, deflateRawSync, inflateRawSync } from "node:zlib";
  * OWPML container that no HWP library produced.
  */
 
-type Entry = { name: string; data: Uint8Array };
+/** `declaredSize` forges the recorded uncompressed size (test packages only). */
+type Entry = { name: string; data: Uint8Array; declaredSize?: number };
 
 function u16(view: DataView, at: number): number {
   return view.getUint16(at, true);
@@ -65,7 +66,7 @@ export function writeZip(entries: readonly Entry[]): Uint8Array {
     lv.setUint16(8, stored ? 0 : 8, true);
     lv.setUint32(14, crc, true);
     lv.setUint32(18, body.length, true);
-    lv.setUint32(22, entry.data.length, true);
+    lv.setUint32(22, entry.declaredSize ?? entry.data.length, true);
     lv.setUint16(26, name.length, true);
     local.set(name, 30);
     const central = new Uint8Array(46 + name.length);
@@ -77,7 +78,7 @@ export function writeZip(entries: readonly Entry[]): Uint8Array {
     cv.setUint16(10, stored ? 0 : 8, true);
     cv.setUint32(16, crc, true);
     cv.setUint32(20, body.length, true);
-    cv.setUint32(24, entry.data.length, true);
+    cv.setUint32(24, entry.declaredSize ?? entry.data.length, true);
     cv.setUint16(28, name.length, true);
     cv.setUint32(42, offset, true);
     central.set(name, 46);

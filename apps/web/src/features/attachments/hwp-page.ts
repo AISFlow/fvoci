@@ -1,8 +1,10 @@
 import { chunkPlainText } from "./chunk-plain-text.ts";
 
 /**
- * Largest HWP/HWPX the browser viewer parses (same budget as PDF); bigger
- * files stay download-only. rhwp applies its own container and inflate limits.
+ * Largest HWP/HWPX the browser viewer downloads (same budget as PDF); bigger
+ * files stay download-only. This bounds the compressed bytes only; what they
+ * may inflate to is bounded by `prepareHwpBytes` (HWPX) and rhwp's own HWP 5
+ * stream caps, inside the per-document worker (`hwp-client.ts`).
  */
 export const HWP_MAX_BYTES = 64 * 1024 * 1024;
 
