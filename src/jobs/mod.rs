@@ -14,6 +14,7 @@
 mod claim;
 mod documents;
 mod retention;
+mod revisions;
 mod tokens;
 mod uploads;
 mod withdrawn;
@@ -32,7 +33,7 @@ use crate::mail::Mailer;
 
 pub use claim::{
     JobClaim, JOB_KEY_DAILY, JOB_KEY_DIGEST, JOB_KEY_ICS, JOB_KEY_MAGIC, JOB_KEY_NOTIFICATIONS,
-    JOB_KEY_PROCESSED, JOB_KEY_UPLOADS, JOB_KEY_WORKSPACE, JOB_LOCK_NAMESPACE,
+    JOB_KEY_PROCESSED, JOB_KEY_REVISIONS, JOB_KEY_UPLOADS, JOB_KEY_WORKSPACE, JOB_LOCK_NAMESPACE,
 };
 pub use documents::{
     run_document_trash_purge, run_document_trash_purge_with, DocumentPurgeLimits,
@@ -42,6 +43,12 @@ pub use retention::{
     run_integration_gc, run_notification_gc, run_processed_gc, GC_DELETE_BATCH, GC_DELETE_ROUNDS,
     NOTIFICATION_ARCHIVED_RETENTION_DAYS, NOTIFICATION_READ_RETENTION_DAYS,
     PROCESSED_GC_WINDOW_DAYS,
+};
+pub use revisions::{
+    run_automatic_revision_gc, run_revision_maintenance_batch, run_revision_maintenance_sweep,
+    RevisionMaintenanceEngine, RevisionMaintenanceParams, RevisionMaintenanceResume,
+    RevisionMaintenanceStats, REVISION_GC_ROUNDS, SCHEDULED_REVISION_TARGET_BATCH,
+    WORKSPACE_SCAN_BATCH,
 };
 pub use tokens::{run_ics_token_gc, run_magic_token_gc, TOKEN_GC_BATCH};
 pub use uploads::{run_stale_upload_gc, StaleUploadGcStats, UPLOAD_GC_BATCH};
@@ -55,6 +62,7 @@ pub const OBJECT_CLEANUP_BATCH: i64 = 100;
 
 const DEFAULT_TICK: Duration = Duration::from_secs(60);
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const DEFAULT_REVISION_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_UPLOAD_GC_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_UPLOAD_INCOMPLETE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -63,11 +71,14 @@ pub struct MaintenanceSettings {
     pub tick: Duration,
     /// Cadence of the daily sweep.
     pub interval: Duration,
+    /// Cadence of scheduled revision snapshots + automatic retention (source hourly compact bundle).
+    pub revision_sweep_interval: Duration,
     /// Cadence of the abandoned-upload cleanup.
     pub upload_gc_interval: Duration,
     /// Incomplete uploads older than this are removed
     /// (`UPLOAD_INCOMPLETE_TTL_HOURS`, validated in `Config`).
     pub upload_incomplete_ttl: Duration,
+    pub revision: RevisionMaintenanceParams,
 }
 
 impl Default for MaintenanceSettings {
@@ -75,14 +86,19 @@ impl Default for MaintenanceSettings {
         Self {
             tick: DEFAULT_TICK,
             interval: DEFAULT_INTERVAL,
+            revision_sweep_interval: DEFAULT_REVISION_SWEEP_INTERVAL,
             upload_gc_interval: DEFAULT_UPLOAD_GC_INTERVAL,
             upload_incomplete_ttl: DEFAULT_UPLOAD_INCOMPLETE_TTL,
+            revision: RevisionMaintenanceParams {
+                settings: crate::config::RevisionSettings::default(),
+                engine: None,
+            },
         }
     }
 }
 
 impl MaintenanceSettings {
-    pub fn from_env(upload_incomplete_ttl: Duration) -> Self {
+    pub fn from_env(upload_incomplete_ttl: Duration, revision: RevisionMaintenanceParams) -> Self {
         Self {
             upload_gc_interval: Duration::from_secs(parse_positive_u64(
                 "FVOCI_UPLOAD_GC_INTERVAL_SECS",
@@ -104,6 +120,14 @@ impl MaintenanceSettings {
                     .as_deref(),
                 DEFAULT_INTERVAL.as_secs(),
             )),
+            revision_sweep_interval: Duration::from_secs(parse_positive_u64(
+                "FVOCI_REVISION_SWEEP_INTERVAL_SECS",
+                std::env::var("FVOCI_REVISION_SWEEP_INTERVAL_SECS")
+                    .ok()
+                    .as_deref(),
+                DEFAULT_REVISION_SWEEP_INTERVAL.as_secs(),
+            )),
+            revision,
         }
     }
 }
@@ -159,8 +183,11 @@ async fn run_maintenance_loop(
     cancel: CancellationToken,
 ) {
     let mut last_daily: Option<Instant> = None;
+    let mut last_revision_sweep: Option<Instant> = None;
     let mut last_upload_gc: Option<Instant> = None;
     let mut upload_gc_cursor = None;
+    let mut revision_resume = RevisionMaintenanceResume::default();
+    let revision_params = settings.revision.clone();
     let mut ticker = tokio::time::interval(settings.tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -183,6 +210,43 @@ async fn run_maintenance_loop(
                         }
                         Ok(None) => {}
                         Err(err) => warn!(error = %err, "maintenance.upload_gc_failed"),
+                    }
+                }
+                if cancel.is_cancelled() {
+                    return;
+                }
+                if is_due(last_revision_sweep, settings.revision_sweep_interval) {
+                    match run_revision_maintenance_sweep(
+                        &pool,
+                        &revision_params,
+                        revision_resume,
+                        &cancel,
+                    )
+                    .await
+                    {
+                        Ok(Some((stats, resume))) => {
+                            if resume.sweep_complete() {
+                                last_revision_sweep = Some(Instant::now());
+                                revision_resume = RevisionMaintenanceResume::default();
+                            } else {
+                                revision_resume = resume;
+                            }
+                            if stats.snapshots_created > 0
+                                || stats.snapshots_deduped > 0
+                                || stats.revisions_deleted > 0
+                            {
+                                info!(
+                                    snapshots_created = stats.snapshots_created,
+                                    snapshots_deduped = stats.snapshots_deduped,
+                                    snapshots_skipped = stats.snapshots_skipped,
+                                    snapshots_failed = stats.snapshots_failed,
+                                    revisions_deleted = stats.revisions_deleted,
+                                    "maintenance.revision_sweep"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => warn!(error = %err, "maintenance.revision_sweep_failed"),
                     }
                 }
                 if cancel.is_cancelled() {

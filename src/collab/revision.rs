@@ -53,6 +53,49 @@ pub fn capture_revision_offline(
     })
 }
 
+/// Semantic snapshot equality in an isolated child (source `Y.equalSnapshots`).
+pub fn revision_snapshots_equal_offline(
+    engine_bin: PathBuf,
+    limits: Limits,
+    left: &[u8],
+    right: &[u8],
+) -> Result<bool, RevisionCaptureError> {
+    if left == right {
+        return Ok(true);
+    }
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin,
+        limits,
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .map_err(|_| RevisionCaptureError::Unavailable)?;
+    match session
+        .call(&Request::RevisionSnapshotsEqual {
+            left_b64: left.to_vec(),
+            right_b64: right.to_vec(),
+        })
+        .outcome
+    {
+        EngineStatus::Ok {
+            update_b64: Some(bytes),
+            ..
+        } => {
+            let decoded = collab_engine::b64::decode(&bytes)
+                .map_err(|_| RevisionCaptureError::Unavailable)?;
+            Ok(decoded.first() == Some(&1))
+        }
+        EngineStatus::Malformed { .. } | EngineStatus::ResourceLimit { .. } => {
+            Err(RevisionCaptureError::Unavailable)
+        }
+        _ => Err(RevisionCaptureError::Unavailable),
+    }
+}
+
 pub fn prepare_revision_text(content_json: &Value) -> Result<String, RevisionCaptureError> {
     crate::collab::derived_body::prepare_derived_body(content_json.clone())
         .map(|body| body.text().to_string())

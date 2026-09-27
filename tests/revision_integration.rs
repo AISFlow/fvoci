@@ -18,21 +18,30 @@ use fvoci_server::collab::room::{
     arm_session_revision_persist_barrier, disarm_join_channel_admission_witness,
     disarm_session_revision_persist_barrier, AuthenticatedConnection, CollabSession, RoomJoin,
 };
+use fvoci_server::collab::seed::SeedEngine;
 use fvoci_server::collab::wire::{CollabKind, CollabRoomName};
+use fvoci_server::config::RevisionSettings;
 use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::pool;
+use fvoci_server::db::projects::{create_project, CreateProjectInput};
 use fvoci_server::db::revisions::{load_durable_collab_for_system, RevisionTarget};
+use fvoci_server::db::tasks::{create_task, CreateTaskInput};
 use fvoci_server::db::workspace::{self, WorkspaceRole};
-use serde_json::Value;
+use fvoci_server::jobs::{
+    run_revision_maintenance_batch, RevisionMaintenanceEngine, RevisionMaintenanceParams,
+    RevisionMaintenanceResume, SCHEDULED_REVISION_TARGET_BATCH, WORKSPACE_SCAN_BATCH,
+};
+use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use support::{
     auth_and_join, collab_app_state, complete_sync_handshake, connect_member, engine_fixture,
-    setup_wiki_doc, stateless_frame, sync_update_frame, test_collab_config,
-    wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update, SessionFixture, TestRun,
-    WikiDocFixture, PEPPER, PUBLIC_ORIGIN,
+    setup_owner_session, setup_wiki_doc, setup_wiki_doc_batch, stateless_frame, sync_update_frame,
+    test_collab_config, wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update,
+    SessionFixture, TestRun, WikiDocFixture, PEPPER, PUBLIC_ORIGIN,
 };
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(45);
@@ -1673,6 +1682,845 @@ async fn session_revision_skips_when_document_trashed_under_lock() {
                 "no revision rows may remain for trashed target"
             );
             admin.close().await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+fn revision_maintenance_params(
+    cfg: &CollabConfig,
+    interval_hours: u32,
+) -> RevisionMaintenanceParams {
+    RevisionMaintenanceParams {
+        settings: RevisionSettings {
+            session_snapshot_enabled: false,
+            keep: 200,
+            snapshot_interval_hours: interval_hours,
+        },
+        engine: Some(RevisionMaintenanceEngine {
+            engine_bin: cfg.engine_bin.clone(),
+            limits: cfg.limits,
+        }),
+    }
+}
+
+async fn count_scheduled_revisions(
+    harness: &support::TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> i64 {
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2 AND reason = 'scheduled'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    count
+}
+
+async fn seed_task_collab(
+    run: &TestRun,
+    addr: std::net::SocketAddr,
+    session: &SessionFixture,
+    task_id: Uuid,
+    content: Value,
+) {
+    let key = CollabRoomName {
+        workspace_id: session.workspace_id,
+        kind: CollabKind::Task,
+        resource_id: task_id,
+    }
+    .routing_key();
+    let update = SeedEngine::from_hub(&run.hub())
+        .tiptap_to_yjs_update(&content)
+        .await
+        .expect("task seed update");
+    let mut ws = connect_member(addr, &session.session_token).await;
+    auth_and_join(&mut ws, &key, 1).await;
+    complete_sync_handshake(&mut ws, &key).await;
+    ws.send(Message::Binary(sync_update_frame(&key, &update).into()))
+        .await
+        .unwrap();
+    assert!(wait_for_sync_applied(&mut ws, Duration::from_secs(8)).await);
+    let request_id = Uuid::now_v7();
+    ws.send(Message::Binary(
+        stateless_frame(&key, &format!("persist:{request_id}")).into(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        wait_for_stateless_exact(
+            &mut ws,
+            &format!("persisted:{request_id}"),
+            Duration::from_secs(8)
+        )
+        .await
+    );
+    let _ = ws.close(None).await;
+}
+
+async fn age_task_anchor(admin: &PgPool, workspace_id: Uuid, task_id: Uuid) {
+    let old = Utc::now() - ChronoDuration::hours(30);
+    sqlx::query(
+        "UPDATE fvoci.task_states SET created_at = $3, updated_at = now() WHERE workspace_id = $1 AND task_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(old)
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+async fn age_parent_task_only(admin: &PgPool, workspace_id: Uuid, task_id: Uuid) {
+    let old = Utc::now() - ChronoDuration::hours(30);
+    sqlx::query("UPDATE fvoci.tasks SET created_at = $3 WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id)
+        .bind(task_id)
+        .bind(old)
+        .execute(admin)
+        .await
+        .unwrap();
+}
+
+async fn seed_collab_edit(addr: std::net::SocketAddr, wiki: &WikiDocFixture) {
+    let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+    let update = engine_fixture("structured.v1");
+    let mut ws = connect_member(addr, &wiki.session.session_token).await;
+    auth_and_join(&mut ws, &key, 1).await;
+    complete_sync_handshake(&mut ws, &key).await;
+    ws.send(Message::Binary(sync_update_frame(&key, &update).into()))
+        .await
+        .unwrap();
+    assert!(wait_for_sync_applied(&mut ws, Duration::from_secs(8)).await);
+    let request_id = Uuid::now_v7();
+    ws.send(Message::Binary(
+        stateless_frame(&key, &format!("persist:{request_id}")).into(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        wait_for_stateless_exact(
+            &mut ws,
+            &format!("persisted:{request_id}"),
+            Duration::from_secs(8)
+        )
+        .await
+    );
+    let _ = ws.close(None).await;
+}
+
+async fn age_document_anchor(admin: &PgPool, workspace_id: Uuid, document_id: Uuid) {
+    let old = Utc::now() - ChronoDuration::hours(30);
+    sqlx::query(
+        "UPDATE fvoci.document_states SET created_at = $3, updated_at = now() WHERE workspace_id = $1 AND document_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .bind(old)
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+async fn age_parent_document_only(admin: &PgPool, workspace_id: Uuid, document_id: Uuid) {
+    let old = Utc::now() - ChronoDuration::hours(30);
+    sqlx::query("UPDATE fvoci.documents SET created_at = $3 WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id)
+        .bind(document_id)
+        .bind(old)
+        .execute(admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn scheduled_revision_document_stale_creates_row() {
+    run_test("scheduled_revision_document_stale_creates_row", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let mut cfg = test_collab_config(4, 60_000);
+        cfg.revision_session_snapshot = false;
+        let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        seed_collab_edit(addr, &wiki).await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        age_document_anchor(&admin, wiki.session.workspace_id, wiki.document_id).await;
+        admin.close().await;
+
+        let params = revision_maintenance_params(&cfg, 24);
+        let (stats, _) = run_revision_maintenance_batch(
+            &wiki.session.pool,
+            &params,
+            RevisionMaintenanceResume::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("sweep");
+        assert_eq!(stats.snapshots_created, 1);
+        assert_eq!(
+            count_scheduled_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id,)
+                .await,
+            1
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scheduled_revision_skips_recent_anchor() {
+    run_test("scheduled_revision_skips_recent_anchor", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let mut cfg = test_collab_config(4, 60_000);
+        cfg.revision_session_snapshot = false;
+        let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        seed_collab_edit(addr, &wiki).await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        let captured = expected_committed_session_capture(
+            &wiki.session.pool,
+            wiki.session.workspace_id,
+            wiki.document_id,
+            &cfg,
+        )
+        .await;
+        let revision_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.revisions (
+                id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+                content_json, text, reason, created_by, created_at
+            ) VALUES ($1, $2, 'document', $3, $4, 1, $5, 'recent', 'session', NULL, now() - interval '1 hour')
+            "#,
+        )
+        .bind(revision_id)
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .bind(&captured.y_snapshot)
+        .bind(&captured.content_json)
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE fvoci.document_states SET updated_at = now() WHERE workspace_id = $1 AND document_id = $2",
+        )
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+
+        let params = revision_maintenance_params(&cfg, 24);
+        let (stats, _) = run_revision_maintenance_batch(
+            &wiki.session.pool,
+            &params,
+            RevisionMaintenanceResume::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("sweep");
+        assert_eq!(stats.snapshots_created, 0);
+        assert_eq!(
+            count_scheduled_revisions(
+                &run.harness,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await,
+            0
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scheduled_revision_semantic_dedup_on_second_sweep() {
+    run_test("scheduled_revision_semantic_dedup_on_second_sweep", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let mut cfg = test_collab_config(4, 60_000);
+        cfg.revision_session_snapshot = false;
+        let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        seed_collab_edit(addr, &wiki).await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        age_document_anchor(&admin, wiki.session.workspace_id, wiki.document_id).await;
+        admin.close().await;
+
+        let params = revision_maintenance_params(&cfg, 24);
+        let cancel = CancellationToken::new();
+        run_revision_maintenance_batch(
+            &wiki.session.pool,
+            &params,
+            RevisionMaintenanceResume::default(),
+            &cancel,
+        )
+        .await
+        .expect("first");
+        sqlx::query(
+            r#"
+            UPDATE fvoci.revisions
+            SET created_at = $3
+            WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2 AND reason = 'scheduled'
+            "#,
+        )
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .bind(Utc::now() - ChronoDuration::hours(30))
+        .execute(
+            &PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&run.harness.admin_url)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let (stats, _) = run_revision_maintenance_batch(
+            &wiki.session.pool,
+            &params,
+            RevisionMaintenanceResume::default(),
+            &cancel,
+        )
+        .await
+        .expect("second");
+        assert_eq!(stats.snapshots_created, 0);
+        assert_eq!(
+            stats.snapshots_deduped,
+            1,
+            "unchanged body with stale anchor must hit semantic dedup (skipped={})",
+            stats.snapshots_skipped
+        );
+        assert_eq!(
+            count_scheduled_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id,)
+                .await,
+            1
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scheduled_revision_disabled_when_interval_zero() {
+    run_test("scheduled_revision_disabled_when_interval_zero", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let mut cfg = test_collab_config(4, 60_000);
+        cfg.revision_session_snapshot = false;
+        let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        seed_collab_edit(addr, &wiki).await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        age_document_anchor(&admin, wiki.session.workspace_id, wiki.document_id).await;
+        admin.close().await;
+
+        let params = revision_maintenance_params(&cfg, 0);
+        let (stats, _) = run_revision_maintenance_batch(
+            &wiki.session.pool,
+            &params,
+            RevisionMaintenanceResume::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("sweep");
+        assert_eq!(stats.snapshots_attempted, 0);
+        assert_eq!(
+            count_scheduled_revisions(&run.harness, wiki.session.workspace_id, wiki.document_id,)
+                .await,
+            0
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+async fn count_workspace_scheduled_revisions(harness: &support::TestDb, workspace_id: Uuid) -> i64 {
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND reason = 'scheduled'
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    count
+}
+
+async fn copy_document_collab_state(
+    admin: &PgPool,
+    workspace_id: Uuid,
+    from_document_id: Uuid,
+    to_document_id: Uuid,
+) {
+    let (state, encoding, writer_generation): (Vec<u8>, i16, i64) = sqlx::query_as(
+        r#"
+        SELECT state, encoding, writer_generation
+        FROM fvoci.document_states
+        WHERE workspace_id = $1 AND document_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(from_document_id)
+    .fetch_one(admin)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.document_states (
+            workspace_id, document_id, state, encoding, writer_generation
+        ) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (workspace_id, document_id) DO UPDATE
+        SET state = EXCLUDED.state,
+            encoding = EXCLUDED.encoding,
+            writer_generation = EXCLUDED.writer_generation,
+            updated_at = now()
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(to_document_id)
+    .bind(&state)
+    .bind(encoding)
+    .bind(writer_generation)
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn scheduled_revision_batch_continues_past_sixteen_targets() {
+    run_test(
+        "scheduled_revision_batch_continues_past_sixteen_targets",
+        async {
+            let target_count = SCHEDULED_REVISION_TARGET_BATCH + 2;
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let docs = setup_wiki_doc_batch(&run.harness, target_count).await;
+            let wiki = &docs[0];
+            let mut cfg = test_collab_config(4, 60_000);
+            cfg.revision_session_snapshot = false;
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            seed_collab_edit(addr, wiki).await;
+
+            let admin = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&run.harness.admin_url)
+                .await
+                .unwrap();
+            for doc in docs.iter().skip(1) {
+                copy_document_collab_state(
+                    &admin,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                    doc.document_id,
+                )
+                .await;
+                age_document_anchor(&admin, wiki.session.workspace_id, doc.document_id).await;
+            }
+            age_document_anchor(&admin, wiki.session.workspace_id, wiki.document_id).await;
+            admin.close().await;
+
+            let params = revision_maintenance_params(&cfg, 24);
+            let cancel = CancellationToken::new();
+            let (first, resume) = run_revision_maintenance_batch(
+                &wiki.session.pool,
+                &params,
+                RevisionMaintenanceResume::default(),
+                &cancel,
+            )
+            .await
+            .expect("first batch");
+            assert_eq!(
+                first.snapshots_created,
+                SCHEDULED_REVISION_TARGET_BATCH as u32
+            );
+            assert!(resume.workspace_id.is_some());
+            assert!(resume.target.is_some());
+
+            let (second, resume2) =
+                run_revision_maintenance_batch(&wiki.session.pool, &params, resume, &cancel)
+                    .await
+                    .expect("second batch");
+            assert_eq!(second.snapshots_created, 2);
+            assert!(resume2.sweep_complete());
+            assert_eq!(
+                count_workspace_scheduled_revisions(&run.harness, wiki.session.workspace_id).await,
+                target_count as i64
+            );
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn scheduled_revision_task_stale_creates_row() {
+    run_test("scheduled_revision_task_stale_creates_row", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let owner = setup_owner_session(&run.harness).await;
+        let mut cfg = test_collab_config(4, 60_000);
+        cfg.revision_session_snapshot = false;
+        let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let project = create_project(
+            &owner.pool,
+            owner.workspace_id,
+            owner.user_id,
+            owner.session_id,
+            CreateProjectInput {
+                key: "SCHTASK",
+                name: "Scheduled task project",
+                visibility: "workspace",
+                description: None,
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .expect("create project")
+        .expect("ok");
+        let task = create_task(
+            &owner.pool,
+            owner.workspace_id,
+            project.id,
+            owner.user_id,
+            owner.session_id,
+            CreateTaskInput {
+                title: "scheduled snapshot task",
+                task_type: "task",
+                priority: "none",
+                status_id: None,
+                start_date: None,
+                due_date: None,
+                parent_id: None,
+                milestone_id: None,
+                recurrence: None,
+            },
+            None,
+            "api",
+        )
+        .await
+        .expect("create task")
+        .expect("ok");
+        let task_body = json!({
+            "type": "doc",
+            "content": [{
+                "type": "paragraph",
+                "attrs": {"id": "sch-t1"},
+                "content": [{"type": "text", "text": "scheduled task body"}]
+            }]
+        });
+        seed_task_collab(&run, addr, &owner, task.id, task_body.clone()).await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        age_task_anchor(&admin, owner.workspace_id, task.id).await;
+        admin.close().await;
+
+        let params = revision_maintenance_params(&cfg, 24);
+        let (stats, _) = run_revision_maintenance_batch(
+            &owner.pool,
+            &params,
+            RevisionMaintenanceResume::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("sweep");
+        assert_eq!(stats.snapshots_created, 1);
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        let (text, content_json): (String, Value) = sqlx::query_as(
+            r#"
+            SELECT text, content_json FROM fvoci.revisions
+            WHERE workspace_id = $1 AND target_kind = 'task' AND target_id = $2 AND reason = 'scheduled'
+            "#,
+        )
+        .bind(owner.workspace_id)
+        .bind(task.id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+        assert!(text.contains("scheduled task body"), "{text}");
+        assert_eq!(
+            content_json["content"][0]["attrs"]["id"],
+            json!("sch-t1")
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scheduled_revision_skips_old_parent_new_document_state() {
+    run_test(
+        "scheduled_revision_skips_old_parent_new_document_state",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let mut cfg = test_collab_config(4, 60_000);
+            cfg.revision_session_snapshot = false;
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+            let addr = run.spawn_router_state(state, hub).await;
+            seed_collab_edit(addr, &wiki).await;
+
+            let admin = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&run.harness.admin_url)
+                .await
+                .unwrap();
+            age_parent_document_only(&admin, wiki.session.workspace_id, wiki.document_id).await;
+            admin.close().await;
+
+            let params = revision_maintenance_params(&cfg, 24);
+            let (stats, _) = run_revision_maintenance_batch(
+                &wiki.session.pool,
+                &params,
+                RevisionMaintenanceResume::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("sweep");
+            assert_eq!(stats.snapshots_created, 0);
+            assert_eq!(
+                count_scheduled_revisions(
+                    &run.harness,
+                    wiki.session.workspace_id,
+                    wiki.document_id,
+                )
+                .await,
+                0
+            );
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn scheduled_revision_skips_old_parent_new_task_state() {
+    run_test("scheduled_revision_skips_old_parent_new_task_state", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let owner = setup_owner_session(&run.harness).await;
+        let mut cfg = test_collab_config(4, 60_000);
+        cfg.revision_session_snapshot = false;
+        let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let project = create_project(
+            &owner.pool,
+            owner.workspace_id,
+            owner.user_id,
+            owner.session_id,
+            CreateProjectInput {
+                key: "ANCHOR",
+                name: "anchor project",
+                visibility: "workspace",
+                description: None,
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .expect("create project")
+        .expect("ok");
+        let task = create_task(
+            &owner.pool,
+            owner.workspace_id,
+            project.id,
+            owner.user_id,
+            owner.session_id,
+            CreateTaskInput {
+                title: "anchor task",
+                task_type: "task",
+                priority: "none",
+                status_id: None,
+                start_date: None,
+                due_date: None,
+                parent_id: None,
+                milestone_id: None,
+                recurrence: None,
+            },
+            None,
+            "api",
+        )
+        .await
+        .expect("create task")
+        .expect("ok");
+        seed_task_collab(
+            &run,
+            addr,
+            &owner,
+            task.id,
+            json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "attrs": {"id": "anc-t1"},
+                    "content": [{"type": "text", "text": "fresh task state"}]
+                }]
+            }),
+        )
+        .await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        age_parent_task_only(&admin, owner.workspace_id, task.id).await;
+        admin.close().await;
+
+        let params = revision_maintenance_params(&cfg, 24);
+        let (stats, _) = run_revision_maintenance_batch(
+            &owner.pool,
+            &params,
+            RevisionMaintenanceResume::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("sweep");
+        assert_eq!(stats.snapshots_created, 0);
+        let scheduled: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)::bigint FROM fvoci.revisions
+            WHERE workspace_id = $1 AND target_kind = 'task' AND target_id = $2 AND reason = 'scheduled'
+            "#,
+        )
+        .bind(owner.workspace_id)
+        .bind(task.id)
+        .fetch_one(
+            &PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&run.harness.admin_url)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scheduled, 0);
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+async fn insert_empty_live_workspaces(admin: &PgPool, count: usize) {
+    for i in 0..count {
+        let id = Uuid::now_v7();
+        let slug = format!("ev{i:04}");
+        sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, 'Empty')")
+            .bind(id)
+            .bind(slug)
+            .execute(admin)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn scheduled_revision_continues_past_empty_workspaces() {
+    run_test(
+        "scheduled_revision_continues_past_empty_workspaces",
+        async {
+            let run = TestRun::new(support::TestDb::bootstrap().await);
+            let mut cfg = test_collab_config(4, 60_000);
+            cfg.revision_session_snapshot = false;
+            let params = revision_maintenance_params(&cfg, 24);
+
+            let admin = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&run.harness.admin_url)
+                .await
+                .unwrap();
+            let extra = WORKSPACE_SCAN_BATCH as usize + 4;
+            insert_empty_live_workspaces(&admin, extra).await;
+            let total: i64 = sqlx::query_scalar(
+                "SELECT count(*)::bigint FROM fvoci.workspaces WHERE deleted_at IS NULL",
+            )
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+            admin.close().await;
+            assert!(total > WORKSPACE_SCAN_BATCH);
+
+            let pool = pool::connect_app(&run.harness.app_url).await.unwrap();
+            let cancel = CancellationToken::new();
+            let (first, resume) = run_revision_maintenance_batch(
+                &pool,
+                &params,
+                RevisionMaintenanceResume::default(),
+                &cancel,
+            )
+            .await
+            .expect("first batch");
+            assert_eq!(first.snapshots_created, 0);
+            assert!(resume.workspace_id.is_some());
+            assert!(resume.target.is_none());
+
+            let mut resume = resume;
+            let mut batches = 1u32;
+            while resume.workspace_id.is_some() || resume.target.is_some() {
+                assert!(batches < 32, "scheduled scan did not finish");
+                let (stats, next) = run_revision_maintenance_batch(&pool, &params, resume, &cancel)
+                    .await
+                    .expect("continuation batch");
+                assert_eq!(stats.snapshots_created, 0);
+                resume = next;
+                batches += 1;
+            }
+            assert!(batches >= 2);
+            pool.close().await;
             run.finish().await.expect("cleanup");
         },
     )
