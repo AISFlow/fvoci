@@ -21,6 +21,9 @@ use fvoci_server::collab::room::{
 use fvoci_server::collab::seed::SeedEngine;
 use fvoci_server::collab::wire::{CollabKind, CollabRoomName};
 use fvoci_server::config::RevisionSettings;
+use fvoci_server::db::collab::{
+    append_collab_update, claim_writer_and_load, AppendCollabInput, AppendCollabResult,
+};
 use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::pool;
 use fvoci_server::db::projects::{create_project, CreateProjectInput};
@@ -38,7 +41,7 @@ use support::{
     auth_and_join, collab_app_state, complete_sync_handshake, connect_member, engine_fixture,
     setup_owner_session, setup_wiki_doc, setup_wiki_doc_batch, stateless_frame, sync_update_frame,
     test_collab_config, wait_for_stateless_exact, wait_for_sync_applied, wait_for_sync_update,
-    SessionFixture, TestRun, WikiDocFixture, PEPPER, PUBLIC_ORIGIN,
+    wait_for_ws_close_code, SessionFixture, TestRun, WikiDocFixture, PEPPER, PUBLIC_ORIGIN,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -1584,6 +1587,128 @@ async fn session_revision_skips_when_writer_generation_stale() {
                 0,
             )
             .await;
+            run.finish().await.expect("cleanup");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn manual_revision_after_stale_writer_close_uses_newer_durable_state() {
+    run_test(
+        "manual_revision_after_stale_writer_close_uses_newer_durable_state",
+        async {
+            let mut run = TestRun::new(support::TestDb::bootstrap().await);
+            let wiki = setup_wiki_doc(&run.harness).await;
+            let cfg = test_collab_config(4, 60_000);
+            let (state, hub) = collab_app_state(&run.harness.app_url, cfg.clone()).await;
+            let addr = run.spawn_router_state(state, hub.clone()).await;
+            let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+
+            let mut ws = connect_member(addr, &wiki.session.session_token).await;
+            auth_and_join(&mut ws, &key, 1).await;
+            complete_sync_handshake(&mut ws, &key).await;
+            ws.send(Message::Binary(
+                sync_update_frame(&key, &engine_fixture("structured.v1")).into(),
+            ))
+            .await
+            .unwrap();
+            assert!(wait_for_sync_applied(&mut ws, Duration::from_secs(8)).await);
+
+            // A newer durable writer takes over and commits past the room's tail.
+            let claim = claim_writer_and_load(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.session.user_id,
+                wiki.session.session_id,
+                wiki.document_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let newer = append_collab_update(
+                &wiki.session.pool,
+                AppendCollabInput {
+                    workspace_id: wiki.session.workspace_id,
+                    actor_user_id: wiki.session.user_id,
+                    session_id: wiki.session.session_id,
+                    document_id: wiki.document_id,
+                    writer_generation: claim.writer_generation,
+                    expected_tail_seq: claim.load.tail_seq,
+                    op_id: Uuid::now_v7(),
+                    payload: &engine_fixture("followup_edit.v1"),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(matches!(newer, AppendCollabResult::Committed { .. }));
+
+            // The room's next append hits the stale generation and closes every connection.
+            ws.send(Message::Binary(
+                sync_update_frame(&key, &engine_fixture("korean_emoji_base.v1")).into(),
+            ))
+            .await
+            .unwrap();
+            wait_for_ws_close_code(
+                &mut ws,
+                1008,
+                Duration::from_secs(8),
+                false,
+                Some("writer stale"),
+            )
+            .await;
+            wait_room_empty(&hub, wiki.session.workspace_id, wiki.document_id).await;
+
+            let expected = expected_committed_session_capture(
+                &wiki.session.pool,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                &cfg,
+            )
+            .await;
+            let live = hub
+                .capture_if_live(
+                    (wiki.session.workspace_id, wiki.document_id),
+                    wiki.session.user_id,
+                    wiki.session.session_id,
+                )
+                .await
+                .expect("stale-writer room stays live with no connections")
+                .expect("live capture");
+            assert_eq!(
+                live.content_json, expected.content_json,
+                "live capture after stale-writer close must use newer durable state"
+            );
+            assert_eq!(
+                live.y_snapshot, expected.y_snapshot,
+                "live capture y_snapshot must match newer durable state"
+            );
+
+            let (status, created) = http_json(
+                addr,
+                reqwest::Method::POST,
+                &revision_path(&wiki, ""),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::CREATED, "{created}");
+            let revision_id = created["id"].as_str().expect("id");
+            let (status, detail) = http_json(
+                addr,
+                reqwest::Method::GET,
+                &revision_path(&wiki, &format!("/{revision_id}")),
+                &wiki.session.session_token,
+                None,
+            )
+            .await;
+            assert_eq!(status, reqwest::StatusCode::OK, "{detail}");
+            assert_eq!(
+                detail["contentJson"], expected.content_json,
+                "manual revision after stale-writer close must use newer durable state"
+            );
             run.finish().await.expect("cleanup");
         },
     )

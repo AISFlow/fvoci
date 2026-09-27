@@ -2850,6 +2850,9 @@ impl RoomActor {
 
     async fn fatal_writer_stale(&mut self) {
         self.writer_generation = None;
+        // A newer writer owns durable state; `committed` may lag it, so the next
+        // capture/join must reload instead of trusting the in-memory bundle.
+        self.committed_loaded = false;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
             self.close_connection(conn_id, 1008, "writer stale").await;
         }
@@ -2857,6 +2860,7 @@ impl RoomActor {
 
     async fn fatal_writer_stale_ordered(&mut self) {
         self.writer_generation = None;
+        self.committed_loaded = false;
         for conn_id in self.connections.keys().cloned().collect::<Vec<_>>() {
             self.close_connection_ordered(conn_id, 1008, "writer stale")
                 .await;
