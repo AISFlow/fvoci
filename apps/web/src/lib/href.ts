@@ -107,6 +107,10 @@ export function documentTagsSettingsPath(slug: string): string {
   return `${settingsPath(slug)}/document-tags`;
 }
 
+export function templatesSettingsPath(slug: string): string {
+  return `${settingsPath(slug)}/templates`;
+}
+
 export function projectsPath(slug: string): string {
   return `/w/${slug.toLowerCase()}/projects`;
 }
