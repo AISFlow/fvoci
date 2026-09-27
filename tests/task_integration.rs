@@ -4862,3 +4862,220 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+async fn set_user_time_zone(admin: &sqlx::PgPool, user_id: Uuid, zone: &str) {
+    sqlx::query("UPDATE fvoci.users SET timezone = $2 WHERE id = $1")
+        .bind(user_id)
+        .bind(zone)
+        .execute(admin)
+        .await
+        .unwrap();
+}
+
+async fn set_task_due(
+    admin: &sqlx::PgPool,
+    task: &serde_json::Value,
+    due_date: Option<&str>,
+    due_at: Option<&str>,
+) {
+    sqlx::query(
+        "UPDATE fvoci.tasks SET due_date = $2::date, due_at = $3::timestamptz WHERE id = $1::uuid",
+    )
+    .bind(task["id"].as_str().unwrap())
+    .bind(due_date)
+    .bind(due_at)
+    .execute(admin)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn task_list_due_sort_and_cursor_use_actor_time_zone() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    // (title, due_date, due_at): Seoul dates 01-02, 01-01, 01-02, 01-02, 01-03;
+    // the UTC dates of the dueAt rows are 01-01, 01-02 and 01-02.
+    let mut tasks = Vec::new();
+    for (title, due_date, due_at) in [
+        ("P", None, Some("2026-01-01T16:00:00Z")),
+        ("Q", Some("2026-01-01"), None),
+        ("R", Some("2026-01-02"), None),
+        ("S", None, Some("2026-01-02T10:00:00Z")),
+        ("T", None, Some("2026-01-02T16:00:00Z")),
+    ] {
+        let task = create_task_with_title(
+            app.clone(),
+            &cookie,
+            workspace_id,
+            project_id,
+            json!({"title": title}),
+        )
+        .await;
+        set_task_due(&admin, &task, due_date, due_at).await;
+        tasks.push(task["id"].as_str().unwrap().to_string());
+    }
+    let [p, q, r, s, t] = <[String; 5]>::try_from(tasks).unwrap();
+    set_user_time_zone(&admin, owner_id, "Asia/Seoul").await;
+
+    let query = r#"{"sort":[{"field":"due","direction":"asc"}]}"#;
+    let expected = vec![q.clone(), p.clone(), r.clone(), s.clone(), t.clone()];
+    let full =
+        all_task_ids_unpaginated(app.clone(), workspace_id, project_id, &cookie, query).await;
+    assert_eq!(full, expected, "due sort in the actor zone, ties by id");
+    assert_pagination_walk_matches_unpaginated(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+    )
+    .await;
+    let desc = r#"{"sort":[{"field":"due","direction":"desc"}]}"#;
+    let full_desc =
+        all_task_ids_unpaginated(app.clone(), workspace_id, project_id, &cookie, desc).await;
+    assert_eq!(
+        full_desc,
+        vec![t.clone(), p.clone(), r.clone(), s.clone(), q.clone()]
+    );
+    assert_pagination_walk_matches_unpaginated(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        desc,
+    )
+    .await;
+    let filtered =
+        r#"{"filters":{"dueBefore":"2026-01-02"},"sort":[{"field":"due","direction":"asc"}]}"#;
+    assert_eq!(
+        all_task_ids_unpaginated(app.clone(), workspace_id, project_id, &cookie, filtered).await,
+        vec![q.clone(), p.clone(), r.clone(), s.clone()]
+    );
+    assert_pagination_walk_matches_unpaginated(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        filtered,
+    )
+    .await;
+
+    // A cursor issued under one zone does not continue under another: the
+    // filter and due order it encodes would silently change meaning. The
+    // anchor (Q) is date-only, so its own sort key is the same in both zones.
+    let (status, page1) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        1,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page1["items"][0]["id"], q.as_str());
+    let cursor = page1["nextCursor"].as_str().unwrap().to_string();
+    let (status, same) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        1,
+        Some(&cursor),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{same}");
+    set_user_time_zone(&admin, owner_id, "America/Los_Angeles").await;
+    let (status, body) = list_tasks_page(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+        1,
+        Some(&cursor),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["params"]["code"], "invalid_cursor");
+    // Los Angeles dates: P 01-01, Q 01-01, R 01-02, S 01-02, T 01-02.
+    let la = all_task_ids_unpaginated(app.clone(), workspace_id, project_id, &cookie, query).await;
+    assert_eq!(
+        la,
+        vec![p.clone(), q.clone(), r.clone(), s.clone(), t.clone()]
+    );
+    assert_pagination_walk_matches_unpaginated(
+        app.clone(),
+        workspace_id,
+        project_id,
+        &cookie,
+        query,
+    )
+    .await;
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_list_and_layout_unknown_time_zone_falls_back_to_utc() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let evening = create_task_with_title(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        project_id,
+        json!({"title": "Evening"}),
+    )
+    .await;
+    set_task_due(&admin, &evening, None, Some("2026-01-01T20:00:00Z")).await;
+    let later = create_task_with_title(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        project_id,
+        json!({"title": "Later"}),
+    )
+    .await;
+    set_task_due(&admin, &later, Some("2026-01-02"), None).await;
+    // Stored zone names are free text; an unknown one reads as UTC.
+    set_user_time_zone(&admin, owner_id, "Mars/Olympus_Mons").await;
+
+    let query =
+        r#"{"filters":{"dueBefore":"2026-01-01"},"sort":[{"field":"due","direction":"asc"}]}"#;
+    let ids = all_task_ids_unpaginated(app.clone(), workspace_id, project_id, &cookie, query).await;
+    assert_eq!(ids, vec![evening["id"].as_str().unwrap().to_string()]);
+    let layout = form_urlencoded::Serializer::new(String::new())
+        .append_pair("year", "2026")
+        .append_pair("month", "1")
+        .append_pair("query", query)
+        .finish();
+    let (status, body) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout?{layout}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let layout_ids: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(layout_ids, vec![evening["id"].as_str().unwrap()]);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
