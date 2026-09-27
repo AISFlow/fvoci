@@ -11,8 +11,10 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Utc};
 use fvoci_server::attachments::ObjectStorage;
 use fvoci_server::auth::token::hash_token;
+use fvoci_server::db::documents::{create_wiki_document, CreateDocumentInput};
 use fvoci_server::db::magic::issue_password_reset_token;
 use fvoci_server::db::outbox::mark_processed;
+use fvoci_server::db::revisions::{create_manual_revision, CreateRevisionInput, RevisionTarget};
 use fvoci_server::jobs::{
     run_daily_sweep, run_document_trash_purge, run_document_trash_purge_with, run_ics_token_gc,
     run_magic_token_gc, run_notification_gc, run_processed_gc, run_stale_upload_gc,
@@ -20,8 +22,6 @@ use fvoci_server::jobs::{
     MaintenanceSettings, JOB_KEY_DAILY, JOB_KEY_UPLOADS,
 };
 use fvoci_server::mail::{send_due_digests, Mailer, SmtpConfig};
-use fvoci_server::db::documents::{create_wiki_document, CreateDocumentInput};
-use fvoci_server::db::revisions::{create_manual_revision, CreateRevisionInput, RevisionTarget};
 use project_harness::{
     admin_pool, app_pool, create_project, json_request, session_id_for_user, setup_session, TestDb,
 };
