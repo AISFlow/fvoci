@@ -102,6 +102,8 @@ pub struct CollabConfig {
     pub revoke_poll_ms: u64,
     pub client_id_ttl_ms: u64,
     pub rpc_timeout_ms: u64,
+    /// When true, append a `session` revision after the last real collab client leaves.
+    pub revision_session_snapshot: bool,
 }
 
 fn parse_max_rooms(raw: Option<&str>) -> usize {
@@ -205,6 +207,8 @@ impl CollabConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(5_000);
+        let revision_session_snapshot =
+            crate::config::revision_settings_from_env().session_snapshot_enabled;
         Some(Self {
             engine_bin,
             limits: Limits::default(),
@@ -229,6 +233,7 @@ impl CollabConfig {
             revoke_poll_ms: revoke_poll_ms.max(500),
             client_id_ttl_ms: client_id_ttl_ms.max(5_000),
             rpc_timeout_ms: rpc_timeout_ms.max(1),
+            revision_session_snapshot,
         })
     }
 

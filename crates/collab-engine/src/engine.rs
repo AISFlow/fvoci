@@ -81,6 +81,15 @@ impl CollabEngine {
             Request::Inspect => self.inspect(),
             Request::Project { .. } => self.project(),
             Request::RevisionSnapshot => self.revision_snapshot(),
+            Request::RevisionSnapshotsEqual {
+                left_b64,
+                right_b64,
+            } => {
+                if let Err(st) = Request::preflight(req, &self.limits) {
+                    return st;
+                }
+                self.revision_snapshots_equal(left_b64, right_b64)
+            }
             Request::RestoreFromSnapshot { snap_b64, .. } => self.restore_from_snapshot(snap_b64),
             Request::ReplaceFromUpdate { update_b64, .. } => self.replace_from_update(update_b64),
             Request::SeedFromTiptap { content_json, .. } => self.seed_from_tiptap(content_json),
@@ -277,6 +286,31 @@ impl CollabEngine {
 
     /// Encode a Yrs Snapshot (state vector + delete set) of the live Doc.
     /// Does not mutate the Doc. Bytes are returned in `update_b64`.
+    pub fn revision_snapshots_equal(&mut self, left: &[u8], right: &[u8]) -> EngineStatus {
+        if let Err(st) = self.bump_op() {
+            return st;
+        }
+        if let Err(st) = self.cap_input(left, "left_b64") {
+            return st;
+        }
+        if let Err(st) = self.cap_input(right, "right_b64") {
+            return st;
+        }
+        if left == right {
+            return self.ok_applied(Some(vec![1]));
+        }
+        let left_snap = match Snapshot::decode_v1(left) {
+            Ok(snap) => snap,
+            Err(err) => return classify_decode(err.into(), "left snapshot"),
+        };
+        let right_snap = match Snapshot::decode_v1(right) {
+            Ok(snap) => snap,
+            Err(err) => return classify_decode(err.into(), "right snapshot"),
+        };
+        let equal = left_snap == right_snap;
+        self.ok_applied(Some(if equal { vec![1] } else { vec![0] }))
+    }
+
     pub fn revision_snapshot(&mut self) -> EngineStatus {
         if let Err(st) = self.bump_op() {
             return st;
@@ -477,6 +511,15 @@ fn xml_view<T: ReadTxn>(txn: &T) -> (u32, String) {
 
 fn xml_len_string<T: ReadTxn>(txn: &T, xml: &XmlFragmentRef) -> (u32, String) {
     (xml.len(txn), xml.get_string(txn))
+}
+
+/// Whether two encoded Yrs revision snapshots describe the same document state
+/// (source `Y.equalSnapshots`). Returns false when either operand fails to decode.
+pub fn revision_snapshots_semantically_equal(a: &[u8], b: &[u8]) -> bool {
+    match (Snapshot::decode_v1(a), Snapshot::decode_v1(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn reconstruct_doc_from_snapshot(live: &Doc, snap: &Snapshot) -> Result<Doc, EngineStatus> {

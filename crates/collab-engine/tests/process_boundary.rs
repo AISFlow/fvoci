@@ -6,8 +6,9 @@ use std::time::Instant;
 use collab_engine::limits::{Limits, MIN_CHILD_STACK_BYTES};
 use collab_engine::outcome::{EngineStatus, LimitKind};
 use collab_engine::process::EngineSession;
-use collab_engine::protocol::Request;
+use collab_engine::protocol::{preflight_wire_json, Request};
 use collab_engine::{SpawnRequest, WorkerFailureReason};
+use serde_json::json;
 use yrs::{Any, Map, ReadTxn, StateVector, Transact};
 
 static SPAWN_TEST: Mutex<()> = Mutex::new(());
@@ -600,6 +601,57 @@ fn max_ops_exhaustion_is_resource_limit() {
         ),
         "{:?}",
         third.outcome
+    );
+}
+
+#[test]
+fn revision_snapshots_equal_wire_preflight_and_child_malformed() {
+    let limits = Limits::for_tests();
+    let oversized = vec![0u8; limits.max_input_bytes as usize + 1];
+    let left = collab_engine::b64::encode(&oversized);
+    let wire = json!({
+        "op": "revision_snapshots_equal",
+        "left_b64": left,
+        "right_b64": "AA==",
+    });
+    assert!(
+        matches!(
+            preflight_wire_json(&wire, &limits),
+            Err(EngineStatus::ResourceLimit {
+                kind: LimitKind::Input,
+                ..
+            })
+        ),
+        "oversize left_b64 must be capped on the wire"
+    );
+
+    let _g = SPAWN_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut session = spawn(limits);
+    let load = session.call(&Request::Load {
+        snapshot_b64: Some(vec![0, 0]),
+        tail_b64: Vec::new(),
+        encoding: 1,
+    });
+    assert!(
+        matches!(load.outcome, EngineStatus::Ok { .. }),
+        "{:?}",
+        load.outcome
+    );
+    let snap = match session.call(&Request::RevisionSnapshot).outcome {
+        EngineStatus::Ok {
+            update_b64: Some(bytes),
+            ..
+        } => collab_engine::b64::decode(&bytes).expect("snap"),
+        other => panic!("revision_snapshot: {other:?}"),
+    };
+    let report = session.call(&Request::RevisionSnapshotsEqual {
+        left_b64: snap,
+        right_b64: vec![0xFF, 0x01, 0x02, 0x03],
+    });
+    assert!(
+        matches!(report.outcome, EngineStatus::Malformed { .. }),
+        "garbage snapshots must be Malformed in the child, got {:?}",
+        report.outcome
     );
 }
 

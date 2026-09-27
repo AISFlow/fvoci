@@ -242,7 +242,8 @@ async fn run_server(config: Config, pool: sqlx::PgPool) -> Result<(), Box<dyn st
         fvoci_server::http::guard::resolve_public_origin(&config.public_origin, addr)?;
 
     let collab = match CollabConfig::from_env() {
-        Some(cfg) => {
+        Some(mut cfg) => {
+            cfg.revision_session_snapshot = config.revision.session_snapshot_enabled;
             if let Err(message) =
                 fvoci_server::collab::config::assert_collab_fits_postgres(&pool, cfg.max_rooms)
                     .await

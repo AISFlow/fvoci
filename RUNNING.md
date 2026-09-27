@@ -256,6 +256,15 @@ Optional tuning:
 | `FVOCI_COLLAB_IDLE_MS` | 30000 | Idle room eviction |
 | `FVOCI_COLLAB_REVOKE_POLL_MS` | 5000 | ACL revoke poll |
 
+Automatic revision history (session snapshots on last collab disconnect; scheduled
+GC not wired in this slice yet):
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `REVISION_SESSION_SNAPSHOT` | `1` | When enabled, the room appends a `session` revision (`created_by` null) after the last real collab WebSocket leaves, using durable committed collab state only. Set `0` to disable. |
+| `REVISION_KEEP` | 200 | Retention cap for automatic revision rows once pruning is implemented. |
+| `REVISION_SNAPSHOT_INTERVAL_HOURS` | 24 | Scheduled stale-target snapshots (`0` disables); job port not wired yet. |
+
 Capacity refusals close WebSocket clients with **1013** “try again later” (retryable).
 Per-child limits stay unchanged (AS 1 GiB, observed RSS kill 512 MiB, 8 s wall, 256-op recycle).
 Helpers try to set `oom_score_adj=1000` so cgroup OOM prefers a helper over `fvoci-server`; where the container profile denies it (e.g. AppArmor docker-default), the helper still starts without it.
