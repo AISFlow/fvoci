@@ -12,6 +12,9 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use futures_util::StreamExt;
 use fvoci_server::db::pool;
+use fvoci_server::http::routes::streams::{
+    reset_task_stream_task_hint_enqueue_count, task_stream_task_hint_enqueue_count,
+};
 use fvoci_server::streams::{initial_cursor, poll_task_events, EventCursor, StreamHub};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, count_rows, create_project, drop_insert_fail_trigger,
@@ -3899,6 +3902,80 @@ async fn wait_for_hub_active(hub: &StreamHub, expected: usize, within: Duration)
     hub.active_count() == expected
 }
 
+async fn wait_for_task_hint_enqueued(
+    workspace_id: Uuid,
+    project_id: Uuid,
+    min: usize,
+    within: Duration,
+) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if task_stream_task_hint_enqueue_count(workspace_id, project_id) >= min {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    task_stream_task_hint_enqueue_count(workspace_id, project_id) >= min
+}
+
+async fn setup_session_with_hub(
+    harness: &TestDb,
+) -> (axum::Router, String, Uuid, Uuid, std::sync::Arc<StreamHub>) {
+    let state = app_state(&harness.app_url).await;
+    let hub = state.streams.clone();
+    let app = fvoci_server::http::router(state, None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup")
+                .header("content-type", "application/json")
+                .header("origin", "http://localhost")
+                .extension(ConnectInfo(test_peer()))
+                .body(Body::from(
+                    json!({
+                        "email": "sf-owner@example.com",
+                        "password": "supersecret1",
+                        "givenName": "SF",
+                        "workspaceSlug": "sf-hub",
+                        "workspaceName": "SF Hub"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("setup");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let cookie_hdr = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .expect("set-cookie");
+    let cookie = cookie_hdr
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .split('=')
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
+    let admin = admin_pool(harness).await;
+    let owner_id: (Uuid,) = sqlx::query_as("SELECT id FROM fvoci.users WHERE email = $1")
+        .bind("sf-owner@example.com")
+        .fetch_one(&admin)
+        .await
+        .expect("owner");
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'sf-hub'")
+            .fetch_one(&admin)
+            .await
+            .expect("workspace");
+    admin.close().await;
+    (app, cookie, owner_id.0, workspace_id.0, hub)
+}
+
 /// After `event: open`, wait on `gate` then read the rest of the body until disconnect.
 async fn sse_collect_after_open_gate(
     app: axum::Router,
@@ -4357,7 +4434,7 @@ async fn workspace_access_stream_closes_when_member_removed() {
 #[tokio::test]
 async fn task_stream_slow_reader_does_not_block_fast_reader() {
     let harness = TestDb::bootstrap().await;
-    let (app, _cookie, _, workspace_id) = setup_session(&harness).await;
+    let (app, _cookie, _, workspace_id, hub) = setup_session_with_hub(&harness).await;
     let admin = admin_pool(&harness).await;
     let owner = add_workspace_user(&admin, workspace_id, "member", "sf-owner").await;
     let peer = add_workspace_user(&admin, workspace_id, "member", "sf-peer").await;
@@ -4365,7 +4442,11 @@ async fn task_stream_slow_reader_does_not_block_fast_reader() {
     let project_id = lab["id"].as_str().unwrap();
     let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
     let _stall = sse_stall_after_open(app.clone(), path.clone(), owner.cookie.clone());
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        wait_for_hub_active(&hub, 1, Duration::from_secs(5)).await,
+        "slow reader should acquire stream capacity (saw {})",
+        hub.active_count()
+    );
     let fast = tokio::spawn(sse_listen(
         app.clone(),
         path,
@@ -4375,6 +4456,11 @@ async fn task_stream_slow_reader_does_not_block_fast_reader() {
         Some(b"event: task".to_vec()),
         Duration::from_secs(25),
     ));
+    assert!(
+        wait_for_hub_active(&hub, 2, Duration::from_secs(5)).await,
+        "slow reader must hold hub capacity while HTTP body is alive (saw {})",
+        hub.active_count()
+    );
     for i in 0..12 {
         let (status, _) = json_request(
             app.clone(),
@@ -4474,7 +4560,8 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
     let admin = admin_pool(&harness).await;
     let viewer = add_workspace_user(&admin, workspace_id, "member", "revoke-viewer").await;
     let lab = create_project(app.clone(), &owner_cookie, workspace_id, "REV", "private").await;
-    let project_id = lab["id"].as_str().unwrap();
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).expect("project id");
+    reset_task_stream_task_hint_enqueue_count(workspace_id, project_id);
     let (status, _) = json_request(
         app.clone(),
         "POST",
@@ -4493,7 +4580,6 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
         gate_rx,
         Duration::from_secs(30),
     ));
-    tokio::time::sleep(Duration::from_millis(500)).await;
     for i in 0..10 {
         let (status, _) = json_request(
             app.clone(),
@@ -4504,7 +4590,15 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+        if task_stream_task_hint_enqueue_count(workspace_id, project_id) >= 1 {
+            break;
+        }
     }
+    assert!(
+        wait_for_task_hint_enqueued(workspace_id, project_id, 1, Duration::from_secs(20)).await,
+        "expected at least one queued task hint before revoke (saw {})",
+        task_stream_task_hint_enqueue_count(workspace_id, project_id)
+    );
     let (status, _) = json_request(
         app.clone(),
         "DELETE",
@@ -4517,7 +4611,6 @@ async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    tokio::time::sleep(Duration::from_millis(1200)).await;
     gate_tx.send(()).ok();
     let body = collector.await.expect("collector");
     assert!(

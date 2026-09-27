@@ -30,17 +30,20 @@ export function openSharedEventSource(
     entry = { source, refs: 0 };
     poolByUrl.set(url, entry);
   }
-  entry.refs += 1;
+  const capturedEntry = entry;
+  capturedEntry.refs += 1;
 
   const { onOpen, onError } = handlers;
   if (onOpen) {
-    entry.source.addEventListener("open", onOpen);
+    capturedEntry.source.addEventListener("open", onOpen);
   }
   if (onError) {
-    entry.source.addEventListener("error", onError);
+    capturedEntry.source.addEventListener("error", onError);
   }
 
-  const source = entry.source;
+  const source = capturedEntry.source;
+  let closed = false;
+
   return {
     addEventListener: (type, listener) => {
       source.addEventListener(type, listener);
@@ -49,19 +52,22 @@ export function openSharedEventSource(
       source.removeEventListener(type, listener);
     },
     close: () => {
-      const pooled = poolByUrl.get(url);
-      if (!pooled) {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (poolByUrl.get(url) !== capturedEntry) {
         return;
       }
       if (onOpen) {
-        pooled.source.removeEventListener("open", onOpen);
+        capturedEntry.source.removeEventListener("open", onOpen);
       }
       if (onError) {
-        pooled.source.removeEventListener("error", onError);
+        capturedEntry.source.removeEventListener("error", onError);
       }
-      pooled.refs -= 1;
-      if (pooled.refs <= 0) {
-        pooled.source.close();
+      capturedEntry.refs -= 1;
+      if (capturedEntry.refs <= 0) {
+        capturedEntry.source.close();
         poolByUrl.delete(url);
       }
     },

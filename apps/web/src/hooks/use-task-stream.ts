@@ -1,6 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
-import { invalidateTaskCaches } from "@/features/tasks/task-cache";
+import {
+  invalidateTaskCaches,
+  invalidateTaskStreamResyncCaches,
+} from "@/features/tasks/task-cache";
 import { subscribeTaskStream } from "@/lib/task-stream";
 
 /**
@@ -15,8 +18,7 @@ export function useTaskStream(workspaceId: string | undefined, projectId: string
     if (!workspaceId || !projectId) return;
     const sub = subscribeTaskStream(workspaceId, projectId, {
       onResync: () => {
-        void queryClient.invalidateQueries({ queryKey: ["tasks", workspaceId, projectId] });
-        void queryClient.invalidateQueries({ queryKey: ["projects", workspaceId] });
+        invalidateTaskStreamResyncCaches(queryClient, workspaceId, projectId);
       },
       onTask: (hint) => {
         void invalidateTaskCaches(queryClient, workspaceId, projectId, hint.taskId);

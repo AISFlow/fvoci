@@ -24,6 +24,7 @@ import {
 } from "@/features/tasks/queries";
 import { mergeTaskListPages } from "@/features/tasks/task-list-page";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
+import { useTaskStream } from "@/hooks/use-task-stream";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { FALLBACK_TZ } from "@/lib/datetime";
@@ -65,6 +66,7 @@ export function ProjectTasksPage() {
   const milestones = useQuery(projectMilestonesQuery(workspace?.id ?? "", project?.id ?? ""));
   const collection = useQuery(projectCollectionQuery(workspace?.id ?? "", project?.id ?? ""));
   const fields = useQuery(collectionFieldsQuery(workspace?.id ?? "", collection.data?.id ?? ""));
+  useTaskStream(workspace?.id, project?.id);
 
   function applyQuery(next: ViewQuery, viewId: string | null | undefined = selectedViewId) {
     const params = new URLSearchParams(search);

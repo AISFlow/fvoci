@@ -1,8 +1,14 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+#[cfg(feature = "db-tests")]
+use std::collections::BTreeMap;
+#[cfg(feature = "db-tests")]
+use std::sync::Mutex;
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -26,8 +32,54 @@ use crate::projects::ProjectPermission;
 use crate::streams::{
     access_event_targets_user, initial_cursor, poll_access_events, poll_task_events,
     task_stream_wire_hint, EventCursor, StreamAcquireError, StreamGuard, StreamHub,
-    STREAM_CHANNEL_CAPACITY, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
+    STREAM_CHANNEL_CAPACITY, STREAM_HIGH_WATER_MARK, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
 };
+
+#[cfg(feature = "db-tests")]
+static TASK_HINT_ENQUEUED_BY_PROJECT: Mutex<BTreeMap<(Uuid, Uuid), usize>> =
+    Mutex::new(BTreeMap::new());
+
+/// Integration-test barrier: producer successfully queued a task hint (not delivered).
+pub fn task_stream_task_hint_enqueue_count(workspace_id: Uuid, project_id: Uuid) -> usize {
+    #[cfg(feature = "db-tests")]
+    {
+        return TASK_HINT_ENQUEUED_BY_PROJECT
+            .lock()
+            .expect("task hint witness")
+            .get(&(workspace_id, project_id))
+            .copied()
+            .unwrap_or(0);
+    }
+    #[cfg(not(feature = "db-tests"))]
+    {
+        let _ = (workspace_id, project_id);
+        0
+    }
+}
+
+pub fn reset_task_stream_task_hint_enqueue_count(workspace_id: Uuid, project_id: Uuid) {
+    #[cfg(feature = "db-tests")]
+    {
+        TASK_HINT_ENQUEUED_BY_PROJECT
+            .lock()
+            .expect("task hint witness")
+            .remove(&(workspace_id, project_id));
+    }
+    #[cfg(not(feature = "db-tests"))]
+    {
+        let _ = (workspace_id, project_id);
+    }
+}
+
+#[cfg(feature = "db-tests")]
+fn record_task_hint_enqueued(workspace_id: Uuid, project_id: Uuid) {
+    let mut map = TASK_HINT_ENQUEUED_BY_PROJECT
+        .lock()
+        .expect("task hint witness");
+    let key = (workspace_id, project_id);
+    let next = map.get(&key).copied().unwrap_or(0) + 1;
+    map.insert(key, next);
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -228,9 +280,11 @@ struct TaskStreamAuth {
 /// Single bounded hint queue; HTTP `Stream` polls hints and authorizes on consumption.
 struct TaskAuthorizedSseStream {
     queue_rx: tokio::sync::mpsc::Receiver<TaskStreamQueueItem>,
+    queue_body_bytes: Arc<AtomicUsize>,
     auth: TaskStreamAuth,
     pending: Option<TaskStreamQueueItem>,
     authorize: Option<Pin<Box<dyn Future<Output = bool> + Send>>>,
+    _guard: StreamGuard,
 }
 
 impl Stream for TaskAuthorizedSseStream {
@@ -255,7 +309,7 @@ impl Stream for TaskAuthorizedSseStream {
         match authorize.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(false) => {
-                drain_task_queue(&mut this.queue_rx);
+                drain_task_queue(&mut this.queue_rx, &this.queue_body_bytes);
                 this.pending = None;
                 this.authorize = None;
                 Poll::Ready(None)
@@ -263,6 +317,10 @@ impl Stream for TaskAuthorizedSseStream {
             Poll::Ready(true) => {
                 let item = this.pending.take().expect("pending after auth");
                 this.authorize = None;
+                release_queue_body_bytes(
+                    &this.queue_body_bytes,
+                    task_item_body_bytes(&item),
+                );
                 Poll::Ready(Some(Ok(queue_item_to_event(item))))
             }
         }
@@ -279,12 +337,7 @@ fn authorize_queue_item(
     let user_id = auth.user_id;
     let session_id = auth.session_id;
     match item {
-        TaskStreamQueueItem::Open => {
-            Box::pin(
-                async move { session_still_valid(&pool, workspace_id, user_id, session_id).await },
-            )
-        }
-        TaskStreamQueueItem::TaskHint { .. } => Box::pin(async move {
+        TaskStreamQueueItem::Open | TaskStreamQueueItem::TaskHint { .. } => Box::pin(async move {
             task_hint_delivery_authorized(&pool, workspace_id, project_id, user_id, session_id)
                 .await
         }),
@@ -301,15 +354,72 @@ fn queue_item_to_event(item: TaskStreamQueueItem) -> Event {
     }
 }
 
-fn try_enqueue_task_hint(
-    queue_tx: &tokio::sync::mpsc::Sender<TaskStreamQueueItem>,
-    item: TaskStreamQueueItem,
-) -> Result<(), ()> {
-    queue_tx.try_send(item).map_err(|_| ())
+fn task_item_body_bytes(item: &TaskStreamQueueItem) -> usize {
+    match item {
+        TaskStreamQueueItem::Open => "event: open\ndata: {}\n\n".len(),
+        TaskStreamQueueItem::TaskHint { wire_verb, task_id } => {
+            let data = json!({"verb": wire_verb, "taskId": task_id}).to_string();
+            format!("event: task\ndata: {data}\n\n").len()
+        }
+    }
 }
 
-fn drain_task_queue(queue_rx: &mut tokio::sync::mpsc::Receiver<TaskStreamQueueItem>) {
-    while queue_rx.try_recv().is_ok() {}
+fn reserve_queue_body_bytes(budget: &AtomicUsize, bytes: usize, limit: usize) -> bool {
+    loop {
+        let current = budget.load(Ordering::Acquire);
+        let projected = current + bytes;
+        if projected > limit {
+            return false;
+        }
+        if budget
+            .compare_exchange_weak(current, projected, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+fn release_queue_body_bytes(budget: &AtomicUsize, bytes: usize) {
+    budget
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(current.saturating_sub(bytes))
+        })
+        .expect("queue byte budget");
+}
+
+fn try_enqueue_task_hint(
+    queue_tx: &tokio::sync::mpsc::Sender<TaskStreamQueueItem>,
+    queue_body_bytes: &Arc<AtomicUsize>,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    item: TaskStreamQueueItem,
+) -> Result<(), ()> {
+    let bytes = task_item_body_bytes(&item);
+    if !reserve_queue_body_bytes(queue_body_bytes, bytes, STREAM_HIGH_WATER_MARK) {
+        return Err(());
+    }
+    let is_hint = matches!(&item, TaskStreamQueueItem::TaskHint { .. });
+    if queue_tx.try_send(item).is_err() {
+        release_queue_body_bytes(queue_body_bytes, bytes);
+        return Err(());
+    }
+    if is_hint {
+        record_task_hint_enqueued(workspace_id, project_id);
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "db-tests"))]
+fn record_task_hint_enqueued(_workspace_id: Uuid, _project_id: Uuid) {}
+
+fn drain_task_queue(
+    queue_rx: &mut tokio::sync::mpsc::Receiver<TaskStreamQueueItem>,
+    queue_body_bytes: &Arc<AtomicUsize>,
+) {
+    while let Ok(item) = queue_rx.try_recv() {
+        release_queue_body_bytes(queue_body_bytes, task_item_body_bytes(&item));
+    }
 }
 
 async fn task_hint_delivery_authorized(
@@ -335,6 +445,7 @@ fn task_sse_stream(
     guard: StreamGuard,
 ) -> TaskAuthorizedSseStream {
     let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+    let queue_body_bytes = Arc::new(AtomicUsize::new(0));
     let auth = TaskStreamAuth {
         pool: pool.clone(),
         workspace_id,
@@ -343,9 +454,17 @@ fn task_sse_stream(
         session_id,
     };
 
+    let queue_body_bytes_producer = Arc::clone(&queue_body_bytes);
     tokio::spawn(async move {
-        let _guard = guard;
-        if try_enqueue_task_hint(&queue_tx, TaskStreamQueueItem::Open).is_err() {
+        if try_enqueue_task_hint(
+            &queue_tx,
+            &queue_body_bytes_producer,
+            workspace_id,
+            project_id,
+            TaskStreamQueueItem::Open,
+        )
+        .is_err()
+        {
             return;
         }
         let mut cursor = cursor;
@@ -375,6 +494,9 @@ fn task_sse_stream(
                         };
                         if try_enqueue_task_hint(
                             &queue_tx,
+                            &queue_body_bytes_producer,
+                            workspace_id,
+                            project_id,
                             TaskStreamQueueItem::TaskHint { wire_verb, task_id },
                         )
                         .is_err()
@@ -396,9 +518,28 @@ fn task_sse_stream(
 
     TaskAuthorizedSseStream {
         queue_rx,
+        queue_body_bytes,
         auth,
         pending: None,
         authorize: None,
+        _guard: guard,
+    }
+}
+
+struct AccessSseStream {
+    end_rx: tokio::sync::mpsc::Receiver<()>,
+    _disconnect_rx: tokio::sync::mpsc::Receiver<()>,
+    _guard: StreamGuard,
+}
+
+impl Stream for AccessSseStream {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.get_mut().end_rx.poll_recv(cx) {
+            Poll::Ready(Some(())) | Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -410,23 +551,20 @@ fn access_sse_stream(
     session_id: Uuid,
     mut cursor: EventCursor,
     guard: StreamGuard,
-) -> EventReceiverStream {
-    let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+) -> AccessSseStream {
+    let (end_tx, end_rx) = tokio::sync::mpsc::channel(1);
+    let (disconnect_tx, disconnect_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::spawn(async move {
-        let _guard = guard;
-        let _keepalive_sender = tx;
-        loop {
-            if _keepalive_sender.is_closed() {
-                return;
-            }
+        let mut finished = false;
+        while !finished {
             if !hub.accepting() {
-                return;
+                break;
             }
             if !session_still_valid(&pool, workspace_id, user_id, session_id).await {
-                return;
+                break;
             }
             tokio::select! {
-                _ = _keepalive_sender.closed() => return,
+                _ = disconnect_tx.closed() => break,
                 _ = tokio::time::sleep(STREAM_POLL_INTERVAL) => {}
             }
             match poll_access_events(&pool, workspace_id, user_id, &cursor, 50).await {
@@ -437,13 +575,16 @@ fn access_sse_stream(
                             seq: row.seq,
                         };
                         if !session_still_valid(&pool, workspace_id, user_id, session_id).await {
-                            return;
+                            finished = true;
+                            break;
                         }
                         if !membership_role_only(&pool, workspace_id, user_id).await {
-                            return;
+                            finished = true;
+                            break;
                         }
                         if access_event_targets_user(&row, user_id) {
-                            return;
+                            finished = true;
+                            break;
                         }
                     }
                 }
@@ -452,19 +593,12 @@ fn access_sse_stream(
                 }
             }
         }
+        end_tx.try_send(()).ok();
     });
-    EventReceiverStream { rx }
-}
-
-struct EventReceiverStream {
-    rx: tokio::sync::mpsc::Receiver<Result<Event, Infallible>>,
-}
-
-impl Stream for EventReceiverStream {
-    type Item = Result<Event, Infallible>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.get_mut().rx.poll_recv(cx)
+    AccessSseStream {
+        end_rx,
+        _disconnect_rx: disconnect_rx,
+        _guard: guard,
     }
 }
 
@@ -530,4 +664,47 @@ async fn membership_role_only(pool: &sqlx::PgPool, workspace_id: Uuid, user_id: 
         .flatten();
     let _ = tx.commit().await;
     role.is_some()
+}
+
+#[cfg(all(feature = "db-tests", test))]
+mod queue_budget_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    use super::{release_queue_body_bytes, reserve_queue_body_bytes};
+
+    #[test]
+    fn reserve_rolls_back_when_channel_send_fails() {
+        let budget = Arc::new(AtomicUsize::new(0));
+        let bytes = 40;
+        assert!(reserve_queue_body_bytes(&budget, bytes, 100));
+        assert_eq!(budget.load(Ordering::Acquire), bytes);
+        release_queue_body_bytes(&budget, bytes);
+        assert_eq!(budget.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn concurrent_reserves_stay_within_limit() {
+        let budget = Arc::new(AtomicUsize::new(0));
+        let limit = 64;
+        let chunk = 8;
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let budget = Arc::clone(&budget);
+                thread::spawn(move || {
+                    for _ in 0..8 {
+                        reserve_queue_body_bytes(&budget, chunk, limit);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("thread");
+        }
+        assert!(
+            budget.load(Ordering::Acquire) <= limit,
+            "budget must not exceed limit"
+        );
+    }
 }

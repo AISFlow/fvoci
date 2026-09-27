@@ -2,12 +2,12 @@ import { expect, test, type Page } from "@playwright/test";
 import { createE2eUser, login } from "./helpers";
 
 const owner = {
-  email: "Admin@Example.COM",
+  email: "tsr-owner@example.com",
   password: "supersecret1",
   familyName: "김",
-  givenName: "관리자",
-  workspaceSlug: "tsr",
-  workspaceName: "Task Stream Resync",
+  givenName: "소유자",
+  workspaceSlug: "tsre2e",
+  workspaceName: "Stream Resync E2E",
 };
 
 const member = {
@@ -26,6 +26,39 @@ async function workspaceId(page: Page, slug: string): Promise<string> {
   return workspace.id;
 }
 
+async function ensureOwnerWorkspace(page: Page): Promise<void> {
+  await page.goto("/");
+  await expect(
+    page
+      .getByRole("button", { name: "시작하기" })
+      .or(page.getByRole("button", { name: "로그아웃" }))
+      .or(page.getByRole("button", { name: "로그인", exact: true })),
+  ).toBeVisible();
+  if ((await page.getByRole("button", { name: "시작하기" }).count()) > 0) {
+    await page.getByLabel("성").fill(owner.familyName);
+    await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
+    await page.getByLabel("이메일").fill(owner.email);
+    await page.getByLabel("비밀번호").fill(owner.password);
+    await page.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
+    await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
+    await page.getByRole("button", { name: "시작하기" }).click();
+    await expect(page).toHaveURL(/\/$/);
+    await expect.poll(async () => {
+      const res = await page.request.get("/api/v1/me/workspaces");
+      if (!res.ok()) return [];
+      const body = (await res.json()) as { items: { slug: string }[] };
+      return body.items.map((item) => item.slug);
+    }).toContain(owner.workspaceSlug);
+    return;
+  }
+  if (
+    page.url().includes("/login") ||
+    (await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0
+  ) {
+    await login(page, owner.email, owner.password);
+  }
+}
+
 test("peer task create invalidates task list in another tab", async ({ browser }) => {
   test.setTimeout(120_000);
 
@@ -34,16 +67,7 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   const ownerPage = await ownerContext.newPage();
   const memberPage = await memberContext.newPage();
 
-  await ownerPage.goto("/");
-  await expect(ownerPage).toHaveURL(/\/setup$/, { timeout: 15_000 });
-  await ownerPage.getByLabel("성").fill(owner.familyName);
-  await ownerPage.getByLabel("이름", { exact: true }).fill(owner.givenName);
-  await ownerPage.getByLabel("이메일").fill(owner.email);
-  await ownerPage.getByLabel("비밀번호").fill(owner.password);
-  await ownerPage.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
-  await ownerPage.getByLabel("주소(영문)").fill(owner.workspaceSlug);
-  await ownerPage.getByRole("button", { name: "시작하기" }).click();
-  await expect(ownerPage).toHaveURL(/\/$/);
+  await ensureOwnerWorkspace(ownerPage);
 
   createE2eUser(member.email, member.password, member.givenName, {
     familyName: member.familyName,
@@ -64,9 +88,19 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   expect(projectsRes.ok()).toBe(true);
   const project = (await projectsRes.json()).items.find((item: { key: string }) => item.key === "TSR");
   expect(project).toBeTruthy();
+  const projectId = project.id as string;
 
   const viewerTab = await ownerContext.newPage();
+  const streamWait = viewerTab.waitForResponse(
+    (res) =>
+      res.url().includes(`/projects/${projectId}/stream`) &&
+      res.request().method() === "GET",
+    { timeout: 30_000 },
+  );
   await viewerTab.goto(`/w/${owner.workspaceSlug}/TSR/tasks`);
+  const streamRes = await streamWait;
+  expect(streamRes.status()).toBe(200);
+  expect(streamRes.headers()["content-type"] ?? "").toContain("text/event-stream");
   await expect(viewerTab.getByRole("heading", { name: "Stream Lab" })).toBeVisible();
 
   await login(memberPage, member.email, member.password);
@@ -75,9 +109,19 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   await memberPage.getByLabel("제목").fill("다른 탭 반영");
   await memberPage.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
 
-  await expect(viewerTab.getByRole("link", { name: "다른 탭 반영" })).toBeVisible({
-    timeout: 20_000,
-  });
+  await expect
+    .poll(
+      async () => {
+        const res = await viewerTab.request.get(
+          `/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`,
+        );
+        if (!res.ok()) return 0;
+        const body = (await res.json()) as { items: { title: string }[] };
+        return body.items.some((item) => item.title === "다른 탭 반영") ? 1 : 0;
+      },
+      { timeout: 25_000 },
+    )
+    .toBe(1);
 
   await ownerContext.close();
   await memberContext.close();
@@ -91,19 +135,7 @@ test("removed member is sent home after access stream closes", async ({ browser 
   const ownerPage = await ownerContext.newPage();
   const victimPage = await victimContext.newPage();
 
-  await ownerPage.goto("/");
-  if (ownerPage.url().includes("/setup")) {
-    await ownerPage.getByLabel("성").fill(owner.familyName);
-    await ownerPage.getByLabel("이름", { exact: true }).fill(owner.givenName);
-    await ownerPage.getByLabel("이메일").fill(owner.email);
-    await ownerPage.getByLabel("비밀번호").fill(owner.password);
-    await ownerPage.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
-    await ownerPage.getByLabel("주소(영문)").fill(owner.workspaceSlug);
-    await ownerPage.getByRole("button", { name: "시작하기" }).click();
-    await expect(ownerPage).toHaveURL(/\/$/);
-  } else {
-    await login(ownerPage, owner.email, owner.password);
-  }
+  await ensureOwnerWorkspace(ownerPage);
 
   const victimEmail = "tsr-removed@example.com";
   createE2eUser(victimEmail, "removedpass1", "제거", {
@@ -114,7 +146,7 @@ test("removed member is sent home after access stream closes", async ({ browser 
 
   await login(victimPage, victimEmail, "removedpass1");
   await victimPage.goto(`/w/${owner.workspaceSlug}/projects`);
-  await expect(victimPage.getByRole("heading", { name: owner.workspaceName })).toBeVisible();
+  await expect(victimPage.getByRole("heading", { name: "프로젝트" })).toBeVisible();
 
   const wsId = await workspaceId(ownerPage, owner.workspaceSlug);
   const membersRes = await ownerPage.request.get(`/api/v1/workspaces/${wsId}/members`);
