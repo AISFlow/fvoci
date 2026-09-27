@@ -550,36 +550,9 @@ pub async fn disarm_join_channel_admission_witness(conn_id: Uuid) {
 }
 
 #[cfg(feature = "db-tests")]
-static NEXT_JOIN_MAILBOX_WITNESS: std::sync::LazyLock<
-    tokio::sync::Mutex<Option<oneshot::Sender<Uuid>>>,
-> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
-
-/// Fires when the next join is admitted to the room actor mailbox (before `handle_join` runs).
-#[cfg(feature = "db-tests")]
-pub async fn arm_next_join_mailbox_witness() -> oneshot::Receiver<Uuid> {
-    let (tx, rx) = oneshot::channel();
-    assert!(
-        NEXT_JOIN_MAILBOX_WITNESS
-            .lock()
-            .await
-            .replace(tx)
-            .is_none()
-    );
-    rx
-}
-
-#[cfg(feature = "db-tests")]
-pub async fn disarm_next_join_mailbox_witness() {
-    NEXT_JOIN_MAILBOX_WITNESS.lock().await.take();
-}
-
-#[cfg(feature = "db-tests")]
 async fn signal_join_channel_admitted(conn_id: Uuid) {
     if let Some(tx) = JOIN_CHANNEL_ADMISSIONS.lock().await.remove(&conn_id) {
         let _ = tx.send(());
-    }
-    if let Some(tx) = NEXT_JOIN_MAILBOX_WITNESS.lock().await.take() {
-        let _ = tx.send(conn_id);
     }
 }
 
