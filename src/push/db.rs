@@ -76,6 +76,7 @@ pub async fn register_subscription(
     upsert_subscription(
         &mut tx,
         user_id,
+        Some(session_id),
         &subscription.endpoint,
         &subscription.p256dh,
         &subscription.auth,
@@ -85,27 +86,31 @@ pub async fn register_subscription(
     Ok(true)
 }
 
-/// Upsert on `(user_id, endpoint)`, then drop the user's least recently
-/// updated rows beyond [`PUSH_SUBSCRIPTIONS_PER_USER`].
+/// Upsert on `(user_id, endpoint)` bound to the registering session, then
+/// drop the user's least recently updated rows beyond
+/// [`PUSH_SUBSCRIPTIONS_PER_USER`].
 pub async fn upsert_subscription(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
+    session_id: Option<Uuid>,
     endpoint: &str,
     p256dh: &str,
     auth: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO fvoci.push_subscriptions (user_id, endpoint, p256dh, auth)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO fvoci.push_subscriptions (user_id, endpoint, p256dh, auth, session_id)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (user_id, endpoint) DO UPDATE
-        SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, updated_at = clock_timestamp()
+        SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
+            session_id = EXCLUDED.session_id, updated_at = clock_timestamp()
         "#,
     )
     .bind(user_id)
     .bind(endpoint)
     .bind(p256dh)
     .bind(auth)
+    .bind(session_id)
     .execute(&mut **tx)
     .await?;
     sqlx::query(
@@ -125,6 +130,32 @@ pub async fn upsert_subscription(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// Logout disconnect: removes the logged-out user's rows for this browser,
+/// that is rows registered by the ending session plus the endpoint the
+/// browser reported. Keyed by the user, so another account's row for the same
+/// endpoint and this user's other devices stay. Runs in the logout
+/// transaction; a send holding the row lock finishes first, and no send starts
+/// after the logout commits (the sender re-reads the row before each POST).
+pub async fn disconnect_browser(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    session_id: Uuid,
+    endpoint: Option<&str>,
+) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query(
+        r#"
+        DELETE FROM fvoci.push_subscriptions
+        WHERE user_id = $1 AND (session_id = $2 OR endpoint = $3)
+        "#,
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .bind(endpoint)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected())
 }
 
 pub async fn remove_by_endpoint(

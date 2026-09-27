@@ -11,7 +11,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::dto::{
-    LoginBody, LoginResponse, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
+    LoginBody, LoginResponse, LogoutBody, OkResponse, PasswordResetBody, PasswordResetConfirmBody,
     SessionUserOutput,
 };
 use crate::auth::password::hash_password;
@@ -101,10 +101,23 @@ pub(crate) fn issued_response(cookie_secure: bool, issued: Issued) -> Response {
     }
 }
 
+/// Optional logout body. Logout must not fail on it: an empty, malformed or
+/// oversized body only means no endpoint is reported.
+fn logout_push_endpoint(body: &[u8]) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    let parsed: LogoutBody = serde_json::from_slice(body).ok()?;
+    parsed
+        .push_endpoint
+        .filter(|endpoint| !endpoint.is_empty() && endpoint.len() <= 2048)
+}
+
 async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
     jar: CookieJar,
+    body: axum::body::Bytes,
 ) -> Result<Response, AppError> {
     check_origin(&headers, &state.public_origin)?;
     let token = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
@@ -119,7 +132,12 @@ async fn logout(
         None
     };
     if let Some(token) = token {
-        state.auth.logout(&token, actor).await.map_err(internal)?;
+        let push_endpoint = logout_push_endpoint(&body);
+        state
+            .auth
+            .logout(&token, actor, push_endpoint.as_deref())
+            .await
+            .map_err(internal)?;
     }
     let cookie = clear_session_cookie(state.cookie_secure);
     let mut response = StatusCode::NO_CONTENT.into_response();

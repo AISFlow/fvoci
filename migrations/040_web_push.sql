@@ -20,7 +20,10 @@ CREATE TABLE fvoci.push_subscriptions (
     auth text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    -- Session that last registered this browser: its logout disconnects it.
+    session_id uuid,
     CONSTRAINT push_subscriptions_user_endpoint_unique UNIQUE (user_id, endpoint),
+    CONSTRAINT push_subscriptions_endpoint_len CHECK (octet_length(endpoint) <= 2048),
     -- Unpadded base64url length locks (65-byte P-256 public, 16-byte auth secret).
     CONSTRAINT push_subscriptions_p256dh_len CHECK (char_length(p256dh) = 87),
     CONSTRAINT push_subscriptions_auth_len CHECK (char_length(auth) = 22)
@@ -31,6 +34,30 @@ CREATE INDEX push_subscriptions_user_updated_idx
 
 CREATE INDEX push_subscriptions_endpoint_idx
     ON fvoci.push_subscriptions (endpoint);
+
+CREATE INDEX push_subscriptions_user_session_idx
+    ON fvoci.push_subscriptions (user_id, session_id);
+
+-- Pending sends fanned out by the `push` outbox consumer in the same
+-- transaction as its processed mark. The sender claims rows, re-checks the
+-- recipient right before each POST, and deletes them after the attempt.
+CREATE TABLE fvoci.push_deliveries (
+    id uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
+    event_id uuid NOT NULL,
+    workspace_id uuid NOT NULL REFERENCES fvoci.workspaces (id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES fvoci.users (id) ON DELETE CASCADE,
+    endpoint text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    claimed_until timestamptz,
+    CONSTRAINT push_deliveries_event_user_endpoint_unique UNIQUE (event_id, user_id, endpoint)
+);
+
+ALTER TABLE fvoci.push_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fvoci.push_deliveries FORCE ROW LEVEL SECURITY;
+CREATE POLICY system_only ON fvoci.push_deliveries
+    AS PERMISSIVE FOR ALL TO public
+    USING ((SELECT public.app_system_ctx_on()))
+    WITH CHECK ((SELECT public.app_system_ctx_on()));
 
 -- No RLS: rows are user-global; the app reads/writes them in system context only.
 

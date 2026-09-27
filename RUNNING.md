@@ -896,6 +896,21 @@ serve the unhashed `/sw.js` (the web build copies `apps/web/public/sw.js`).
   and `GET /api/v1/instance` answers `webPushPublicKey: null`, so the toggle in
   workspace notification settings shows "not available". Notifications created
   while keys are missing are not pushed later.
+- **Delivery.** The `push` outbox consumer queues one `push_deliveries` row per
+  recipient device in the same transaction as its processed mark; an
+  in-process sender claims up to 8 rows (60 s claim lease) and, right before
+  posting, re-checks the event's current recipients (membership, resource
+  access, in-app preference), that the user is not deleted or suspended, and
+  that the subscription row still exists. Each device gets one attempt with a
+  5 s timeout; 404/410 remove the endpoint, other failures are logged with the
+  endpoint origin only. A crash or a failed record after a send re-sends that
+  batch once the lease expires (at least once per device). Rows older than
+  24 h are dropped unsent.
+- **Logout.** Logging out removes this browser's subscription for that user in
+  the logout transaction: the row registered by the ending session plus the
+  endpoint the browser reports in the logout request, never other accounts'
+  rows or the user's other devices. The browser then unsubscribes. A send
+  already in flight for that row finishes first; none starts after logout.
 - **Rotation.** `fvoci-migrate --rotate-vapid` (server environment, app role)
   stores a new keypair, deletes every browser subscription (push services
   reject old-key subscriptions with 401/403, which the sender does not clean

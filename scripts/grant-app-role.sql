@@ -243,6 +243,7 @@ GRANT EXECUTE ON FUNCTION fvoci.app_admin_user_restore_withdrawn(uuid) TO :"app_
 REVOKE ALL ON fvoci.instance_config FROM :"app_role";
 GRANT SELECT (vapid_public_key) ON fvoci.instance_config TO :"app_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.push_subscriptions TO :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON fvoci.push_deliveries TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_vapid_public_key() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION fvoci.app_vapid_public_key() TO :"app_role";
 REVOKE EXECUTE ON FUNCTION fvoci.app_vapid_private_key() FROM PUBLIC;

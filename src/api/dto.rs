@@ -434,6 +434,16 @@ pub struct NotificationPrefsBody {
     pub mail_digest: bool,
 }
 
+/// Optional logout body: this browser's Web Push endpoint, disconnected
+/// together with the session.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+pub struct LogoutBody {
+    #[serde(default)]
+    pub push_endpoint: Option<String>,
+}
+
 /// `PushSubscription.toJSON()` keys: unpadded base64url.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

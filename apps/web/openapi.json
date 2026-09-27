@@ -1303,6 +1303,23 @@
           "auth"
         ],
         "operationId": "logout",
+        "requestBody": {
+          "description": "Optional: this browser's push endpoint",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/LogoutBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "204": {
             "description": "Logged out"
@@ -26779,6 +26796,19 @@
             "description": "Null when the account has MFA enabled: the session is issued by\n`/auth/mfa/verify` with `mfaToken` (source `loginOutput`)."
           }
         }
+      },
+      "LogoutBody": {
+        "type": "object",
+        "description": "Optional logout body: this browser's Web Push endpoint, disconnected\ntogether with the session.",
+        "properties": {
+          "pushEndpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "LookupItemOutput": {
         "type": "object",

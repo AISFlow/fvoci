@@ -87,15 +87,11 @@ pub async fn send_push(
     subject: &str,
     target: PushTarget<'_>,
     payload: &PushPayload,
+    timeout: Duration,
 ) -> Result<PushSendOutcome, OutboundError> {
     let request = build_request(vapid, subject, &target, payload)?;
     let status = outbound
-        .post(
-            target.endpoint,
-            &request.headers,
-            request.body,
-            PUSH_TIMEOUT,
-        )
+        .post(target.endpoint, &request.headers, request.body, timeout)
         .await?;
     Ok(match status {
         200..=299 => PushSendOutcome::Delivered,

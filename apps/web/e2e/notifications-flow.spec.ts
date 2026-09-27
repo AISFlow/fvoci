@@ -171,6 +171,11 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
         },
       }),
       unsubscribe: async () => {
+        if (sessionStorage.getItem("e2e-push-fail-unsubscribe") === "1") {
+          sessionStorage.removeItem("e2e-push-fail-unsubscribe");
+          log("unsubscribe-failed");
+          throw new Error("push service unreachable");
+        }
         log("unsubscribe");
         sessionStorage.removeItem(KEY);
         return true;
@@ -249,4 +254,31 @@ async function browserPushToggle(page: Page, workspaceId: string): Promise<void>
   await expect(page.getByLabel("브라우저 푸시")).not.toBeChecked();
   expect(await pushLog()).toEqual(["subscribe:87", "unsubscribe", "subscribe:87", "unsubscribe"]);
   expect(requests).toEqual([]);
+
+  // Logout disconnects this browser: the logout request reports the endpoint
+  // (the server drops the row in the logout transaction) even when the
+  // browser-side unsubscribe then fails.
+  const reenabled = page.waitForResponse(isPut);
+  await page.getByLabel("브라우저 푸시").click();
+  expect((await reenabled).status()).toBe(200);
+  await expect(page.getByLabel("브라우저 푸시")).toBeChecked();
+  const endpoint: string = JSON.parse(
+    (await page.evaluate(() => sessionStorage.getItem("e2e-push-subscription"))) ?? "{}",
+  ).endpoint;
+  await page.evaluate(() => sessionStorage.setItem("e2e-push-fail-unsubscribe", "1"));
+  const logoutRequest = page.waitForRequest(
+    (request) => request.url().endsWith("/api/v1/auth/logout") && request.method() === "POST",
+  );
+  await logout(page);
+  expect((await logoutRequest).postDataJSON()).toEqual({ pushEndpoint: endpoint });
+  expect((await pushLog()).at(-1)).toBe("unsubscribe-failed");
+
+  // The next account in this browser profile never sees the leftover
+  // subscription as its own: shown off, and removed from the browser.
+  await login(page, owner.email, owner.password);
+  await page.goto(`/w/${owner.workspaceSlug}/settings`);
+  await expect(page.getByLabel("브라우저 푸시")).toBeEnabled({ timeout: 15_000 });
+  await expect(page.getByLabel("브라우저 푸시")).not.toBeChecked();
+  await expect.poll(async () => (await pushLog()).at(-1)).toBe("unsubscribe");
+  expect(await page.evaluate(() => sessionStorage.getItem("e2e-push-subscription"))).toBeNull();
 }

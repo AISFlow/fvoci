@@ -41,7 +41,7 @@ use crate::api::dto::{
     InvitationConsentItem, InvitationCreateBody, InvitationCreateResponse, InvitationLegalDocument,
     InvitationPublicResponse, LabelListResponse, LabelOutput, LegalDocumentOutput,
     LegalPublishBody, LegalVersionMetaOutput, LegalVersionsResponse, LoginBody, LoginResponse,
-    LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput,
+    LogoutBody, LookupItemOutput, LookupListResponse, MeApiTokenCreateBody, MemberConsentOutput,
     MemberResponse, MemberRoleBody, MembersResponse, MilestoneListResponse, MilestoneOutput,
     MoveDocumentBody, MoveTaskBody, NotificationItemOutput, NotificationListResponse,
     NotificationPatchBody, NotificationPrefsBody, NotificationReadAllResponse,
@@ -475,6 +475,7 @@ impl Modify for CookieSecurityAddon {
             NotificationPrefsBody,
             PushSubscriptionBody,
             PushSubscriptionKeysBody,
+            LogoutBody,
             CreateDocumentBody,
             PatchDocumentBody,
             DocumentMetaResponse,
@@ -1002,6 +1003,7 @@ fn login() {}
     path = "/api/v1/auth/logout",
     tag = "auth",
     security(("fvoci_session" = [])),
+    request_body(content = Option<LogoutBody>, description = "Optional: this browser's push endpoint"),
     responses(
         (status = 204, description = "Logged out"),
     )

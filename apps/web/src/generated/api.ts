@@ -4699,6 +4699,13 @@ export interface components {
              */
             userId: string | null;
         };
+        /**
+         * @description Optional logout body: this browser's Web Push endpoint, disconnected
+         *     together with the session.
+         */
+        LogoutBody: {
+            pushEndpoint?: string | null;
+        };
         LookupItemOutput: {
             displayId: string;
             id: string;
@@ -6747,7 +6754,12 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional: this browser's push endpoint */
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["LogoutBody"] | null;
+            };
+        };
         responses: {
             /** @description Logged out */
             204: {
