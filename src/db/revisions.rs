@@ -7,9 +7,13 @@ use crate::db::context::{session_is_live, set_tenant};
 use crate::db::documents::workspace_is_live;
 use crate::db::identity::{append_event, EventAppend};
 
+const SESSION_REVISION_HEAD_RETRIES: u32 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevisionDbError {
     NotFound,
+    /// Observed revision head changed between compare and INSERT.
+    StaleRevisionHead,
     Forbidden,
     /// Task revision write on an archived task (409 `task_archived`).
     TaskArchived,
@@ -74,10 +78,107 @@ pub struct CreateRevisionInput {
     pub reason: String,
 }
 
+/// Observed revision head before semantic compare; re-checked under row locks at INSERT.
+#[derive(Debug, Clone)]
+pub struct SystemRevisionHead {
+    pub latest_revision_id: Option<Uuid>,
+    pub latest_y_snapshot: Option<Vec<u8>>,
+}
+
+impl SystemRevisionHead {
+    pub fn from_latest(row: Option<(Uuid, Vec<u8>)>) -> Self {
+        match row {
+            None => Self {
+                latest_revision_id: None,
+                latest_y_snapshot: None,
+            },
+            Some((id, snap)) => Self {
+                latest_revision_id: Some(id),
+                latest_y_snapshot: Some(snap),
+            },
+        }
+    }
+
+    fn matches_current(&self, current: Option<(Uuid, Vec<u8>)>) -> bool {
+        match (self.latest_revision_id, current) {
+            (None, None) => true,
+            (Some(expected_id), Some((id, snap))) => {
+                expected_id == id
+                    && self
+                        .latest_y_snapshot
+                        .as_deref()
+                        .is_some_and(|fenced| fenced == snap.as_slice())
+            }
+            _ => false,
+        }
+    }
+}
+
+pub const SYSTEM_REVISION_HEAD_RETRIES: u32 = SESSION_REVISION_HEAD_RETRIES;
+
 #[derive(Debug, Clone)]
 pub struct PersistedCollabSource {
     pub snapshot: Vec<u8>,
     pub tail: Vec<Vec<u8>>,
+}
+
+/// Durable collab snapshot + tail from DB (session revision capture; no user gate).
+#[derive(Debug, Clone)]
+pub struct DurableCollabSnapshot {
+    pub snapshot: Vec<u8>,
+    pub tail: Vec<Vec<u8>>,
+    pub tail_seq: i64,
+    pub snapshot_cutoff_seq: i64,
+}
+
+/// Load persisted collab bytes for automatic session snapshots (tenant-scoped, live target only).
+pub async fn load_durable_collab_for_system(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    target: RevisionTarget,
+) -> Result<Result<DurableCollabSnapshot, RevisionDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    if !workspace_is_live(&mut tx, workspace_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let (state_sql, tail_sql) = match target {
+        RevisionTarget::Document(_) => (
+            "SELECT state, encoding, snapshot_cutoff_seq, tail_seq FROM fvoci.document_states WHERE workspace_id = $1 AND document_id = $2",
+            "SELECT payload FROM fvoci.document_collab_updates WHERE workspace_id = $1 AND document_id = $2 AND seq > $3 ORDER BY seq ASC",
+        ),
+        RevisionTarget::Task(_) => (
+            "SELECT state, encoding, snapshot_cutoff_seq, tail_seq FROM fvoci.task_states WHERE workspace_id = $1 AND task_id = $2",
+            "SELECT payload FROM fvoci.task_collab_updates WHERE workspace_id = $1 AND task_id = $2 AND seq > $3 ORDER BY seq ASC",
+        ),
+    };
+    let state: Option<(Vec<u8>, i16, i64, i64)> = sqlx::query_as(state_sql)
+        .bind(workspace_id)
+        .bind(target.id())
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((snapshot, encoding, snapshot_cutoff_seq, tail_seq)) = state else {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    };
+    if encoding != 1 {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let tail: Vec<(Vec<u8>,)> = sqlx::query_as(tail_sql)
+        .bind(workspace_id)
+        .bind(target.id())
+        .bind(snapshot_cutoff_seq)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Ok(DurableCollabSnapshot {
+        snapshot,
+        tail: tail.into_iter().map(|(payload,)| payload).collect(),
+        tail_seq,
+        snapshot_cutoff_seq,
+    }))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,8 +188,16 @@ pub struct RevisionCursor {
 }
 
 const MANUAL_REASON: &str = "manual";
+const SESSION_REASON: &str = "session";
+const SCHEDULED_REASON: &str = "scheduled";
 const TARGET_DOCUMENT: &str = "document";
 const TARGET_TASK: &str = "task";
+
+type TaskRevisionLockRow = (Uuid, Option<DateTime<Utc>>);
+
+fn is_automatic_revision_reason(reason: &str) -> bool {
+    reason == SESSION_REASON || reason == SCHEDULED_REASON
+}
 
 type RevisionMetaRow = (Uuid, String, Uuid, String, Option<Uuid>, DateTime<Utc>);
 type RevisionDetailRow = (
@@ -560,13 +669,14 @@ pub async fn create_manual_revision(
             return Ok(Err(err));
         }
     }
-    let recent: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
+    let recent: Option<(Uuid, Vec<u8>, String)> = sqlx::query_as(
         r#"
-        SELECT id, y_snapshot
+        SELECT id, y_snapshot, reason
         FROM fvoci.revisions
         WHERE workspace_id = $1 AND target_kind = $2 AND target_id = $3
         ORDER BY created_at DESC, id DESC
         LIMIT 1
+        FOR UPDATE
         "#,
     )
     .bind(workspace_id)
@@ -574,8 +684,23 @@ pub async fn create_manual_revision(
     .bind(target.id())
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some((id, prev_snap)) = recent {
+    if let Some((id, prev_snap, reason)) = recent {
         if prev_snap == input.y_snapshot {
+            if is_automatic_revision_reason(&reason) {
+                sqlx::query(
+                    r#"
+                    UPDATE fvoci.revisions
+                    SET reason = $3, created_by = $4
+                    WHERE workspace_id = $1 AND id = $2
+                    "#,
+                )
+                .bind(workspace_id)
+                .bind(id)
+                .bind(MANUAL_REASON)
+                .bind(actor_user_id)
+                .execute(&mut *tx)
+                .await?;
+            }
             tx.commit().await?;
             return Ok(Ok(id));
         }
@@ -602,6 +727,257 @@ pub async fn create_manual_revision(
         input.reason.as_str()
     })
     .bind(actor_user_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Ok(id))
+}
+
+async fn lock_system_revision_target(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    target: RevisionTarget,
+    expected_writer_generation: Option<i64>,
+) -> Result<Result<(), RevisionDbError>, sqlx::Error> {
+    if !workspace_is_live(&mut *tx, workspace_id).await? {
+        return Ok(Err(RevisionDbError::NotFound));
+    }
+    let writer_generation = match target {
+        RevisionTarget::Document(document_id) => {
+            let affiliation: Option<(Option<Uuid>,)> = sqlx::query_as(
+                "SELECT project_id FROM fvoci.documents WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace_id)
+            .bind(document_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let Some((expected_project_id,)) = affiliation else {
+                return Ok(Err(RevisionDbError::NotFound));
+            };
+            if let Some(project_id) = expected_project_id {
+                let project: Option<(Uuid,)> = sqlx::query_as(
+                    r#"
+                    SELECT id FROM fvoci.projects
+                    WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+                    FOR SHARE
+                    "#,
+                )
+                .bind(workspace_id)
+                .bind(project_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if project.is_none() {
+                    return Ok(Err(RevisionDbError::NotFound));
+                }
+            }
+            let row: Option<(Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+                r#"
+                SELECT project_id, deleted_at
+                FROM fvoci.documents
+                WHERE workspace_id = $1 AND id = $2
+                FOR UPDATE
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(document_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let Some((project_id, deleted_at)) = row else {
+                return Ok(Err(RevisionDbError::NotFound));
+            };
+            if deleted_at.is_some() || project_id != expected_project_id {
+                return Ok(Err(RevisionDbError::NotFound));
+            }
+            let state: Option<(i64,)> = sqlx::query_as(
+                r#"
+                SELECT writer_generation
+                FROM fvoci.document_states
+                WHERE workspace_id = $1 AND document_id = $2
+                FOR UPDATE
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(document_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            state.map(|(g,)| g)
+        }
+        RevisionTarget::Task(task_id) => {
+            let expected: Option<(Uuid,)> = sqlx::query_as(
+                r#"
+                SELECT project_id FROM fvoci.tasks
+                WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let Some((expected_project_id,)) = expected else {
+                return Ok(Err(RevisionDbError::NotFound));
+            };
+            let project: Option<(Uuid,)> = sqlx::query_as(
+                r#"
+                SELECT id FROM fvoci.projects
+                WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+                FOR SHARE
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(expected_project_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if project.is_none() {
+                return Ok(Err(RevisionDbError::NotFound));
+            }
+            let row: Option<TaskRevisionLockRow> = sqlx::query_as(
+                r#"
+                SELECT project_id, deleted_at
+                FROM fvoci.tasks
+                WHERE workspace_id = $1 AND id = $2
+                FOR NO KEY UPDATE
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let Some((project_id, deleted_at)) = row else {
+                return Ok(Err(RevisionDbError::NotFound));
+            };
+            if deleted_at.is_some() || project_id != expected_project_id {
+                return Ok(Err(RevisionDbError::NotFound));
+            }
+            let state: Option<(i64,)> = sqlx::query_as(
+                r#"
+                SELECT writer_generation
+                FROM fvoci.task_states
+                WHERE workspace_id = $1 AND task_id = $2
+                FOR UPDATE
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            state.map(|(g,)| g)
+        }
+    };
+    let Some(writer_generation) = writer_generation else {
+        return Ok(Err(RevisionDbError::NotFound));
+    };
+    if let Some(expected) = expected_writer_generation {
+        if writer_generation != expected {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+    }
+    Ok(Ok(()))
+}
+
+async fn latest_revision_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    target: RevisionTarget,
+) -> Result<Option<(Uuid, Vec<u8>)>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT id, y_snapshot
+        FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = $2 AND target_id = $3
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target.kind_str())
+    .bind(target.id())
+    .fetch_optional(&mut **tx)
+    .await
+}
+
+/// System-authored revision (`created_by` null). No user permission gate.
+pub async fn latest_revision_y_snapshot(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    target: RevisionTarget,
+) -> Result<Option<(Uuid, Vec<u8>)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let row: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
+        r#"
+        SELECT id, y_snapshot
+        FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = $2 AND target_id = $3
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target.kind_str())
+    .bind(target.id())
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row)
+}
+
+pub async fn create_system_revision(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    target: RevisionTarget,
+    input: CreateRevisionInput,
+    expected_writer_generation: i64,
+    head_fence: SystemRevisionHead,
+) -> Result<Result<Uuid, RevisionDbError>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    match lock_system_revision_target(
+        &mut tx,
+        workspace_id,
+        target,
+        Some(expected_writer_generation),
+    )
+    .await?
+    {
+        Ok(()) => {}
+        Err(err) => {
+            tx.rollback().await?;
+            return Ok(Err(err));
+        }
+    }
+    let recent = latest_revision_in_tx(&mut tx, workspace_id, target).await?;
+    if !head_fence.matches_current(recent.clone()) {
+        tx.rollback().await?;
+        return Ok(Err(RevisionDbError::StaleRevisionHead));
+    }
+    if let Some((id, prev_snap)) = recent {
+        if prev_snap == input.y_snapshot {
+            tx.commit().await?;
+            return Ok(Ok(id));
+        }
+    }
+    let id = Uuid::now_v7();
+    let reason = if input.reason.is_empty() {
+        SESSION_REASON
+    } else {
+        input.reason.as_str()
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.revisions (
+            id, workspace_id, target_kind, target_id, y_snapshot, encoding,
+            content_json, text, reason, created_by
+        ) VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, NULL)
+        "#,
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .bind(target.kind_str())
+    .bind(target.id())
+    .bind(&input.y_snapshot)
+    .bind(&input.content_json)
+    .bind(&input.text)
+    .bind(reason)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

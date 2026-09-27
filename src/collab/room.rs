@@ -28,9 +28,15 @@ use crate::collab::config::CollabConfig;
 use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
+use crate::collab::revision::prepare_revision_text;
 use crate::collab::validation::{
     classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
     ValidateStageTimings,
+};
+use crate::db::revisions::{
+    create_system_revision, latest_revision_y_snapshot, load_durable_collab_for_system,
+    CreateRevisionInput, RevisionDbError, RevisionTarget, SystemRevisionHead,
+    SYSTEM_REVISION_HEAD_RETRIES,
 };
 
 const MAX_REJECTED_CANDIDATES_PER_USER: usize = 8;
@@ -395,6 +401,47 @@ pub async fn disarm_append_projection_barrier(document_id: Uuid) {
 #[cfg(feature = "db-tests")]
 async fn pause_for_append_projection_barrier(document_id: Uuid) {
     let barrier = APPEND_PROJECTION_BARRIERS.lock().await.remove(&document_id);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached_tx.send(());
+        let _ = barrier.proceed_rx.await;
+    }
+}
+
+#[cfg(feature = "db-tests")]
+static SESSION_REVISION_PERSIST_BARRIERS: std::sync::LazyLock<
+    tokio::sync::Mutex<HashMap<Uuid, AppendRevokeBarrier>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "db-tests")]
+pub async fn arm_session_revision_persist_barrier(
+    document_id: Uuid,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (proceed_tx, proceed_rx) = oneshot::channel();
+    SESSION_REVISION_PERSIST_BARRIERS.lock().await.insert(
+        document_id,
+        AppendRevokeBarrier {
+            reached_tx,
+            proceed_rx,
+        },
+    );
+    (reached_rx, proceed_tx)
+}
+
+#[cfg(feature = "db-tests")]
+pub async fn disarm_session_revision_persist_barrier(document_id: Uuid) {
+    SESSION_REVISION_PERSIST_BARRIERS
+        .lock()
+        .await
+        .remove(&document_id);
+}
+
+#[cfg(feature = "db-tests")]
+async fn pause_for_session_revision_persist_barrier(document_id: Uuid) {
+    let barrier = SESSION_REVISION_PERSIST_BARRIERS
+        .lock()
+        .await
+        .remove(&document_id);
     if let Some(barrier) = barrier {
         let _ = barrier.reached_tx.send(());
         let _ = barrier.proceed_rx.await;
@@ -875,6 +922,8 @@ impl std::fmt::Debug for JoinDelivery {
 #[derive(Clone)]
 pub struct RoomHandle {
     tx: mpsc::Sender<RoomCommand>,
+    /// Set before `Shutdown` is enqueued so in-flight session snapshot work can abort.
+    session_cancel: watch::Sender<bool>,
 }
 
 impl RoomHandle {
@@ -921,6 +970,7 @@ impl RoomHandle {
     }
 
     pub async fn shutdown(&self) {
+        let _ = self.session_cancel.send(true);
         let _ = self.tx.send(RoomCommand::Shutdown).await;
     }
 
@@ -1110,6 +1160,16 @@ struct RoomActor {
     /// Set when the dedicated fence connection is lost; actor exits once empty.
     fence_lost: bool,
     user_reject_budgets: HashMap<Uuid, UserRejectBudget>,
+    session_cancel_rx: watch::Receiver<bool>,
+    /// Last-disconnect session snapshot (`captured` set after durable reload + primary capture).
+    session_revision: Option<SessionRevisionState>,
+}
+
+struct SessionRevisionState {
+    writer_generation: i64,
+    /// Set after capture; retained across `StaleRevisionHead` retries without recapture.
+    captured: Option<CapturedRevision>,
+    head_retries: u32,
 }
 
 pub async fn spawn_room(
@@ -1135,6 +1195,7 @@ pub async fn spawn_room(
         }
     };
     let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
+    let (session_cancel_tx, session_cancel_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = oneshot::channel();
     let actor = RoomActor {
         workspace_id,
@@ -1167,6 +1228,8 @@ pub async fn spawn_room(
         flushing_awareness: false,
         fence_lost: false,
         user_reject_budgets: HashMap::new(),
+        session_cancel_rx,
+        session_revision: None,
     };
     tokio::spawn(async move {
         let mut actor = actor;
@@ -1186,7 +1249,13 @@ pub async fn spawn_room(
             let _ = finished_tx.send(());
         }
     });
-    Ok((RoomHandle { tx }, finished_rx))
+    Ok((
+        RoomHandle {
+            tx,
+            session_cancel: session_cancel_tx,
+        },
+        finished_rx,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1311,6 +1380,7 @@ impl RoomActor {
                         }
                         Some(RoomCommand::Shutdown) => {
                             self.shutting_down = true;
+                            self.abort_session_revision_work();
                             break;
                         }
                         #[cfg(feature = "db-tests")]
@@ -1332,6 +1402,9 @@ impl RoomActor {
                 }
             }
             self.publish_live_conns();
+            if self.session_revision.is_some() && !self.shutting_down {
+                let _ = self.advance_session_revision().await;
+            }
             if self.fence_lost && self.connections.is_empty() {
                 break;
             }
@@ -1491,6 +1564,7 @@ impl RoomActor {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
+        self.try_schedule_session_revision();
     }
 
     async fn close_connection_ordered(&mut self, conn_id: Uuid, code: u16, reason: &str) {
@@ -1498,6 +1572,289 @@ impl RoomActor {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
+        self.try_schedule_session_revision();
+    }
+
+    fn revision_target(&self) -> RevisionTarget {
+        match self.kind {
+            CollabKind::Document => RevisionTarget::Document(self.document_id),
+            CollabKind::Task => RevisionTarget::Task(self.document_id),
+        }
+    }
+
+    fn session_revision_scheduling_blocked(&self) -> bool {
+        self.shutting_down
+            || self.fence_lost
+            || !self.connections.is_empty()
+            || !self.committed_loaded
+    }
+
+    fn session_revision_cancelled(&self) -> bool {
+        self.shutting_down || self.fence_lost || *self.session_cancel_rx.borrow()
+    }
+
+    fn abort_session_revision_work(&mut self) {
+        self.session_revision = None;
+    }
+
+    async fn capture_committed_revision_primary(
+        &mut self,
+    ) -> Result<CapturedRevision, RevisionCaptureError> {
+        let durable =
+            load_durable_collab_for_system(&self.pool, self.workspace_id, self.revision_target())
+                .await
+                .map_err(|_| RevisionCaptureError::Unavailable)?;
+        let durable = durable.map_err(|_| RevisionCaptureError::Unavailable)?;
+        self.committed.snapshot = durable.snapshot;
+        self.committed.tail_payloads = durable.tail;
+        self.committed.tail_seq = durable.tail_seq;
+        self.committed.snapshot_cutoff_seq = durable.snapshot_cutoff_seq;
+        self.committed_loaded = true;
+        self.reload_primary_from_committed()
+            .await
+            .map_err(|_| RevisionCaptureError::Unavailable)?;
+        if self.session_revision_cancelled() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
+        if self.ensure_primary_capacity().await.is_err() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
+        if self.session_revision_cancelled() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
+        let snap = match self.engine.call(Request::RevisionSnapshot).await {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    update_b64: Some(bytes),
+                    ..
+                } => b64::decode(&bytes).map_err(|_| RevisionCaptureError::Unavailable)?,
+                _ => return Err(RevisionCaptureError::Unavailable),
+            },
+            Err(_) => return Err(RevisionCaptureError::Unavailable),
+        };
+        if self.session_revision_cancelled() {
+            return Err(RevisionCaptureError::Unavailable);
+        }
+        let content_json = match self.engine.call(Request::Project { encoding: 1 }).await {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    content_json: Some(json),
+                    ..
+                } => json,
+                _ => return Err(RevisionCaptureError::Unavailable),
+            },
+            Err(_) => return Err(RevisionCaptureError::Unavailable),
+        };
+        Ok(CapturedRevision {
+            y_snapshot: snap,
+            content_json,
+        })
+    }
+
+    async fn revision_snapshots_equal_primary(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+    ) -> Result<bool, RevisionCaptureError> {
+        if left == right {
+            return Ok(true);
+        }
+        match self
+            .engine
+            .call(Request::RevisionSnapshotsEqual {
+                left_b64: left.to_vec(),
+                right_b64: right.to_vec(),
+            })
+            .await
+        {
+            Ok(report) => match report.outcome {
+                EngineStatus::Ok {
+                    update_b64: Some(bytes),
+                    ..
+                } => {
+                    let decoded =
+                        b64::decode(&bytes).map_err(|_| RevisionCaptureError::Unavailable)?;
+                    Ok(decoded.first() == Some(&1))
+                }
+                EngineStatus::Malformed { .. } | EngineStatus::ResourceLimit { .. } => {
+                    Err(RevisionCaptureError::Unavailable)
+                }
+                _ => Err(RevisionCaptureError::Unavailable),
+            },
+            Err(_) => Err(RevisionCaptureError::Unavailable),
+        }
+    }
+
+    fn try_schedule_session_revision(&mut self) {
+        if !self.config.revision_session_snapshot {
+            return;
+        }
+        if self.session_revision.is_some() {
+            return;
+        }
+        if self.session_revision_scheduling_blocked() {
+            return;
+        }
+        let Some(writer_generation) = self.writer_generation else {
+            return;
+        };
+        self.session_revision = Some(SessionRevisionState {
+            writer_generation,
+            captured: None,
+            head_retries: 0,
+        });
+    }
+
+    /// Linear capture → compare → insert on the room primary (`StaleRevisionHead` retries head only).
+    async fn advance_session_revision(&mut self) -> bool {
+        if self.session_revision_cancelled() {
+            self.abort_session_revision_work();
+            return true;
+        }
+        let Some(mut work) = self.session_revision.take() else {
+            return true;
+        };
+        let workspace_id = self.workspace_id;
+        let target = self.revision_target();
+        let pool = self.pool.clone();
+
+        if work.captured.is_none() {
+            match self.capture_committed_revision_primary().await {
+                Ok(captured) => work.captured = Some(captured),
+                Err(_) => {
+                    tracing::warn!(
+                        workspace_id = %workspace_id,
+                        target_kind = target.kind_str(),
+                        target_id = %target.id(),
+                        "collab.session_revision_capture_failed"
+                    );
+                    self.abort_session_revision_work();
+                    return true;
+                }
+            }
+        }
+
+        let captured = work.captured.as_ref().expect("captured");
+        if self.session_revision_cancelled() {
+            self.abort_session_revision_work();
+            return true;
+        }
+
+        let latest = match latest_revision_y_snapshot(&pool, workspace_id, target).await {
+            Ok(row) => row,
+            Err(err) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    error = %err,
+                    "collab.session_revision_head_read_failed"
+                );
+                self.abort_session_revision_work();
+                return true;
+            }
+        };
+        let head_fence = SystemRevisionHead::from_latest(latest.clone());
+
+        if let Some((_, prev_snap)) = &latest {
+            if self.session_revision_cancelled() {
+                self.abort_session_revision_work();
+                return true;
+            }
+            match self
+                .revision_snapshots_equal_primary(prev_snap, &captured.y_snapshot)
+                .await
+            {
+                Ok(true) => {
+                    self.abort_session_revision_work();
+                    return true;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        workspace_id = %workspace_id,
+                        target_kind = target.kind_str(),
+                        target_id = %target.id(),
+                        "collab.session_revision_compare_failed"
+                    );
+                    self.abort_session_revision_work();
+                    return true;
+                }
+            }
+        }
+
+        if self.session_revision_cancelled() {
+            self.abort_session_revision_work();
+            return true;
+        }
+
+        let text = match prepare_revision_text(&captured.content_json) {
+            Ok(text) => text,
+            Err(_) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    "collab.session_revision_text_failed"
+                );
+                self.abort_session_revision_work();
+                return true;
+            }
+        };
+        let input = CreateRevisionInput {
+            y_snapshot: captured.y_snapshot.clone(),
+            content_json: captured.content_json.clone(),
+            text,
+            reason: "session".into(),
+        };
+        #[cfg(feature = "db-tests")]
+        pause_for_session_revision_persist_barrier(self.document_id).await;
+        if self.session_revision_cancelled() {
+            self.abort_session_revision_work();
+            return true;
+        }
+        let done = match create_system_revision(
+            &pool,
+            workspace_id,
+            target,
+            input,
+            work.writer_generation,
+            head_fence,
+        )
+        .await
+        {
+            Ok(Ok(_)) => true,
+            Ok(Err(RevisionDbError::StaleRevisionHead))
+                if work.head_retries + 1 < SYSTEM_REVISION_HEAD_RETRIES =>
+            {
+                work.head_retries += 1;
+                self.session_revision = Some(work);
+                return false;
+            }
+            Ok(Err(_)) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    "collab.session_revision_persist_skipped"
+                );
+                true
+            }
+            Err(err) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    error = %err,
+                    "collab.session_revision_persist_failed"
+                );
+                true
+            }
+        };
+        if done {
+            self.abort_session_revision_work();
+        }
+        done
     }
 
     fn signal_cancel(

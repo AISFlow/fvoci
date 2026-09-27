@@ -151,9 +151,9 @@ fn map_derived(err: DerivedBodyError) -> TaskApiError {
 
 fn map_revision_access(err: RevisionDbError) -> TaskApiError {
     match err {
-        RevisionDbError::NotFound | RevisionDbError::Forbidden => {
-            AppError::from_code(ProblemCode::NotFound).into()
-        }
+        RevisionDbError::NotFound
+        | RevisionDbError::Forbidden
+        | RevisionDbError::StaleRevisionHead => AppError::from_code(ProblemCode::NotFound).into(),
         RevisionDbError::TaskArchived => AppError::from_code(ProblemCode::TaskArchived).into(),
         RevisionDbError::ProjectArchived => {
             AppError::from_code(ProblemCode::ProjectArchived).into()

@@ -536,9 +536,9 @@ fn detail_response(detail: RevisionDetail) -> RevisionDetailResponse {
 
 fn map_revision_error(err: RevisionDbError) -> RevisionApiError {
     match err {
-        RevisionDbError::NotFound | RevisionDbError::Forbidden => {
-            AppError::from_code(ProblemCode::NotFound).into()
-        }
+        RevisionDbError::NotFound
+        | RevisionDbError::Forbidden
+        | RevisionDbError::StaleRevisionHead => AppError::from_code(ProblemCode::NotFound).into(),
         RevisionDbError::TaskArchived => AppError::from_code(ProblemCode::TaskArchived).into(),
         RevisionDbError::ProjectArchived => {
             AppError::from_code(ProblemCode::ProjectArchived).into()
