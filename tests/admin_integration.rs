@@ -2700,3 +2700,142 @@ async fn verify_storage_covers_attachment_previews() {
     admin.close().await;
     h.finish().await;
 }
+
+fn security_txt_fields(bytes: &[u8]) -> std::collections::BTreeMap<String, String> {
+    let text = std::str::from_utf8(bytes).expect("utf-8 security.txt");
+    text.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(": ")?;
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn well_known_security_txt_follows_instance_security_contact() {
+    let h = harness().await;
+    let path = "/.well-known/security.txt";
+    let patch = |body: Value| {
+        with_json(
+            &h.app,
+            "PATCH",
+            "/api/v1/admin/instance-settings",
+            body,
+            Some(&h.admin_cookie),
+        )
+    };
+
+    let unset = get(&h.app, path, None).await;
+    assert_eq!(unset.status, StatusCode::NOT_FOUND);
+    assert_eq!(unset.json["code"], "not_found");
+
+    let mailto = "mailto:sec@example.com";
+    let set_mailto = patch(json!({"security": {"contact": mailto}})).await;
+    assert_eq!(set_mailto.status, StatusCode::OK, "{}", set_mailto.json);
+
+    let mailto_txt = get(&h.app, path, None).await;
+    assert_eq!(mailto_txt.status, StatusCode::OK);
+    assert_eq!(
+        mailto_txt.headers.get("content-type").unwrap(),
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(
+        mailto_txt.headers.get("cache-control").unwrap(),
+        "public, max-age=3600"
+    );
+    let fields = security_txt_fields(&mailto_txt.bytes);
+    assert_eq!(fields["Contact"], mailto);
+    assert_eq!(fields["Preferred-Languages"], "ko, en");
+    let expires =
+        chrono::DateTime::parse_from_rfc3339(&fields["Expires"]).expect("RFC3339 Expires");
+    let now = Utc::now();
+    assert!(expires > now);
+    assert!(expires <= now + ChronoDuration::days(365) + ChronoDuration::minutes(1));
+
+    let https = "https://example.com/security";
+    let set_https = patch(json!({"security": {"contact": https}})).await;
+    assert_eq!(set_https.status, StatusCode::OK, "{}", set_https.json);
+    let settings = get(
+        &h.app,
+        "/api/v1/admin/instance-settings",
+        Some(&h.admin_cookie),
+    )
+    .await;
+    assert_eq!(settings.status, StatusCode::OK);
+    assert_eq!(settings.json["values"]["security"]["contact"], https);
+    let https_txt = get(&h.app, path, None).await;
+    assert_eq!(https_txt.status, StatusCode::OK);
+    assert_eq!(security_txt_fields(&https_txt.bytes)["Contact"], https);
+
+    let canonical_host = "https://example.com/";
+    let set_host = patch(json!({"security": {"contact": "https://example.com"}})).await;
+    assert_eq!(set_host.status, StatusCode::OK, "{}", set_host.json);
+    assert_eq!(
+        get(
+            &h.app,
+            "/api/v1/admin/instance-settings",
+            Some(&h.admin_cookie),
+        )
+        .await
+        .json["values"]["security"]["contact"],
+        canonical_host
+    );
+    let host_txt = get(&h.app, path, None).await;
+    assert_eq!(
+        security_txt_fields(&host_txt.bytes)["Contact"],
+        canonical_host
+    );
+
+    let malformed = patch(json!({"security": {"contact": "https:example.com"}})).await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        security_txt_fields(&get(&h.app, path, None).await.bytes)["Contact"],
+        canonical_host
+    );
+
+    let invalid_contact = patch(json!({"security": {"contact": "https://example.com/%zz"}})).await;
+    assert_eq!(invalid_contact.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        get(
+            &h.app,
+            "/api/v1/admin/instance-settings",
+            Some(&h.admin_cookie),
+        )
+        .await
+        .json["values"]["security"]["contact"],
+        canonical_host
+    );
+    assert_eq!(
+        security_txt_fields(&get(&h.app, path, None).await.bytes)["Contact"],
+        canonical_host
+    );
+
+    let bad = patch(json!({"security": {"contact": "mailto:sec\r@example.com"}})).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    let still_https = get(&h.app, path, None).await;
+    assert_eq!(
+        security_txt_fields(&still_https.bytes)["Contact"],
+        canonical_host
+    );
+
+    let reset = patch(json!({"security": null})).await;
+    assert_eq!(reset.status, StatusCode::OK, "{}", reset.json);
+    let gone = get(&h.app, path, None).await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+    assert_eq!(gone.json["code"], "not_found");
+
+    let (_, member) = h.user("member@example.com", Some("owner")).await;
+    let denied = with_json(
+        &h.app,
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        json!({"security": {"contact": mailto}}),
+        Some(&member),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::NOT_FOUND);
+    let still_empty = get(&h.app, path, None).await;
+    assert_eq!(still_empty.status, StatusCode::NOT_FOUND);
+
+    h.finish().await;
+}

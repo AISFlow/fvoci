@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+  workflow_dispatch:
 
 # Only obsolete runs of this workflow on the same PR are cancelled.
 concurrency:
@@ -20,12 +22,44 @@ permissions:
   contents: read
 
 jobs:
+  ci-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      reason_code: ${{ steps.plan.outputs.reason_code }}
+      plan_ok: ${{ steps.plan.outputs.plan_ok }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
+      select_fast: ${{ steps.plan.outputs.select_fast }}
+      select_postgres: ${{ steps.plan.outputs.select_postgres }}
+      select_collaboration: ${{ steps.plan.outputs.select_collaboration }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
+          bash scripts/test-ci-selection.sh
+          python3 scripts/ci_selection.py plan \
+            --workflow rust \
+            --event-json "$GITHUB_EVENT_PATH" \
+            --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
+            --github-output "$GITHUB_OUTPUT"
+
   fast:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_fast == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - name: Collaboration CI runner fixture
+        run: bash scripts/fixtures/rust-ci/run-collaboration-admission-fixture-test.sh
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -42,7 +76,6 @@ jobs:
       - run: cargo fetch --locked
       - run: cargo fmt --check
       - run: python3 scripts/encryption_keys.py self-test
-      - run: cargo check --locked --offline --all-targets --features db-tests
       - run: cargo clippy --locked --offline --all-targets --features db-tests -- -D warnings
       - run: cargo test --locked --offline --lib --bin fvoci-server
       - run: cargo test --locked --offline --test collab_wire
@@ -53,6 +86,8 @@ jobs:
       - run: cargo test --locked --offline --test doctor_conversion
       - run: cargo test --locked --offline --manifest-path vendor/markdown/Cargo.toml --target-dir target/vendor-markdown
   postgres:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_postgres == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -68,7 +103,7 @@ jobs:
           - runner: ubuntu-24.04
             check: postgres-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration
           - runner: ubuntu-24.04-arm
             check: postgres-arm64
             shard: a
@@ -76,7 +111,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             check: postgres-arm64-b
             shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration
+            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     services:
@@ -136,6 +171,8 @@ jobs:
         run: bash scripts/start-test-minio.sh cargo test --locked --offline --no-fail-fast --features db-tests --test attachment_s3_integration
 
   collaboration:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_collaboration == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -204,8 +241,20 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
+        run: bash scripts/run-rust-collaboration-ci-tests.sh
+
+  rust-ci-gate:
+    name: rust-ci-gate
+    needs: [ci-plan, fast, postgres, collaboration]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Fail closed on selection results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          TESTED_SHA: ${{ github.sha }}
         run: |
-          set -o pipefail
-          cargo test --locked --offline --features db-tests --test collab_product collab_primary_huge_varint_memory_rejected_1008 -- --exact | tee "$RUNNER_TEMP/native-admission-test.log"
-          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/native-admission-test.log"
-          cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product --test collab_projection --test collab_lifecycle --test collab_shutdown --test document_collab_lifecycle --test revision_integration --test document_api_integration --test document_import_export_integration --test document_import_formats_integration --test task_collab_integration
+          set -euo pipefail
+          python3 scripts/ci_selection.py gate --workflow rust --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"

@@ -1,58 +1,31 @@
 import { FvociEditor } from "@fvoci/editor/fvoci-editor";
-import { formatPersonName, t } from "@fvoci/i18n";
-import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { t } from "@fvoci/i18n";
+import { useState } from "react";
 import { QueryLoading } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { collabBadge } from "@/features/documents/collab-badge";
 import { CollabPresence } from "@/features/documents/collab-presence";
-import { CollabRoom, collabUserOf, useCollabSession } from "@/features/documents/collab-session";
+import type { CollabSession, CollabUser } from "@/features/documents/collab-session";
 import { RevisionPanel } from "@/features/documents/revision-panel";
-import { meQuery } from "@/lib/queries";
 import "@/features/documents/document-shell.css";
 
 /* Source task-detail-screen: the task body is the `${ws}:task:${id}` collab room.
- * There is no body GET/PUT; the editor, block patch and revision restore write it. */
+ * Parent owns the single `useCollabSession` (TaskDetailView). */
 export function TaskBodyEditor({
   workspaceId,
   slug,
   taskId,
-  readOnly,
-}: {
-  workspaceId: string;
-  slug: string;
-  taskId: string;
-  readOnly: boolean;
-}) {
-  return (
-    <CollabRoom workspaceId={workspaceId} kind="task" id={taskId}>
-      <TaskBodyConnected
-        workspaceId={workspaceId}
-        slug={slug}
-        taskId={taskId}
-        readOnly={readOnly}
-      />
-    </CollabRoom>
-  );
-}
-
-function TaskBodyConnected({
-  workspaceId,
-  slug,
-  taskId,
   readOnly: pageReadOnly,
+  session,
+  collabUser,
 }: {
   workspaceId: string;
   slug: string;
   taskId: string;
   readOnly: boolean;
+  session: CollabSession | null;
+  collabUser: CollabUser | null;
 }) {
-  const me = useQuery(meQuery);
-  const collabUser = useMemo(() => {
-    if (!me.data) return null;
-    return collabUserOf(me.data.userId, formatPersonName(me.data, me.data.locale));
-  }, [me.data]);
-  const session = useCollabSession(collabUser);
   const [persisting, setPersisting] = useState(false);
   const [persistError, setPersistError] = useState<string | null>(null);
 
