@@ -74,6 +74,9 @@ mkdir -p "$FVOCI_STORAGE_DIR"
 export FVOCI_E2E_ADMIN_DATABASE_URL="$DATABASE_URL"
 export FVOCI_E2E_SERVER_BIN="$SERVER_BIN"
 export FVOCI_E2E_RESULT_DIR="$RUN_DIR"
+# Both configs write per-run results here; web-e2e-run-group.sh retains this
+# exact directory on failure, so a shared default test-results/ is never used.
+PLAYWRIGHT_OUTPUT_DIR="$RUN_DIR/playwright-output"
 unset DATABASE_URL FVOCI_MIGRATION_URL
 
 SMTP_CAPTURE="$RUN_DIR/smtp.jsonl"
@@ -101,7 +104,8 @@ export FVOCI_E2E_SMTP_CAPTURE="$SMTP_CAPTURE"
 if [[ "${FVOCI_E2E_PENDING:-}" == "1" ]]; then
   cd "$ROOT/apps/web"
   "$ROOT/apps/web/node_modules/.bin/playwright" test \
-    --config=e2e-pending/collab-playwright.config.ts "$@"
+    --config=e2e-pending/collab-playwright.config.ts \
+    --output="$PLAYWRIGHT_OUTPUT_DIR" "$@"
   exit 0
 fi
 
@@ -129,4 +133,5 @@ fi
 
 cd "$ROOT/apps/web"
 export PLAYWRIGHT_BASE_URL="$BASE_URL"
-"$ROOT/apps/web/node_modules/.bin/playwright" test "$@"
+"$ROOT/apps/web/node_modules/.bin/playwright" test \
+  --output="$PLAYWRIGHT_OUTPUT_DIR" "$@"
