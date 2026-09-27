@@ -3998,6 +3998,18 @@ impl RoomActor {
         self.flushing_awareness = false;
     }
 
+    /// 1009 eviction from `deliver_outbound`. The tombstone is left for the caller's awareness
+    /// flush (this runs inside it); the session revision is scheduled like any other close.
+    async fn evict_for_backpressure(&mut self, conn_id: Uuid) {
+        if let Some(tombstone) = self
+            .evict_connection(conn_id, 1009, "outbound queue full")
+            .await
+        {
+            self.pending_awareness.push_back(tombstone);
+        }
+        self.try_schedule_session_revision();
+    }
+
     async fn deliver_outbound(&mut self, conn_id: Uuid, bytes: Vec<u8>, kind: OutboundKind) {
         if self
             .connections
@@ -4015,33 +4027,18 @@ impl RoomActor {
             return;
         };
         if accounted_bytes > budget.max_bytes {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
             return;
         }
         let current = budget.queued_bytes.load(Ordering::Relaxed);
         if current + accounted_bytes > budget.max_bytes {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
             return;
         }
         let frame_permit = match budget.frame_sem.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                if let Some(tombstone) = self
-                    .evict_connection(conn_id, 1009, "outbound queue full")
-                    .await
-                {
-                    self.pending_awareness.push_back(tombstone);
-                }
+                self.evict_for_backpressure(conn_id).await;
                 return;
             }
         };
@@ -4063,12 +4060,7 @@ impl RoomActor {
             permit: Some(delivery_permit),
         };
         if events.try_send(RoomClientEvent::Outbound(frame)).is_err() {
-            if let Some(tombstone) = self
-                .evict_connection(conn_id, 1009, "outbound queue full")
-                .await
-            {
-                self.pending_awareness.push_back(tombstone);
-            }
+            self.evict_for_backpressure(conn_id).await;
         }
     }
 
