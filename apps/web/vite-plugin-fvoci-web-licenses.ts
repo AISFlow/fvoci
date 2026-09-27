@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Plugin } from "vite";
-import { finalizeBrowserOpenSourceNotice } from "./src/build/web-licenses.ts";
+import {
+  type BundledSourceNotice,
+  finalizeBrowserOpenSourceNotice,
+} from "./src/build/web-licenses.ts";
 
 export const VITE_LICENSE_DATA_FILE = "open-source-license-data.json";
 export const PUBLIC_LICENSE_FILE = "open-source-licenses.txt";
@@ -9,6 +12,8 @@ export const PUBLIC_LICENSE_FILE = "open-source-licenses.txt";
 export function fvociWebLicenseAdapt(options: {
   repoRoot: string;
   manifestPath: string;
+  /** Notices for files copied into the build outside the module graph. */
+  assetNotices?: () => BundledSourceNotice[];
 }): Plugin {
   return {
     name: "fvoci-web-license-adapt",
@@ -41,6 +46,7 @@ export function fvociWebLicenseAdapt(options: {
           licenseJson,
           options.repoRoot,
           options.manifestPath,
+          options.assetNotices?.() ?? [],
         );
         fs.writeFileSync(path.join(outDir, PUBLIC_LICENSE_FILE), publicText, "utf8");
         fs.unlinkSync(dataPath);

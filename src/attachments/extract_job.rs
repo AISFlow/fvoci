@@ -335,7 +335,7 @@ fn skipped() -> FinishExtract {
 }
 
 /// Source `pickExtractor` dispatch. `Ok(None)` = cancelled (release the lease).
-async fn run_extractor(
+pub(crate) async fn run_extractor(
     settings: &ExtractJobSettings,
     name: &str,
     mime: &str,

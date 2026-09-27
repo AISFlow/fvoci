@@ -262,10 +262,11 @@ remain unsupported in this slice.
 
 ## Collaboration (`/collab`)
 
-Collaboration is **opt-in**. The HTTP server exposes `GET /collab` (426 without
-WebSocket upgrade) and upgrades to Hocuspocus 4.6.0 only when
-`FVOCI_COLLAB_ENGINE` points at a built `collab-engine` helper binary. Without
-that variable the route returns 503 `collab_unavailable`.
+The HTTP server exposes `GET /collab` (426 without WebSocket upgrade) and
+upgrades to Hocuspocus 4.6.0 only when `FVOCI_COLLAB_ENGINE` points at a built
+`collab-engine` helper binary. The container image and Compose stack set it by
+default (see "Container install"); a server run outside them needs the variable.
+Without it the route returns 503 `collab_unavailable`.
 
 Build the helper (separate crate graph; parent depends on `collab-engine` with
 `default-features = false` and talks to the child through framed JSON only):
@@ -339,8 +340,9 @@ before HTTP draining; independent rooms drain concurrently. Normal shutdown
 joins room helpers and releases their database guards before closing the pool.
 An observed shutdown failure or deadline expiry exits nonzero. Expiry is not a
 successful flush or proof that an in-flight transaction rolled back; recovery
-uses the durable CRDT state and operation receipts. Actor panic/rejoin handling
-is still under acceptance review, so collaboration remains opt-in.
+uses the durable CRDT state and operation receipts. If a room actor panics, its
+peers are closed with 1011, the helper and room guard are released, and the next
+join starts one successor from the durable state.
 
 Product tests require `TEST_DATABASE_URL`, the helper path above, and run as:
 

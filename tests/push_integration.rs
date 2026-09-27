@@ -712,6 +712,41 @@ async fn ledger_len(admin: &PgPool) -> i64 {
         .unwrap()
 }
 
+/// Gives the ledger rows of `endpoints` increasing ids in that order, so the
+/// sender (which claims `ORDER BY id`) takes them in that order. Ids from one
+/// fan-out statement share a millisecond; only PostgreSQL 18's built-in
+/// uuidv7() keeps their insertion order, the 16/17 shim orders them by
+/// millisecond only.
+async fn pin_ledger_order(admin: &PgPool, endpoints: &[String]) {
+    let base_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+    let mut tx = admin.begin().await.unwrap();
+    for (offset, endpoint) in (0u64..).zip(endpoints) {
+        let id = uuid::Builder::from_unix_timestamp_millis(base_ms + offset, &[0; 10]).into_uuid();
+        let updated = sqlx::query(
+            "UPDATE fvoci.push_deliveries AS d SET id = $1
+             FROM fvoci.push_subscriptions AS s
+             WHERE s.id = d.subscription_id AND s.endpoint = $2",
+        )
+        .bind(id)
+        .bind(endpoint)
+        .execute(&mut *tx)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert_eq!(updated, 1, "{endpoint}");
+    }
+    tx.commit().await.unwrap();
+    let claim_order: Vec<String> = sqlx::query_scalar(
+        "SELECT s.endpoint FROM fvoci.push_deliveries AS d
+         JOIN fvoci.push_subscriptions AS s ON s.id = d.subscription_id
+         ORDER BY d.id",
+    )
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    assert_eq!(claim_order, endpoints);
+}
+
 async fn wait_ledger_empty(admin: &PgPool) {
     wait_until("the push ledger to drain", async || {
         ledger_len(admin).await == 0
@@ -1347,6 +1382,15 @@ async fn logout_before_the_final_check_prevents_the_send() {
     wait_processed(&admin, "push", event_id).await;
     pipeline.stop().await;
     assert_eq!(ledger_len(&admin).await, 3);
+    pin_ledger_order(
+        &admin,
+        &[
+            format!("{base}/push/slow-alice-other"),
+            format!("{base}/push/alice-this"),
+            format!("{base}/push/slow-bob-this"),
+        ],
+    )
+    .await;
 
     // One request at a time, in ledger order (Alice's rows, then Bob's).
     let sender = start_sender(&pool, keys, sender_settings(1, Duration::from_secs(5)));

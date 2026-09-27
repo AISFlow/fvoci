@@ -171,6 +171,121 @@ END
 $$;
 "#;
 
+// Migrations 016, 018 and 040 call unqualified `uuidv7()`, a built-in only
+// from PostgreSQL 18. On 16 and 17 this creates `public.uuidv7()` with the
+// RFC 9562 section 5.7 layout: 48-bit Unix milliseconds from
+// clock_timestamp(), version 7, and the RFC variant and remaining 74 bits
+// taken from built-in gen_random_uuid() (CSPRNG). A clock outside the
+// 48-bit millisecond range raises instead of truncating. PG18's per-backend
+// sub-millisecond monotonicity is not reproduced: ids created in the same
+// millisecond have no defined relative order, so ordering by id is only
+// coarsely FIFO. An existing `uuidv7` on the migration search path is reused
+// only when it is exactly this function owned by the migration role;
+// anything else fails before it is changed. PostgreSQL 18 is left untouched.
+const UUIDV7_COMPAT_PREFLIGHT: &str = r#"
+DO $preflight$
+DECLARE
+    caller_schemas pg_catalog.name[] := pg_catalog.current_schemas(true);
+    shim_body pg_catalog.text := $body$
+DECLARE
+    unix_ms pg_catalog.int8 := pg_catalog.floor(
+        pg_catalog.extract('epoch', pg_catalog.clock_timestamp()) * 1000
+    );
+BEGIN
+    IF unix_ms < 0 OR unix_ms > 281474976710655 THEN
+        RAISE EXCEPTION 'uuidv7: clock % ms is outside the 48-bit Unix millisecond range', unix_ms;
+    END IF;
+    RETURN pg_catalog.encode(
+        pg_catalog.set_bit(
+            pg_catalog.set_bit(
+                pg_catalog.overlay(
+                    pg_catalog.uuid_send(pg_catalog.gen_random_uuid()),
+                    pg_catalog.substr(pg_catalog.int8send(unix_ms), 3),
+                    1,
+                    6
+                ),
+                52,
+                1
+            ),
+            53,
+            1
+        ),
+        'hex'
+    )::pg_catalog.uuid;
+END
+$body$;
+    shim_config pg_catalog.text[] := ARRAY['search_path=pg_catalog, pg_temp'];
+    existing record;
+    found_shim boolean := false;
+BEGIN
+    PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
+
+    IF pg_catalog.current_setting('server_version_num')::integer >= 180000 THEN
+        RETURN;
+    END IF;
+
+    IF NOT 'public' = ANY (caller_schemas) THEN
+        RAISE EXCEPTION 'uuidv7 compatibility: schema "public" is not on the migration search_path (%)',
+            pg_catalog.array_to_string(caller_schemas, ', ')
+            USING HINT = 'run fvoci-migrate with the default search_path so migrations resolve public.uuidv7()';
+    END IF;
+
+    FOR existing IN
+        SELECT p.oid::regprocedure AS signature,
+               n.nspname = 'public' AND p.pronargs = 0 AS is_candidate,
+               p.proowner = (SELECT r.oid FROM pg_roles r WHERE r.rolname = current_user) AS owned,
+               pg_get_userbyid(p.proowner) AS owner_name,
+               p.prokind = 'f'
+                   AND p.prolang = (SELECT l.oid FROM pg_language l WHERE l.lanname = 'plpgsql')
+                   AND p.prosrc = shim_body
+                   AND p.prorettype = 'pg_catalog.uuid'::regtype
+                   AND NOT p.proretset
+                   AND p.provolatile = 'v'
+                   AND p.proparallel = 's'
+                   AND NOT p.prosecdef
+                   AND NOT p.proleakproof
+                   AND NOT p.proisstrict
+                   AND p.pronargdefaults = 0
+                   AND p.proconfig IS NOT DISTINCT FROM shim_config AS exact
+        FROM pg_proc p
+        INNER JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE p.proname = 'uuidv7'
+          AND n.nspname = ANY (caller_schemas || 'public'::name)
+        ORDER BY n.nspname, p.oid
+    LOOP
+        IF existing.is_candidate AND existing.owned AND existing.exact THEN
+            found_shim := true;
+        ELSE
+            RAISE EXCEPTION 'uuidv7 compatibility: existing function % (owner %) is not the FVOCI shim owned by %',
+                existing.signature, existing.owner_name, current_user
+                USING HINT = 'drop or rename that function (or remove its schema from the migration search_path) and rerun fvoci-migrate; it was not changed';
+        END IF;
+    END LOOP;
+
+    IF NOT found_shim THEN
+        EXECUTE format(
+            'CREATE FUNCTION public.uuidv7() RETURNS pg_catalog.uuid LANGUAGE plpgsql VOLATILE PARALLEL SAFE SET search_path = pg_catalog, pg_temp AS %L',
+            shim_body
+        );
+    END IF;
+END
+$preflight$;
+"#;
+
+/// Runs the version-specific preflight under the migration lock in its own
+/// transaction, before any migration is applied.
+async fn preflight(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(MIGRATION_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::raw_sql(UUIDV7_COMPAT_PREFLIGHT)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
 pub async fn run_migrations(url: &str) -> Result<(), sqlx::Error> {
     run_migrations_through(url, i32::MAX).await
 }
@@ -183,6 +298,7 @@ pub async fn run_migrations_through(url: &str, max_version: i32) -> Result<(), s
 }
 
 async fn apply_migrations(pool: &PgPool, max_version: i32) -> Result<(), sqlx::Error> {
+    preflight(pool).await?;
     for (sql, version) in MIGRATIONS {
         if *version > max_version {
             continue;

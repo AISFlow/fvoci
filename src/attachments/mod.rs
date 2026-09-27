@@ -4,6 +4,7 @@ mod extract_job;
 mod local;
 mod mime;
 pub mod preview;
+mod preview_html;
 mod preview_job;
 mod range;
 mod s3;
@@ -18,6 +19,7 @@ pub use extract_job::{
 pub use disposition::content_disposition_attachment;
 pub use local::{LocalStorage, PartInfo, StagedPart, StorageError};
 pub use mime::{is_image_mime, sniff_mime_from_bytes};
+pub use preview_html::{PreviewExtractor, PreviewParse, PREVIEW_BUSY_RETRY_AFTER_SECS};
 pub use preview_job::{
     process_one_preview, spawn_preview_job, PreviewJobHandle, PreviewJobSettings,
 };
