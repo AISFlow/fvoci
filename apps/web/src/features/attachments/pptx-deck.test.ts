@@ -58,6 +58,13 @@ test("slide 1 lays out Korean/emoji text, runs, list, table, shapes and the embe
   assert.equal((svg.match(/<image /g) ?? []).length, 1);
   assert.match(svg, /data-pptx-fallback="image"/);
   assert.ok(!new RegExp(`(href|src)="${FIXTURE_PPTX_EXTERNAL_IMAGE}`).test(svg));
+  // The placeholder label is unclipped text wider than its box, drawn over whatever lies beside
+  // it: its band (centre ± one font size) stays clear of the embedded picture that the browser
+  // test samples, whatever font the host resolves.
+  const label = /data-pptx-fallback="image">.*?<text x="[0-9.]+" y="([0-9.]+)"[^>]* font-size="([0-9.]+)"/.exec(svg);
+  assert.ok(label, "fallback label");
+  const [labelY, labelSize] = [Number(label[1]), Number(label[2])];
+  assert.ok(labelY - labelSize >= 400 + 48 || labelY + labelSize <= 400, `label band ${labelY}±${labelSize}`);
   // Raw renderer output still links out; the viewer shows it only as an image inside an image (pptx-svg.ts).
   assert.ok(svg.includes(`href="${FIXTURE_PPTX_EXTERNAL_LINK}"`));
   assert.ok(svg.includes('href="javascript:alert(1)"'));

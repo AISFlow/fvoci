@@ -139,7 +139,8 @@ export function buildFixturePptx(
       shape(7, "Green rectangle", "rect", 40, 380, 160, 80, hexOf(FIXTURE_PPTX_COLORS.green)),
       shape(8, "Orange ellipse", "ellipse", 240, 380, 160, 80, hexOf(FIXTURE_PPTX_COLORS.orange)),
       picture(9, "Blue picture", '<a:blip r:embed="rIdImage"/>', 480, 400, 96, 48),
-      picture(10, "Linked picture", '<a:blip r:link="rIdLinkedImage"/>', 640, 400, 48, 48),
+      // Below the shapes row: its fallback label is wider than the box and would cover the blue picture.
+      picture(10, "Linked picture", '<a:blip r:link="rIdLinkedImage"/>', 560, 480, 48, 48),
     ].join(""),
   );
   const slide2 = slideXml(textBox(2, "Second", 40, 40, 880, 60, `<a:p>${run(text.secondSlide, { size: 3200 })}</a:p>${FIXTURE_PPTX_FILLER.repeat(slide2Paragraphs)}`));

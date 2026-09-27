@@ -170,14 +170,22 @@ function pptxWorkers(page: Page) {
 type Rgb = [number, number, number];
 
 /**
+ * The fixture's embedded picture (480, 400, 96 × 48), inset 2 px from the
+ * edges its upscale blends with the background.
+ */
+const BLUE_PICTURE_INTERIOR = { x: 482, y: 402, width: 92, height: 44 } as const;
+
+/**
  * Colours of the rendered slide at slide-space points, from a screenshot of
- * the `<img>` (a canvas would be tainted by the SVG's foreignObject text).
+ * the `<img>` (a canvas would be tainted by the SVG's foreignObject text),
+ * and how many slide px of the blue picture's interior are not its colour:
+ * one point can fall between the glyphs of text drawn over the picture.
  */
 async function sampleSlide(page: Page, points: Record<string, [number, number]>) {
   const img = page.locator("[data-pptx-viewer] img.pptx-viewer__slide");
   const png = await img.screenshot();
   return page.evaluate(
-    async ({ data, points, slideWidth }) => {
+    async ({ data, points, slideWidth, box, blue }) => {
       const image = new Image();
       image.src = `data:image/png;base64,${data}`;
       await image.decode();
@@ -193,13 +201,26 @@ async function sampleSlide(page: Page, points: Record<string, [number, number]>)
         const [r, g, b] = ctx.getImageData(Math.round(x * px), Math.round(y * px), 1, 1).data;
         out[name] = [r!, g!, b!];
       }
+      let offBlue = 0;
+      for (let y = box.y; y < box.y + box.height; y += 1) {
+        for (let x = box.x; x < box.x + box.width; x += 1) {
+          const rgb = ctx.getImageData(Math.round((x + 0.5) * px), Math.round((y + 0.5) * px), 1, 1).data;
+          if (!blue.every((c, k) => Math.abs(rgb[k]! - c) <= 24)) offBlue += 1;
+        }
+      }
       // Dark pixels in the title box: glyphs were drawn (whatever font the host has).
       const title = ctx.getImageData(Math.round(40 * px), Math.round(24 * px), Math.round(880 * px), Math.round(60 * px)).data;
       let ink = 0;
       for (let i = 0; i < title.length; i += 4) if (title[i]! + title[i + 1]! + title[i + 2]! < 240) ink += 1;
-      return { colors: out, titleInk: ink };
+      return { colors: out, titleInk: ink, offBlue };
     },
-    { data: png.toString("base64"), points, slideWidth: FIXTURE_PPTX_SLIDE_W },
+    {
+      data: png.toString("base64"),
+      points,
+      slideWidth: FIXTURE_PPTX_SLIDE_W,
+      box: BLUE_PICTURE_INTERIOR,
+      blue: FIXTURE_PPTX_COLORS.blue,
+    },
   );
 }
 
@@ -381,6 +402,7 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   expect(near(samples.colors.green!, FIXTURE_PPTX_COLORS.green)).toBe(true);
   expect(near(samples.colors.orange!, FIXTURE_PPTX_COLORS.orange)).toBe(true);
   expect(near(samples.colors.blue!, FIXTURE_PPTX_COLORS.blue)).toBe(true);
+  expect(samples.offBlue).toBe(0);
   expect(near(samples.colors.white!, [255, 255, 255])).toBe(true);
   expect(samples.titleInk).toBeGreaterThan(200);
 
