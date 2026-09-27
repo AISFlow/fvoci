@@ -1138,10 +1138,20 @@ async fn logout_disconnects_only_this_browser() {
     .fetch_all(&admin)
     .await
     .unwrap();
-    assert_eq!(bound, vec![new_session], "one row, bound to the newest session");
-    assert_eq!(logout(&app, &old_cookie, None).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        bound,
+        vec![new_session],
+        "one row, bound to the newest session"
+    );
+    assert_eq!(
+        logout(&app, &old_cookie, None).await,
+        StatusCode::NO_CONTENT
+    );
     assert_eq!(rows_for(&admin, member.user_id).await.len(), 3);
-    assert_eq!(logout(&app, &new_cookie, None).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        logout(&app, &new_cookie, None).await,
+        StatusCode::NO_CONTENT
+    );
     assert_eq!(rows_for(&admin, member.user_id).await.len(), 2);
 
     // Logout without a live session touches nothing.
