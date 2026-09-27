@@ -42,8 +42,8 @@ test("slide 1 lays out Korean/emoji text, runs, list, table, shapes and the embe
     assert.ok(svg.includes(part), part);
   }
   assert.ok(!svg.includes(text.secondSlide));
-  // Title 36 pt bold; body runs 20 pt, the bold one weighted 700.
-  assert.match(svg, /font-size:48\.00px[^"]*font-weight:700">FVOCI PPTX 슬라이드/);
+  // Title 28 pt bold; body runs 20 pt, the bold one weighted 700.
+  assert.match(svg, /font-size:37\.33px[^"]*font-weight:700">FVOCI PPTX 슬라이드/);
   assert.match(svg, /font-weight:700">굵은 글씨/);
   // Two-level bullets: marker characters and a deeper indent for the second level.
   assert.match(svg, /padding-left:24\.00px;text-indent:-18\.00px"><span[^>]*>•<\/span><span[^>]*>첫째 항목/);

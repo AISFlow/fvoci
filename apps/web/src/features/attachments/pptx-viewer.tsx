@@ -22,8 +22,10 @@ type SlideImage =
  * PPTX slide viewer (source `PptxViewer`): the original bytes are laid out by
  * `@office-kit/pptx` + `@office-kit/pptx-preview` (browser entry), one slide
  * at a time as SVG, with slide and zoom controls. Read-only — no edit, save
- * or export. The SVG is sanitized and only ever shown through `<img>` from a
- * blob URL, so deck links, scripts and external references stay inert.
+ * or export. The SVG is sanitized (`pptx-svg.ts`) and only ever shown through
+ * `<img>` from a blob URL, so deck links, scripts and external references
+ * stay inert. A slide whose markup is rejected, too large or fails to decode
+ * says so; the other slides stay reachable.
  */
 export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode {
   const [generation, setGeneration] = useState(0);
@@ -154,6 +156,11 @@ export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
             className="pptx-viewer__slide"
             width={Math.round(state.deck.width * zoom)}
             height={Math.round(state.deck.height * zoom)}
+            onError={() =>
+              setImage((shown) =>
+                shown === current ? { deck: current.deck, index: current.index, status: "unavailable" } : shown,
+              )
+            }
           />
         ) : current?.status === "unavailable" ? (
           <p role="alert" className="attachment-viewer__alert">

@@ -4,52 +4,42 @@ import { isSafeDataImageUrl } from "./docx-frame.ts";
  * Hardening for `@office-kit/pptx-preview` slide SVG before it is shown.
  *
  * The slide is only ever displayed through `<img>` from a blob URL, where a
- * browser runs no script, follows no link and loads no external resource. On
- * top of that, the markup itself is made inert here, so the served image
- * carries no navigation or remote reference at all: the renderer emits
- * `<a href>` (with `target="_blank"`) for run and shape hyperlinks, including
- * `javascript:` targets taken verbatim from the deck, and its CSS can carry
- * deck-supplied font names.
+ * browser runs no script, follows no link and loads no external resource.
+ * That is the isolation boundary. On top of it, the served markup itself
+ * carries no navigation or remote reference, so it stays inert even if the
+ * blob is opened as a document: the renderer emits `<a href>` (with
+ * `target="_blank"`) for run and shape hyperlinks, including `javascript:`
+ * targets taken verbatim from the deck, and puts deck font names into CSS.
+ *
+ * This works on the markup string, not a DOM: every in-page DOM parse
+ * (DOMParser, an inert HTML document, `<template>`) inherits the app CSP and
+ * reports each `style` attribute as a `style-src` violation. It is exact for
+ * this renderer's output, which escapes `& < > "` in all text and attribute
+ * values, so a tag is precisely `<[^<>]*>` and a quoted value `"[^"]*"`.
+ * Anything outside that shape or the renderer's element set — declarations,
+ * processing instructions, comments, script, SMIL, `<style>` or an event
+ * attribute — makes the slide unavailable rather than being rewritten.
  */
 
-const DENIED_ELEMENTS = new Set([
-  "script",
-  "iframe",
-  "frame",
-  "frameset",
-  "object",
-  "embed",
-  "applet",
-  "link",
-  "meta",
-  "base",
-  "form",
-  "input",
-  "button",
-  "textarea",
-  "select",
-  "template",
-  "portal",
-  "noscript",
-  "audio",
-  "video",
-  "source",
-  "track",
-  // SMIL can rewrite attributes (such as `href`) after sanitizing.
-  "animate",
-  "animatemotion",
-  "animatetransform",
-  "set",
-  "discard",
-]);
+const TAG = /<[^<>]*>/g;
 
-const URL_ATTRIBUTES = new Set(["href", "xlink:href", "src", "srcset", "poster", "background", "data", "action", "formaction"]);
+const DENIED_TAG =
+  /^<\/?(script|iframe|frame|frameset|object|embed|applet|link|meta|base|form|input|button|textarea|select|template|portal|noscript|audio|video|source|track|style|animate|animatemotion|animatetransform|set|discard|handler|listener|feimage)\b/i;
+
+/** Declarations, processing instructions, comments, CDATA: never emitted by the renderer. */
+const DECLARATION = /^<[!?]/;
+
+const EVENT_ATTRIBUTE = /\son[a-z]+\s*=/i;
+
+const ANCHOR = /^<\/?a(\s|>)/i;
+
+const URL_ATTRIBUTE = /(\s)((?:[a-z]+:)?href|src)\s*=\s*"([^"]*)"/gi;
 
 const SAFE_DATA_FONT = /^data:(font\/|application\/(font|x-font|octet-stream|vnd\.ms-))/i;
 
 /** A same-document reference such as `#clip-3`. */
 function isFragment(url: string): boolean {
-  return /^#[^\s]*$/.test(url.trim());
+  return /^#\S*$/.test(url.trim());
 }
 
 /**
@@ -66,46 +56,41 @@ export function neutralizeSvgUrls(value: string): string {
     });
 }
 
-function unwrap(element: Element): void {
-  const parent = element.parentNode;
-  if (!parent) return;
-  while (element.firstChild) parent.insertBefore(element.firstChild, element);
-  element.remove();
+/** Undoes the renderer's attribute escaping, for checking a URL value. */
+function unescapeAttribute(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
 }
 
 /**
- * Returns the slide SVG with active and navigational content removed, or
- * `null` when it does not parse as one SVG document. Links keep their text
- * and styling but lose their targets (`<a>` is unwrapped); only fragment and
- * embedded `data:` image references survive.
+ * Returns the slide SVG with navigation and remote references removed, or
+ * `null` when it holds markup the renderer never produces. `<a>` tags are
+ * unwrapped (link text and styling stay); `href`/`src` values other than
+ * fragments and embedded `data:` images are dropped; CSS `url()` to anything
+ * else becomes `none`. Text content is never touched.
  */
 export function sanitizeSlideSvg(svg: string): string | null {
-  const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
-  const root = parsed.documentElement;
-  if (root.localName !== "svg" || parsed.getElementsByTagName("parsererror").length > 0) return null;
-
-  const all = [...root.getElementsByTagName("*")];
-  for (const element of all) {
-    const name = element.localName.toLowerCase();
-    if (DENIED_ELEMENTS.has(name)) element.remove();
-  }
-  for (const anchor of [...root.getElementsByTagName("*")].filter((el) => el.localName.toLowerCase() === "a")) {
-    unwrap(anchor);
-  }
-  for (const element of [root, ...root.getElementsByTagName("*")]) {
-    for (const attr of [...element.attributes]) {
-      const name = attr.name.toLowerCase();
-      if (name.startsWith("on")) {
-        element.removeAttributeNode(attr);
-      } else if (URL_ATTRIBUTES.has(name) || name.endsWith(":href")) {
-        if (!isFragment(attr.value) && !isSafeDataImageUrl(attr.value)) element.removeAttributeNode(attr);
-      } else if (/url\(|@import/i.test(attr.value)) {
-        element.setAttribute(attr.name, neutralizeSvgUrls(attr.value));
-      }
+  if (!/^<svg[\s>]/.test(svg) || !/<\/svg>\s*$/.test(svg)) return null;
+  let rejected = false;
+  const out = svg.replace(TAG, (tag) => {
+    if (rejected) return tag;
+    // Attribute names only: quoted values (e.g. a deck font name) cannot trip the check.
+    const names = tag.replace(/"[^"]*"/g, '""');
+    if (DECLARATION.test(tag) || DENIED_TAG.test(tag) || EVENT_ATTRIBUTE.test(names)) {
+      rejected = true;
+      return tag;
     }
-  }
-  for (const style of [...root.getElementsByTagName("*")].filter((el) => el.localName.toLowerCase() === "style")) {
-    style.textContent = neutralizeSvgUrls(style.textContent ?? "");
-  }
-  return new XMLSerializer().serializeToString(parsed);
+    if (ANCHOR.test(tag)) return "";
+    let clean = tag.replace(URL_ATTRIBUTE, (whole, space: string, _name: string, value: string) => {
+      const url = unescapeAttribute(value);
+      return isFragment(url) || isSafeDataImageUrl(url) ? whole : space.trimEnd();
+    });
+    if (/url\(|@import/i.test(clean)) clean = neutralizeSvgUrls(clean);
+    return clean;
+  });
+  return rejected ? null : out;
 }

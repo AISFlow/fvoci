@@ -18,11 +18,14 @@ export const PPTX_MAX_SLIDES = 1_000;
  */
 export const PPTX_MAX_SLIDE_SVG_CHARS = 64 * 1024 * 1024;
 
-/** Compressed input handed to the streaming reader per step. */
-const INPUT_CHUNK = 16 * 1024;
+/**
+ * Compressed input handed to the streaming reader per step. At DEFLATE's
+ * ~1032:1 limit one step inflates ≤ ~4 MiB (≈ 20 ms measured in Node).
+ */
+const INPUT_CHUNK = 4 * 1024;
 
-/** Yield to the event loop after this much compressed input. */
-const YIELD_EVERY = 1024 * 1024;
+/** Reading yields to the event loop once a slice has run this long. */
+const SLICE_MS = 16;
 
 export type PptxRepack =
   | { status: "ok"; bytes: Uint8Array; entries: number; expanded: number }
@@ -54,7 +57,9 @@ function concat(chunks: Uint8Array[], size: number): Uint8Array<ArrayBuffer> {
  * (the same library, local-header order), fed `INPUT_CHUNK` bytes at a time,
  * and the inflated bytes are counted as they appear — declared sizes are not
  * trusted. It stops at the first chunk past `maxExpanded` (overshoot ≤ one
- * chunk's output, ≤ ~16 MiB at DEFLATE's ~1032:1 limit) or past `maxEntries`.
+ * chunk's output, ≤ ~4 MiB at DEFLATE's ~1032:1 limit) or past `maxEntries`.
+ * The read yields to the event loop every `SLICE_MS`, so the page stays
+ * responsive and a cancelled load stops at the next step.
  * Duplicate names (compared case-insensitively, as OPC part names are),
  * unknown compression methods, truncated or malformed data fail the check.
  *
@@ -68,7 +73,8 @@ function concat(chunks: Uint8Array[], size: number): Uint8Array<ArrayBuffer> {
  *
  * Peak memory is about three times the inflated size (parts, re-packed ZIP,
  * the loader's copies). The caps bound inflated bytes and entry count, not a
- * universal browser CPU or latency limit for XML parsing and layout.
+ * universal browser CPU or latency limit: the re-pack, the loader's copy and
+ * its XML parsing and each slide's layout still run in one synchronous step.
  *
  * Cancellation (`isAlive() === false`) is honoured between input chunks.
  */
@@ -127,11 +133,15 @@ export async function repackPptx(
   unzip.register(UnzipInflate);
 
   try {
+    let slice = performance.now();
     for (let at = 0; at < bytes.byteLength && !failure; at += INPUT_CHUNK) {
+      if (performance.now() - slice >= SLICE_MS) {
+        await yieldToEventLoop();
+        slice = performance.now();
+      }
       if (!isAlive()) return { status: "invalid" };
       const end = Math.min(bytes.byteLength, at + INPUT_CHUNK);
       unzip.push(bytes.subarray(at, end), end === bytes.byteLength);
-      if (end % YIELD_EVERY === 0) await yieldToEventLoop();
     }
   } catch {
     return { status: "invalid" };

@@ -123,40 +123,49 @@ type SvgProbe = {
   foreignObjects: number;
 };
 
-/** What the served slide SVG (the Blob behind the visible `<img>`) contains. */
+/**
+ * What the served slide SVG (the Blob behind the visible `<img>`) contains.
+ * The markup is analysed here in Node: an in-page DOM parse would itself
+ * raise CSP `style-src` reports for the slide's style attributes.
+ */
 async function probeSvg(page: Page): Promise<SvgProbe> {
   const img = page.locator("[data-pptx-viewer] img.pptx-viewer__slide");
   const src = (await img.getAttribute("src"))!;
-  return page.evaluate(async (url) => {
+  const markup = await page.evaluate(async (url) => {
     const store = (window as unknown as { __svgBlobs: { created: Map<string, Blob> } }).__svgBlobs;
-    const markup = await store.created.get(url)!.text();
-    const doc = new DOMParser().parseFromString(markup, "image/svg+xml");
-    const all = [...doc.getElementsByTagName("*")];
-    const refs: string[] = [];
-    const cssUrls: string[] = [];
-    for (const el of all) {
-      for (const attr of [...el.attributes]) {
-        if (/(^|:)(href|src)$/i.test(attr.name) && !attr.value.startsWith("#") && !attr.value.startsWith("data:image/")) {
-          refs.push(`${el.localName}[${attr.name}]=${attr.value.slice(0, 60)}`);
-        }
-        for (const match of attr.value.matchAll(/url\(\s*["']?([^"')]*)/gi)) {
-          if (!match[1]!.startsWith("#") && !match[1]!.startsWith("data:")) cssUrls.push(match[1]!);
-        }
-      }
-    }
-    const named = (name: string) => all.filter((el) => el.localName.toLowerCase() === name).length;
-    return {
-      src: url,
-      text: doc.documentElement.textContent ?? "",
-      anchors: named("a"),
-      denied: ["script", "iframe", "object", "embed", "form", "animate", "set", "style"].reduce((n, name) => n + named(name), 0),
-      handlers: all.filter((el) => [...el.attributes].some((a) => a.name.toLowerCase().startsWith("on"))).length,
-      refs,
-      cssUrls,
-      images: named("image"),
-      foreignObjects: named("foreignobject"),
-    };
+    return store.created.get(url)!.text();
   }, src);
+  // The renderer escapes & < > " in text and values, so tags are exactly <[^<>]*>.
+  const tags = markup.match(/<[^<>]*>/g) ?? [];
+  const named = (name: string) => tags.filter((tag) => new RegExp(`^<${name}[\\s/>]`, "i").test(tag)).length;
+  const refs: string[] = [];
+  const cssUrls: string[] = [];
+  for (const tag of tags) {
+    for (const match of tag.matchAll(/\s((?:[a-z]+:)?href|src)="([^"]*)"/gi)) {
+      if (!match[2]!.startsWith("#") && !match[2]!.startsWith("data:image/")) refs.push(`${match[1]}=${match[2]!.slice(0, 60)}`);
+    }
+    for (const match of tag.matchAll(/url\(\s*["']?([^"')]*)/gi)) {
+      if (!match[1]!.startsWith("#") && !match[1]!.startsWith("data:")) cssUrls.push(match[1]!);
+    }
+  }
+  const text = markup
+    .replace(/<[^<>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+  return {
+    src,
+    text,
+    anchors: named("a"),
+    denied: ["script", "iframe", "object", "embed", "form", "animate", "set", "style"].reduce((n, name) => n + named(name), 0),
+    handlers: tags.filter((tag) => /\son[a-z]+\s*=/i.test(tag.replace(/"[^"]*"/g, '""'))).length,
+    refs,
+    cssUrls,
+    images: named("image"),
+    foreignObjects: named("foreignObject"),
+  };
 }
 
 type Rgb = [number, number, number];
@@ -329,7 +338,7 @@ test("PPTX attachment: slide layout, inert SVG, slides, zoom, original bytes, ch
   await viewer.getByRole("button", { name: "확대" }).click();
   await expect(viewer.getByText("125%")).toBeVisible();
   await expect.poll(async () => Math.round((await img.boundingBox())!.width)).toBe(FIXTURE_PPTX_SLIDE_W * 1.25);
-  for (let i = 0; i < 4; i += 1) await viewer.getByRole("button", { name: "축소" }).click();
+  for (let i = 0; i < 3; i += 1) await viewer.getByRole("button", { name: "축소" }).click();
   await expect(viewer.getByText("50%")).toBeVisible();
   await expect(viewer.getByRole("button", { name: "축소" })).toBeDisabled();
   await expect.poll(async () => Math.round((await img.boundingBox())!.width)).toBe(FIXTURE_PPTX_SLIDE_W / 2);
@@ -440,7 +449,10 @@ test("PPTX attachment: slide layout, inert SVG, slides, zoom, original bytes, ch
   const brokenId = await uploadAttachment(page, wsId, documentId, "broken.pptx", Buffer.from("not a zip", "utf8"));
   await page.goto(`/w/acme/a/${brokenId}/view`);
   await expect(page.locator("[data-attachment-viewer] [role=alert]")).toHaveText(unavailable, { timeout: 20_000 });
-  const pptId = await uploadAttachment(page, wsId, documentId, "old.ppt", pptxBytes);
+  // The server sniffs MIME from content, so the legacy file carries an OLE compound-file header.
+  const ole = Buffer.alloc(4096);
+  Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(ole);
+  const pptId = await uploadAttachment(page, wsId, documentId, "old.ppt", ole);
   await page.goto(`/w/acme/a/${pptId}/view`);
   await expect(page.getByText(unavailable)).toBeVisible();
   await expect(page.locator("[data-pptx-viewer]")).toHaveCount(0);

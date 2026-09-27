@@ -116,7 +116,7 @@ export function buildFixturePptx(text: PptxFixtureText = DEFAULT_PPTX_TEXT): Uin
 
   const slide1 = slideXml(
     [
-      textBox(2, "Title", 40, 24, 880, 60, `<a:p>${run(text.title, { size: 3600, bold: true })}</a:p>`),
+      textBox(2, "Title", 40, 24, 880, 60, `<a:p>${run(text.title, { size: 2800, bold: true })}</a:p>`),
       textBox(
         3,
         "Body",
