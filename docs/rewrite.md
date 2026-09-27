@@ -133,28 +133,30 @@
 | #129 | ba6e3e1c | 협업 idle eviction 검사의 타이머 소유권을 명시적 제어로 고정 | x64/ARM64 협업 실행·별도 검토·36 checks |
 | #127 | 889118c0 | 에이전트별 worktree CodeGraph 동기화·호출 경로 대조 지침 | 별도 검토·동일 트리의 전체 CI 근거, 현재 base의 선택 계획 재확인 |
 | #128 | 6ce8f52d | 문서·태스크 scheduled 리비전과 bounded 자동 보존 정리, 수동 리비전 보존 | background_jobs 25개(x64/ARM64, 승격·GC 경합 포함)·별도 검토·36 checks |
+| #131 | 8b75d7f9 | 살아 있는 협업 helper의 SIGKILL 이후 새 컨텍스트에서 복구 확인 | 실제 helper·브라우저 회귀, 별도 검토·원격 CI |
+| #132, #137 | 3478aef0, 1b4a3235 | 태스크·프로젝트·접근 철회 SSE와 연결 준비 이후 이벤트를 생성하는 회귀 | PG·실제 UI·x64/ARM64 검사, 별도 검토·각 36 checks |
+| #134 | bf3ad9c4 | workspace ZIP 내보내기, 항목 전달 경계의 현재 인가·취소·한도 | workspace_lifecycle 19개·철회 경합·브라우저, 별도 검토·36 checks |
+| #136 | bbaf8920 | AGENTS.md·.agents/environment.md의 명시적 문서 분류, 혼합 변경·실패 시 검사 유지 | 선택기 103개·별도 검토·전체 36 checks; #140에서 실제 제품 잡 제외 확인 |
+| #138 | a2df144a | 공개 공유 HEAD의 보안 헤더·빈 본문, Content-Length 생략 | static_api 10개(실제 HTTP 포함)·공유 PG 11개·별도 검토·36 checks |
+| #139 | 546b1533 | Rust Web Push·migration 040, 발송 직전 현재 권한 확인·로그아웃 시 해당 브라우저 연결 해제 | x64/ARM64 push 9개씩·36 checks·별도 검토; 최종 합성 트리에서 Clippy·push 9/공유 11/static 10 추가 통과. 실제 외부 푸시 서비스는 미검증 |
+| #135, #140 | 081cafef, 50268dca | 현재 모델 역할과 프로젝트 전체 쓰기 상한 3개를 운영 기록에 반영 | 별도 검토; #140은 5개 계획·5개 gate 성공, 제품 잡은 not applicable로 실제 제외 |
 
 검증 기준: 각 PR의 필요한 실제 검사·원격 CI와 별도 세션의 독립 검토를 고정 SHA에서 확인한다.
 과거 Opus/Fable 검토는 당시 범위의 근거로 보존하며, 현재 역할은 AGENTS.md를 따른다.
 최신 실행·소유권·검증 SHA·인계 포인터는 `/home/kinesis/orca/fvoci-evidence/coordinator-handoff-2026-09-26.md`에 둔다.
 
-진행 중(아래 항목은 미수락):
-- #131 협업 crash 검사의 live helper 관찰·SIGKILL·새 컨텍스트 복구 순서 보강: 기존 수정의 독립 검토와 로컬 24개 브라우저 검사를 회수했다. 최신 main 통합 delta 검토·CI는 진행 중이다.
-- #132 태스크 화면 갱신·workspace 접근 철회 SSE: PG 8개와 실제 UI 브라우저 2개를 회수했으며 최신 통합 SHA의 최종 검토·CI는 진행 중이다.
-- push-subscriptions(Web Push): 로컬 후보 `fvoci/rust-web-push`(main bf3ad9c4 병합)이며 미수락이다.
-  migration 040, 세션 전용 PUT·VAPID 부트스트랩/`--rotate-vapid`/`--verify-secrets`, `push` fan-out 소비자와
-  발송 직전 재검사 sender, 로그아웃 시 이 브라우저 연결 해제(사용자 결정), `/sw.js`·PushToggle을 포함한다.
-  독립 기준 검토 B1–B4 수정은 delta 재검토 대기다. 원격 CI·실제 푸시 서비스(FCM 등) 발송은 미실행이다.
-- workspace ZIP export: 기존 구현을 보존하며 독립 검토의 인가·tenant·취소/한도 지적을 수정·검증 중이다.
+현재 작업·잔여 범위:
+- 컬렉션 board 그룹별 paging·drag-and-drop: 기존 Rust 그룹/커서 API와 키보드 이동 선택을 유지하며
+  `fvoci/rust-collection-board`에서 구현 중이다. 검사·독립 검토·수락 전이며 소유권은 최신 인계에 둔다.
 - 문서 변환의 정상 Rust 경로는 수락됐으며 Node 구현 복원은 필요 없다. 개발·CI의 Node/Python과 독립 reader는
   제품 런타임과 별개다. 필수 백업·복원 자체 검증은 Rust이며 pg_dump/pg_restore·얇은 실행 스크립트는 유지한다.
-- migration 037·038·039는 main에 수락됐다. 번호를 다시 배정하지 않는다.
-- 잔여 기능: workspace export·events/access-stream/project stream(SSE)·
-  push-subscriptions, S3 presigned 계약, settings 소비자(embed·AI·첨부 미리보기·i18n 재정의),
+- migration 037·038·039·040은 main에 수락됐다. 번호를 다시 배정하지 않는다.
+- 잔여 기능·검증: 실제 브라우저 PushManager 및 외부 푸시 서비스(FCM 등) 발송,
+  S3 presigned 계약, settings 소비자(embed·AI·첨부 미리보기·i18n 재정의),
   #77 외부 제공자 검증의 미실행 범위, 컬렉션 `dueBefore` 시간대·wiki 컬렉션 권한 N+1(#76 S3·S4),
   board 그룹 paging·drag-and-drop, preview-html 격리 parse·HWP viewer(rhwp WASM), 추가 DB.
   후속(비차단): #83 `DeriveFailed` dead arm·patch-block 409 테스트·duplicate node cap·backlinks references table;
-  #84 `HEAD /s/:token` noindex·`BRANDING_ASSET_MAX_BYTES` settings; #82 hybrid lexical leg 필터 차이; #85 S1/S2·
+  `BRANDING_ASSET_MAX_BYTES`의 settings 모듈 이동(현재 512 KiB 한도는 원본과 동일); #82 hybrid lexical leg 필터 차이; #85 S1/S2·
   EPUB/HTML 추출; #88 S3 time_entries 명시 grant 줄; #91 admin
   erase ConfirmActionButton key/portal; #92 process-wide engine cap last-write-wins·spawn_room CapacityRetry dead path;
   #97 64 KiB 토큰 응답 통합 케이스·RFC 3339 updated_at 벡터·ambiguous-kid/typ/cty 벡터·RUNNING.md 문구; #99
@@ -180,8 +182,8 @@
 | 기능 | 원본 근거 | 보존할 불변식 | 상태 | 증거 | 남은 차이 |
 | --- | --- | --- | --- | --- | --- |
 | 설치·로그인·세션·프로필 | identity/routes.ts, core/auth.ts | 활성 사용자, 철회, 본문+이벤트+감사 원자성 | 부분 | #1, #34, #53, #69, #72 | 수락: 비밀번호 재설정(#53), 탈퇴·익명화·비밀번호/이메일 변경·magic link·export(#69), 설정 기반 비밀번호 최소 길이(#72), TOTP MFA·OIDC·workspace SSO(#77), MFA 등록 QR(SVG)·수동 키 UI(#84). 실제 인증 앱 스캔 검증과 브라우저 구조 검사는 구분한다 |
-| 워크스페이스 | domains/workspaces | 현재 역할·철회 경합·RLS·풀 컨텍스트 | 부분 | #4, #39, #56, #61 | 수락: counts·owner 전용 삭제(#56), 30일 purge 실행기(#61), S3 저장소 purge(#63). 수락: 원본 사용권별 workspace/guest/storage quota(#110) |
-| 멤버·초대 | invitation.ts, quota.ts, consent.ts | 좌석 한도(모든 billable 경로)·토큰 단일 사용·역할 상한 | 부분 | #21, #53 | 수락: 초대 메일(#53), 초대 수락의 legal consent 428(#72), 탈퇴 시 보낸 pending 초대 정리(#69). 미착수: 수락 시 MFA/OIDC, pending 목록/철회 API, 알림 설정 기본값, 계정 삭제 시 pending 정리, 다른 E2E의 SQL fixture 멤버 |
+| 워크스페이스 | domains/workspaces | 현재 역할·철회 경합·RLS·풀 컨텍스트 | 부분 | #4, #39, #56, #61 | 수락: counts·owner 전용 삭제(#56), 30일 purge 실행기(#61), S3 저장소 purge(#63). 수락: 원본 사용권별 workspace/guest/storage quota(#110), workspace ZIP 내보내기(#134) |
+| 멤버·초대 | invitation.ts, quota.ts, consent.ts | 좌석 한도(모든 billable 경로)·토큰 단일 사용·역할 상한 | 부분 | #21, #53 | 수락: 초대 메일(#53), 초대 수락의 legal consent 428(#72), 탈퇴 시 보낸 pending 초대 정리(#69). 수락: 초대 수락 시 MFA challenge(`mfa_gate_covers_magic_link_and_invitation_accept`). 미착수: OIDC 초대 수락 흐름, pending 목록/철회 API, 알림 설정 기본값, 계정 삭제 시 pending 정리, 다른 E2E의 SQL fixture 멤버 |
 | 그룹·권한 통합 | policies.ts effectivePermission, project/document_members(user XOR group) | 리소스별 단일 권한 함수 | 수락 | #23, #39, #50 | 후속: collab 프레임당 권한 재조회 축소·collab_delivery의 그룹 join 사본·설정 UI `canManage` DTO |
 | 프로젝트 | domains/projects | 비공개 접근(workspace admin 제외)·lead/멤버 제거 경합·원자성 | 부분 | #13, #39, #52, #78, #83 | 수락: 프로젝트 문서 협업·trash/restore/sort·archive·30일 purge(#78), 프로젝트 문서 body/children/ancestors/backlinks/duplicate(#83). 미착수: collection/view 복제, 프로젝트 문서 첨부·리비전·그룹·태그 route |
 | 태스크 | domains/tasks, core/task.ts, workflow.ts | 권한·버전·WIP·반복 회차 원자성·키셋 커서 | 부분 | #13, #19, #26, #38, #40, #47, #60 | 수락: activity feed(#60), 본문 협업·block patch·수동 리비전(#104), origin UI/API(#117), archive 전 본문 영속화(#121). Gantt 조회·편집 UI(#130)는 수락. board 그룹 paging·drag-and-drop 등 잔여 UI는 별도 추적 |
@@ -193,8 +195,8 @@
 | 첨부 | domains/attachments, packages/storage | 부모 권한·원본 bytes·원자 완료·취소 | 부분 | #10, #39, #58, #63, #65, #80 | 수락: viewer route(#58), S3 프록시·중단 업로드 GC(#63, #65), 태스크·프로젝트 문서 부모·DELETE·quota·이미지 preview(#80). 수락: `--verify-storage` preview 객체·크기 확인(#90). 미착수: S3 presigned 계약, preview-html 격리 parse, HWP viewer |
 | HWP/HWPX 추출 | 원본 추출 경로, rhwp e8800c8 | 부분/손상/미지원을 빈 본문 성공으로 바꾸지 않음·자원 한도 | 부분 | #2, #8, #9, #11, #35 | 미착수: 썸네일 연결. 후속: lease 만료·재시도 결과 게시 경계 |
 | 검색·색인·AI | domains/search, packages/search | 검색에서도 인가·철회·색인 복구 | 부분 | #29, #30, #35, #48, #57, #83 | 수락: 워크스페이스·전역 검색, 댓글 hit, outbox 색인 배치(#57), 복구 후 rebuild, PAT scope 검색(#83). 진행: 의미(벡터) 검색(#82). 후속: 첨부 hit의 viewer 이동 |
-| 알림·outbox·메일·webhook·연동 | domains/notifications, packages/jobs | 커밋 후 전달·중복/재시도 | 부분 | #31, #35, #45 | 수락: 앱 내 알림, 메일·digest(#53, #61), webhook·GitHub App·AI 동작(#74). 미착수: requeue 운영 API/UI(원본도 없음) |
-| 공유·즐겨찾기·최근·태그·컬렉션 | 해당 routes | 공유 링크 권한 | 부분 | #70, #72, #76, #84 | 수락: 즐겨찾기·최근·공유 링크·공개 공유 페이지·PDF, 공유 정책(#72), 태그·컬렉션·저장 view(#76), 대화상자 정책·`/s/:token` head meta(#84), 공유 첨부 preview(#80). 후속: `HEAD /s/:token` noindex 헤더 |
+| 알림·outbox·메일·webhook·연동 | domains/notifications, packages/jobs | 커밋 후 전달·중복/재시도 | 부분 | #31, #35, #45 | 수락: 앱 내 알림, 메일·digest(#53, #61), webhook·GitHub App·AI 동작(#74). 수락: Web Push와 로그아웃 시 브라우저 연결 해제(#139); 실제 외부 푸시 서비스·브라우저 PushManager는 미검증. 미착수: requeue 운영 API/UI(원본도 없음) |
+| 공유·즐겨찾기·최근·태그·컬렉션 | 해당 routes | 공유 링크 권한 | 부분 | #70, #72, #76, #84 | 수락: 즐겨찾기·최근·공유 링크·공개 공유 페이지·PDF, 공유 정책(#72), 태그·컬렉션·저장 view(#76), 대화상자 정책·`/s/:token` head meta(#84), 공유 첨부 preview(#80). 수락: `HEAD /s/:token` 보안 헤더·빈 본문(#138) |
 | 동의·감사·사용권·관리 | legal, auth.consents, admin.audit, packages/ee | 동의 gate·증거·권한 | 부분 | #72, #84 | 수락: 관리 API·instance settings·법률 문서·동의·428 gate·branding(#72), 관리자 사용자 삭제 예약/취소(#84). 수락: 사용자가 원본 정책 보존을 확정한 사용권·quota(#110), 운영자 정보(#119), security.txt(#120), 브라우저 오픈소스 고지(#122). 미착수: 나머지 settings 소비자 |
 | 제품 MCP·CLI·백업·복구 | init.ts, backup.ts, doctor.ts, MCP | 프로토콜·복원 | 부분 | #32, #31, #35, #84 | 수락: 컨테이너 설치 백업·복구(outbox cursor 재기준·검색 rebuild 포함), S3는 스크립트 백업 거부·복구 후 `--verify-storage`(#63, branding #84). 수락: 제품 MCP·CLI·doctor(#81), 키 fingerprint·`--verify-secrets`(#90), Rust 백업 manifest/preflight·키 검증 공유(#109). 개발 Python oracle는 유지 |
 | 설치·배포 산출물 | infra/app, compose | 비특권 실행·migrate/grant 분리·helper 포함 | 부분 | #17, #20, #29, #32, #35 | 미착수: 운영 TLS/secure cookie 안내, 업그레이드 경로 |
