@@ -1,0 +1,90 @@
+version: 2
+
+# Version PRs are reviewed and tested like other changes; this enables no auto-merge.
+# Fixed-source oracles (compat/, crates/collab-engine/js/, scripts/document-convert/)
+# and vendor/ snapshots are deliberately re-baselined by hand.
+# document-extract also needs a manual update: its required .vendor-src/rhwp
+# path is fetched by crates/document-extract/fetch-rhwp.sh, not stored in Git.
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /crates/collab-engine
+      - /crates/document-extract-client
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 2
+    groups:
+      rust-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directories:
+      - /apps/web
+      - /packages/editor
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 2
+    groups:
+      web-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 1
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /scripts
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 1
+    groups:
+      ci-python-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /infra/rust
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 1
+    groups:
+      build-images-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker-compose
+    directory: /infra/rust
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 1
+    groups:
+      services-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
