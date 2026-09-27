@@ -21,17 +21,31 @@ type ByteStream = {
 
 /**
  * docx-preview inflates whole parts in memory with no size bound, so a small
- * ZIP could expand without limit. Checked in bounded order with JSZip (the
- * renderer's own ZIP reader):
+ * ZIP could expand without limit. Checked with JSZip (the renderer's own ZIP
+ * reader) over the same logical view the renderer builds:
  *
  * 1. central directory only (`checkCRC32: false` inflates nothing);
  * 2. part count, then every part stream-inflated one at a time, stopping at
- *    the first byte past `maxExpanded` — declared sizes are not trusted;
- * 3. only then JSZip's whole-package CRC check. It inflates all parts at once,
- *    which step 2 has just bounded.
+ *    the first chunk past `maxExpanded` — declared sizes are not trusted.
+ *    JSZip inflates one 16 KiB compressed block synchronously, so the stop can
+ *    overshoot by that block's output (≤ ~16 MiB at DEFLATE's ~1032:1 limit).
+ *
+ * The caps apply to the logical parts in `zip.files` (last name wins after
+ * JSZip's path normalisation, directories empty) — exactly what
+ * docx-preview's own `loadAsync` (defaults, no CRC) can inflate. Shadowed
+ * duplicate, colliding or directory records are never inflated by either
+ * load, so they are neither counted nor rendered. There is deliberately no
+ * `checkCRC32: true` load: it inflates every raw record, including those
+ * shadowed ones, outside this budget. A CRC mismatch alone is therefore not a
+ * failure here; CRC is corruption detection, not authentication, and the
+ * bytes are the authenticated download itself. Malformed ZIP or DEFLATE data
+ * still fails the check, and malformed XML fails the render.
+ *
+ * The caps bound inflated bytes and part count, not a universal browser CPU
+ * or latency limit for parsing and layout.
  *
  * Cancellation (`isAlive() === false`) is honoured before any inflation and
- * between steps and chunks.
+ * between parts and chunks.
  */
 export async function checkDocxPackage(
   bytes: Uint8Array,
@@ -68,12 +82,6 @@ export async function checkDocxPackage(
         .resume();
     });
     if (result !== "ok") return result;
-  }
-  if (!isAlive()) return "invalid";
-  try {
-    await JSZip.loadAsync(bytes, { checkCRC32: true });
-  } catch {
-    return "invalid";
   }
   return isAlive() ? "ok" : "invalid";
 }

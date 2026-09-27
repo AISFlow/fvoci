@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createRequire } from "node:module";
 import { deflateRawSync } from "node:zlib";
 import JSZip from "jszip";
 import { checkDocxPackage } from "./docx-limits.ts";
-import { writeZip } from "./docx-test-fixture.ts";
+import { crc32, writeZip, type ZipEntry } from "./docx-test-fixture.ts";
 
 async function zip(files: Record<string, Uint8Array | string>): Promise<Uint8Array> {
   const archive = new JSZip();
@@ -40,7 +41,7 @@ test("too many parts, non-ZIP bytes and a cancelled check are not rendered", asy
   assert.equal(await checkDocxPackage(bytes, () => false), "invalid");
 });
 
-// --- Bounded order: nothing inflates the whole package before the caps ------
+// --- Nothing inflates the package outside the caps ---------------------------
 
 /** One raw-DEFLATE part of `size` zero bytes with a deliberately wrong CRC. */
 function badCrcZip(size: number): Uint8Array {
@@ -86,16 +87,102 @@ test("the part-count cap is enforced from the central directory alone", async ()
   assert.deepEqual(counted.crcLoads, [false]);
 });
 
-test("integrity is still checked once the package is bounded", async () => {
+test("a CRC mismatch alone is not a failure: CRC is not an authentication check", async () => {
+  // The renderer's own load (JSZip defaults) never checks CRC either.
   const bad = await recordLoads(() => checkDocxPackage(badCrcZip(1024), alive));
-  assert.equal(bad.result, "invalid");
-  assert.deepEqual(bad.crcLoads, [false, true]);
-  const good = await recordLoads(async () => checkDocxPackage(await zip({ "a.xml": "<a/>" }), alive));
-  assert.equal(good.result, "ok");
-  assert.deepEqual(good.crcLoads, [false, true]);
+  assert.equal(bad.result, "ok");
+  assert.deepEqual(bad.crcLoads, [false]);
 });
 
-test("cancellation before the check inflates nothing; mid-stream cancellation skips the CRC pass", async () => {
+test("malformed DEFLATE data still fails the check", async () => {
+  // BTYPE 11 is reserved in RFC 1951; the capped stream reports the error.
+  const bytes = writeZip([{ name: "word/document.xml", deflated: new Uint8Array([0xff, 0xff, 0xff]), crc: 0, size: 64 }]);
+  assert.equal(await checkDocxPackage(bytes, alive), "invalid");
+});
+
+// --- Records shadowed in the renderer's view are neither budgeted nor inflated
+
+const flate = createRequire(import.meta.url)("jszip/lib/flate") as { uncompressWorker: () => unknown };
+
+/** Counts every byte any JSZip DEFLATE stream produces while `run` is pending. */
+async function countInflated<T>(run: () => Promise<T>): Promise<{ result: T; inflated: number }> {
+  const original = flate.uncompressWorker;
+  let inflated = 0;
+  flate.uncompressWorker = () => {
+    const worker = original() as { push(chunk: { data: Uint8Array }): unknown };
+    const push = worker.push;
+    worker.push = function (chunk) {
+      inflated += chunk.data.length;
+      return push.call(this, chunk);
+    };
+    return worker;
+  };
+  try {
+    return { result: await run(), inflated };
+  } finally {
+    flate.uncompressWorker = original;
+  }
+}
+
+/** A raw-DEFLATE part of `size` zero bytes with its correct CRC. */
+function zeros(name: string, size: number): ZipEntry {
+  const data = Buffer.alloc(size);
+  return { name, deflated: deflateRawSync(data), crc: crc32(data), size };
+}
+
+/** What docx-preview inflates: its own default load, then every part. */
+async function renderView(bytes: Uint8Array): Promise<{ names: string[]; inflated: number }> {
+  const { result: names, inflated } = await countInflated(async () => {
+    const zip = await JSZip.loadAsync(bytes);
+    const parts = Object.values(zip.files).filter((entry) => !entry.dir);
+    for (const part of parts) await part.async("uint8array");
+    return parts.map((part) => part.name);
+  });
+  return { names, inflated };
+}
+
+const BOMB = 4 * 1024 * 1024;
+const CAP = 1024 * 1024;
+const TINY = 13;
+
+const shadowed: [string, ZipEntry[]][] = [
+  ["a duplicate name (earlier record shadowed)", [zeros("word/document.xml", BOMB), zeros("word/document.xml", TINY)]],
+  ["a normalised path collision", [zeros("x/../word/document.xml", BOMB), zeros("word/document.xml", TINY)]],
+  ["a directory record with a payload", [zeros("hidden/", BOMB), zeros("word/document.xml", TINY)]],
+];
+
+for (const [label, entries] of shadowed) {
+  test(`${label} is never inflated by the check or the renderer`, async () => {
+    const bytes = writeZip(entries);
+    const checked = await countInflated(() => recordLoads(() => checkDocxPackage(bytes, alive, CAP)));
+    assert.equal(checked.inflated, TINY);
+    assert.equal(checked.result.result, "ok");
+    assert.deepEqual(checked.result.crcLoads, [false]);
+    assert.deepEqual(await renderView(bytes), { names: ["word/document.xml"], inflated: TINY });
+  });
+}
+
+test("the visible record of a duplicate name is the one budgeted", async () => {
+  const bytes = writeZip([zeros("word/document.xml", TINY), zeros("word/document.xml", BOMB)]);
+  const checked = await countInflated(() => checkDocxPackage(bytes, alive, CAP));
+  assert.equal(checked.result, "tooLarge");
+  // The stop overshoots by at most one 16 KiB compressed block's output (DEFLATE ≤ ~1032:1).
+  assert.ok(checked.inflated <= CAP + 1032 * 16 * 1024, `inflated ${checked.inflated}`);
+});
+
+test("the part-count cap counts logical parts; shadowed duplicates add no inflation", async () => {
+  const part = 64 * 1024;
+  const bytes = writeZip(Array.from({ length: 50 }, () => zeros("a.xml", part)));
+  const checked = await countInflated(() => checkDocxPackage(bytes, alive, 2 * part, 10));
+  assert.equal(checked.result, "ok");
+  assert.equal(checked.inflated, part);
+  assert.deepEqual(await renderView(bytes), { names: ["a.xml"], inflated: part });
+  // Distinct names are logical parts and do hit the cap.
+  const distinct = writeZip(Array.from({ length: 50 }, (_, i) => zeros(`p${i}.xml`, TINY)));
+  assert.equal(await checkDocxPackage(distinct, alive, 2 * part, 10), "tooLarge");
+});
+
+test("cancellation before the check inflates nothing; mid-stream cancellation stops the stream", async () => {
   const early = await recordLoads(() => checkDocxPackage(badCrcZip(4 * 1024 * 1024), () => false));
   assert.equal(early.result, "invalid");
   assert.deepEqual(early.crcLoads, []);
