@@ -77,6 +77,8 @@ use crate::api::dto::{
     WorkspaceStatusOutput,
 };
 #[cfg(feature = "api-schema")]
+use crate::integrations::unfurl::{UnfurlKind, UnfurlResult};
+#[cfg(feature = "api-schema")]
 use crate::settings::catalog::{
     AttachmentPreviewSettings, AuthSettings, BrandingAsset, BrandingSettings, DefaultsUserSettings,
     EmbedSettings, FeaturesSettings, I18nSettings, OperatorSettings, SecuritySettings,
@@ -192,6 +194,7 @@ impl Modify for CookieSecurityAddon {
         lookup_display_id,
         global_search,
         workspace_search,
+        workspace_unfurl,
         list_tasks,
         create_task,
         get_task,
@@ -446,6 +449,8 @@ impl Modify for CookieSecurityAddon {
             SearchSnippetPiece,
             SearchItemOutput,
             SearchListResponse,
+            UnfurlKind,
+            UnfurlResult,
             NotificationItemOutput,
             NotificationListResponse,
             NotificationUnreadCountResponse,
@@ -1996,6 +2001,26 @@ fn global_search() {}
     )
 )]
 fn workspace_search() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/unfurl",
+    tag = "search",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("url" = String, Query, description = "http(s) URL to preview, 1-2048 bytes"),
+    ),
+    responses(
+        (status = 200, description = "Link preview metadata", body = UnfurlResult),
+        (status = 400, description = "Invalid URL or SSRF", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not a workspace member", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn workspace_unfurl() {}
 
 #[cfg(feature = "api-schema")]
 #[utoipa::path(

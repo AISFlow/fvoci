@@ -3508,6 +3508,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{workspace_id}/unfurl": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workspace_unfurl"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{workspace_id}/views/{view_id}": {
         parameters: {
             query?: never;
@@ -5416,6 +5432,21 @@ export interface components {
         };
         TreeResponse: {
             items: components["schemas"]["TreeNodeResponse"][];
+        };
+        /** @enum {string} */
+        UnfurlKind: "github_issue" | "github_pull" | "og";
+        UnfurlResult: {
+            description?: string | null;
+            html?: string | null;
+            imageUrl?: string | null;
+            kind: components["schemas"]["UnfurlKind"];
+            /** Format: int64 */
+            number?: number | null;
+            owner?: string | null;
+            repo?: string | null;
+            state?: string | null;
+            title?: string | null;
+            url: string;
         };
         WebhookCreateBody: {
             events: string[];
@@ -20399,6 +20430,68 @@ export interface operations {
             };
             /** @description Not found or forbidden */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    workspace_unfurl: {
+        parameters: {
+            query: {
+                /** @description http(s) URL to preview, 1-2048 bytes */
+                url: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Link preview metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnfurlResult"];
+                };
+            };
+            /** @description Invalid URL or SSRF */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Not a workspace member */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
