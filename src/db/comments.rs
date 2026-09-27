@@ -224,12 +224,37 @@ async fn fetch_comment(
     Ok(row.map(|row| row_to_comment(&row)))
 }
 
+/// Locks the comment row after the parent authorization has taken its project or
+/// document lock (parent -> comment, the order cascades and other writers use)
+/// and returns its current state, or `None` when a concurrent purge won.
+async fn lock_comment(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    comment_id: Uuid,
+) -> Result<Option<CommentRow>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, workspace_id, document_id, task_id, parent_id, created_by, body,
+               resolved_at, reactions, created_at, updated_at
+        FROM fvoci.comments
+        WHERE workspace_id = $1 AND id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(comment_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|row| row_to_comment(&row)))
+}
+
 struct DocumentTarget {
     document_id: Uuid,
     project_id: Option<Uuid>,
 }
 
 struct TaskTarget {
+    task_id: Uuid,
     project_id: Uuid,
     archived_at: Option<DateTime<Utc>>,
 }
@@ -275,6 +300,7 @@ async fn task_target(
     .await?;
     match row {
         Some((project_id, None, archived_at)) => Ok(TaskTarget {
+            task_id,
             project_id,
             archived_at,
         }),
@@ -395,7 +421,16 @@ async fn require_task_access(
         if locked.status == "archived" {
             return Err(CommentDbError::ProjectArchived);
         }
-        if task.archived_at.is_some() {
+        // `task` was read before the project lock. Task trash, restore and
+        // archive take this project lock before changing the task row, so a
+        // fresh read now sees any of them that committed while we waited.
+        let current = task_target(tx, workspace_id, task.task_id)
+            .await
+            .map_err(|_| CommentDbError::NotFound)?;
+        if current.project_id != task.project_id {
+            return Err(CommentDbError::NotFound);
+        }
+        if current.archived_at.is_some() {
             return Err(CommentDbError::TaskArchived);
         }
     }
@@ -1130,6 +1165,12 @@ pub async fn purge_comment(
         Ok(()) => {}
         Err(err) => return Ok(Err(err)),
     }
+    if lock_comment(&mut tx, workspace_id, comment_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Err(CommentDbError::NotFound));
+    }
     sqlx::query("DELETE FROM fvoci.comments WHERE workspace_id = $1 AND id = $2")
         .bind(workspace_id)
         .bind(comment_id)
@@ -1248,6 +1289,10 @@ pub async fn unresolve_comment(
         Ok(()) => {}
         Err(err) => return Ok(Err(err)),
     }
+    let comment = match lock_comment(&mut tx, workspace_id, comment_id).await? {
+        Some(value) => value,
+        None => return Ok(Err(CommentDbError::NotFound)),
+    };
     if comment.resolved_at.is_some() {
         sqlx::query(
             "UPDATE fvoci.comments SET resolved_at = NULL, updated_at = now() WHERE workspace_id = $1 AND id = $2",

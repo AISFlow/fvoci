@@ -1138,3 +1138,265 @@ async fn comment_create_unknown_fields_and_empty_group_ids() {
 
     harness.cleanup().await;
 }
+
+async fn begin_row_blocker(
+    admin: &sqlx::PgPool,
+    sql: &str,
+    id: Uuid,
+) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut blocker = admin.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query(sql)
+        .bind(id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    (blocker, pid)
+}
+
+async fn comment_verb_count(
+    admin: &sqlx::PgPool,
+    table: &str,
+    verb: &str,
+    comment_id: Uuid,
+) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM fvoci.{table} WHERE verb = $1 AND payload->>'commentId' = $2"
+    ))
+    .bind(verb)
+    .bind(comment_id.to_string())
+    .fetch_one(admin)
+    .await
+    .unwrap()
+}
+
+async fn wiki_comment_fixture(
+    app: axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    body: &str,
+) -> (Uuid, Uuid) {
+    let (status, doc) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents"),
+        Some(json!({"parentId": null, "title": "경합 문서"})),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{doc:?}");
+    let document_id = Uuid::parse_str(doc["id"].as_str().unwrap()).unwrap();
+    let (status, created) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/documents/{document_id}/comments"),
+        Some(json!({"body": body})),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    (
+        document_id,
+        Uuid::parse_str(created["id"].as_str().unwrap()).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn task_comment_refuses_task_trashed_while_waiting_for_project_lock() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "commenter").await;
+    let lab = create_project(app.clone(), &owner_cookie, workspace_id, "TRS", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "휴지통 경합"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task:?}");
+    let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+
+    // Hold the task row so the real trash request stops after taking the
+    // project lock, before it marks the task deleted.
+    let (blocker, blocker_pid) = begin_row_blocker(
+        &admin,
+        "SELECT 1 FROM fvoci.tasks WHERE id = $1 FOR SHARE",
+        task_id,
+    )
+    .await;
+    let trash = tokio::spawn({
+        let app = app.clone();
+        let cookie = owner_cookie.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/trash"),
+                None,
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    let trash_pid = wait_for_query_blocked_by(&admin, blocker_pid, "%fvoci.tasks%").await;
+
+    // The comment reads the still-live task, then waits for the trash's project lock.
+    let create = tokio::spawn({
+        let app = app.clone();
+        let cookie = member.cookie.clone();
+        async move {
+            json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments"),
+                Some(json!({"body": "휴지통 태스크 댓글"})),
+                Some(&cookie),
+            )
+            .await
+        }
+    });
+    wait_for_query_blocked_by(&admin, trash_pid, "%fvoci.projects%").await;
+    blocker.commit().await.unwrap();
+
+    let (trash_status, trash_body) = trash.await.unwrap();
+    assert!(trash_status.is_success(), "{trash_status} {trash_body:?}");
+    let (status, body) = create.await.unwrap();
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    let comments: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.comments WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(comments, 0);
+    let created_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fvoci.events WHERE verb = 'comment.created' AND payload->>'taskId' = $1",
+    )
+    .bind(task_id.to_string())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(created_events, 0);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_comment_deletes_record_one_delete() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "author").await;
+    let (_, comment_id) =
+        wiki_comment_fixture(app.clone(), &member.cookie, workspace_id, "동시 삭제").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/comments/{comment_id}");
+
+    // The author's delete stops on the comment row while it holds the document lock.
+    let (blocker, blocker_pid) = begin_row_blocker(
+        &admin,
+        "SELECT 1 FROM fvoci.comments WHERE id = $1 FOR UPDATE",
+        comment_id,
+    )
+    .await;
+    let author_delete = tokio::spawn({
+        let app = app.clone();
+        let cookie = member.cookie.clone();
+        let path = path.clone();
+        async move { json_request(app, "DELETE", &path, None, Some(&cookie)).await }
+    });
+    // Blocked on the comment row: the DELETE itself, or the row lock taken before it.
+    let author_pid = wait_for_query_blocked_by(&admin, blocker_pid, "%fvoci.comments%").await;
+    // The owner's delete has already read the comment and waits on that document lock.
+    let owner_delete = tokio::spawn({
+        let app = app.clone();
+        let cookie = owner_cookie.clone();
+        let path = path.clone();
+        async move { json_request(app, "DELETE", &path, None, Some(&cookie)).await }
+    });
+    wait_for_query_blocked_by(&admin, author_pid, "%fvoci.documents%").await;
+    blocker.commit().await.unwrap();
+
+    let (author_status, author_body) = author_delete.await.unwrap();
+    assert_eq!(author_status, StatusCode::OK, "{author_body:?}");
+    let (owner_status, owner_body) = owner_delete.await.unwrap();
+    assert_eq!(owner_status, StatusCode::NOT_FOUND, "{owner_body:?}");
+    assert_eq!(
+        comment_verb_count(&admin, "events", "comment.deleted", comment_id).await,
+        1
+    );
+    assert_eq!(
+        comment_verb_count(&admin, "audit_log", "comment.deleted", comment_id).await,
+        1
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn unresolve_waiting_behind_resolve_applies_to_resolved_comment() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "resolver").await;
+    let (_, comment_id) =
+        wiki_comment_fixture(app.clone(), &owner_cookie, workspace_id, "해결 경합").await;
+    let base = format!("/api/v1/workspaces/{workspace_id}/comments/{comment_id}");
+
+    let (blocker, blocker_pid) = begin_row_blocker(
+        &admin,
+        "SELECT 1 FROM fvoci.comments WHERE id = $1 FOR UPDATE",
+        comment_id,
+    )
+    .await;
+    let resolve = tokio::spawn({
+        let app = app.clone();
+        let cookie = member.cookie.clone();
+        let path = format!("{base}/resolve");
+        async move { json_request(app, "POST", &path, None, Some(&cookie)).await }
+    });
+    let resolver_pid =
+        wait_for_query_blocked_by(&admin, blocker_pid, "%UPDATE fvoci.comments%").await;
+    // The unresolve read the comment as unresolved and waits on the resolver's document lock.
+    let unresolve = tokio::spawn({
+        let app = app.clone();
+        let cookie = owner_cookie.clone();
+        let path = format!("{base}/unresolve");
+        async move { json_request(app, "POST", &path, None, Some(&cookie)).await }
+    });
+    wait_for_query_blocked_by(&admin, resolver_pid, "%fvoci.documents%").await;
+    blocker.commit().await.unwrap();
+
+    let (status, resolved) = resolve.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{resolved:?}");
+    assert!(resolved["resolvedAt"].is_string());
+    let (status, unresolved) = unresolve.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{unresolved:?}");
+    assert!(unresolved["resolvedAt"].is_null(), "{unresolved:?}");
+    let resolved_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT resolved_at FROM fvoci.comments WHERE id = $1")
+            .bind(comment_id)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(resolved_at, None);
+    assert_eq!(
+        comment_verb_count(&admin, "events", "comment.resolved", comment_id).await,
+        1
+    );
+    assert_eq!(
+        comment_verb_count(&admin, "events", "comment.updated", comment_id).await,
+        1
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}
