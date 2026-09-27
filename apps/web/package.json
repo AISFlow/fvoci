@@ -21,7 +21,7 @@
     "jszip": "3.10.2",
     "openapi-fetch": "0.17.0",
     "pdfjs-dist": "6.3.289",
-    "qrcode-generator": "1.4.4",
+    "qrcode-generator": "2.0.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-hook-form": "^7.88.0",
