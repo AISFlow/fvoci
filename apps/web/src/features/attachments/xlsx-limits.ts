@@ -17,6 +17,14 @@ export const XLSX_MAX_ROWS = 20_000;
 /** Package part count cap, as for DOCX (a real workbook has tens of parts). */
 export const XLSX_MAX_ENTRIES = 10_000;
 
+/**
+ * Wall-clock bounds for the parse worker (`xlsx-client.ts`). The declared-size
+ * check cannot bound how long a hostile DEFLATE stream takes to decode, so the
+ * worker is terminated when opening or one page takes longer.
+ */
+export const XLSX_OPEN_TIMEOUT_MS = 20_000;
+export const XLSX_PAGE_TIMEOUT_MS = 10_000;
+
 /** Source paging: one table shows at most 200 rows × 64 columns. */
 export const XLSX_ROWS_PER_PAGE = 200;
 export const XLSX_COLS_PER_PAGE = 64;

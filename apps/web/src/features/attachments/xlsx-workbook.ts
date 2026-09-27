@@ -49,7 +49,8 @@ const OVER_CAP = Symbol("xlsx package over cap");
  *
  * Only declared sizes are bounded here, not how much work inflating a
  * record's stream takes: the fallback decodes a deflated stream to its end
- * even past the declared size (the extra output is dropped).
+ * even past the declared size (the extra output is dropped). The viewer
+ * therefore parses in a worker with a wall-clock bound (`xlsx-client.ts`).
  */
 export function checkXlsxPackage(bytes: Uint8Array, limits: XlsxLimits = XLSX_LIMITS): "ok" | "tooLarge" | "invalid" {
   let entries = 0;
@@ -118,4 +119,3 @@ export async function openXlsx(bytes: Uint8Array, limits: XlsxLimits = XLSX_LIMI
     },
   };
 }
-
