@@ -1,6 +1,8 @@
 # Running the Rust slice
 
-This slice initializes a new PostgreSQL database. Upgrading or importing an existing FVOCI installation is not supported yet.
+This slice initializes a new PostgreSQL database. Importing an existing TypeScript FVOCI installation is not supported.
+The Rust server has forward schema migrations (see "Migrate and grant before server" and, for the Compose
+install, "Upgrade", including its unexecuted image-to-image validation scope). Downgrading a migrated database is not supported.
 
 ## Toolchain
 
@@ -626,6 +628,20 @@ The server is published on `FVOCI_PUBLISH_ADDR:FVOCI_PUBLISH_PORT` (default
 use. Beyond local evaluation, terminate TLS in a reverse proxy, set
 `FVOCI_PUBLIC_ORIGIN=https://…` and `FVOCI_COOKIE_SECURE=true`.
 
+Compose always passes `FVOCI_COOKIE_SECURE` (default `false`), so the server's
+https-scheme default does not apply: set `true` in `.env` yourself when you
+switch an existing file to https (`--init-env` does it for new files). Keep the
+published address reachable only by the proxy. The proxy must pass the
+browser's `Origin` header unchanged (mutating routes and `/collab` compare it
+with `FVOCI_PUBLIC_ORIGIN`) and forward the WebSocket upgrade for `/collab`.
+An https origin also sends HSTS with `includeSubDomains`, so serve every
+subdomain over https first. After editing `.env`, re-run `up -d --wait server`
+with the install's same Compose files, project name and env file (as in "Upgrade"),
+then `--doctor` with those same flags (see "Operator commands"): its
+`public_origin` check fails for plain http off loopback or https without
+secure cookies. Proxy body-size and timeout limits for uploads are under
+"Start server".
+
 ### Verification
 
 `scripts/install-smoke.sh` builds the image, starts an isolated Compose project
@@ -635,6 +651,52 @@ a graceful `docker compose stop server` (stopped container must report exit code
 a recreated server container on the same volumes, and post-recreate reads.
 CI runs the same script on `ubuntu-24.04` and `ubuntu-24.04-arm` via
 `.github/workflows/install.yml` (no secrets, no image publish).
+
+### Upgrade
+
+This moves a Compose install to a newer build of this Rust server on the same
+volumes. Each migration commits on its own, so a failed or interrupted migrate
+can leave the database between versions, and an older image then refuses to
+start against it.
+
+Use the existing install's Compose project name (`fvoci-rust-install` for the
+Bootstrap example, or the name passed to `restore.sh --project`), env file and
+all `-f` files throughout. For S3, omitting `infra/rust/compose.s3.yml` silently
+selects local storage; a storage doctor probe cannot detect that wrong choice.
+
+1. From the new checkout, build the new image under a new tag and keep the old
+   image and checkout:
+   `docker build -f infra/rust/Dockerfile -t fvoci-rust-install:<new-tag> .`
+   Do not rebuild the tag `.env` still names: `scripts/backup.sh` refuses when
+   the running server's image differs from the one `FVOCI_IMAGE` resolves to.
+2. From the old checkout, with its `.env` unchanged, back up and leave the server
+   stopped (old servers must not run during migrate):
+   `scripts/backup.sh --project <name> --env-file infra/rust/.env --output <new-dir> --leave-stopped`.
+   Keep a protected copy of the env file with the backup (file mode 0600,
+   directory 0700); the archive omits the pepper, encryption keys and passwords.
+   With S3 the script refuses. First stop the server using the existing flags:
+   `docker compose -f infra/rust/compose.yml -f infra/rust/compose.s3.yml --project-name <name> --env-file infra/rust/.env stop -t 45 server`,
+   then take the quiesced dump and protect bucket objects as in "S3 storage backup".
+3. Compare the new checkout's `.env.example` and release instructions with the
+   existing env file; preserve keys, role/database names, storage and project
+   identity. Set `FVOCI_IMAGE` to the new tag. From the new checkout run:
+   `docker compose -f infra/rust/compose.yml --project-name <name> --env-file <existing-env> up -d --wait server`.
+   For S3, include `-f infra/rust/compose.s3.yml` after the base file, as for
+   the stop command. Retain any other overlays used by this install.
+   `init` runs `fvoci-migrate`, `--grant-app-role` and `--ensure-meili-key`
+   from the new image; `server` starts only if init succeeds.
+4. Run `--doctor` using the same files, project name and env file (see "Operator
+   commands"), then confirm login and an existing document and attachment.
+
+If init fails, leave the server stopped. Run `logs init` with the same Compose
+flags, fix the cause and repeat step 3: already applied migrations are skipped
+and the grant commits all or nothing. To go back to the old build, stop the
+upgraded server first; do not start the old image on the migrated database.
+Restore the pre-upgrade backup into a new project with the old image (local
+storage: "Backup and restore"; S3: "S3 storage backup", item 3). A rollback
+loses writes made after that backup; preserve the failed install for diagnosis.
+CI does not run this image-to-image upgrade; `install-smoke.sh` recreates the
+server on the same image.
 
 ## Backup and restore
 
