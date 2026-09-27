@@ -690,6 +690,7 @@ async fn collab_lifecycle_joining_blocks_idle_eviction_then_rejoin_safe() {
                     .await;
                 let key = room_key(wiki.session.workspace_id, wiki.document_id);
 
+                let idle_hold = IdleEvictionHold::arm(wiki.document_id);
                 let member = hub_join(run, &hub, &wiki, 1).await.expect("seed join");
                 hub.leave_room(key, member).await;
                 wait_for_member_count(&hub, key, 0).await;
@@ -734,6 +735,7 @@ async fn collab_lifecycle_joining_blocks_idle_eviction_then_rejoin_safe() {
                 assert!(hub.execute_idle_evict_if_eligible(key).await);
                 assert!(!hub.room_occupies_slot(key).await);
                 assert_eq!(hub.available_room_slots(), 4);
+                drop(idle_hold);
                 assert!(hub_join(run, &hub, &wiki, 3).await.is_ok());
                 assert_eq!(hub.available_room_slots(), 3);
             })
