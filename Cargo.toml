@@ -35,7 +35,7 @@ required-features = ["extract-native-tests"]
 argon2 = "0.5"
 axum = { version = "0.8", default-features = false, features = ["macros", "json", "form", "query", "matched-path", "original-uri", "tokio", "http1", "ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
-base64 = "0.22"
+base64 = "0.23"
 collab-engine = { path = "crates/collab-engine", default-features = false }
 document-extract-client = { path = "crates/document-extract-client" }
 futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
