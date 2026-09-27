@@ -109,19 +109,9 @@ test("peer task create invalidates task list in another tab", async ({ browser }
   await memberPage.getByLabel("제목").fill("다른 탭 반영");
   await memberPage.getByRole("dialog").getByRole("button", { name: "태스크 만들기" }).click();
 
-  await expect
-    .poll(
-      async () => {
-        const res = await viewerTab.request.get(
-          `/api/v1/workspaces/${wsId}/projects/${projectId}/tasks`,
-        );
-        if (!res.ok()) return 0;
-        const body = (await res.json()) as { items: { title: string }[] };
-        return body.items.some((item) => item.title === "다른 탭 반영") ? 1 : 0;
-      },
-      { timeout: 25_000 },
-    )
-    .toBe(1);
+  const peerTaskLink = viewerTab.getByRole("link", { name: /다른 탭 반영/ });
+  await expect(peerTaskLink).toBeVisible({ timeout: 25_000 });
+  await expect(peerTaskLink).toHaveAttribute("href", /\/w\/tsre2e\/TSR-\d+$/);
 
   await ownerContext.close();
   await memberContext.close();
