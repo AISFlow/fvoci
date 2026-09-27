@@ -1,4 +1,8 @@
 {
+  "@nodable/entities@3.0.0": {
+    "file": "supplements/nodable-entities-3.0.0-LICENSE",
+    "source": "https://raw.githubusercontent.com/nodable/val-parsers/4fe544c219e52cb6e302c43a88824a8333babe3e/LICENSE"
+  },
   "is-emoji-supported@0.0.5": {
     "file": "supplements/is-emoji-supported-0.0.5-LICENSE.md",
     "source": "https://raw.githubusercontent.com/koala-interactive/is-emoji-supported/4afc4ca0a4ff406ef885287a0bfcb2906b965a9d/LICENSE.md"
@@ -10,5 +14,9 @@
   "react-remove-scroll-bar@2.3.8": {
     "file": "supplements/react-remove-scroll-bar-2.3.8-LICENSE",
     "source": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/8ca9ba5ea52de03308fe8ced94f7b159a44d28ff/LICENSE"
+  },
+  "saxes@6.0.0": {
+    "file": "supplements/saxes-6.0.0-LICENSE",
+    "source": "https://raw.githubusercontent.com/lddubeau/saxes/211fa0ebec9b628affc09219199639887174bfc3/LICENSE"
   }
 }

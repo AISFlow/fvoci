@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
@@ -10,6 +11,7 @@ import {
   pdfjsAssetBase,
 } from "./src/features/attachments/pdf-assets.ts";
 import {
+  collectWorkerModuleIds,
   fvociWebLicenseAdapt,
   VITE_LICENSE_DATA_FILE,
 } from "./vite-plugin-fvoci-web-licenses.ts";
@@ -79,6 +81,35 @@ function pdfjsAssets(): Plugin {
   };
 }
 
+/**
+ * `@office-kit/xlsx` ships THIRD_PARTY_NOTICES.md (the openpyxl MIT notice
+ * for its derived code) next to its LICENSE; build.license takes only the
+ * LICENSE, so the sidecar is added here.
+ */
+function officeKitXlsxNotice() {
+  // The package exports no ./package.json; walk up from an exported entry.
+  let dir = path.dirname(fileURLToPath(import.meta.resolve("@office-kit/xlsx/cell")));
+  let manifest: { name?: string; version: string };
+  for (;;) {
+    const file = path.join(dir, "package.json");
+    if (fs.existsSync(file)) {
+      manifest = JSON.parse(fs.readFileSync(file, "utf8")) as typeof manifest;
+      if (manifest.name === "@office-kit/xlsx") break;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) throw new Error("@office-kit/xlsx package.json not found");
+    dir = parent;
+  }
+  const { version } = manifest;
+  return {
+    title: `@office-kit/xlsx ${version}: THIRD_PARTY_NOTICES.md`,
+    text: fs.readFileSync(path.join(dir, "THIRD_PARTY_NOTICES.md"), "utf8").trim(),
+  };
+}
+
+/** Modules of every web-worker bundle, for the license notice. */
+const workerModuleIds = new Set<string>();
+
 const apiProxyTarget =
   process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8080";
 
@@ -89,7 +120,8 @@ export default defineConfig({
     fvociWebLicenseAdapt({
       repoRoot,
       manifestPath: browserLicenseManifest,
-      assetNotices: pdfjsAssetNotices,
+      assetNotices: () => [...pdfjsAssetNotices(), officeKitXlsxNotice()],
+      workerModuleIds: () => workerModuleIds,
     }),
     pdfjsAssets(),
   ],
@@ -115,6 +147,9 @@ export default defineConfig({
         ws: true,
       },
     },
+  },
+  worker: {
+    plugins: () => [collectWorkerModuleIds(workerModuleIds)],
   },
   build: {
     outDir: "dist",
