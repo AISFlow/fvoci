@@ -38,6 +38,7 @@ import { collabBadge } from "./collab-badge";
 import { CollabPresence } from "./collab-presence";
 import { collabUserOf, setTitleEditing, useCollabSession } from "./collab-session";
 import { RevisionPanel } from "./revision-panel";
+import { DocumentAiMenu } from "./document-ai-menu";
 import { DocumentExportMenu } from "./document-export-menu";
 import { ShareDialog } from "@/features/share/share-dialog";
 import { StarToggle } from "@/features/share/star-toggle";
@@ -602,6 +603,22 @@ export function DocumentView({ workspaceId, slug, documentId, project }: Documen
           </AttachmentBlockContext.Provider>
         ) : null}
       </section>
+      <DocumentAiMenu
+        workspaceId={workspaceId}
+        slug={slug}
+        documentId={documentId}
+        project={
+          project ? { id: project.id, canCreateTasks: project.canEdit && !project.archived } : null
+        }
+        editor={ready ? editor : null}
+        insertBlockedReason={
+          readOnly
+            ? t("doc.readOnly")
+            : collabSession?.status === "connected"
+              ? null
+              : t("ai.document.loading")
+        }
+      />
       <OriginPanel workspaceId={workspaceId} slug={slug} documentId={documentId} />
       {me.data ? (
         <CommentPanel

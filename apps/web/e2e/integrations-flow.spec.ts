@@ -249,3 +249,164 @@ test("public features.ai gates the document AI menu; the server keeps its own AI
   await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
   await expect(aiMenu).toHaveCount(0);
 });
+
+type BodyNode = { type?: string; text?: string; attrs?: { id?: string }; content?: BodyNode[] };
+
+/** Non-empty paragraph texts of a stored body, mentions as `@<id>`, in document order. */
+function paragraphsOf(node: BodyNode): string[] {
+  const inline = (child: BodyNode): string =>
+    child.type === "text"
+      ? (child.text ?? "")
+      : child.type === "mention"
+        ? `@${child.attrs?.id ?? ""}`
+        : (child.content ?? []).map(inline).join("");
+  if (node.type === "paragraph") {
+    const text = inline(node);
+    return text.length > 0 ? [text] : [];
+  }
+  return (node.content ?? []).flatMap(paragraphsOf);
+}
+
+test("confirmed AI results apply through the live editor and the project task route", async ({ page }) => {
+  test.setTimeout(120_000);
+  await signInOwner(page);
+  const workspacesRes = await page.request.get("/api/v1/me/workspaces");
+  const workspace = (await workspacesRes.json()).items.find(
+    (item: { slug: string }) => item.slug === owner.workspaceSlug,
+  ) as { id: string };
+  const wsId = workspace.id;
+
+  const on = await page.request.patch("/api/v1/admin/instance-settings", {
+    data: { features: { ai: true } },
+  });
+  expect(on.status(), await on.text()).toBe(200);
+  try {
+    const projectRes = await page.request.post(`/api/v1/workspaces/${wsId}/projects`, {
+      data: { key: "AIAP", name: "AI 적용 프로젝트", visibility: "workspace" },
+    });
+    expect(projectRes.status(), await projectRes.text()).toBe(201);
+    const project = (await projectRes.json()) as { id: string; rootDocumentId: string };
+    const docRes = await page.request.post(
+      `/api/v1/workspaces/${wsId}/projects/${project.id}/documents`,
+      { data: { parentId: project.rootDocumentId, title: "AI 적용 문서" } },
+    );
+    expect(docRes.status(), await docRes.text()).toBe(201);
+    const doc = (await docRes.json()) as { id: string; displayId: string };
+    const linkRes = await page.request.post(`/api/v1/workspaces/${wsId}/documents`, {
+      data: { parentId: null, title: "연결 후보 문서" },
+    });
+    expect(linkRes.status(), await linkRes.text()).toBe(201);
+    const linkDoc = (await linkRes.json()) as { id: string; number: number };
+
+    // WHY: the server's own AI gate is off under e2e (the gate test above proves the real route
+    // answers 503; the real summarize/generate/suggest outputs are covered by the Rust
+    // integrations tests). Only these three AI answers are stubbed — the apply path below uses the
+    // real editor, collab persistence, task route and authorization.
+    const aiCalls: string[] = [];
+    await page.route(/\/api\/v1\/workspaces\/[^/]+\/ai\/(summarize|generate-tasks|suggest-links)$/, (route) => {
+      const kind = new URL(route.request().url()).pathname.split("/").pop()!;
+      expect(route.request().postDataJSON()).toEqual({ documentId: doc.id });
+      aiCalls.push(kind);
+      const body =
+        kind === "summarize"
+          ? { summary: "요약 첫 줄 🙂\n\n요약 둘째 줄" }
+          : kind === "generate-tasks"
+            ? { titles: ["AI 작업 가", "AI 작업 나", "AI 작업 다"] }
+            : { documentIds: [linkDoc.id] };
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    });
+
+    const bodyOf = async () => {
+      const res = await page.request.get(
+        `/api/v1/workspaces/${wsId}/projects/${project.id}/documents/${doc.id}/body`,
+      );
+      expect(res.ok()).toBe(true);
+      return paragraphsOf((await res.json()).contentJson as BodyNode);
+    };
+
+    await page.goto(`/w/${owner.workspaceSlug}/${doc.displayId}`);
+    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+    const editor = page.locator(".fvoci-editor .ProseMirror");
+    await editor.click();
+    await page.keyboard.type("기존 본문");
+    await page.keyboard.press("Home");
+
+    const aiMenu = page.getByRole("group", { name: "AI 도구" });
+    const preview = page.getByRole("region", { name: "AI 결과 미리보기" });
+
+    // Summary: nothing changes until the user confirms; a double click inserts once, at the end.
+    await aiMenu.getByRole("button", { name: "요약", exact: true }).click();
+    await expect(preview.getByText("요약 첫 줄 🙂")).toBeVisible();
+    await expect(editor).not.toContainText("요약 첫 줄");
+    await preview.getByRole("button", { name: "본문 끝에 삽입" }).dblclick();
+    await expect(page.getByRole("status").filter({ hasText: "본문에 삽입했습니다." })).toBeVisible();
+    await expect(preview).toHaveCount(0);
+
+    // Links: document mentions appended after the summary.
+    await aiMenu.getByRole("button", { name: "링크 제안", exact: true }).click();
+    await expect(preview.getByText("연결 후보 문서")).toBeVisible();
+    await preview.getByRole("button", { name: "링크 삽입" }).click();
+    await expect(editor.locator("[data-mention]")).toHaveCount(1);
+
+    await page.getByRole("button", { name: "저장", exact: true }).click();
+    await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
+    await expect
+      .poll(bodyOf, { timeout: 15_000 })
+      .toEqual(["기존 본문", "요약 첫 줄 🙂", "요약 둘째 줄", `@${linkDoc.id}`]);
+
+    // Tasks: the second create is rejected once (injected 422 before the server); the retry
+    // creates only what is still missing, so the first title is not recreated.
+    let rejectOnce = true;
+    const taskPosts: string[] = [];
+    await page.route(`**/api/v1/workspaces/${wsId}/projects/${project.id}/tasks`, async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const { title } = route.request().postDataJSON() as { title: string };
+      taskPosts.push(title);
+      if (title === "AI 작업 나" && rejectOnce) {
+        rejectOnce = false;
+        return route.fulfill({
+          status: 422,
+          contentType: "application/problem+json",
+          body: JSON.stringify({ type: "about:blank", title: "invalid", status: 422, code: "validation_failed" }),
+        });
+      }
+      return route.fallback();
+    });
+    await aiMenu.getByRole("button", { name: "태스크 생성", exact: true }).click();
+    await expect(preview.getByText("AI 작업 가")).toBeVisible();
+    await preview.getByRole("button", { name: "태스크 만들기" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "태스크 1개를 만들었습니다." })).toBeVisible();
+    await expect(page.locator(".document-ai-menu [role=alert]")).toBeVisible();
+    await expect(preview.locator('[data-ai-task-state="created"]')).toHaveCount(1);
+    await preview.getByRole("button", { name: "태스크 만들기" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "태스크 3개를 만들었습니다." })).toBeVisible();
+    await expect(preview).toHaveCount(0);
+    expect(taskPosts).toEqual(["AI 작업 가", "AI 작업 나", "AI 작업 나", "AI 작업 다"]);
+    const tasksRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects/${project.id}/tasks`);
+    expect(tasksRes.ok()).toBe(true);
+    const titles = ((await tasksRes.json()).items as Array<{ title: string }>)
+      .map((item) => item.title)
+      .filter((title) => title.startsWith("AI 작업"))
+      .sort();
+    expect(titles).toEqual(["AI 작업 가", "AI 작업 나", "AI 작업 다"]);
+
+    // A result belongs to its document: switching documents drops the pending preview.
+    await aiMenu.getByRole("button", { name: "요약", exact: true }).click();
+    await expect(preview).toBeVisible();
+    await page.evaluate((path) => {
+      window.history.pushState(null, "", path);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }, `/w/${owner.workspaceSlug}/WIKI-${linkDoc.number}`);
+    await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+    await expect(preview).toHaveCount(0);
+    // Wiki documents have no project: generating tasks stays locked there.
+    await expect(aiMenu.getByRole("button", { name: "태스크 생성", exact: true })).toBeDisabled();
+    await expect(page.getByText("프로젝트에 속한 문서에서만 태스크를 만들 수 있습니다.")).toBeVisible();
+    expect(aiCalls).toEqual(["summarize", "suggest-links", "generate-tasks", "summarize"]);
+  } finally {
+    const off = await page.request.patch("/api/v1/admin/instance-settings", {
+      data: { features: { ai: null } },
+    });
+    expect(off.status(), await off.text()).toBe(200);
+  }
+});
