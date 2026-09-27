@@ -324,6 +324,9 @@ function slashExtension(items: () => MentionLoader) {
 					pluginKey: slashKey,
 					editor: this.editor,
 					char: "/",
+					// http(s) URL embed queries include `/` (`https://…`); without
+					// this the match stops at `https:` and "URL 임베드" never appears.
+					allowToIncludeChar: true,
 					floatingUi: suggestionFloatingUi,
 					/* WHY: #628 — 정적 항목은 renderer 가 쿼리에서 직접 만든다(먼저 그린다).
 					 * items() 는 네트워크에 달린 임베드 후보만 돌려주고 뒤에 합쳐진다. */

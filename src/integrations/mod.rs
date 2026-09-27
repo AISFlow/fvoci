@@ -4,6 +4,7 @@
 pub mod ai;
 pub mod github;
 pub mod outbound;
+pub mod unfurl;
 pub mod webhooks;
 
 use std::sync::Arc;
