@@ -38,7 +38,8 @@ async function uploadAttachment(
   for (const part of upload.parts) {
     const put = await page.request.put(part.url, {
       headers: { "content-type": "application/octet-stream" },
-      data: bytes.subarray(
+      // Only a Buffer is sent as raw bytes; a plain Uint8Array would be JSON-encoded.
+      data: Buffer.from(bytes).subarray(
         (part.partNumber - 1) * upload.partSizeBytes,
         part.partNumber * upload.partSizeBytes,
       ),
