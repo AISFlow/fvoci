@@ -12,7 +12,7 @@ pub fn month_range(year: i32, month: i32, week_starts_on: u8) -> Option<(IsoDate
     let lead = ((first_dow as i32 - week_starts_on as i32) % 7 + 7) % 7;
     let start = add_days(&first, -lead)?;
     let next_month_first = if month == 12 {
-        format!("{year:04}-01-01")
+        format!("{:04}-01-01", year + 1)
     } else {
         format!("{year:04}-{:02}-01", month + 1)
     };
@@ -31,5 +31,19 @@ mod tests {
         let (start, end) = month_range(2026, 9, 0).unwrap();
         assert!(start.as_str() < "2026-09-01");
         assert!(end.as_str() >= "2026-09-30");
+    }
+
+    #[test]
+    fn december_2026_spans_the_month() {
+        let (start, end) = month_range(2026, 12, 0).unwrap();
+        assert!(start.as_str() < "2026-12-01");
+        assert!(end.as_str() >= "2026-12-31");
+    }
+
+    #[test]
+    fn year_one_january_includes_sunday_padding() {
+        let (start, end) = month_range(1, 1, 0).unwrap();
+        assert_eq!(start, "0000-12-31");
+        assert!(end.as_str() >= "0001-01-31");
     }
 }

@@ -8,11 +8,12 @@ use super::types::{GanttLinkInput, LaidOutBar, ScheduledTask, TimeScale};
 const MILESTONE_WIDTH: f64 = 12.0;
 const PACK_GAP: f64 = 1.0;
 
-struct BarRect {
+pub(in crate::gantt) struct BarRect {
     x: f64,
     width: f64,
 }
 
+#[allow(dead_code)]
 pub fn pack_lanes(
     tasks: &[ScheduledTask],
     scale: &TimeScale,
@@ -163,10 +164,7 @@ fn ranges_overlap(a: &LaidOutBar, b: &BarRect) -> bool {
     a.x < b.x + b.width + PACK_GAP && b.x < a.x + a.width + PACK_GAP
 }
 
-fn order_by_dependency(
-    tasks: &[ScheduledTask],
-    links: &[GanttLinkInput],
-) -> Vec<ScheduledTask> {
+fn order_by_dependency(tasks: &[ScheduledTask], links: &[GanttLinkInput]) -> Vec<ScheduledTask> {
     let by_id: HashMap<Uuid, ScheduledTask> = tasks.iter().map(|t| (t.id, t.clone())).collect();
     let mut indeg: HashMap<Uuid, i32> = tasks.iter().map(|t| (t.id, 0)).collect();
     let mut adj: HashMap<Uuid, Vec<Uuid>> = tasks.iter().map(|t| (t.id, Vec::new())).collect();

@@ -7,7 +7,7 @@ use super::scale::{make_scale, month_bands, scale_width, ticks};
 use super::schedule::schedule_tasks;
 use super::types::{
     GanttBarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttLinkInput, GanttScaleOutput,
-    GanttTaskInput, PackMode, ScheduledTask, TimeScale, ZoomLevel,
+    GanttTaskInput, PackMode, ScheduledTask, ZoomLevel,
 };
 
 const MAX_DISPLAY_PATHS: usize = 2048;
@@ -146,10 +146,10 @@ fn merge_items(
                 title: s.title.clone(),
                 number: base.map(|b| b.number).unwrap_or(0),
                 status_id: base.map(|b| b.status_id.clone()).unwrap_or_default(),
-                priority: base.map(|b| b.priority.clone()).unwrap_or_else(|| "none".into()),
-                assignee_ids: base
-                    .map(|b| b.assignee_ids.clone())
-                    .unwrap_or_default(),
+                priority: base
+                    .map(|b| b.priority.clone())
+                    .unwrap_or_else(|| "none".into()),
+                assignee_ids: base.map(|b| b.assignee_ids.clone()).unwrap_or_default(),
                 start_date: base.and_then(|b| b.start_date.clone()),
                 due_date: base.and_then(|b| b.due_date.clone()),
                 due_at: base.and_then(|b| b.due_at.clone()),

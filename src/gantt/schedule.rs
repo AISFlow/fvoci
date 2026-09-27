@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use super::date::{days_between, to_epoch_day};
+use super::date::to_epoch_day;
 use super::types::{GanttTaskInput, ScheduleInference, ScheduledTask};
 
 pub fn schedule_tasks(tasks: &[GanttTaskInput]) -> (Vec<ScheduledTask>, Vec<Uuid>) {
@@ -22,13 +22,11 @@ fn schedule_task(t: &GanttTaskInput) -> Option<ScheduledTask> {
     if start.is_none() && due.is_none() {
         return None;
     }
-    if start.is_some() && due.is_none() {
-        let s = start.unwrap();
-        return Some(build(t, &s, &s, ScheduleInference::FromStart));
+    if let Some(s) = start.as_ref().filter(|_| due.is_none()) {
+        return Some(build(t, s, s, ScheduleInference::FromStart));
     }
-    if start.is_none() && due.is_some() {
-        let d = due.unwrap();
-        return Some(build(t, &d, &d, ScheduleInference::FromDue));
+    if let Some(d) = due.as_ref().filter(|_| start.is_none()) {
+        return Some(build(t, d, d, ScheduleInference::FromDue));
     }
     let start = start.unwrap();
     let due = due.unwrap();
@@ -40,12 +38,7 @@ fn schedule_task(t: &GanttTaskInput) -> Option<ScheduledTask> {
     Some(build(t, &start, &due, ScheduleInference::None))
 }
 
-fn build(
-    t: &GanttTaskInput,
-    start: &str,
-    end: &str,
-    inferred: ScheduleInference,
-) -> ScheduledTask {
+fn build(t: &GanttTaskInput, start: &str, end: &str, inferred: ScheduleInference) -> ScheduledTask {
     ScheduledTask {
         id: t.id,
         title: t.title.clone(),

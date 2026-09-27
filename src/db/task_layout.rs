@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use sqlx::{PgPool, Row, Transaction};
 use uuid::Uuid;
 
@@ -8,14 +8,12 @@ use crate::db::context::{session_is_live, set_tenant};
 use crate::db::holidays::list_holiday_dates;
 use crate::db::projects::{project_permission_by_id, ProjectDbError};
 use crate::db::tasks::{load_task_refs, order_clause, task_list_filter_conditions};
-use crate::db::view_query::{
-    compile_view_query, CompileOptions, RootKind, SqlArgs, ViewScope,
-};
+use crate::db::view_query::{compile_view_query, CompileOptions, RootKind, SqlArgs, ViewScope};
+use crate::gantt::month_range;
 use crate::gantt::{
     prepare_gantt, GanttLayoutItemOutput, GanttLayoutOutput, GanttLinkInput, GanttTaskInput,
     LinkType, PrepareInput, ScheduleInference,
 };
-use crate::gantt::month_range;
 use crate::projects::ProjectPermission;
 use crate::tasks::dependency::finish_date;
 use crate::tasks::layout_query::ParsedTaskLayoutQuery;
@@ -43,11 +41,7 @@ pub async fn get_project_task_layout(
 ) -> Result<Result<GanttLayoutOutput, ProjectDbError>, sqlx::Error> {
     let range = month_range(layout.year, layout.month, layout.week_starts_on)
         .ok_or_else(|| sqlx::Error::RowNotFound)?;
-    let from = if range.0.as_str() < "0001-01-01" {
-        "0001-01-01".to_string()
-    } else {
-        range.0.clone()
-    };
+    let scale_start = range.0.clone();
     let to = range.1.clone();
 
     let mut tx = pool.begin().await?;
@@ -66,8 +60,8 @@ pub async fn get_project_task_layout(
         tx.rollback().await?;
         return Ok(Err(ProjectDbError::NotFound));
     }
-    let permission = project_permission_by_id(&mut tx, workspace_id, actor_user_id, project_id)
-        .await?;
+    let permission =
+        project_permission_by_id(&mut tx, workspace_id, actor_user_id, project_id).await?;
     if !permission
         .map(|p| p.at_least(ProjectPermission::View))
         .unwrap_or(false)
@@ -198,7 +192,9 @@ pub async fn get_project_task_layout(
                     .unwrap_or_default(),
                 start_date: item.start_date.map(|d| d.format("%Y-%m-%d").to_string()),
                 due_date: item.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
-                due_at: item.due_at.map(|d| d.to_rfc3339()),
+                due_at: item
+                    .due_at
+                    .map(|d| d.to_rfc3339_opts(SecondsFormat::Millis, true)),
                 start,
                 end,
                 milestone: false,
@@ -223,7 +219,7 @@ pub async fn get_project_task_layout(
         tasks: gantt_tasks,
         links: gantt_links,
         holidays: holiday_strings,
-        scale_start: from,
+        scale_start,
         scale_end: to,
         zoom: layout.zoom,
         px_per_day: layout.px_per_day,
@@ -265,11 +261,13 @@ async fn list_dependencies_among(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(blocker_id, blocked_id, dependency_type, lag_days)| DepRow {
-            blocker_id,
-            blocked_id,
-            dependency_type,
-            lag_days,
-        })
+        .map(
+            |(blocker_id, blocked_id, dependency_type, lag_days)| DepRow {
+                blocker_id,
+                blocked_id,
+                dependency_type,
+                lag_days,
+            },
+        )
         .collect())
 }

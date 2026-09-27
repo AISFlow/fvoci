@@ -5,17 +5,27 @@ import type React from "react";
 import { useId, useRef, useState } from "react";
 import { addDays, daysBetween } from "./date";
 import { barRect, laneCenterY } from "./layout";
-import type { PreparedGantt } from "./prepare";
+import type { components } from "@/generated/api";
 import { dateToX, xToDate } from "./scale";
 import type {
 	IsoDate,
 	LaidOutBar,
 	ScheduledTask,
 	TimeScale,
+	ZoomLevel,
 } from "./types";
 
+export type GanttLayoutDto = components["schemas"]["GanttLayoutOutput"];
+
+function chartScale(layout: GanttLayoutDto): TimeScale {
+	return {
+		...layout.scale,
+		zoom: layout.scale.zoom as ZoomLevel,
+	};
+}
+
 export interface GanttChartProps {
-	readonly layout: PreparedGantt;
+	readonly layout: GanttLayoutDto;
 	readonly preview?: { id: string; start: IsoDate; end: IsoDate };
 	readonly className?: string;
 	readonly selectedId?: string;
@@ -61,17 +71,18 @@ export function GanttChart({
 		width,
 		height,
 		overflow,
-		scale,
 		laneHeight,
 		laneCount,
 		pack,
 	} = layout;
-	const titleById = new Map(scheduled.map((s) => [s.id, s.title]));
+	const scale = chartScale(layout);
+	const scheduledRows = scheduled as ScheduledTask[];
+	const titleById = new Map(scheduledRows.map((s) => [s.id, s.title]));
 	const todayDate = today ?? new Date().toISOString().slice(0, 10);
 	const todayX = dateToX(todayDate, scale);
 	const showToday = todayX !== null && todayX >= 0 && todayX <= width;
 	const ordered = bars;
-	const scheduledById = new Map(scheduled.map((s) => [s.id, s]));
+	const scheduledById = new Map(scheduledRows.map((s) => [s.id, s]));
 	const displayBars = bars.map((b) =>
 		overlayBar(b, scheduledById.get(b.id), live ?? preview ?? null, scale),
 	);

@@ -42,6 +42,7 @@ pub fn link_paths(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn elbow(
     from: &LaidOutBar,
     to: &LaidOutBar,
@@ -96,7 +97,10 @@ fn elbow(
             let detour_y = pick_gutter(left, right, y1, y2, bars, lane_height, used);
             vec![
                 Point { x: x1, y: y1 },
-                Point { x: x1 + ELBOW_PAD, y: y1 },
+                Point {
+                    x: x1 + ELBOW_PAD,
+                    y: y1,
+                },
                 Point {
                     x: x1 + ELBOW_PAD,
                     y: detour_y,
@@ -105,7 +109,10 @@ fn elbow(
                     x: x2 - ELBOW_PAD,
                     y: detour_y,
                 },
-                Point { x: x2 - ELBOW_PAD, y: y2 },
+                Point {
+                    x: x2 - ELBOW_PAD,
+                    y: y2,
+                },
                 Point { x: x2, y: y2 },
             ]
         }
@@ -135,7 +142,13 @@ fn pick_gutter(
     }
     prefs.push(lo - lane_height as f64 * 0.38);
     prefs.push(hi + lane_height as f64 * 0.38);
-    let deltas = [0.0, -DETOUR_STEP, DETOUR_STEP, -DETOUR_STEP * 2.0, DETOUR_STEP * 2.0];
+    let deltas = [
+        0.0,
+        -DETOUR_STEP,
+        DETOUR_STEP,
+        -DETOUR_STEP * 2.0,
+        DETOUR_STEP * 2.0,
+    ];
     let mut seen: Vec<i64> = Vec::new();
     for base in prefs {
         let key = (base * 1000.0) as i64;
@@ -151,9 +164,10 @@ fn pick_gutter(
             if hits_name(y, left, right, bars, lane_height) {
                 continue;
             }
-            if used.iter().any(|(uy, ul, ur)| {
-                (uy - y).abs() < DETOUR_STEP - 1.0 && left < *ur && right > *ul
-            }) {
+            if used
+                .iter()
+                .any(|(uy, ul, ur)| (uy - y).abs() < DETOUR_STEP - 1.0 && left < *ur && right > *ul)
+            {
                 continue;
             }
             used.push((y, left, right));

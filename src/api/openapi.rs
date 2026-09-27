@@ -63,11 +63,6 @@ use crate::api::dto::{
     WorkspaceListResponse, WorkspaceMemberConsentsOutput, WorkspaceMetaResponse,
 };
 #[cfg(feature = "api-schema")]
-use crate::gantt::{
-    GanttBarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttScaleOutput, MonthBandOutput,
-    ScaleTickOutput, ScheduleInference,
-};
-#[cfg(feature = "api-schema")]
 use crate::api::dto::{
     AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
     GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
@@ -80,6 +75,11 @@ use crate::api::dto::{
     ErasureScheduleOutput, IdentitiesOutput, IdentityOutput, MagicLinkBody, MeDashboardResponse,
     MeLocateResponse, PasswordChangeBody, ProviderOutput, ProvidersOutput, TokenBody, WithdrawBody,
     WorkspaceStatusOutput,
+};
+#[cfg(feature = "api-schema")]
+use crate::gantt::{
+    GanttBarOutput, GanttLayoutItemOutput, GanttLayoutOutput, GanttScaleOutput, MonthBandOutput,
+    ScaleTickOutput, ScheduleInference,
 };
 #[cfg(feature = "api-schema")]
 use crate::settings::catalog::{

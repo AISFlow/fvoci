@@ -7,12 +7,12 @@ import { EmptyState } from "@/components/empty-state";
 import { loadErrorMessage, QueryError } from "@/components/query-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Spinner } from "@/components/ui/spinner";
+import { QueryLoading } from "@/components/query-status";
 import { ProjectViewNav } from "@/features/collections/project-view-nav";
+import { projectQuery, workflowQuery } from "@/features/projects/queries";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { itemPath, projectGanttPath, projectPath, projectsPath } from "@/lib/href";
-import { workflowQueryOptions } from "@/lib/queries/tasks";
-import { membersQueryOptions, projectQueryOptions } from "@/lib/queries/workspace";
+import { membersQuery } from "@/lib/queries";
 import { EMPTY_VIEW_QUERY, withTitleFilter, type ViewQuery } from "@/lib/view-query";
 import { ganttBarPatch } from "./gantt-bar";
 import { GanttChart } from "./gantt/GanttChart";
@@ -21,7 +21,6 @@ import "./gantt-project-view.css";
 import { shiftMonth } from "./month-view-query";
 import { ganttLayoutQueryOptions } from "./task-layout-query";
 import type { IsoDate } from "./gantt/types";
-import { StatusCategoryIcon } from "./status-category-icon";
 import { formatPersonName } from "@fvoci/i18n";
 
 function utcYearMonth(): { year: number; month: number } {
@@ -61,9 +60,9 @@ export function GanttProjectView({
   };
   const [flow, setFlow] = useState(false);
   const [barError, setBarError] = useState<string | null>(null);
-  const projectQuery = useQuery(projectQueryOptions(workspaceId, projectId));
-  const workflowQuery = useQuery(workflowQueryOptions(workspaceId, projectId));
-  const membersQuery = useQuery(membersQueryOptions(workspaceId));
+  const projectQ = useQuery(projectQuery(workspaceId, projectId));
+  const workflowQ = useQuery(workflowQuery(workspaceId, projectId));
+  const membersQ = useQuery(membersQuery(workspaceId));
   const viewQuery = query ?? EMPTY_VIEW_QUERY;
   const layoutFilters = {
     year,
@@ -75,24 +74,31 @@ export function GanttProjectView({
   };
   const listOptions = ganttLayoutQueryOptions(workspaceId, projectId, layoutFilters);
   const listQuery = useQuery(listOptions);
-  const readOnly = projectQuery.data?.status === "archived";
+  const readOnly = projectQ.data?.status === "archived";
   const tasks = listQuery.data?.items ?? [];
   const layout = listQuery.data;
   const byId = useMemo(() => new Map(tasks.map((item) => [item.id, item])), [tasks]);
   const statusById = useMemo(
-    () => new Map((workflowQuery.data?.statuses ?? []).map((s) => [s.id, s])),
-    [workflowQuery.data?.statuses],
+    () => new Map((workflowQ.data?.statuses ?? []).map((s) => [s.id, s])),
+    [workflowQ.data?.statuses],
   );
-  const memberById = useMemo(
-    () => new Map((membersQuery.data ?? []).map((m) => [m.userId, formatPersonName(m)])),
-    [membersQuery.data],
-  );
+  const memberById = useMemo(() => {
+    const rows = membersQ.data?.items ?? [];
+    return new Map(rows.map((m) => [m.userId, formatPersonName(m)]));
+  }, [membersQ.data]);
 
   const barMutation = useMutation({
     mutationFn: async (p: { id: string; start: IsoDate; end: IsoDate }) => {
       const task = tasks.find((item) => item.id === p.id);
       if (!task) throw new Error("task not found");
-      const body = ganttBarPatch(task, p);
+      const body = ganttBarPatch(
+        {
+          startDate: task.startDate ?? null,
+          dueDate: task.dueDate ?? null,
+          dueAt: task.dueAt ?? null,
+        },
+        p,
+      );
       const result = await api.PATCH("/api/v1/workspaces/{workspace_id}/tasks/{task_id}", {
         params: { path: { workspace_id: workspaceId, task_id: p.id } },
         body,
@@ -108,7 +114,7 @@ export function GanttProjectView({
     },
   });
 
-  if (projectQuery.error) {
+  if (projectQ.error) {
     return (
       <p role="alert" className="break-keep text-ui text-destructive">
         {t("project.load.failed")}
@@ -116,7 +122,7 @@ export function GanttProjectView({
     );
   }
 
-  const loading = listQuery.isPending || projectQuery.isLoading;
+  const loading = listQuery.isPending || projectQ.isLoading;
 
   return (
     <div className="fvoci-gantt-shell flex flex-col gap-3">
@@ -178,7 +184,7 @@ export function GanttProjectView({
       ) : null}
       {loading ? (
         <div className="fvoci-gantt-shell__state">
-          <Spinner />
+          <QueryLoading />
         </div>
       ) : listQuery.isError ? (
         <QueryError message={loadErrorMessage(listQuery.error)} onRetry={() => void listQuery.refetch()} />
@@ -195,10 +201,14 @@ export function GanttProjectView({
             const status = statusById.get(item.statusId);
             const assigneeName = item.assigneeIds
               .map((id) => memberById.get(id))
-              .find((n) => n !== undefined);
+              .find((n): n is string => n !== undefined);
             return (
               <span className="flex min-w-0 items-center gap-1">
-                {status ? <StatusCategoryIcon category={status.category} /> : null}
+                {status ? (
+                  <span className="shrink-0 text-caption text-muted-foreground" title={status.name}>
+                    {status.name}
+                  </span>
+                ) : null}
                 <span className="shrink-0 font-mono text-caption text-muted-foreground">
                   {formatDisplayId(projectKey, item.number)}
                 </span>

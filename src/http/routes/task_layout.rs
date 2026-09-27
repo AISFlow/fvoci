@@ -12,8 +12,7 @@ use crate::db::task_layout::get_project_task_layout;
 use crate::error::{AppError, ProblemCode};
 use crate::gantt::GanttLayoutOutput;
 use crate::http::routes::tasks::{
-    internal, map_task_db_error, map_task_list_query_error, require_session,
-    TaskApiError,
+    internal, map_task_db_error, map_task_list_query_error, require_session, TaskApiError,
 };
 use crate::http::state::AppState;
 use crate::tasks::layout_query::{

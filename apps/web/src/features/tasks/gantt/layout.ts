@@ -15,7 +15,7 @@ export function packLanes(
 	scale: TimeScale,
 	maxLanes = Number.POSITIVE_INFINITY,
 ): { bars: LaidOutBar[]; overflow: string[] } {
-	const sorted = tasks.toSorted(compareForPacking);
+	const sorted = [...tasks].sort(compareForPacking);
 	const laneEnd: number[] = [];
 	const bars: LaidOutBar[] = [];
 	const overflow: string[] = [];
@@ -99,7 +99,7 @@ export function stackRows(
 	tasks: readonly ScheduledTask[],
 	scale: TimeScale,
 ): { bars: LaidOutBar[]; overflow: string[] } {
-	const sorted = tasks.toSorted(compareForPacking);
+	const sorted = [...tasks].sort(compareForPacking);
 	const bars: LaidOutBar[] = [];
 	const overflow: string[] = [];
 	let lane = 0;
@@ -176,7 +176,7 @@ function orderByDependency(
 	}
 	const ready = tasks
 		.filter((t) => (indeg.get(t.id) ?? 0) === 0)
-		.toSorted(compareForPacking);
+		.sort(compareForPacking);
 	const out: ScheduledTask[] = [];
 	const deg = new Map(indeg);
 	while (ready.length > 0) {
@@ -198,7 +198,7 @@ function orderByDependency(
 	if (out.length < tasks.length) {
 		const seen = new Set(out.map((t) => t.id));
 		out.push(
-			...tasks.filter((t) => !seen.has(t.id)).toSorted(compareForPacking),
+			...tasks.filter((t) => !seen.has(t.id)).sort(compareForPacking),
 		);
 	}
 	return out;

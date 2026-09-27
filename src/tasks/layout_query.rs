@@ -28,10 +28,7 @@ pub fn parse_task_layout_query(
         Some("1") => 1,
         _ => return Err(TaskLayoutQueryError::InvalidInput),
     };
-    let zoom = raw
-        .get("zoom")
-        .map(|s| s.as_str())
-        .unwrap_or("day");
+    let zoom = raw.get("zoom").map(|s| s.as_str()).unwrap_or("day");
     let zoom = ZoomLevel::parse(zoom).ok_or(TaskLayoutQueryError::InvalidInput)?;
     let px_per_day = match raw.get("pxPerDay") {
         None => None,
@@ -53,10 +50,7 @@ pub fn parse_task_layout_query(
             n
         }
     };
-    let pack = raw
-        .get("pack")
-        .map(|s| s.as_str())
-        .unwrap_or("rows");
+    let pack = raw.get("pack").map(|s| s.as_str()).unwrap_or("rows");
     let pack = PackMode::parse(pack).ok_or(TaskLayoutQueryError::InvalidInput)?;
     let max_lanes = match raw.get("maxLanes") {
         None => None,

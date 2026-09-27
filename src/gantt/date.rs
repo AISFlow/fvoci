@@ -1,13 +1,27 @@
-use chrono::{Datelike, NaiveDate};
-
-use crate::tasks::parse_iso_date;
+use chrono::NaiveDate;
 
 use super::types::IsoDate;
 
-const MS_PER_DAY: i64 = 86_400_000;
+/// Gantt epoch math only: accepts proleptic Gregorian dates chrono can represent,
+/// including year 0 padding (e.g. `0000-12-31`). User/PG task dates still use
+/// `crate::tasks::parse_iso_date`, which rejects year 0000.
+fn parse_gantt_date(value: &str) -> Option<NaiveDate> {
+    let bytes = value.as_bytes();
+    let shape_ok = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+    if !shape_ok {
+        return None;
+    }
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
+}
 
 pub fn to_epoch_day(d: &str) -> Option<i32> {
-    let date = parse_iso_date(d)?;
+    let date = parse_gantt_date(d)?;
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
     Some((date - epoch).num_days() as i32)
 }
@@ -38,15 +52,9 @@ pub fn each_day(start: &str, end: &str) -> Vec<IsoDate> {
     let s = to_epoch_day(start);
     let e = to_epoch_day(end);
     match (s, e) {
-        (Some(s), Some(e)) if e >= s => (s..=e)
-            .filter_map(from_epoch_day)
-            .collect(),
+        (Some(s), Some(e)) if e >= s => (s..=e).filter_map(from_epoch_day).collect(),
         _ => Vec::new(),
     }
-}
-
-pub fn format_iso(date: NaiveDate) -> IsoDate {
-    date.format("%Y-%m-%d").to_string()
 }
 
 #[cfg(test)]
@@ -63,5 +71,11 @@ mod tests {
     #[test]
     fn days_between_inclusive_span() {
         assert_eq!(days_between("2026-09-01", "2026-09-03"), Some(2));
+    }
+
+    #[test]
+    fn year_zero_padding_day_is_valid_for_gantt_math() {
+        let day = to_epoch_day("0000-12-31").expect("year-0 padding date");
+        assert_eq!(from_epoch_day(day).as_deref(), Some("0000-12-31"));
     }
 }
