@@ -66,7 +66,8 @@ use crate::api::dto::{
 use crate::api::dto::{
     AiDocumentBody, AiGenerateTasksOutput, AiSuggestLinksOutput, AiSummarizeOutput,
     GithubInstallOutput, GithubInstallUrlOutput, GithubIssueLinkBody, GithubIssueLinkOutput,
-    WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
+    TemplateApplyBody, TemplateApplyOutput, TemplateCreateBody, TemplateListResponse,
+    TemplateOutput, WebhookCreateBody, WebhookCreatedOutput, WebhookListResponse, WebhookOutput,
 };
 #[cfg(feature = "api-schema")]
 use crate::api::dto::{
@@ -344,9 +345,17 @@ impl Modify for CookieSecurityAddon {
         create_project_view,
         update_project_view,
         delete_project_view,
+        list_templates_path,
+        create_template_path,
+        apply_template_path,
     ),
     components(
         schemas(
+            TemplateCreateBody,
+            TemplateOutput,
+            TemplateListResponse,
+            TemplateApplyBody,
+            TemplateApplyOutput,
             WebhookCreateBody,
             WebhookOutput,
             WebhookCreatedOutput,
@@ -5102,3 +5111,56 @@ fn ai_generate_tasks_path() {}
     )
 )]
 fn ai_suggest_links_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{workspace_id}/templates",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace templates", body = TemplateListResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or insufficient workspace access", body = ProblemResponse),
+    )
+)]
+fn list_templates_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/templates",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(("workspace_id" = String, description = "Workspace id")),
+    request_body = TemplateCreateBody,
+    responses(
+        (status = 201, description = "Created template", body = TemplateOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found or insufficient workspace access", body = ProblemResponse),
+    )
+)]
+fn create_template_path() {}
+
+#[cfg(feature = "api-schema")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{workspace_id}/templates/{template_id}/apply",
+    tag = "documents",
+    security(("fvoci_session" = []), ("bearer_api_token" = [])),
+    params(
+        ("workspace_id" = String, description = "Workspace id"),
+        ("template_id" = String, description = "Template id"),
+    ),
+    request_body = TemplateApplyBody,
+    responses(
+        (status = 201, description = "Applied template", body = TemplateApplyOutput),
+        (status = 400, description = "Invalid input", body = ProblemResponse),
+        (status = 401, description = "Authentication required", body = ProblemResponse),
+        (status = 404, description = "Not found", body = ProblemResponse),
+        (status = 409, description = "Project archived", body = ProblemResponse),
+    )
+)]
+fn apply_template_path() {}

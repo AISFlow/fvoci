@@ -19,6 +19,7 @@ import {
   authOutlineLinkClass,
   authPrimaryButtonClass,
 } from "./auth-form";
+import type { OperatorInfo } from "@/features/legal/operator-info";
 import { AuthLayout, AuthPanel } from "./auth-layout";
 
 const RESET_SENT_NOTICE = t("auth.reset.sent");
@@ -119,9 +120,11 @@ export function LoginForm({
   providers,
   providersLoading,
   workspaceSso,
+  operator,
 }: {
   onSubmit: (input: LoginInput) => Promise<void>;
   brandingName?: string | null;
+  operator?: OperatorInfo | null;
   unavailableNotice?: string | null;
   mailEnabled?: boolean;
   onPasswordReset?: (email: string) => Promise<void>;
@@ -145,7 +148,7 @@ export function LoginForm({
   });
 
   return (
-    <AuthLayout brandingName={brandingName}>
+    <AuthLayout brandingName={brandingName} footerOperator={operator ?? null}>
       <AuthPanel title={t("auth.login")}>
         {resetNotice ? <AuthStatus>{RESET_DONE_NOTICE}</AuthStatus> : null}
         {withdrawnNotice ? <AuthStatus>{WITHDRAWN_NOTICE}</AuthStatus> : null}

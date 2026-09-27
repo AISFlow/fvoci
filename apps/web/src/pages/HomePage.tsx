@@ -2,6 +2,7 @@ import { t } from "@fvoci/i18n";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { AuthenticatedLegalNav } from "@/features/legal/operator-info";
 import { EmptyWorkspace } from "@/features/workspace/empty-workspace";
 import { WorkspaceCreateDialog } from "@/features/workspace/workspace-create-dialog";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
@@ -91,6 +92,9 @@ export function HomePage() {
             }}
           />
         </main>
+        <footer className="border-t border-border px-4 py-3">
+          <AuthenticatedLegalNav />
+        </footer>
       </div>
     );
   }
@@ -149,6 +153,9 @@ export function HomePage() {
           ))}
         </div>
       </main>
+      <footer className="border-t border-border px-4 py-3">
+        <AuthenticatedLegalNav />
+      </footer>
       <WorkspaceCreateDialog
         open={createOpen}
         onOpenChange={setCreateOpen}

@@ -12,6 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
+use chrono::{Duration as ChronoDuration, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -38,8 +39,13 @@ use crate::settings::{self, asset_href, BrandingAssetKind};
 /// Same 60 s as the asset bytes: the two public surfaces must not drift.
 const PUBLIC_CACHE_CONTROL: &str = "public, max-age=60";
 
+/// Source `SECURITY_TXT_EXPIRES_MS` / RFC 9116 §2.5.5: regenerated per request.
+const SECURITY_TXT_EXPIRES_DAYS: i64 = 365;
+const SECURITY_TXT_CACHE_CONTROL: &str = "public, max-age=3600";
+
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/.well-known/security.txt", get(get_security_txt))
         .route("/api/v1/legal/{kind}", get(get_legal))
         .route("/api/v1/legal/{kind}/versions", get(get_legal_versions))
         .route("/api/v1/auth/consents", post(post_consents))
@@ -67,6 +73,36 @@ fn kind_param(kind: &str) -> Result<(), AppError> {
     } else {
         Err(AppError::with_source(ProblemCode::InvalidInput, "/kind"))
     }
+}
+
+fn security_txt_body(contact: &str) -> String {
+    let expires = (Utc::now() + ChronoDuration::days(SECURITY_TXT_EXPIRES_DAYS)).to_rfc3339();
+    format!("Contact: {contact}\nExpires: {expires}\nPreferred-Languages: ko, en\n")
+}
+
+/// Public RFC 9116 security contact (source `server.ts` `/.well-known/security.txt`).
+async fn get_security_txt(State(state): State<AppState>) -> Result<Response, AppError> {
+    let values = settings::current_values_with_license(
+        &state.auth.db.pool,
+        &state.branding_name,
+        &state.auth.db.license,
+    )
+    .await
+    .map_err(internal)?;
+    let contact = values.security.contact.as_deref();
+    let Some(contact) = contact else {
+        return Err(not_found());
+    };
+    let body = security_txt_body(contact);
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, SECURITY_TXT_CACHE_CONTROL),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 /// `z.coerce.number().int().positive()`.

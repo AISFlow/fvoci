@@ -172,6 +172,7 @@ pub fn router_with_settings(
         .merge(routes::legal::router())
         .merge(routes::collections::router())
         .merge(routes::document_tags::router())
+        .merge(routes::templates::router())
         .merge(routes::project_views::router())
         .merge(collab)
         .layer(middleware::from_fn_with_state(state.clone(), consent_gate))

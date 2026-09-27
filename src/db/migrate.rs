@@ -74,6 +74,7 @@ const MIGRATIONS: &[(&str, i32)] = &[
         include_str!("../../migrations/038_oidc_legacy_issuer_fail_closed.sql"),
         38,
     ),
+    (include_str!("../../migrations/039_templates.sql"), 39),
 ];
 
 const MIGRATION_LOCK_KEY: i64 = 847_291_003_552;
@@ -574,6 +575,10 @@ mod tests {
         (
             38,
             "03d965d84b895263df58bf5520c23ca8e1acc444f082ca20306bcb388a29a487",
+        ),
+        (
+            39,
+            "27713b14583fd331f0679244e359ade3ae4a2427d8db06210cbfd4d6dc4f34d5",
         ),
     ];
 

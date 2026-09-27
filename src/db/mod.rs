@@ -48,6 +48,7 @@ pub mod task_activity;
 pub mod task_ops;
 pub mod task_origins;
 pub mod tasks;
+pub mod templates;
 pub mod user_export;
 pub mod view_query;
 pub mod workflow_statuses;

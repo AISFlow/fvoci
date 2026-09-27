@@ -171,16 +171,56 @@ fn hostname(value: String) -> Option<String> {
     ((1..=253).contains(&len) && HOSTNAME_RE.is_match(&trimmed)).then_some(trimmed)
 }
 
+/// WHATWG `Url` canonicalizes (IDN, percent-encoding, default path) but does not
+/// guarantee RFC 3986 URI syntax on `as_str()`. A bounded second parse with
+/// `syntax_violation_callback` rejects leftover non-URI code points and bad
+/// percent-escapes without a handwritten URI parser.
+fn canonical_https_contact_uri_ok(canonical: &str) -> bool {
+    use std::cell::RefCell;
+
+    use url::SyntaxViolation;
+
+    let reject = RefCell::new(false);
+    let parsed = url::Url::options()
+        .syntax_violation_callback(Some(&|v| {
+            if matches!(
+                v,
+                SyntaxViolation::NonUrlCodePoint | SyntaxViolation::PercentDecode
+            ) {
+                *reject.borrow_mut() = true;
+            }
+        }))
+        .parse(canonical);
+    parsed.is_ok() && !*reject.borrow()
+}
+
+fn normalize_https_security_contact(trimmed: &str) -> Option<String> {
+    if !trimmed.starts_with("https://") {
+        return None;
+    }
+    if trimmed.contains('\\') || trimmed.contains(' ') {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed).ok()?;
+    if parsed.scheme() != "https" || parsed.host().is_none() {
+        return None;
+    }
+    let canonical = parsed.as_str().to_string();
+    if utf16_len(&canonical) > 320 || !canonical_https_contact_uri_ok(&canonical) {
+        return None;
+    }
+    Some(canonical)
+}
+
 fn security_contact(value: String) -> Option<String> {
     let trimmed = value.trim().to_string();
     if utf16_len(&trimmed) > 320 || !no_control(&trimmed) || trimmed.is_empty() {
         return None;
     }
-    let ok = match trimmed.strip_prefix("mailto:") {
-        Some(address) => is_zod_email(address),
-        None => trimmed.starts_with("https://") && trimmed.len() > "https://".len(),
-    };
-    ok.then_some(trimmed)
+    match trimmed.strip_prefix("mailto:") {
+        Some(address) => is_zod_email(address).then_some(trimmed),
+        None => normalize_https_security_contact(&trimmed),
+    }
 }
 
 /// Raster formats only: SVG is a script-bearing document and is never served
@@ -742,11 +782,51 @@ mod tests {
     #[test]
     fn security_contact_and_operator_urls() {
         let c = |v: &str| json!({"contact": v});
-        assert!(parse_patch_value(SettingsKey::Security, &c("mailto:sec@example.com")).is_some());
-        assert!(parse_patch_value(SettingsKey::Security, &c("https://example.com/sec")).is_some());
+        let contact = |v: &str| {
+            parse_patch_value(SettingsKey::Security, &c(v)).unwrap()["contact"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(contact("mailto:sec@example.com"), "mailto:sec@example.com");
+        assert_eq!(
+            contact("https://example.com/sec"),
+            "https://example.com/sec"
+        );
         assert!(parse_patch_value(SettingsKey::Security, &c("https://")).is_none());
+        assert_eq!(contact("https://example.com"), "https://example.com/");
         assert!(parse_patch_value(SettingsKey::Security, &c("mailto:nope")).is_none());
+        assert!(parse_patch_value(SettingsKey::Security, &c("mailto:sec\r@example.com")).is_none());
         assert!(parse_patch_value(SettingsKey::Security, &c("http://example.com")).is_none());
+        for bad in [
+            "https:example.com",
+            "https://example.com/a b",
+            "https://example.com\\foo",
+            "https://example.com/a|b",
+            "https://example.com/a^b",
+            "https://example.com/%zz",
+            "https://example.com/%E",
+        ] {
+            assert!(
+                parse_patch_value(SettingsKey::Security, &c(bad)).is_none(),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            contact("https://example.com/%25"),
+            "https://example.com/%25"
+        );
+        assert_eq!(
+            contact("https://xn--2j5b.example/"),
+            "https://xn--2j5b.example/"
+        );
+        let encoded = "https://example.com/%EB%B3%B4%EC%95%88";
+        assert_eq!(contact(encoded), encoded);
+        let unicode_path = "https://example.com/보안";
+        assert_eq!(contact(unicode_path), encoded);
+        assert_eq!(contact(encoded), contact(unicode_path));
+        let over = format!("https://example.com/{}", "a".repeat(320));
+        assert!(parse_patch_value(SettingsKey::Security, &c(&over)).is_none());
         let mut op = serde_json::to_value(OperatorSettings::default()).unwrap();
         op["businessInfoUrl"] = json!("javascript:alert(1)");
         assert!(parse_patch_value(SettingsKey::Operator, &op).is_none());
