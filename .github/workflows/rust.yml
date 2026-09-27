@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+  workflow_dispatch:
 
 # Only obsolete runs of this workflow on the same PR are cancelled.
 concurrency:
@@ -20,7 +22,37 @@ permissions:
   contents: read
 
 jobs:
+  ci-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      reason_code: ${{ steps.plan.outputs.reason_code }}
+      plan_ok: ${{ steps.plan.outputs.plan_ok }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
+      select_fast: ${{ steps.plan.outputs.select_fast }}
+      select_postgres: ${{ steps.plan.outputs.select_postgres }}
+      select_collaboration: ${{ steps.plan.outputs.select_collaboration }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
+          bash scripts/test-ci-selection.sh
+          python3 scripts/ci_selection.py plan \
+            --workflow rust \
+            --event-json "$GITHUB_EVENT_PATH" \
+            --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
+            --github-output "$GITHUB_OUTPUT"
+
   fast:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_fast == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -54,6 +86,8 @@ jobs:
       - run: cargo test --locked --offline --test doctor_conversion
       - run: cargo test --locked --offline --manifest-path vendor/markdown/Cargo.toml --target-dir target/vendor-markdown
   postgres:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_postgres == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -137,6 +171,8 @@ jobs:
         run: bash scripts/start-test-minio.sh cargo test --locked --offline --no-fail-fast --features db-tests --test attachment_s3_integration
 
   collaboration:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_collaboration == 'true'
     name: ${{ matrix.check }}
     strategy:
       fail-fast: false
@@ -206,3 +242,19 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
         run: bash scripts/run-rust-collaboration-ci-tests.sh
+
+  rust-ci-gate:
+    name: rust-ci-gate
+    needs: [ci-plan, fast, postgres, collaboration]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Fail closed on selection results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_selection.py gate --workflow rust --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"
