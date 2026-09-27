@@ -807,7 +807,7 @@ async fn task_revisions_create_list_get_restore_through_room() {
         let (status, created) = session_call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), &s.session_token, None).await;
         assert_eq!(status, StatusCode::CREATED, "{created}");
         let revision_id = created["id"].as_str().expect("id").to_string();
-        // Unchanged content dedupes to the same revision.
+        // Unchanged content dedupes to the same revision (POST body is id-only).
         let (status, again) = session_call(addr, Method::POST, &task_path(s, f.task_id, "/revisions"), &s.session_token, None).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(again["id"], revision_id.as_str());

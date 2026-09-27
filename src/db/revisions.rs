@@ -189,8 +189,29 @@ pub struct RevisionCursor {
 
 const MANUAL_REASON: &str = "manual";
 const SESSION_REASON: &str = "session";
+const SCHEDULED_REASON: &str = "scheduled";
 const TARGET_DOCUMENT: &str = "document";
 const TARGET_TASK: &str = "task";
+
+type TaskRevisionLockSqlRow = (Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+
+struct TaskRevisionLockRow {
+    project_id: Uuid,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+fn task_revision_lock_row(
+    (project_id, _archived_at, deleted_at): TaskRevisionLockSqlRow,
+) -> TaskRevisionLockRow {
+    TaskRevisionLockRow {
+        project_id,
+        deleted_at,
+    }
+}
+
+fn is_automatic_revision_reason(reason: &str) -> bool {
+    reason == SESSION_REASON || reason == SCHEDULED_REASON
+}
 
 type RevisionMetaRow = (Uuid, String, Uuid, String, Option<Uuid>, DateTime<Utc>);
 type RevisionDetailRow = (
@@ -662,13 +683,14 @@ pub async fn create_manual_revision(
             return Ok(Err(err));
         }
     }
-    let recent: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
+    let recent: Option<(Uuid, Vec<u8>, String)> = sqlx::query_as(
         r#"
-        SELECT id, y_snapshot
+        SELECT id, y_snapshot, reason
         FROM fvoci.revisions
         WHERE workspace_id = $1 AND target_kind = $2 AND target_id = $3
         ORDER BY created_at DESC, id DESC
         LIMIT 1
+        FOR UPDATE
         "#,
     )
     .bind(workspace_id)
@@ -676,8 +698,28 @@ pub async fn create_manual_revision(
     .bind(target.id())
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some((id, prev_snap)) = recent {
+    if let Some((id, prev_snap, reason)) = recent {
         if prev_snap == input.y_snapshot {
+            if is_automatic_revision_reason(&reason) {
+                sqlx::query(
+                    r#"
+                    UPDATE fvoci.revisions
+                    SET reason = $3,
+                        created_by = $4,
+                        content_json = $5,
+                        text = $6
+                    WHERE workspace_id = $1 AND id = $2
+                    "#,
+                )
+                .bind(workspace_id)
+                .bind(id)
+                .bind(MANUAL_REASON)
+                .bind(actor_user_id)
+                .bind(&input.content_json)
+                .bind(&input.text)
+                .execute(&mut *tx)
+                .await?;
+            }
             tx.commit().await?;
             return Ok(Ok(id));
         }
@@ -807,7 +849,7 @@ async fn lock_system_revision_target(
             if project.is_none() {
                 return Ok(Err(RevisionDbError::NotFound));
             }
-            let row: Option<(Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            let row: Option<TaskRevisionLockSqlRow> = sqlx::query_as(
                 r#"
                 SELECT project_id, archived_at, deleted_at
                 FROM fvoci.tasks
@@ -819,7 +861,11 @@ async fn lock_system_revision_target(
             .bind(task_id)
             .fetch_optional(&mut **tx)
             .await?;
-            let Some((project_id, _archived_at, deleted_at)) = row else {
+            let Some(TaskRevisionLockRow {
+                project_id,
+                deleted_at,
+            }) = row.map(task_revision_lock_row)
+            else {
                 return Ok(Err(RevisionDbError::NotFound));
             };
             if deleted_at.is_some() || project_id != expected_project_id {
