@@ -246,6 +246,7 @@ impl Harness {
             ),
             import_wake: None,
             import_extractor_available: false,
+            preview_extract: None,
             quota: Default::default(),
             streams: fvoci_server::http::state::AppState::fresh_streams(),
         };

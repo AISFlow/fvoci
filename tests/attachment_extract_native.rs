@@ -6,10 +6,11 @@ mod extract_harness;
 use std::time::Duration;
 
 use extract_harness::{
-    app_pool, create_document, download_original, extract_job_driver_bin, extract_job_settings,
-    idle_extract_job_settings, require_extractor_bin, run_extract_job_driver, server_bin,
-    setup_session, spawn_extract_for_storage, spawn_server_process_guarded, upload_bytes,
-    wait_for_extract, wait_for_server_exit, wait_for_server_ready, TempStorageGuard, TestDb,
+    app_pool, app_router, app_state_with_storage, create_document, download_original,
+    extract_job_driver_bin, extract_job_settings, idle_extract_job_settings, json_request,
+    require_extractor_bin, run_extract_job_driver, server_bin, setup_session,
+    spawn_extract_for_storage, spawn_server_process_guarded, upload_bytes, wait_for_extract,
+    wait_for_server_exit, wait_for_server_ready, TempStorageGuard, TestDb,
 };
 use uuid::Uuid;
 
@@ -145,6 +146,83 @@ async fn authenticated_hwpx_upload_extracts_안녕_and_download_matches() {
     job.request_shutdown();
     job.join().await.expect("extract job join");
     pool.close().await;
+    harness.cleanup().await;
+}
+
+/// `preview-html` (server mode) for HWP and HWPX files no extract job has
+/// reached: the route reads the original and parses it through the native
+/// helper, serves the escaped text, and leaves the extract columns alone.
+#[tokio::test]
+async fn authenticated_hwp_and_hwpx_preview_html_parse_on_demand_before_extract() {
+    let extractor = require_extractor_bin();
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, _owner, workspace_id, storage_root) = setup_session(&harness).await;
+    let mut state = app_state_with_storage(&harness.app_url, storage_root).await;
+    state.preview_extract = Some(fvoci_server::attachments::PreviewExtractor::new(
+        Some(extractor),
+        None,
+    ));
+    let app = app_router(state);
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO fvoci.instance_settings (key, value) VALUES ('attachmentPreview', '{\"mode\":\"server\"}')",
+    )
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    for name in ["sample.hwp", "sample.hwpx"] {
+        let fixture = std::fs::read(format!("compat/fixtures/{name}")).expect("fixture");
+        let uploaded = upload_bytes(
+            &app,
+            &cookie,
+            workspace_id,
+            &document_id,
+            name,
+            &fixture,
+            Some("application/x-hwp"),
+        )
+        .await;
+        let extract_state = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT row(extract_text, extract_status, extract_attempts, extract_warnings,
+                            extract_lease_token, extract_lease_expires_at, extract_rhwp_rev)::text
+                 FROM fvoci.attachments WHERE id = $1",
+            )
+            .bind(Uuid::parse_str(&uploaded.attachment_id).unwrap())
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        };
+        let before = extract_state().await;
+        assert!(before.starts_with("(\"\",pending,0,"), "{name}: {before}");
+
+        let (status, body, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{workspace_id}/attachments/{}/preview-html",
+                uploaded.attachment_id
+            ),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{name}: {body}");
+        let html = body["html"].as_str().unwrap();
+        assert!(
+            html.starts_with("<pre>") && html.ends_with("</pre>"),
+            "{name}: {html}"
+        );
+        assert!(html.contains("안녕"), "{name}: {html}");
+        assert_eq!(extract_state().await, before, "{name}");
+    }
+    admin.close().await;
     harness.cleanup().await;
 }
 
