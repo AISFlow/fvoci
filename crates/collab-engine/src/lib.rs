@@ -33,7 +33,9 @@ mod project;
 pub mod seed;
 
 #[cfg(feature = "worker")]
-pub use engine::{new_doc, CollabEngine, FRAGMENT as ENGINE_FRAGMENT};
+pub use engine::{
+    new_doc, revision_snapshots_semantically_equal, CollabEngine, FRAGMENT as ENGINE_FRAGMENT,
+};
 pub use limits::Limits;
 pub use outcome::{EngineReport, EngineStatus, LimitKind, UnsupportedReason, WorkerFailureReason};
 pub use process::{

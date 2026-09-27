@@ -44,6 +44,13 @@ pub enum Request {
     /// Yrs Snapshot (state vector + delete set). Product revision capture.
     /// Does not mutate the Doc. Bytes are returned in `update_b64`.
     RevisionSnapshot,
+    /// Whether two encoded revision snapshots are semantically equal (source `Y.equalSnapshots`).
+    RevisionSnapshotsEqual {
+        #[serde(with = "b64")]
+        left_b64: Vec<u8>,
+        #[serde(with = "b64")]
+        right_b64: Vec<u8>,
+    },
     /// Compute a forward updateV1 that replaces the live `prosemirror` fragment
     /// with the fragment reconstructed from a Yrs Snapshot. Does not mutate the
     /// live Doc; the parent persists then applies the returned update.
@@ -88,7 +95,11 @@ impl Request {
             | Self::RestoreFromSnapshot { encoding, .. }
             | Self::ReplaceFromUpdate { encoding, .. }
             | Self::SeedFromTiptap { encoding, .. } => *encoding,
-            Self::Ping | Self::Snapshot | Self::Inspect | Self::RevisionSnapshot => 1,
+            Self::Ping
+            | Self::Snapshot
+            | Self::Inspect
+            | Self::RevisionSnapshot
+            | Self::RevisionSnapshotsEqual { .. } => 1,
         }
     }
 
@@ -100,6 +111,9 @@ impl Request {
             | Self::Inspect
             | Self::Project { .. }
             | Self::RevisionSnapshot => 0,
+            Self::RevisionSnapshotsEqual { left_b64, right_b64, .. } => {
+                left_b64.len() as u64 + right_b64.len() as u64
+            }
             Self::Apply { update_b64, .. } => update_b64.len() as u64,
             Self::Sync {
                 state_vector_b64, ..

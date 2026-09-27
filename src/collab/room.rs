@@ -28,6 +28,12 @@ use crate::collab::config::CollabConfig;
 use crate::collab::derived_body::prepare_derived_body;
 use crate::collab::engine_bridge::{warn_engine_not_applied, BridgeError, EngineBridge};
 use crate::collab::guard::RoomGuard;
+use crate::collab::revision::{
+    capture_revision_offline, prepare_revision_text, revision_snapshots_semantically_equal_offline,
+};
+use crate::db::revisions::{
+    create_system_revision, latest_revision_y_snapshot, CreateRevisionInput, RevisionTarget,
+};
 use crate::collab::validation::{
     classify_admission_load, validate_recovery_bundle, validate_snapshot_only, BundleValidation,
     ValidateStageTimings,
@@ -1110,6 +1116,7 @@ struct RoomActor {
     /// Set when the dedicated fence connection is lost; actor exits once empty.
     fence_lost: bool,
     user_reject_budgets: HashMap<Uuid, UserRejectBudget>,
+    session_revision_in_flight: bool,
 }
 
 pub async fn spawn_room(
@@ -1167,6 +1174,7 @@ pub async fn spawn_room(
         flushing_awareness: false,
         fence_lost: false,
         user_reject_budgets: HashMap::new(),
+        session_revision_in_flight: false,
     };
     tokio::spawn(async move {
         let mut actor = actor;
@@ -1491,6 +1499,7 @@ impl RoomActor {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
+        self.maybe_session_revision_on_last_disconnect().await;
     }
 
     async fn close_connection_ordered(&mut self, conn_id: Uuid, code: u16, reason: &str) {
@@ -1498,6 +1507,128 @@ impl RoomActor {
             self.pending_awareness.push_back(encoded);
         }
         self.flush_pending_awareness().await;
+        self.maybe_session_revision_on_last_disconnect().await;
+    }
+
+    fn revision_target(&self) -> RevisionTarget {
+        match self.kind {
+            CollabKind::Document => RevisionTarget::Document(self.document_id),
+            CollabKind::Task => RevisionTarget::Task(self.document_id),
+        }
+    }
+
+    async fn maybe_session_revision_on_last_disconnect(&mut self) {
+        if !self.config.revision_session_snapshot {
+            return;
+        }
+        if self.shutting_down || self.fence_lost {
+            return;
+        }
+        if !self.connections.is_empty() {
+            return;
+        }
+        if !self.committed_loaded {
+            return;
+        }
+        if self.session_revision_in_flight {
+            return;
+        }
+        self.session_revision_in_flight = true;
+        let workspace_id = self.workspace_id;
+        let target = self.revision_target();
+        let writer_generation = self.writer_generation;
+        let snapshot = self.committed.snapshot.clone();
+        let tail = self.committed.tail_payloads.clone();
+        let engine_bin = self.config.engine_bin.clone();
+        let limits = self.config.limits;
+        let pool = self.pool.clone();
+
+        let captured = tokio::task::spawn_blocking(move || {
+            capture_revision_offline(engine_bin, limits, snapshot, tail)
+        })
+        .await;
+
+        let captured = match captured {
+            Ok(Ok(captured)) => captured,
+            Ok(Err(_)) | Err(_) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    "collab.session_revision_capture_failed"
+                );
+                self.session_revision_in_flight = false;
+                return;
+            }
+        };
+
+        let text = match prepare_revision_text(&captured.content_json) {
+            Ok(text) => text,
+            Err(_) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    "collab.session_revision_text_failed"
+                );
+                self.session_revision_in_flight = false;
+                return;
+            }
+        };
+
+        if let Ok(Some((_, prev_snap))) =
+            latest_revision_y_snapshot(&pool, workspace_id, target).await
+        {
+            let engine_bin = self.config.engine_bin.clone();
+            let limits = self.config.limits;
+            let left = prev_snap;
+            let right = captured.y_snapshot.clone();
+            let duplicate = tokio::task::spawn_blocking(move || {
+                revision_snapshots_semantically_equal_offline(engine_bin, limits, &left, &right)
+            })
+            .await
+            .unwrap_or(false);
+            if duplicate {
+                self.session_revision_in_flight = false;
+                return;
+            }
+        }
+
+        let input = CreateRevisionInput {
+            y_snapshot: captured.y_snapshot,
+            content_json: captured.content_json,
+            text,
+            reason: "session".into(),
+        };
+        match create_system_revision(
+            &pool,
+            workspace_id,
+            target,
+            input,
+            writer_generation,
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    "collab.session_revision_persist_skipped"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    target_kind = target.kind_str(),
+                    target_id = %target.id(),
+                    error = %err,
+                    "collab.session_revision_persist_failed"
+                );
+            }
+        }
+        self.session_revision_in_flight = false;
     }
 
     fn signal_cancel(

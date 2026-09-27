@@ -821,3 +821,202 @@ async fn restore_timeout_before_append_is_504_and_nothing_persisted() {
     )
     .await;
 }
+
+async fn count_session_revisions(
+    harness: &support::TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+) -> i64 {
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = 'document' AND target_id = $2 AND reason = 'session'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(document_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    count
+}
+
+async fn wait_session_revision_count(
+    harness: &support::TestDb,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    expected: i64,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    loop {
+        let count = count_session_revisions(harness, workspace_id, document_id).await;
+        if count == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "expected {expected} session revisions, last count {count} for document {document_id}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn session_revision_on_last_disconnect_two_clients() {
+    run_test("session_revision_on_last_disconnect_two_clients", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let member = create_member_session(
+            &run.harness,
+            wiki.session.workspace_id,
+            "rev-member@t.local",
+        )
+        .await;
+        let (state, hub) =
+            collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        let update = engine_fixture("structured.v1");
+
+        let mut ws0 = connect_member(addr, &wiki.session.session_token).await;
+        auth_and_join(&mut ws0, &key, 1).await;
+        complete_sync_handshake(&mut ws0, &key).await;
+        ws0.send(Message::Binary(sync_update_frame(&key, &update).into()))
+            .await
+            .unwrap();
+        assert!(wait_for_sync_applied(&mut ws0, Duration::from_secs(8)).await);
+        let request_id = Uuid::now_v7();
+        ws0.send(Message::Binary(
+            stateless_frame(&key, &format!("persist:{request_id}")).into(),
+        ))
+        .await
+        .unwrap();
+        assert!(
+            wait_for_stateless_exact(
+                &mut ws0,
+                &format!("persisted:{request_id}"),
+                Duration::from_secs(8)
+            )
+            .await
+        );
+
+        let mut ws1 = connect_member(addr, &member.session_token).await;
+        auth_and_join(&mut ws1, &key, 2).await;
+        complete_sync_handshake(&mut ws1, &key).await;
+
+        let _ = ws0.close(None).await;
+        wait_session_revision_count(
+            &run.harness,
+            wiki.session.workspace_id,
+            wiki.document_id,
+            0,
+        )
+        .await;
+
+        let _ = ws1.close(None).await;
+        wait_session_revision_count(
+            &run.harness,
+            wiki.session.workspace_id,
+            wiki.document_id,
+            1,
+        )
+        .await;
+
+        let admin = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&run.harness.admin_url)
+            .await
+            .unwrap();
+        let row: (Option<Uuid>, String) = sqlx::query_as(
+            r#"
+            SELECT created_by, reason FROM fvoci.revisions
+            WHERE workspace_id = $1 AND target_id = $2 AND reason = 'session'
+            "#,
+        )
+        .bind(wiki.session.workspace_id)
+        .bind(wiki.document_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+        assert!(row.0.is_none(), "session revision must be system-authored");
+        assert_eq!(row.1, "session");
+
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn session_revision_disabled_by_config() {
+    run_test("session_revision_disabled_by_config", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let mut cfg = test_collab_config(4, 60_000);
+        cfg.revision_session_snapshot = false;
+        let (state, hub) = collab_app_state(&run.harness.app_url, cfg).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        apply_and_persist(
+            addr,
+            &wiki.session.session_token,
+            &key,
+            1,
+            &engine_fixture("structured.v1"),
+        )
+        .await;
+        assert_eq!(
+            count_session_revisions(
+                &run.harness,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await,
+            0
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn session_revision_dedupes_unchanged_reconnect() {
+    run_test("session_revision_dedupes_unchanged_reconnect", async {
+        let mut run = TestRun::new(support::TestDb::bootstrap().await);
+        let wiki = setup_wiki_doc(&run.harness).await;
+        let (state, hub) =
+            collab_app_state(&run.harness.app_url, test_collab_config(4, 60_000)).await;
+        let addr = run.spawn_router_state(state, hub).await;
+        let key = routing_key(wiki.session.workspace_id, wiki.document_id);
+        let update = engine_fixture("structured.v1");
+        for round in 0..2 {
+            apply_and_persist(addr, &wiki.session.session_token, &key, 10 + round, &update).await;
+            wait_session_revision_count(
+                &run.harness,
+                wiki.session.workspace_id,
+                wiki.document_id,
+                1,
+            )
+            .await;
+        }
+        assert_eq!(
+            count_session_revisions(
+                &run.harness,
+                wiki.session.workspace_id,
+                wiki.document_id,
+            )
+            .await,
+            1,
+            "unchanged content across reconnect must not append another session row"
+        );
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}

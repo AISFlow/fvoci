@@ -1533,3 +1533,78 @@ async fn document_origin_list_pages_authorized_count_and_current_authz() {
     })
     .await;
 }
+
+async fn count_task_session_revisions(
+    harness: &TestDb,
+    workspace_id: Uuid,
+    task_id: Uuid,
+) -> i64 {
+    let admin = admin_pool(harness).await;
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)::bigint FROM fvoci.revisions
+        WHERE workspace_id = $1 AND target_kind = 'task' AND target_id = $2 AND reason = 'session'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    count
+}
+
+async fn wait_task_session_revision_count(
+    harness: &TestDb,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    expected: i64,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    loop {
+        let count = count_task_session_revisions(harness, workspace_id, task_id).await;
+        if count == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("expected {expected} task session revisions, got {count}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn task_session_revision_on_last_disconnect() {
+    run_test("task_session_revision_on_last_disconnect", async {
+        let mut run = TestRun::new(TestDb::bootstrap().await);
+        let (addr, f) = setup_task(&mut run, 5_000).await;
+        let key = task_key(f.owner.workspace_id, f.task_id);
+        let update = seed_update(
+            &run,
+            json!({"type":"doc","content":[para("sess-1", "세션 스냅샷")]}),
+        )
+        .await;
+        apply_and_persist(addr, &f.owner.session_token, &key, 50, &update).await;
+        wait_task_session_revision_count(
+            &run.harness,
+            f.owner.workspace_id,
+            f.task_id,
+            1,
+        )
+        .await;
+        let admin = admin_pool(&run.harness).await;
+        let row: (Option<Uuid>,) = sqlx::query_as(
+            "SELECT created_by FROM fvoci.revisions WHERE workspace_id = $1 AND target_id = $2 AND reason = 'session'",
+        )
+        .bind(f.owner.workspace_id)
+        .bind(f.task_id)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        admin.close().await;
+        assert!(row.0.is_none());
+        run.finish().await.expect("cleanup");
+    })
+    .await;
+}
