@@ -2155,6 +2155,41 @@ async fn due_before_uses_each_actor_time_zone_on_every_task_query_path() {
         assert_eq!(titles, vec!["at-evening", "date-on"], "{path}");
     }
 
+    // An unknown stored zone reads as UTC on every path, collection included,
+    // instead of failing `AT TIME ZONE` on the first timestamp due.
+    sqlx::query("UPDATE fvoci.users SET timezone = 'Mars/Olympus_Mons' WHERE id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    for path in ["collection", "project", "workspace", "layout"] {
+        let titles = due_before_titles(&app, &owner, ws, &project_id, &cid, path).await;
+        assert_eq!(titles, vec!["at-evening", "date-on"], "{path}");
+    }
+    // A calendar window keeps its own zone over the actor's fallback: Seoul
+    // puts the 20:00Z due on 2026-01-02, which UTC would not.
+    let (status, body) = query(
+        &app,
+        &owner,
+        ws,
+        &cid,
+        json!({
+            "config": {"dateBy": "due"},
+            "window": {"from": "2026-01-02", "to": "2026-01-03", "timeZone": "Asia/Seoul"},
+            "limit": 100,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut titles: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["title"].as_str().unwrap())
+        .collect();
+    titles.sort();
+    assert_eq!(titles, vec!["at-early-next", "at-evening", "date-after"]);
+
     admin.close().await;
     harness.cleanup().await;
 }
