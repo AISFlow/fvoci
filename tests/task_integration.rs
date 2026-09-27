@@ -4372,15 +4372,25 @@ async fn task_stream_emits_activity_on_comment() {
     assert_eq!(status, StatusCode::CREATED);
     let task_id = task["id"].as_str().unwrap();
     let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    // The live tail starts at the cursor taken before `event: open`; mutate only after open.
+    let (open_tx, open_rx) = tokio::sync::oneshot::channel();
     let listener = tokio::spawn(sse_listen(
         app.clone(),
         path,
         owner.cookie.clone(),
         Some(b"event: open".to_vec()),
-        None,
+        Some(open_tx),
         Some(b"task.activity".to_vec()),
         Duration::from_secs(20),
     ));
+    assert!(
+        timeout(Duration::from_secs(5), open_rx)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_some(),
+        "task stream should emit open before comment mutation"
+    );
     let (status, _) = json_request(
         app.clone(),
         "POST",
