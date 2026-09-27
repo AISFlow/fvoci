@@ -638,7 +638,11 @@ test("calendar moves previews and day-list rows to another day or unassigned thr
   await calendar.getByRole("button", { name: "2027-05-04 · 전체 1개" }).click();
   const editor = page.getByLabel(`기준일 · ${listed.displayId}`, { exact: true });
   await editor.fill("2027-05-06");
-  await page.getByTestId(`collection-row-${listed.displayId}`).getByRole("button", { name: "저장" }).click();
+  await page
+    .getByTestId(`collection-row-${listed.displayId}`)
+    .getByTestId("value-editor-base_day")
+    .getByRole("button", { name: "저장" })
+    .click();
   await expect.poll(async () => (await itemRow(listed.displayId)).values[dateField.id]).toEqual({ date: "2027-05-06" });
   await expect(cell("2027-05-06").getByTestId(`collection-preview-${listed.displayId}`)).toBeVisible();
 
