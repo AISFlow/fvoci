@@ -191,6 +191,7 @@ async fn app_state_with_part_size(
         collab: None,
         meili: None,
         search_embedder: None,
+        streams: fvoci_server::http::state::AppState::fresh_streams(),
         mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
         markdown: Some(
             fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(

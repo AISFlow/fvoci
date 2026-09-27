@@ -2,11 +2,13 @@ import { t } from "@fvoci/i18n";
 import { useQuery } from "@tanstack/react-query";
 import { Navigate, Outlet } from "react-router-dom";
 import { meQuery } from "@/lib/queries";
+import { useWorkspaceAccessWatch } from "@/hooks/use-workspace-access-watch";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 
 export function WorkspaceLayout() {
   const me = useQuery(meQuery);
   const { workspaces, workspace } = useWorkspaceContext();
+  useWorkspaceAccessWatch(workspace?.id);
 
   if (me.isError) {
     return <Navigate to="/login" replace />;

@@ -518,6 +518,7 @@ pub async fn collab_app_state_with_pool(
         import_wake: None,
         import_extractor_available: false,
         quota: Default::default(),
+        streams: fvoci_server::http::state::AppState::fresh_streams(),
         mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
     };
     (state, hub)

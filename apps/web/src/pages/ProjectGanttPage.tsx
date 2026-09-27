@@ -1,6 +1,7 @@
 import { useSearchParams } from "react-router-dom";
 import { GanttProjectView } from "@/features/tasks/gantt-project-view";
 import { useProjectRef } from "@/features/collections/use-project-ref";
+import { useTaskStream } from "@/hooks/use-task-stream";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { parseViewQueryParam } from "@/lib/view-query";
 import { t } from "@fvoci/i18n";
@@ -13,6 +14,8 @@ export function ProjectGanttPage() {
   const year = y ? Number.parseInt(y, 10) : undefined;
   const month = m ? Number.parseInt(m, 10) : undefined;
   const viewQuery = parseViewQueryParam(search.get("query"));
+
+  useTaskStream(workspace?.id, project?.id);
 
   if (!workspace) return null;
 

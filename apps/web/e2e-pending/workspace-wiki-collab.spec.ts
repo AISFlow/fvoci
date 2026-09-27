@@ -468,12 +468,15 @@ test("membership revoke while connected stops further edits", async ({
     );
     expect(revoke.ok()).toBe(true);
 
-    await expect(memberPage.locator('[data-collab-status="unauthorized"]')).toBeVisible({
-      timeout: 20_000,
-    });
-    await expect(memberPage.getByRole("alert")).toHaveText("권한 없음 · 다시 로그인");
+    // Membership loss is reconciled via workspace access-stream → home eviction, not
+    // the in-document collab unauthorized badge (see task-stream-resync / workspace-flow).
+    await expect(memberPage).toHaveURL(/\?denied=workspace$/, { timeout: 20_000 });
+    await expect(memberPage.getByRole("alert")).toContainText("접근 권한");
     await expect(editorLocator(memberPage)).toHaveCount(0);
-    await expect(memberPage.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
+
+    await memberPage.goto(doc.url);
+    await expect(memberPage).toHaveURL(/\?denied=workspace$/);
+    await expect(editorLocator(memberPage)).toHaveCount(0);
   } finally {
     await ownerCtx.close();
     await memberCtx.close();
@@ -626,6 +629,15 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
   let url = "";
   let seeded: Awaited<ReturnType<typeof editorShape>> | undefined;
   let seedBodyFailed = false;
+  let seedContextsOpen = true;
+  const ensureSeedContextsClosed = async () => {
+    if (!seedContextsOpen) return;
+    seedContextsOpen = false;
+    await Promise.all([
+      closeCollabContext(seedA, seedBodyFailed),
+      closeCollabContext(seedB, seedBodyFailed),
+    ]);
+  };
   try {
     await test.step("authenticate independent seed clients", () => Promise.all([
       login(pageA, member.email, member.password),
@@ -675,14 +687,23 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     seedBodyFailed = true;
     throw error;
   } finally {
-    await Promise.all([
-      closeCollabContext(seedA, seedBodyFailed),
-      closeCollabContext(seedB, seedBodyFailed),
-    ]);
+    if (seedBodyFailed) {
+      await ensureSeedContextsClosed();
+    }
   }
-  phase("persist acknowledged and old clients closed");
-  await test.step("kill owned process tree and restart from DB", () => collabApp.crashAndRestart());
-  phase("server restarted");
+  try {
+    await test.step(
+      "SIGKILL owned process tree while collaboration helper is live",
+      () => collabApp.crashKillWhenHelperLive(),
+    );
+    phase("process tree crashed with live helper");
+    await ensureSeedContextsClosed();
+    phase("persist acknowledged and old clients closed");
+    await test.step("restart owned server from DB", () => collabApp.rebindAfterCrash());
+    phase("server restarted");
+  } finally {
+    await ensureSeedContextsClosed();
+  }
 
   const freshA = await newCollabContext(browser, collabApp.baseUrl);
   const freshB = await newCollabContext(browser, collabApp.baseUrl);

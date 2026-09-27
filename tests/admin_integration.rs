@@ -176,6 +176,7 @@ async fn app_state(
         import_wake: None,
         import_extractor_available: false,
         quota: Default::default(),
+        streams: fvoci_server::http::state::AppState::fresh_streams(),
         mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
     }
 }

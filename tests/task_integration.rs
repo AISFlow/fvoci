@@ -5,16 +5,25 @@
 mod project_harness;
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
+use futures_util::StreamExt;
+use fvoci_server::db::pool;
+use fvoci_server::http::routes::streams::{
+    reset_task_stream_task_hint_enqueue_count, task_stream_task_hint_enqueue_count,
+};
+use fvoci_server::streams::{initial_cursor, poll_task_events, StreamHub};
 use project_harness::{
-    add_workspace_user, admin_pool, count_rows, create_project, drop_insert_fail_trigger,
-    insert_minimal_project, insert_project_document, install_insert_fail_trigger, json_request,
-    setup_session, wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
+    add_workspace_user, admin_pool, app_state, count_rows, create_project,
+    drop_insert_fail_trigger, insert_minimal_project, insert_project_document,
+    install_insert_fail_trigger, json_request, setup_session, test_peer, wait_for_query_blocked_by,
+    wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
+use tokio::time::timeout;
 use tower::ServiceExt;
 use url::form_urlencoded;
 use uuid::Uuid;
@@ -3880,6 +3889,747 @@ async fn task_layout_year_one_month_one_and_due_at_window() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    admin.close().await;
+    harness.cleanup().await;
+}
+async fn wait_for_hub_active(hub: &StreamHub, expected: usize, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if hub.active_count() == expected {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    hub.active_count() == expected
+}
+
+async fn wait_for_task_hint_enqueued(
+    workspace_id: Uuid,
+    project_id: Uuid,
+    min: usize,
+    within: Duration,
+) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if task_stream_task_hint_enqueue_count(workspace_id, project_id) >= min {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    task_stream_task_hint_enqueue_count(workspace_id, project_id) >= min
+}
+
+async fn setup_session_with_hub(
+    harness: &TestDb,
+) -> (axum::Router, String, Uuid, Uuid, std::sync::Arc<StreamHub>) {
+    let state = app_state(&harness.app_url).await;
+    let hub = state.streams.clone();
+    let app = fvoci_server::http::router(state, None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup")
+                .header("content-type", "application/json")
+                .header("origin", "http://localhost")
+                .extension(ConnectInfo(test_peer()))
+                .body(Body::from(
+                    json!({
+                        "email": "sf-owner@example.com",
+                        "password": "supersecret1",
+                        "givenName": "SF",
+                        "workspaceSlug": "sf-hub",
+                        "workspaceName": "SF Hub"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("setup");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let cookie_hdr = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .expect("set-cookie");
+    let cookie = cookie_hdr
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .split('=')
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
+    let admin = admin_pool(harness).await;
+    let owner_id: (Uuid,) = sqlx::query_as("SELECT id FROM fvoci.users WHERE email = $1")
+        .bind("sf-owner@example.com")
+        .fetch_one(&admin)
+        .await
+        .expect("owner");
+    let workspace_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM fvoci.workspaces WHERE slug = 'sf-hub'")
+            .fetch_one(&admin)
+            .await
+            .expect("workspace");
+    admin.close().await;
+    (app, cookie, owner_id.0, workspace_id.0, hub)
+}
+
+/// After `event: open`, signal `open_ready` then wait on `gate` and read until disconnect.
+async fn sse_collect_after_open_gate(
+    app: axum::Router,
+    path: String,
+    cookie: String,
+    gate: tokio::sync::oneshot::Receiver<()>,
+    open_ready: tokio::sync::oneshot::Sender<()>,
+    within: Duration,
+) -> Vec<u8> {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(&path)
+            .header("cookie", format!("fvoci_session={}", cookie))
+            .header("origin", "http://localhost")
+            .body(Body::empty())
+            .expect("request");
+        request.extensions_mut().insert(ConnectInfo(test_peer()));
+        let response = app.oneshot(request).await.expect("sse response");
+        if response.status() != StatusCode::OK {
+            let _ = done_tx.send(Vec::new());
+            return;
+        }
+        let mut stream = response.into_body().into_data_stream();
+        let mut buf = Vec::new();
+        let needle = b"event: open";
+        let mut saw_open = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                    if !saw_open && buf.windows(needle.len()).any(|w| w == needle) {
+                        saw_open = true;
+                    }
+                }
+                Err(_) => break,
+            }
+            if saw_open {
+                break;
+            }
+        }
+        if saw_open {
+            let _ = open_ready.send(());
+            let _ = gate.await;
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bytes) => buf.extend_from_slice(&bytes),
+                    Err(_) => break,
+                }
+            }
+        }
+        let _ = done_tx.send(buf);
+    });
+    timeout(within, done_rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default()
+}
+
+/// Hold an SSE connection open after `event: open` without consuming further body bytes.
+fn sse_stall_after_open(
+    app: axum::Router,
+    path: String,
+    cookie: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(&path)
+            .header("cookie", format!("fvoci_session={}", cookie))
+            .header("origin", "http://localhost")
+            .body(Body::empty())
+            .expect("request");
+        request.extensions_mut().insert(ConnectInfo(test_peer()));
+        let response = app.oneshot(request).await.expect("sse response");
+        if response.status() != StatusCode::OK {
+            return;
+        }
+        let mut stream = response.into_body().into_data_stream();
+        let mut buf = Vec::new();
+        let needle = b"event: open";
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                    if buf.windows(needle.len()).any(|w| w == needle) {
+                        break;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(120)).await;
+    })
+}
+
+async fn sse_until_disconnect(
+    app: axum::Router,
+    path: String,
+    cookie: String,
+    within: Duration,
+) -> bool {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(&path)
+            .header("cookie", format!("fvoci_session={}", cookie))
+            .header("origin", "http://localhost")
+            .body(Body::empty())
+            .expect("request");
+        request.extensions_mut().insert(ConnectInfo(test_peer()));
+        let response = app.oneshot(request).await.expect("sse response");
+        if response.status() != StatusCode::OK {
+            let _ = done_tx.send(false);
+            return;
+        }
+        let mut stream = response.into_body().into_data_stream();
+        while stream.next().await.is_some() {}
+        let _ = done_tx.send(true);
+    });
+    timeout(within, done_rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(false)
+}
+
+async fn sse_listen(
+    app: axum::Router,
+    path: String,
+    cookie: String,
+    open_needle: Option<Vec<u8>>,
+    open_notify: Option<tokio::sync::oneshot::Sender<()>>,
+    hit_needle: Option<Vec<u8>>,
+    within: Duration,
+) -> bool {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(&path)
+        .header("cookie", format!("fvoci_session={}", cookie))
+        .header("origin", "http://localhost")
+        .body(Body::empty())
+        .expect("request");
+    request.extensions_mut().insert(ConnectInfo(test_peer()));
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+    let open_notify = open_notify;
+    let wait_for_hit = hit_needle.is_some();
+    tokio::spawn(async move {
+        let response = app.oneshot(request).await.expect("sse response");
+        let ct = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if response.status() != StatusCode::OK || !ct.contains("text/event-stream") {
+            let _ = opened_tx.send(false);
+            let _ = done_tx.send(false);
+            return;
+        }
+        let mut open_confirmed = open_needle.is_none();
+        let mut open_notify = open_notify;
+        let mut opened_signal = Some(opened_tx);
+        if open_confirmed {
+            if let Some(tx) = opened_signal.take() {
+                let _ = tx.send(true);
+            }
+            if let Some(notify) = open_notify.take() {
+                notify.send(()).ok();
+            }
+        }
+        let mut stream = response.into_body().into_data_stream();
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                    if !open_confirmed {
+                        if let Some(needle) = open_needle.as_ref() {
+                            if buf.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                                open_confirmed = true;
+                                if let Some(tx) = opened_signal.take() {
+                                    let _ = tx.send(true);
+                                }
+                                if let Some(notify) = open_notify.take() {
+                                    notify.send(()).ok();
+                                }
+                            }
+                        }
+                    }
+                    if open_confirmed {
+                        if let Some(needle) = hit_needle.as_ref() {
+                            if buf.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                                done_tx.send(true).ok();
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if !open_confirmed {
+            if let Some(tx) = opened_signal.take() {
+                let _ = tx.send(false);
+            }
+        }
+        let _ = done_tx.send(false);
+    });
+    let opened = timeout(within, opened_rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(false);
+    if !opened {
+        return false;
+    }
+    if !wait_for_hit {
+        return true;
+    }
+    timeout(within, done_rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn task_stream_notifies_viewers_on_other_user_task_create() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let owner = add_workspace_user(&admin, workspace_id, "member", "owner2").await;
+    let peer = add_workspace_user(&admin, workspace_id, "member", "peer").await;
+    let lab = create_project(app.clone(), &owner.cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+    let listener = tokio::spawn(sse_listen(
+        app.clone(),
+        path.clone(),
+        owner.cookie.clone(),
+        Some(b"event: open".to_vec()),
+        Some(open_tx),
+        Some(b"event: task".to_vec()),
+        Duration::from_secs(20),
+    ));
+    assert!(
+        timeout(Duration::from_secs(5), open_rx)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_some(),
+        "task stream should emit open before mutations"
+    );
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "remote"})),
+        Some(&peer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        listener.await.expect("listener task"),
+        "project stream should receive a task invalidation frame"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_stream_denies_non_member_like_task_list() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let owner = add_workspace_user(&admin, workspace_id, "member", "priv-owner").await;
+    let outsider = add_workspace_user(&admin, workspace_id, "member", "outsider").await;
+    let lab = create_project(app.clone(), &owner.cookie, workspace_id, "PRV", "private").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream"),
+        None,
+        Some(&outsider.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_stream_rejects_65th_concurrent_subscriber() {
+    let harness = TestDb::bootstrap().await;
+    let state = app_state(&harness.app_url).await;
+    let hub = state.streams.clone();
+    let app = fvoci_server::http::router(state, None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup")
+                .header("content-type", "application/json")
+                .header("origin", "http://localhost")
+                .extension(ConnectInfo(test_peer()))
+                .body(Body::from(
+                    json!({
+                        "email": "cap@example.com",
+                        "password": "supersecret1",
+                        "givenName": "Cap",
+                        "workspaceSlug": "cap",
+                        "workspaceName": "Cap"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("setup");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let cookie = response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .find_map(|v| v.to_str().ok())
+        .and_then(|s| s.split(';').next())
+        .and_then(|s| s.strip_prefix("fvoci_session="))
+        .expect("session");
+    let (status, list) = json_request(
+        app.clone(),
+        "GET",
+        "/api/v1/me/workspaces",
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let workspace_id = Uuid::parse_str(list["items"][0]["id"].as_str().unwrap()).unwrap();
+    let lab = create_project(app.clone(), cookie, workspace_id, "CAP", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let holds = (0..64).map(|_| {
+        tokio::spawn(sse_listen(
+            app.clone(),
+            path.clone(),
+            cookie.to_string(),
+            Some(b"event: open".to_vec()),
+            None,
+            None,
+            Duration::from_secs(10),
+        ))
+    });
+    for hold in holds {
+        assert!(hold.await.expect("hold task"), "subscriber should open");
+    }
+    assert!(
+        wait_for_hub_active(&hub, 64, Duration::from_secs(3)).await,
+        "expected 64 active stream guards, saw {}",
+        hub.active_count()
+    );
+    let (status, _) = json_request(app.clone(), "GET", &path, None, Some(cookie)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    hub.begin_shutdown();
+    let (status, _) = json_request(app.clone(), "GET", &path, None, Some(cookie)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_stream_emits_activity_on_comment() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let owner = add_workspace_user(&admin, workspace_id, "member", "act-owner").await;
+    let peer = add_workspace_user(&admin, workspace_id, "member", "act-peer").await;
+    let lab = create_project(app.clone(), &owner.cookie, workspace_id, "ACT", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "comment me"})),
+        Some(&owner.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = task["id"].as_str().unwrap();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let listener = tokio::spawn(sse_listen(
+        app.clone(),
+        path,
+        owner.cookie.clone(),
+        Some(b"event: open".to_vec()),
+        None,
+        Some(b"task.activity".to_vec()),
+        Duration::from_secs(20),
+    ));
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/tasks/{task_id}/comments"),
+        Some(json!({"body": "stream ping"})),
+        Some(&peer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        listener.await.expect("listener"),
+        "task stream should map comment.created to task.activity"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_access_stream_closes_when_member_removed() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let victim = add_workspace_user(&admin, workspace_id, "member", "access-victim").await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/access-stream");
+    let disconnect = tokio::spawn(sse_until_disconnect(
+        app.clone(),
+        path,
+        victim.cookie.clone(),
+        Duration::from_secs(30),
+    ));
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/members/{}",
+            victim.user_id
+        ),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        disconnect.await.expect("disconnect task"),
+        "access stream should end after workspace_member.removed"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_stream_slow_reader_does_not_block_fast_reader() {
+    let harness = TestDb::bootstrap().await;
+    let (app, _cookie, _, workspace_id, hub) = setup_session_with_hub(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let owner = add_workspace_user(&admin, workspace_id, "member", "sf-owner").await;
+    let peer = add_workspace_user(&admin, workspace_id, "member", "sf-peer").await;
+    let lab = create_project(app.clone(), &owner.cookie, workspace_id, "SF", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let _stall = sse_stall_after_open(app.clone(), path.clone(), owner.cookie.clone());
+    assert!(
+        wait_for_hub_active(&hub, 1, Duration::from_secs(5)).await,
+        "slow reader should acquire stream capacity (saw {})",
+        hub.active_count()
+    );
+    let fast = tokio::spawn(sse_listen(
+        app.clone(),
+        path,
+        peer.cookie.clone(),
+        Some(b"event: open".to_vec()),
+        None,
+        Some(b"event: task".to_vec()),
+        Duration::from_secs(25),
+    ));
+    assert!(
+        wait_for_hub_active(&hub, 2, Duration::from_secs(5)).await,
+        "slow reader must hold hub capacity while HTTP body is alive (saw {})",
+        hub.active_count()
+    );
+    for i in 0..12 {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+            Some(json!({"title": format!("flood-{i}")})),
+            Some(&peer.cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    assert!(
+        fast.await.expect("fast listener"),
+        "fast reader should still receive task invalidations while slow reader stalls"
+    );
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_stream_poll_skips_uncommitted_events_until_commit() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LC", "workspace").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).unwrap();
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "late"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = task["id"].as_str().unwrap();
+    let app_pool = pool::connect_app(&harness.app_url).await.expect("app pool");
+    let cursor = initial_cursor(&app_pool, workspace_id)
+        .await
+        .expect("cursor");
+    let mut tx = admin.begin().await.expect("tx");
+    sqlx::query("SELECT set_config('fvoci.workspace_id', $1::text, true)")
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await
+        .expect("tenant");
+    let event_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, actor_user_id, payload, channel)
+        VALUES ($1, $2, 'task.updated', 'task', $3::uuid, $4, $5::jsonb, 'web')
+        "#,
+    )
+    .bind(event_id)
+    .bind(workspace_id)
+    .bind(Uuid::parse_str(task_id).unwrap())
+    .bind(owner_id)
+    .bind(json!({"taskId": task_id, "projectId": project_id.to_string()}))
+    .execute(&mut *tx)
+    .await
+    .expect("insert uncommitted");
+    let pending = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
+        .await
+        .expect("poll");
+    assert!(
+        pending.is_empty(),
+        "uncommitted event must not appear in poll snapshot"
+    );
+    tx.commit().await.expect("commit");
+    let mut seen = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let rows = poll_task_events(&app_pool, workspace_id, project_id, &cursor, 10)
+            .await
+            .expect("poll");
+        if rows.iter().any(|r| r.verb == "task.updated") {
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "committed event should become visible to poll");
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+/// Witness: hints enqueue while the HTTP consumer is blocked after `open`, then project
+/// access is revoked before consumption; authorized poll must discard the bounded queue.
+async fn task_stream_enqueue_before_revoke_discards_queued_hints() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let viewer = add_workspace_user(&admin, workspace_id, "member", "revoke-viewer").await;
+    let lab = create_project(app.clone(), &owner_cookie, workspace_id, "REV", "private").await;
+    let project_id = Uuid::parse_str(lab["id"].as_str().unwrap()).expect("project id");
+    reset_task_stream_task_hint_enqueue_count(workspace_id, project_id);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/members"),
+        Some(json!({"userId": viewer.user_id.to_string(), "role": "viewer"})),
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let path = format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/stream");
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (open_ready_tx, open_ready_rx) = tokio::sync::oneshot::channel();
+    let collector = tokio::spawn(sse_collect_after_open_gate(
+        app.clone(),
+        path,
+        viewer.cookie.clone(),
+        gate_rx,
+        open_ready_tx,
+        Duration::from_secs(30),
+    ));
+    assert!(
+        timeout(Duration::from_secs(15), open_ready_rx)
+            .await
+            .expect("open-ready timeout")
+            .is_ok(),
+        "collector must consume event: open before task mutations"
+    );
+    for i in 0..10 {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+            Some(json!({"title": format!("queued-{i}")})),
+            Some(&owner_cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        if task_stream_task_hint_enqueue_count(workspace_id, project_id) >= 1 {
+            break;
+        }
+    }
+    assert!(
+        wait_for_task_hint_enqueued(workspace_id, project_id, 1, Duration::from_secs(20)).await,
+        "expected at least one queued task hint before revoke (saw {})",
+        task_stream_task_hint_enqueue_count(workspace_id, project_id)
+    );
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/members/{}",
+            viewer.user_id
+        ),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    gate_tx.send(()).ok();
+    let body = collector.await.expect("collector");
+    assert!(
+        body.windows(b"event: open".len())
+            .any(|w| w == b"event: open"),
+        "open must be delivered before revoke witness gate"
+    );
+    assert!(
+        !body
+            .windows(b"event: task".len())
+            .any(|w| w == b"event: task"),
+        "enqueue-before-revoke hints must not reach the response body after authorization loss"
+    );
+    let _ = owner_id;
     admin.close().await;
     harness.cleanup().await;
 }
