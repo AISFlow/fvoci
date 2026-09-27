@@ -42,6 +42,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::collab::wire::CollabKind;
 use crate::db::context::set_tenant;
 use crate::db::workspace::WorkspaceRole;
 use crate::projects::{
@@ -214,6 +215,166 @@ pub async fn check_delivery_admission(
         false,
     )
     .await
+}
+
+/// Kind-aware delivery snapshot: documents use [`check_delivery_admission`],
+/// tasks the owning project's effective permission (a trashed task or project
+/// denies; an archived task or project is read-only).
+pub async fn check_delivery_admission_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    resource_id: Uuid,
+) -> Result<DeliveryAdmission, sqlx::Error> {
+    match kind {
+        CollabKind::Document => {
+            check_delivery_admission(pool, workspace_id, actor_user_id, session_id, resource_id)
+                .await
+        }
+        CollabKind::Task => {
+            check_task_delivery_admission(
+                pool,
+                workspace_id,
+                actor_user_id,
+                session_id,
+                resource_id,
+            )
+            .await
+        }
+    }
+}
+
+type TaskDeliveryRow = (
+    bool,
+    bool,
+    Option<String>,
+    Option<Uuid>,
+    Option<bool>,
+    Option<DateTime<Utc>>,
+    Option<bool>,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+);
+
+async fn check_task_delivery_admission(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    task_id: Uuid,
+) -> Result<DeliveryAdmission, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await?;
+    set_tenant(&mut tx, workspace_id).await?;
+    let row: Option<TaskDeliveryRow> = sqlx::query_as(
+        r#"
+        SELECT
+            (
+                s.revoked_at IS NULL
+                AND s.expires_at > clock_timestamp()
+                AND u.deleted_at IS NULL
+                AND u.suspended_at IS NULL
+            ) AS session_live,
+            (w.deleted_at IS NULL) AS workspace_live,
+            m.role,
+            t.project_id,
+            (t.archived_at IS NOT NULL) AS task_archived,
+            t.deleted_at,
+            (p.deleted_at IS NULL) AS project_live,
+            p.visibility AS project_visibility,
+            p.status AS project_status,
+            (
+                SELECT max(
+                    CASE pm.role
+                        WHEN 'lead' THEN 3
+                        WHEN 'member' THEN 2
+                        WHEN 'viewer' THEN 1
+                        ELSE 0
+                    END
+                )
+                FROM fvoci.project_members pm
+                WHERE pm.workspace_id = $3
+                  AND pm.project_id = t.project_id
+                  AND (
+                    pm.user_id = u.id
+                    OR EXISTS (
+                        SELECT 1
+                        FROM fvoci.group_members gm
+                        WHERE gm.workspace_id = pm.workspace_id
+                          AND gm.group_id = pm.group_id
+                          AND gm.user_id = u.id
+                    )
+                  )
+            ) AS project_rank
+        FROM fvoci.users u
+        INNER JOIN fvoci.sessions s ON s.id = $2 AND s.user_id = u.id
+        INNER JOIN fvoci.workspaces w ON w.id = $3
+        LEFT JOIN fvoci.memberships m
+            ON m.workspace_id = $3 AND m.user_id = u.id
+        LEFT JOIN fvoci.tasks t
+            ON t.workspace_id = $3 AND t.id = $4
+        LEFT JOIN fvoci.projects p
+            ON p.workspace_id = $3 AND p.id = t.project_id
+        WHERE u.id = $1
+        "#,
+    )
+    .bind(actor_user_id)
+    .bind(session_id)
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let Some((
+        session_live,
+        workspace_live,
+        role,
+        project_id,
+        task_archived,
+        deleted_at,
+        project_live,
+        project_visibility,
+        project_status,
+        project_rank,
+    )) = row
+    else {
+        return Ok(DeliveryAdmission::Denied);
+    };
+    if !session_live || !workspace_live {
+        return Ok(DeliveryAdmission::Denied);
+    }
+    let Some(role) = role.as_deref().and_then(WorkspaceRole::parse) else {
+        return Ok(DeliveryAdmission::Denied);
+    };
+    if project_id.is_none() || deleted_at.is_some() {
+        return Ok(DeliveryAdmission::Denied);
+    }
+    let (Some(true), Some(visibility), Some(project_status)) =
+        (project_live, project_visibility, project_status)
+    else {
+        return Ok(DeliveryAdmission::Denied);
+    };
+    let member_role = match project_rank {
+        Some(3) => Some(ProjectMemberRole::Lead),
+        Some(2) => Some(ProjectMemberRole::Member),
+        Some(1) => Some(ProjectMemberRole::Viewer),
+        _ => None,
+    };
+    let permission = effective_permission(role, &visibility, member_role);
+    if !permission.at_least(ProjectPermission::View) {
+        return Ok(DeliveryAdmission::Denied);
+    }
+    Ok(DeliveryAdmission::Allowed {
+        read_only: task_archived == Some(true)
+            || project_status == "archived"
+            || !permission.at_least(ProjectPermission::Edit),
+    })
 }
 
 async fn check_delivery_admission_inner(
@@ -389,6 +550,47 @@ pub async fn authorize_outbound_delivery(
     session_id: Uuid,
     document_id: Uuid,
 ) -> OutboundDeliveryAuth {
+    authorize_outbound_delivery_kind(
+        pool,
+        CollabKind::Document,
+        workspace_id,
+        actor_user_id,
+        session_id,
+        document_id,
+    )
+    .await
+}
+
+/// Kind-aware [`authorize_outbound_delivery`].
+pub async fn authorize_outbound_delivery_kind(
+    pool: &PgPool,
+    kind: CollabKind,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> OutboundDeliveryAuth {
+    if kind == CollabKind::Task {
+        #[cfg(feature = "db-tests")]
+        if let Ok(mut counts) = DELIVERY_READ_COUNTS.lock() {
+            *counts.entry(document_id).or_insert(0) += 1;
+        }
+        return match check_task_delivery_admission(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            document_id,
+        )
+        .await
+        {
+            Ok(DeliveryAdmission::Allowed { read_only }) => {
+                OutboundDeliveryAuth::Allowed { read_only }
+            }
+            Ok(DeliveryAdmission::Denied) => OutboundDeliveryAuth::Denied,
+            Err(_) => OutboundDeliveryAuth::DbError,
+        };
+    }
     #[cfg(feature = "db-tests")]
     {
         if let Ok(mut counts) = DELIVERY_READ_COUNTS.lock() {
