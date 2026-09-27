@@ -234,3 +234,17 @@ CLI를 해당 worktree에서 사용한다. 인덱스가 없으면 `init -y`, 변
 `status`가 최신이어도 개별 파일이 변경됐다는 탐색 경고가 있으면 다시 동기화한다.
 `.codegraph/`는 worktree 로컬 개발 산출물이며 전역 설정·설치·MCP 권한을 변경하지 않는다.
 실제 task의 호출·동기화 근거와 그래프 누락 관찰은 기존 진행·인계 기록에 남긴다.
+
+## 2026-09-27 Opus 구현·독립 검토 전환
+
+사용자 확인의 sol 라우팅 문제로 신규 sol 호출·복구 재시도는 중단한다. Astra 코디네이터는
+유지하며 새 핵심 구현과 별도 읽기 전용 수락 검토는 Claude Code Opus 5.5 medium이다.
+Grok `cursor-grok-4.6-high`는 별도 effort 없이 조사·재현·교차 검증에 사용한다.
+이전 Composer/sol/Grok 대체 검토 기록은 당시 사실이며 현 역할 승인이 아니다.
+
+- 기존 검증 경로 `orca-ide orchestration worker-start --agent claude --model claude-opus-5-5
+  --effort medium`를 재사용했다. 새 독립 검토 dispatch `ctx_1d287edef3d7`의 receipt는
+  requested/effective 모두 `claude-opus-5-5` / `medium`, `turnStart: observed`이다.
+- 구현 전환은 기존 작성자의 쓰기 종료와 변경·검사·자원 인계 후 수행한다. 요청만으로 구현
+  전환 완료를 주장하지 않는다. 현재 소유권과 후속 실행 근거는 기존 인계 기록에 둔다.
+- 모델별 스킬·전역 설정·권한은 추가하지 않는다. 각 worktree의 CodeGraph 인덱스를 사용한다.

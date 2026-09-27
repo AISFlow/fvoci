@@ -11,6 +11,7 @@ import { WorkspaceSsoSection } from "@/features/settings/workspace-sso";
 import { WorkspaceWebhooksSection } from "@/features/settings/workspace-webhooks";
 import { WorkspaceGithubSection } from "@/features/settings/workspace-github";
 import { DeletedProjectsSection } from "@/features/settings/deleted-projects";
+import { WorkspaceExportSection } from "@/features/settings/workspace-export";
 import { WorkspaceImportSection } from "@/features/settings/workspace-import";
 import { NotificationPrefsSection } from "@/features/notifications/notification-prefs";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
@@ -140,6 +141,7 @@ export function WorkspaceSettingsPage() {
         {roleAtLeast(workspace.role, "member") ? (
           <WorkspaceGroupsSection workspaceId={workspace.id} canManage={canManage} />
         ) : null}
+        <WorkspaceExportSection workspaceId={workspace.id} canManage={canManage} />
         <WorkspaceImportSection workspaceId={workspace.id} canManage={canManage} />
         {roleAtLeast(workspace.role, "member") ? (
           <NotificationPrefsSection workspaceId={workspace.id} />
