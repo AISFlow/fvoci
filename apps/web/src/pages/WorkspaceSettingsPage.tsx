@@ -17,7 +17,7 @@ import { WorkspaceShell } from "@/features/workspace/workspace-shell";
 import { useWorkspaceContext } from "@/hooks/use-workspace-context";
 import { api, ensureOk, ProblemError } from "@/lib/api";
 import { meQuery } from "@/lib/queries";
-import { documentTagsSettingsPath } from "@/lib/href";
+import { documentTagsSettingsPath, templatesSettingsPath } from "@/lib/href";
 
 function roleAtLeast(role: string, minimum: string): boolean {
   const order = ["guest", "member", "admin", "owner"];
@@ -108,6 +108,9 @@ export function WorkspaceSettingsPage() {
         <nav aria-label={t("nav.workspaceSettings")} className="mb-6 flex flex-wrap gap-3">
           <Link to={documentTagsSettingsPath(slug)} className="text-ui underline underline-offset-2">
             {t("settings.documentTags.nav")}
+          </Link>
+          <Link to={templatesSettingsPath(slug)} className="text-ui underline underline-offset-2">
+            {t("settings.templates")}
           </Link>
         </nav>
         <WorkspaceIdentitySection
