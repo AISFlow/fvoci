@@ -165,6 +165,32 @@ pub struct ExportAttachment {
     pub storage_key: String,
 }
 
+type ExportDocumentListingRow = (Uuid, Option<Uuid>, Option<Uuid>, String, String);
+
+type ExportTaskPageRow = (
+    Uuid,
+    Uuid,
+    String,
+    Uuid,
+    String,
+    Option<Uuid>,
+    Option<DateTime<Utc>>,
+    DateTime<Utc>,
+);
+
+type ExportCommentPageRow = (Uuid, Option<Uuid>, Option<Uuid>, String, DateTime<Utc>);
+
+type ExportAttachmentListingRow = (
+    Uuid,
+    Option<Uuid>,
+    Option<Uuid>,
+    String,
+    String,
+    Option<i64>,
+    String,
+    String,
+);
+
 #[derive(Debug, Clone)]
 pub struct WorkspaceExportSnapshot {
     pub workspace: WorkspaceExportMeta,
@@ -270,8 +296,8 @@ pub async fn recheck_attachment_delivery(
             tx.rollback().await?;
             return Ok(Err(WorkspaceExportDbError::Forbidden));
         };
-        let permission = project_permission_by_id(&mut tx, workspace_id, actor_user_id, project_id)
-            .await?;
+        let permission =
+            project_permission_by_id(&mut tx, workspace_id, actor_user_id, project_id).await?;
         if !permission
             .map(|p| p.at_least(ProjectPermission::View))
             .unwrap_or(false)
@@ -436,10 +462,7 @@ pub async fn fetch_document_body(
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(row.map(|(text, content_json)| ExportDocumentBody {
-        text,
-        content_json,
-    }))
+    Ok(row.map(|(text, content_json)| ExportDocumentBody { text, content_json }))
 }
 
 pub async fn fetch_comment_body(
@@ -449,13 +472,12 @@ pub async fn fetch_comment_body(
 ) -> Result<Option<String>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let body = sqlx::query_scalar(
-        "SELECT body FROM fvoci.comments WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id)
-    .bind(comment_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let body =
+        sqlx::query_scalar("SELECT body FROM fvoci.comments WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace_id)
+            .bind(comment_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     tx.commit().await?;
     Ok(body)
 }
@@ -517,9 +539,13 @@ pub async fn load_export_snapshot(
     let mut visible_project_ids = std::collections::HashSet::new();
     let mut excluded_private = 0i32;
     for (project_id, visibility) in &project_rows {
-        let member_role =
-            crate::db::projects::project_member_role(&mut tx, workspace_id, *project_id, actor_user_id)
-                .await?;
+        let member_role = crate::db::projects::project_member_role(
+            &mut tx,
+            workspace_id,
+            *project_id,
+            actor_user_id,
+        )
+        .await?;
         let level = effective_permission(workspace_role, visibility, member_role);
         if level.at_least(ProjectPermission::View) {
             visible_project_ids.insert(*project_id);
@@ -528,7 +554,7 @@ pub async fn load_export_snapshot(
         }
     }
 
-    let doc_nodes: Vec<(Uuid, Option<Uuid>, Option<Uuid>, String, String)> = sqlx::query_as(
+    let doc_nodes: Vec<ExportDocumentListingRow> = sqlx::query_as(
         r#"
         SELECT id, parent_id, project_id, title, status
         FROM fvoci.documents
@@ -576,16 +602,7 @@ pub async fn load_export_snapshot(
                 tx.rollback().await?;
                 return Ok(Err(WorkspaceExportDbError::Truncated));
             }
-            let page_rows: Vec<(
-                Uuid,
-                Uuid,
-                String,
-                Uuid,
-                String,
-                Option<Uuid>,
-                Option<DateTime<Utc>>,
-                DateTime<Utc>,
-            )> = sqlx::query_as(
+            let page_rows: Vec<ExportTaskPageRow> = sqlx::query_as(
                 r#"
                 SELECT id, project_id, title, status_id, type, parent_id, archived_at, created_at
                 FROM fvoci.tasks
@@ -639,9 +656,8 @@ pub async fn load_export_snapshot(
             tx.rollback().await?;
             return Ok(Err(WorkspaceExportDbError::Truncated));
         }
-        let page_rows: Vec<(Uuid, Option<Uuid>, Option<Uuid>, String, DateTime<Utc>)> =
-            sqlx::query_as(
-                r#"
+        let page_rows: Vec<ExportCommentPageRow> = sqlx::query_as(
+            r#"
                 SELECT id, document_id, task_id, body, created_at
                 FROM fvoci.comments
                 WHERE workspace_id = $1
@@ -649,13 +665,13 @@ pub async fn load_export_snapshot(
                 ORDER BY created_at ASC, id ASC
                 LIMIT $4
                 "#,
-            )
-            .bind(workspace_id)
-            .bind(after_comment.map(|(at, _)| at))
-            .bind(after_comment.map(|(_, id)| id))
-            .bind(EXPORT_COMMENT_PAGE)
-            .fetch_all(&mut *tx)
-            .await?;
+        )
+        .bind(workspace_id)
+        .bind(after_comment.map(|(at, _)| at))
+        .bind(after_comment.map(|(_, id)| id))
+        .bind(EXPORT_COMMENT_PAGE)
+        .fetch_all(&mut *tx)
+        .await?;
         let full = page_rows.len() as i64 == EXPORT_COMMENT_PAGE;
         let page_cursor = page_rows.last().map(|row| (row.4, row.0));
         for (id, document_id, task_id, _body, created_at) in page_rows {
@@ -687,8 +703,7 @@ pub async fn load_export_snapshot(
     let mut attachments = Vec::new();
     let mut seen = std::collections::HashSet::new();
     if !doc_ids.is_empty() || !task_ids.is_empty() {
-        let rows: Vec<(Uuid, Option<Uuid>, Option<Uuid>, String, String, Option<i64>, String, String)> =
-            sqlx::query_as(
+        let rows: Vec<ExportAttachmentListingRow> = sqlx::query_as(
             r#"
             SELECT id, document_id, task_id, name, mime, size_bytes, scan_status, storage_key
             FROM fvoci.attachments

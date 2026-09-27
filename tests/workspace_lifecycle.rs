@@ -8,9 +8,8 @@ use axum::http::StatusCode;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use project_harness::{
-    add_workspace_user, admin_pool, app_pool, create_project, http_request,
-    insert_minimal_project, insert_project_document, insert_stored_attachment, json_request,
-    setup_session, TestDb,
+    add_workspace_user, admin_pool, app_pool, create_project, http_request, insert_minimal_project,
+    insert_project_document, insert_stored_attachment, json_request, setup_session, TestDb,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -484,11 +483,7 @@ async fn sweep_purges_expired_team_and_personal_immediately() {
     harness.cleanup().await;
 }
 
-fn write_local_attachment_payload(
-    storage_root: &std::path::Path,
-    key: &str,
-    payload: &[u8],
-) {
+fn write_local_attachment_payload(storage_root: &std::path::Path, key: &str, payload: &[u8]) {
     let dir = storage_root.join("objects").join(key);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("payload"), payload).unwrap();
@@ -496,13 +491,7 @@ fn write_local_attachment_payload(
 
 async fn setup_session_with_storage(
     harness: &TestDb,
-) -> (
-    axum::Router,
-    String,
-    Uuid,
-    Uuid,
-    std::path::PathBuf,
-) {
+) -> (axum::Router, String, Uuid, Uuid, std::path::PathBuf) {
     use axum::body::Body;
     use axum::http::Request;
     use fvoci_server::attachments::LocalStorage;
@@ -657,15 +646,18 @@ fn read_zip_names(bytes: &[u8]) -> Vec<String> {
         if offset + 30 > bytes.len() {
             break;
         }
-        let name_len = u16::from_le_bytes(bytes[offset + 26..offset + 28].try_into().unwrap()) as usize;
-        let extra_len = u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().unwrap()) as usize;
+        let name_len =
+            u16::from_le_bytes(bytes[offset + 26..offset + 28].try_into().unwrap()) as usize;
+        let extra_len =
+            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().unwrap()) as usize;
         let name_start = offset + 30;
         let name_end = name_start + name_len;
         if name_end > bytes.len() {
             break;
         }
         names.push(String::from_utf8_lossy(&bytes[name_start..name_end]).into_owned());
-        let data_len = u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().unwrap()) as usize;
+        let data_len =
+            u32::from_le_bytes(bytes[offset + 18..offset + 22].try_into().unwrap()) as usize;
         offset = name_end + extra_len + data_len;
     }
     names
@@ -680,13 +672,15 @@ async fn workspace_zip_export_requires_manage_and_streams_zip() {
 
     let wiki = create_wiki(app.clone(), &cookie, workspace_id, "보낼 위키").await;
     let document_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
-    let _attachment_id = insert_stored_attachment(&admin, workspace_id, document_id, owner_id).await;
+    let _attachment_id =
+        insert_stored_attachment(&admin, workspace_id, document_id, owner_id).await;
 
     let path = format!("/api/v1/workspaces/{workspace_id}/export");
     let (status, _, _) = bytes_request(app.clone(), "GET", &path, Some(&member.cookie), &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (status, body, headers) = bytes_request(app.clone(), "GET", &path, Some(&cookie), &[]).await;
+    let (status, body, headers) =
+        bytes_request(app.clone(), "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers.get("content-type").unwrap(), "application/zip");
     assert_eq!(
@@ -765,10 +759,9 @@ async fn workspace_zip_omits_private_project_without_membership() {
     let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK);
     external_zip_check(&body);
-    let workspace_json: serde_json::Value = serde_json::from_slice(
-        &read_zip_entry(&body, "workspace.json").expect("workspace.json"),
-    )
-    .unwrap();
+    let workspace_json: serde_json::Value =
+        serde_json::from_slice(&read_zip_entry(&body, "workspace.json").expect("workspace.json"))
+            .unwrap();
     assert_eq!(workspace_json["excludedPrivateProjectCount"], 1);
     let docs: serde_json::Value =
         serde_json::from_slice(&read_zip_entry(&body, "documents.json").unwrap()).unwrap();
@@ -860,9 +853,7 @@ async fn workspace_zip_skips_infected_attachment_bytes() {
     );
     let names = read_zip_names(&body);
     assert!(
-        !names
-            .iter()
-            .any(|n| n.contains(&infected_id.to_string())),
+        !names.iter().any(|n| n.contains(&infected_id.to_string())),
         "infected payload must not be packed: {names:?}"
     );
 
@@ -879,15 +870,13 @@ async fn patch_document_export_fields(
     sort_key: &str,
     text: &str,
 ) {
-    sqlx::query(
-        "UPDATE fvoci.documents SET sort_key = $1, text = $2 WHERE id = $3",
-    )
-    .bind(sort_key)
-    .bind(text)
-    .bind(document_id)
-    .execute(admin)
-    .await
-    .expect("patch document export fields");
+    sqlx::query("UPDATE fvoci.documents SET sort_key = $1, text = $2 WHERE id = $3")
+        .bind(sort_key)
+        .bind(text)
+        .bind(document_id)
+        .execute(admin)
+        .await
+        .expect("patch document export fields");
 }
 
 async fn stream_export_aborts_after_witness<F, Fut>(
@@ -1116,8 +1105,14 @@ async fn workspace_zip_export_includes_task_and_project_document_comments() {
     let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
     let wiki = create_wiki(app.clone(), &cookie, workspace_id, "위키 댓글").await;
     let wiki_id = Uuid::parse_str(wiki["id"].as_str().unwrap()).unwrap();
-    let doc_comment_id =
-        insert_document_comment(&admin, workspace_id, project_doc, owner_id, "프로젝트 문서 댓글").await;
+    let doc_comment_id = insert_document_comment(
+        &admin,
+        workspace_id,
+        project_doc,
+        owner_id,
+        "프로젝트 문서 댓글",
+    )
+    .await;
     let wiki_comment_id =
         insert_document_comment(&admin, workspace_id, wiki_id, owner_id, "위키 문서 댓글").await;
     let task_comment_id =
@@ -1163,8 +1158,7 @@ async fn workspace_zip_export_negative_auth_and_limits() {
     let (status, _, _) = bytes_request(app.clone(), "GET", &path, None, &[]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let (status, _, _) =
-        bytes_request(app.clone(), "GET", &path, Some(&guest.cookie), &[]).await;
+    let (status, _, _) = bytes_request(app.clone(), "GET", &path, Some(&guest.cookie), &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, token_body) = json_request(
@@ -1242,14 +1236,7 @@ async fn workspace_zip_export_negative_auth_and_limits() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let (status, body) = json_request(
-        app.clone(),
-        "GET",
-        &path,
-        None,
-        Some(&cookie),
-    )
-    .await;
+    let (status, body) = json_request(app.clone(), "GET", &path, None, Some(&cookie)).await;
     assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
     assert_eq!(body["code"], "consent_required");
 
@@ -1288,14 +1275,7 @@ async fn workspace_zip_export_rate_limited_after_five_exports() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let (status, body) = json_request(
-        app.clone(),
-        "GET",
-        &path,
-        None,
-        Some(&cookie),
-    )
-    .await;
+    let (status, body) = json_request(app.clone(), "GET", &path, None, Some(&cookie)).await;
     assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
     assert_eq!(body["code"], "consent_required");
     let (status, _) = json_request(
@@ -1310,7 +1290,11 @@ async fn workspace_zip_export_rate_limited_after_five_exports() {
 
     for i in 0..5 {
         let (status, _, _) = bytes_request(app.clone(), "GET", &path, Some(&cookie), &[]).await;
-        assert_eq!(status, StatusCode::OK, "export {i} should succeed within rate window");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "export {i} should succeed within rate window"
+        );
     }
     let (status, _, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -1531,8 +1515,14 @@ async fn workspace_zip_aborts_when_attachment_revoked_after_storage_open() {
             None => break,
         }
     }
-    assert!(barrier_done, "export must reach post-open attachment barrier");
-    assert!(saw_error, "export must fail after post-open attachment recheck");
+    assert!(
+        barrier_done,
+        "export must reach post-open attachment barrier"
+    );
+    assert!(
+        saw_error,
+        "export must fail after post-open attachment recheck"
+    );
     assert!(
         !buf.windows(ATTACH_EXPORT_SECRET.len())
             .any(|w| w == ATTACH_EXPORT_SECRET.as_bytes()),
