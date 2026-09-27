@@ -618,7 +618,6 @@ fn sender_settings(batch: i64, request_timeout: Duration) -> PushSenderSettings 
         request_timeout,
         claim_lease: Duration::from_secs(2),
         poll_interval: Duration::from_millis(50),
-        ..PushSenderSettings::default()
     }
 }
 
