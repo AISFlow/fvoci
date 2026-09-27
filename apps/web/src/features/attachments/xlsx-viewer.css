@@ -1,0 +1,20 @@
+.attachment-viewer__xlsx-body {
+  align-items: flex-start;
+}
+
+.attachment-viewer__xlsx-table {
+  border-collapse: collapse;
+  font-size: var(--text-ui-size);
+  line-height: var(--text-ui-leading);
+  font-variant-numeric: tabular-nums;
+}
+
+.attachment-viewer__xlsx-table td {
+  min-width: 4rem;
+  max-width: 24rem;
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.5rem;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
