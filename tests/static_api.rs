@@ -343,9 +343,10 @@ async fn https_origin_adds_hsts_and_upgrade_insecure_requests() {
 }
 
 /// `HEAD /s/{token}` answers like the GET shell (source server.ts `/s/:token`
-/// headers): private no-store, noindex, no-referrer, the HTML content type,
-/// an empty body and the Content-Length of the GET body. Other paths keep
-/// the generic static HEAD handling.
+/// headers): private no-store, noindex, no-referrer and the HTML content type
+/// with an empty body. It omits Content-Length (RFC 9110 9.3.2) because the
+/// GET length depends on the share's head tags. Other paths keep the generic
+/// static HEAD handling.
 #[tokio::test]
 async fn share_shell_head_matches_get_headers_with_empty_body() {
     let dir = std::env::temp_dir().join(format!("fvoci-static-head-{}", uuid::Uuid::now_v7()));
@@ -384,12 +385,14 @@ async fn share_shell_head_matches_get_headers_with_empty_body() {
         assert_eq!(h["cache-control"], "private, no-store", "{uri}");
         assert_eq!(h["x-robots-tag"], "noindex", "{uri}");
         assert_eq!(h["referrer-policy"], "no-referrer", "{uri}");
-        assert_eq!(
-            h["content-length"],
-            get_body.len().to_string().as_str(),
-            "{uri}"
-        );
-        for name in ["content-type", "cache-control", "x-robots-tag", "referrer-policy"] {
+        assert!(h.get("content-length").is_none(), "{uri}");
+        assert!(!get_body.is_empty(), "{uri}");
+        for name in [
+            "content-type",
+            "cache-control",
+            "x-robots-tag",
+            "referrer-policy",
+        ] {
             assert_eq!(h[name], get_headers[name], "{uri} {name}");
         }
     }
@@ -413,5 +416,53 @@ async fn share_shell_head_matches_get_headers_with_empty_body() {
     let (status, _, body) = send("HEAD", "/missing-asset.js").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// On the wire hyper sends no body and no invented `content-length: 0` for the
+/// share shell HEAD.
+#[tokio::test]
+async fn share_shell_head_on_the_wire_has_no_body_or_length() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = std::env::temp_dir().join(format!("fvoci-static-wire-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
+    let app: Router = router(app_state().await, Some(dir.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            b"HEAD /s/some-share-token HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    server.abort();
+    let raw = String::from_utf8(raw).unwrap().to_ascii_lowercase();
+    let (head, body) = raw.split_once("\r\n\r\n").expect("header end");
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(
+        head.contains("\r\ncache-control: private, no-store"),
+        "{head}"
+    );
+    assert!(head.contains("\r\nx-robots-tag: noindex"), "{head}");
+    assert!(
+        head.contains("\r\ncontent-type: text/html; charset=utf-8"),
+        "{head}"
+    );
+    assert!(!head.contains("content-length"), "{head}");
+    assert!(!head.contains("transfer-encoding"), "{head}");
+    assert!(body.is_empty(), "{body}");
     let _ = std::fs::remove_dir_all(dir);
 }

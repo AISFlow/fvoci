@@ -1823,24 +1823,29 @@ fn meta_content<'a>(html: &'a str, attr: &str) -> Option<&'a str> {
     Some(&html[start..start + end])
 }
 
-/// `HEAD /s/{token}`: the GET shell's status and private headers, an empty
-/// body and the GET body's Content-Length.
+/// `HEAD /s/{token}`: the GET shell's status and private headers with an
+/// empty body and no Content-Length (the GET length depends on the head tags).
 async fn assert_share_head_matches_get(site: &axum::Router, path: &str) {
     let (get_status, get_headers, get_body) = raw_get(site.clone(), path, &[]).await;
     let (status, headers, body) = raw_request(site.clone(), "HEAD", path, &[]).await;
     assert_eq!(status, get_status, "{path}");
     assert!(body.is_empty(), "{path}");
-    assert_eq!(headers["content-type"], "text/html; charset=utf-8", "{path}");
+    assert_eq!(
+        headers["content-type"], "text/html; charset=utf-8",
+        "{path}"
+    );
     assert_eq!(headers["cache-control"], "private, no-store", "{path}");
     assert_eq!(headers["x-robots-tag"], "noindex", "{path}");
     assert_eq!(headers["referrer-policy"], "no-referrer", "{path}");
     assert!(!headers.contains_key("retry-after"), "{path}");
-    assert_eq!(
-        headers["content-length"],
-        get_body.len().to_string().as_str(),
-        "{path}"
-    );
-    for name in ["content-type", "cache-control", "x-robots-tag", "referrer-policy"] {
+    assert!(!headers.contains_key("content-length"), "{path}");
+    assert!(!get_body.is_empty(), "{path}");
+    for name in [
+        "content-type",
+        "cache-control",
+        "x-robots-tag",
+        "referrer-policy",
+    ] {
         assert_eq!(headers[name], get_headers[name], "{path} {name}");
     }
 }
@@ -1931,15 +1936,9 @@ async fn share_shell_head_carries_escaped_og_meta_only_for_live_shares() {
     assert!(!raw_description.contains('\u{FFFD}'));
     assert!(!html.contains("<script>alert"));
 
-    // HEAD: the same private headers and the injected body's length.
+    // HEAD: the same private headers without the body.
     assert_share_head_matches_get(&site, &format!("/s/{token}")).await;
     assert_share_head_matches_get(&site, &format!("/s/{token}/")).await;
-    let (_, headers, _) = raw_request(site.clone(), "HEAD", &format!("/s/{token}"), &[]).await;
-    assert_ne!(
-        headers["content-length"],
-        SHELL_INDEX.len().to_string().as_str(),
-        "the live share's length is the injected shell's"
-    );
 
     // Trailing slash is the same root; sub-paths are not.
     let (_, _, bytes) = raw_get(site.clone(), &format!("/s/{token}/"), &[]).await;

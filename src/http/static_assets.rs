@@ -88,14 +88,24 @@ impl Service<Request<Body>> for StaticFallback {
         let share_head = self.share_head.clone();
         Box::pin(async move {
             if let Some(state) = share_head {
-                if req.method() == Method::GET {
+                let is_head = req.method() == Method::HEAD;
+                if req.method() == Method::GET || is_head {
                     if let Some(token) = share_shell_token(req.uri().path()) {
-                        let token = token.to_string();
-                        let peer = req
-                            .extensions()
-                            .get::<ConnectInfo<SocketAddr>>()
-                            .map(|info| info.0);
-                        let mut response = share_shell(&state, peer, &token, &index).await;
+                        let mut response = if is_head {
+                            // GET's private headers without the body: no share
+                            // lookup or share-ip hit, and no Content-Length
+                            // since the GET length depends on the head tags.
+                            let mut response = Response::new(Body::empty());
+                            share_shell_headers(&mut response);
+                            response
+                        } else {
+                            let token = token.to_string();
+                            let peer = req
+                                .extensions()
+                                .get::<ConnectInfo<SocketAddr>>()
+                                .map(|info| info.0);
+                            share_shell(&state, peer, &token, &index).await
+                        };
                         response.headers_mut().insert(
                             header::REFERRER_POLICY,
                             header::HeaderValue::from_static("no-referrer"),
@@ -187,6 +197,11 @@ async fn share_shell(
         None => html,
     };
     let mut response = Response::new(Body::from(html));
+    share_shell_headers(&mut response);
+    response
+}
+
+fn share_shell_headers(response: &mut Response) {
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
@@ -200,7 +215,6 @@ async fn share_shell(
         header::HeaderName::from_static("x-robots-tag"),
         header::HeaderValue::from_static("noindex"),
     );
-    response
 }
 
 fn resolve_static_file(root: &Path, uri_path: &str) -> Option<PathBuf> {
