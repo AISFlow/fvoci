@@ -85,7 +85,7 @@ function pdfjsAssets(): Plugin {
   };
 }
 
-/** Upstream crate table for the Rust code compiled into @rhwp/core's wasm. */
+/** Pinned full license texts for the Rust dependencies of @rhwp/core's wasm. */
 function rhwpWasmNotice() {
   const coreDir = path.dirname(createRequire(import.meta.url).resolve("@rhwp/core"));
   const { version } = JSON.parse(
