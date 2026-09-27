@@ -28,6 +28,7 @@ pub mod share;
 pub mod stars;
 pub mod streams;
 pub mod task_body;
+pub mod task_layout;
 pub mod task_ops;
 pub mod tasks;
 pub mod templates;

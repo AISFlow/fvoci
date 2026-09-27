@@ -14,16 +14,57 @@ use futures_util::StreamExt;
 use fvoci_server::db::pool;
 use fvoci_server::streams::{initial_cursor, poll_task_events, EventCursor, StreamHub};
 use project_harness::{
-    add_workspace_user, admin_pool, app_state, count_rows, create_project,
-    drop_insert_fail_trigger, insert_minimal_project, insert_project_document,
-    install_insert_fail_trigger, json_request, setup_session, test_peer, wait_for_query_blocked_by,
-    wait_for_user_for_update_blocked, TestDb,
+    add_workspace_user, admin_pool, app_state, count_rows, create_project, drop_insert_fail_trigger,
+    insert_minimal_project, insert_project_document, install_insert_fail_trigger, json_request,
+    setup_session, test_peer, wait_for_query_blocked_by, wait_for_user_for_update_blocked, TestDb,
 };
 use serde_json::json;
 use tokio::time::timeout;
 use tower::ServiceExt;
 use url::form_urlencoded;
 use uuid::Uuid;
+
+async fn json_request_bearer(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    bearer: &str,
+) -> (StatusCode, serde_json::Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("origin", "http://localhost")
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .unwrap();
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(project_harness::test_peer()));
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default();
+    let json = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(json!({}))
+    };
+    (status, json)
+}
+
+async fn insert_other_workspace(admin: &sqlx::PgPool) -> Uuid {
+    let id = Uuid::now_v7();
+    let slug = format!("w-{}", &id.simple().to_string()[20..]);
+    sqlx::query("INSERT INTO fvoci.workspaces (id, slug, name) VALUES ($1, $2, 'Other')")
+        .bind(id)
+        .bind(slug)
+        .execute(admin)
+        .await
+        .unwrap();
+    id
+}
 
 #[tokio::test]
 async fn contract_task_create_read_and_counts() {
@@ -3459,6 +3500,394 @@ async fn task_dates_accept_only_source_iso_format() {
     harness.cleanup().await;
 }
 
+#[tokio::test]
+async fn task_layout_gantt_geometry_and_holiday_column() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let (status, task_a) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({
+            "title": "Layout A",
+            "startDate": "2026-09-01",
+            "dueDate": "2026-09-03"
+        })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, task_b) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({
+            "title": "Layout B",
+            "startDate": "2026-09-04",
+            "dueDate": "2026-09-04"
+        })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let a_id = task_a["id"].as_str().unwrap();
+    let b_id = task_b["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/tasks/{a_id}/dependencies"),
+        Some(json!({"blockedId": b_id, "type": "FS"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/holidays"),
+        Some(json!({"date": "2026-09-02"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let q = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("year", "2026")
+        .append_pair("month", "9")
+        .append_pair("query", r#"{"filters":{"title":"Layout"},"sort":[]}"#)
+        .finish();
+    let (status, layout) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?{q}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(layout["truncated"], false);
+    let items = layout["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(layout["pathTotal"], 1);
+    let off = layout["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["date"] == "2026-09-02")
+        .unwrap();
+    assert_eq!(off["offDuty"], true);
+    assert!(layout["monthBands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["label"] == "9월"));
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?year=2026&month=9&view=calendar"
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_auth_pat_session_and_query_validation() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let layout_path =
+        format!("/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?year=2026&month=9");
+
+    let (status, _) = json_request(app.clone(), "GET", &layout_path, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, read_token) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/api-tokens"),
+        Some(json!({"name": "read", "scopes": ["tasks.read"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let read = read_token["token"].as_str().unwrap();
+    let (status, layout) = json_request_bearer(app.clone(), "GET", &layout_path, read).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(layout["items"].is_array());
+
+    let (status, wrong_scope) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/api-tokens"),
+        Some(json!({"name": "proj", "scopes": ["projects.read"]})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let projects_only = wrong_scope["token"].as_str().unwrap();
+    let (status, _) = json_request_bearer(app.clone(), "GET", &layout_path, projects_only).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let other_ws = insert_other_workspace(&admin).await;
+    let foreign_path = format!(
+        "/api/v1/workspaces/{other_ws}/projects/{project_id}/task-layout?year=2026&month=9"
+    );
+    let (status, _) = json_request(app.clone(), "GET", &foreign_path, None, Some(&cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?year=2026&month=9&maxLanes=501"
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?year=2026&month=13"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_revoked_session_is_unauthorized() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let lab = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = lab["id"].as_str().unwrap();
+    sqlx::query("UPDATE fvoci.sessions SET revoked_at = now() WHERE user_id = $1")
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, _) = json_request(
+        app,
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout?year=2026&month=9"
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_private_project_denies_non_member() {
+    let harness = TestDb::bootstrap().await;
+    let (app, owner_cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
+    let hid = create_project(app.clone(), &member.cookie, workspace_id, "HID", "private").await;
+    let project_id = hid["id"].as_str().unwrap();
+    let (status, _) = json_request(
+        app,
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/projects/{project_id}/task-layout?year=2026&month=9"
+        ),
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_truncation_applies_after_title_filter() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let pid = Uuid::parse_str(&project_id).unwrap();
+    let (_, wf) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/workflow"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    let status_id = Uuid::parse_str(wf["statuses"][0]["id"].as_str().unwrap()).unwrap();
+    let owner_id: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.users LIMIT 1")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    for number in 1..=501_i32 {
+        sqlx::query(
+            r#"
+            INSERT INTO fvoci.tasks (
+                id, workspace_id, project_id, number, title, type, priority, status_id,
+                content_json, created_by, start_date, due_date
+            ) VALUES (
+                $1, $2, $3, $4, $5, 'task', 'none', $6,
+                '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, $7,
+                '2026-09-02'::date, '2026-09-28'::date
+            )
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws)
+        .bind(pid)
+        .bind(number)
+        .bind(format!("bulk filler {number}"))
+        .bind(status_id)
+        .bind(owner_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.tasks (
+            id, workspace_id, project_id, number, title, type, priority, status_id,
+            content_json, created_by, start_date, due_date
+        ) VALUES (
+            $1, $2, $3, 502, 'GanttNeedleUnique', 'task', 'none', $4,
+            '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, $5,
+            '2026-09-05'::date, '2026-09-06'::date
+        )
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws)
+    .bind(pid)
+    .bind(status_id)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+
+    let (status, unfiltered) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?year=2026&month=9"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unfiltered["truncated"], true);
+    assert_eq!(unfiltered["items"].as_array().unwrap().len(), 500);
+
+    let q = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("year", "2026")
+        .append_pair("month", "9")
+        .append_pair(
+            "query",
+            r#"{"filters":{"title":"GanttNeedleUnique"},"sort":[]}"#,
+        )
+        .finish();
+    let (status, filtered) = json_request(
+        app,
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?{q}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered["truncated"], false);
+    let titles = filtered["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(titles, vec!["GanttNeedleUnique"]);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn task_layout_year_one_month_one_and_due_at_window() {
+    let (harness, app, cookie, ws, admin, project_id, _pid) = review_setup().await;
+    let (status, empty) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?year=1&month=1"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["items"].as_array().unwrap().len(), 0);
+
+    let (status, task) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+        Some(json!({"title": "DueAt only"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = task["id"].as_str().unwrap();
+    let (status, _) = patch_task(
+        app.clone(),
+        ws,
+        task_id,
+        json!({"dueAt": "2026-09-15T12:00:00Z"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, layout) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/workspaces/{ws}/projects/{project_id}/task-layout?year=2026&month=9"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let item = layout["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == task_id)
+        .expect("dueAt task in layout");
+    let due_at = item["dueAt"].as_str().expect("dueAt in layout item");
+    let parsed = chrono::DateTime::parse_from_rfc3339(due_at)
+        .expect("layout dueAt is RFC3339")
+        .with_timezone(&chrono::Utc);
+    let expected = chrono::DateTime::parse_from_rfc3339("2026-09-15T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert_eq!(parsed, expected);
+    assert_eq!(item["end"], "2026-09-15");
+
+    let (status, _) = patch_task(
+        app,
+        ws,
+        task_id,
+        json!({"dueAt": null, "dueDate": "2026-09-16"}),
+        &cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
 async fn wait_for_hub_active(hub: &StreamHub, expected: usize, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {

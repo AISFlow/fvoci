@@ -206,7 +206,7 @@ pub(crate) async fn list_task_label_ids(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
-async fn load_task_refs(
+pub(crate) async fn load_task_refs(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
     task_ids: &[Uuid],
@@ -1659,7 +1659,7 @@ async fn list_tasks_in_scope(
     }))
 }
 
-fn task_list_filter_conditions(
+pub(crate) fn task_list_filter_conditions(
     query: &ParsedTaskListQuery,
     actor_user_id: Uuid,
     scope_condition: String,
@@ -1848,7 +1848,7 @@ fn sort_anchor_ref(field: SortField, bind_index: usize) -> String {
     }
 }
 
-fn order_clause(sort: &[ViewSort], custom: &HashMap<Uuid, String>) -> String {
+pub(crate) fn order_clause(sort: &[ViewSort], custom: &HashMap<Uuid, String>) -> String {
     let mut parts = Vec::new();
     for entry in sort {
         let column = term_sql(entry.field, custom);
