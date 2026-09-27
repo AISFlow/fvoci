@@ -168,6 +168,9 @@ pub async fn query_collection(
             Err(_) => return Ok(Err(CollectionDbError::InvalidCursor)),
         },
     };
+    // The actor's validated zone, read once like the task list and layout;
+    // an unknown stored name falls back to UTC instead of failing the query.
+    let time_zone = crate::db::dashboard::user_time_zone(pool, actor.user_id).await?;
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
@@ -176,7 +179,16 @@ pub async fn query_collection(
     sqlx::query("SET LOCAL statement_timeout = '15s'")
         .execute(&mut *tx)
         .await?;
-    let result = run(&mut tx, workspace_id, actor, collection_id, q, cursor).await?;
+    let result = run(
+        &mut tx,
+        workspace_id,
+        actor,
+        collection_id,
+        q,
+        cursor,
+        &time_zone,
+    )
+    .await?;
     match result {
         Ok(out) => {
             tx.commit().await?;
@@ -196,6 +208,7 @@ async fn run(
     collection_id: Uuid,
     q: &QueryInput,
     cursor: Option<TaskListCursor>,
+    time_zone: &str,
 ) -> DbResult<QueryResult> {
     let role = match begin_member(tx, ws, actor, false).await? {
         Ok(role) => role,
@@ -219,11 +232,6 @@ async fn run(
     {
         return Ok(Err(err));
     }
-    let time_zone: String = sqlx::query_scalar("SELECT timezone FROM fvoci.users WHERE id = $1")
-        .bind(actor.user_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .unwrap_or_else(|| "UTC".to_string());
     let as_of = cursor.as_ref().map(|c| c.as_of).unwrap_or_else(Utc::now);
     let acl = load_search_acl(tx, ws, actor.user_id, role, None).await?;
     let task = collection.kind == CollectionKind::Task;
@@ -254,7 +262,7 @@ async fn run(
         &q.config.query,
         &CompileOptions {
             actor_user_id: actor.user_id,
-            time_zone: &time_zone,
+            time_zone,
             standard_filters: true,
         },
         "r",
