@@ -2141,3 +2141,246 @@ async fn workflow_status_write_rechecks_a_demoted_lead() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+fn status_names(workflow: &Value) -> Vec<(String, String)> {
+    workflow["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["category"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn named(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(n, c)| (n.to_string(), c.to_string()))
+        .collect()
+}
+
+async fn patch_i18n(app: axum::Router, cookie: &str, value: Value) -> (StatusCode, Value) {
+    json_request(
+        app,
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        Some(json!({"i18n": value})),
+        Some(cookie),
+    )
+    .await
+}
+
+async fn clone_task_title(
+    app: axum::Router,
+    cookie: &str,
+    workspace_id: Uuid,
+    task: &Value,
+) -> String {
+    let (status, copy) = json_request(
+        app,
+        "POST",
+        &format!(
+            "/api/v1/workspaces/{workspace_id}/tasks/{}/clone",
+            task["id"].as_str().unwrap()
+        ),
+        None,
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{copy}");
+    copy["title"].as_str().unwrap().to_string()
+}
+
+/// Source `workflow.test.ts` AC9 and `task.ts` cloneTask: seed names and the
+/// clone suffix come from the instance overrides at operation time; existing
+/// and copied statuses keep their names; a non-admin cannot change them.
+#[tokio::test]
+async fn i18n_overrides_seed_new_workflows_and_label_task_clones() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let defaults = named(&[
+        ("백로그", "backlog"),
+        ("할 일", "todo"),
+        ("진행 중", "in_progress"),
+        ("검토 대기", "in_progress"),
+        ("완료", "done"),
+        ("취소", "canceled"),
+    ]);
+
+    // A workspace member (not an instance admin) cannot set overrides.
+    let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
+    let (status, body) = patch_i18n(
+        app.clone(),
+        &member.cookie,
+        json!({"overrides": {"seed.status.backlog": "Hijacked"}}),
+    )
+    .await;
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "{status} {body}"
+    );
+
+    let old = create_project(app.clone(), &cookie, workspace_id, "OLD", "workspace").await;
+    let old_id = old["id"].as_str().unwrap();
+    assert_eq!(
+        status_names(&workflow(app.clone(), &cookie, workspace_id, old_id).await),
+        defaults
+    );
+    let bare = create_project(app.clone(), &cookie, workspace_id, "BARE", "workspace").await;
+    let bare_id = bare["id"].as_str().unwrap();
+
+    let (status, body) = patch_i18n(
+        app.clone(),
+        &cookie,
+        json!({"overrides": {
+            "seed.status.backlog": "Inbox",
+            "seed.status.review": "In review",
+            // Valid override, but over the 100-unit status name limit.
+            "seed.status.todo": "가".repeat(101),
+            "task.duplicate.suffix": "Copy of {{title}}"
+        }}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let overridden = named(&[
+        ("Inbox", "backlog"),
+        ("할 일", "todo"),
+        ("진행 중", "in_progress"),
+        ("In review", "in_progress"),
+        ("완료", "done"),
+        ("취소", "canceled"),
+    ]);
+
+    // Existing statuses keep their names.
+    assert_eq!(
+        status_names(&workflow(app.clone(), &cookie, workspace_id, old_id).await),
+        defaults
+    );
+    // A new project is seeded from the overrides.
+    let new = create_project(app.clone(), &cookie, workspace_id, "NEW", "workspace").await;
+    let new_id = new["id"].as_str().unwrap();
+    assert_eq!(
+        status_names(&workflow(app.clone(), &cookie, workspace_id, new_id).await),
+        overridden
+    );
+    // A project clone copies the source's statuses unchanged.
+    let (status, copied) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{old_id}/clone"),
+        Some(json!({"key": "CPY", "name": "Copied"})),
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {copied}");
+    let copied_id = copied["id"]
+        .as_str()
+        .or_else(|| copied["project"]["id"].as_str())
+        .expect("cloned project id");
+    assert_eq!(
+        status_names(&workflow(app.clone(), &cookie, workspace_id, copied_id).await),
+        defaults
+    );
+    // A clone of a project without a workflow seeds a new one.
+    let bare_uuid = Uuid::parse_str(bare_id).unwrap();
+    sqlx::query("DELETE FROM fvoci.statuses WHERE project_id = $1")
+        .bind(bare_uuid)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM fvoci.workflows WHERE project_id = $1")
+        .bind(bare_uuid)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, reseeded) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{bare_id}/clone"),
+        Some(json!({"key": "SEED", "name": "Seeded"})),
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {reseeded}");
+    let reseeded_id = reseeded["id"]
+        .as_str()
+        .or_else(|| reseeded["project"]["id"].as_str())
+        .expect("cloned project id");
+    assert_eq!(
+        status_names(&workflow(app.clone(), &cookie, workspace_id, reseeded_id).await),
+        overridden
+    );
+
+    // Task clone title: override, single-pass substitution, title limit.
+    let plain = create_task(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        new_id,
+        json!({"title": "Fix login"}),
+    )
+    .await;
+    assert_eq!(
+        clone_task_title(app.clone(), &cookie, workspace_id, &plain).await,
+        "Copy of Fix login"
+    );
+    let braces = create_task(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        new_id,
+        json!({"title": "Keep {{title}} literal"}),
+    )
+    .await;
+    assert_eq!(
+        clone_task_title(app.clone(), &cookie, workspace_id, &braces).await,
+        "Copy of Keep {{title}} literal"
+    );
+    let long_title = "a".repeat(495);
+    let long = create_task(
+        app.clone(),
+        &cookie,
+        workspace_id,
+        new_id,
+        json!({"title": long_title}),
+    )
+    .await;
+    assert_eq!(
+        clone_task_title(app.clone(), &cookie, workspace_id, &long).await,
+        long_title
+    );
+
+    // Reset: defaults again for the next seed and clone, no restart.
+    let (status, body) = patch_i18n(app.clone(), &cookie, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        clone_task_title(app.clone(), &cookie, workspace_id, &plain).await,
+        "Fix login 복사"
+    );
+    let after = create_project(app.clone(), &cookie, workspace_id, "AFT", "workspace").await;
+    assert_eq!(
+        status_names(
+            &workflow(
+                app.clone(),
+                &cookie,
+                workspace_id,
+                after["id"].as_str().unwrap()
+            )
+            .await
+        ),
+        defaults
+    );
+    // The earlier override-seeded project is unchanged by the reset.
+    assert_eq!(
+        status_names(&workflow(app.clone(), &cookie, workspace_id, new_id).await),
+        overridden
+    );
+
+    admin.close().await;
+    harness.cleanup().await;
+}

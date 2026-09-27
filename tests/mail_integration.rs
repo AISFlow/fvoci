@@ -815,3 +815,244 @@ async fn app_role_cannot_select_magic_tokens() {
     app.close().await;
     harness.cleanup().await;
 }
+
+fn header_values(mail: &CapturedMail, name: &str) -> Vec<String> {
+    let parsed = mailparse::parse_mail(mail.data.as_bytes()).expect("parse captured mail");
+    parsed
+        .headers
+        .iter()
+        .filter(|h| h.get_key().eq_ignore_ascii_case(name))
+        .map(|h| h.get_value())
+        .collect()
+}
+
+async fn deliver_identity_linked(harness: &TestDb, mailer: Arc<Mailer>, user_id: Uuid) {
+    let admin = harness.admin().await;
+    let event_id = Uuid::now_v7();
+    let mut tx = admin.begin().await.unwrap();
+    sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, actor_user_id, verb, payload, channel)
+        VALUES ($1, $2, 'identity.linked', '{"provider":"oidc"}'::jsonb, 'web')
+        "#,
+    )
+    .bind(event_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    admin.close().await;
+
+    let app_pool = pool::connect_app(&harness.app_url).await.unwrap();
+    fvoci_server::db::outbox::ensure_consumer(&app_pool, "mail")
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let event = loop {
+        let events = read_events(&app_pool, "mail", 100).await.unwrap();
+        if let Some(event) = events.into_iter().find(|event| event.id == event_id) {
+            break event;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mail consumer can read identity.linked"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    fvoci_server::mail::mail_consumer(mailer)
+        .deliver(&app_pool, Uuid::now_v7(), &event)
+        .await
+        .expect("deliver identity mail");
+    app_pool.close().await;
+}
+
+/// Source `settings-overrides.test.ts`: an admin PATCH of `i18n.overrides`
+/// changes the next mail without a restart; absent keys keep the Korean
+/// default, an invalid PATCH changes nothing and a reset restores defaults.
+#[tokio::test]
+async fn i18n_overrides_reach_the_next_mail_live_and_reset() {
+    let harness = TestDb::bootstrap().await;
+    let sink = SmtpSink::spawn().await;
+    let mailer = mailer_for(sink.port);
+    let (app, cookie, user_id) = setup_session(&harness, mailer.clone()).await;
+    let admin = harness.admin().await;
+    let ws: Uuid = sqlx::query_scalar("SELECT id FROM fvoci.workspaces WHERE slug = 'acme'")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+
+    let patch = |body: Value| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            json_request(
+                app,
+                "PATCH",
+                "/api/v1/admin/instance-settings",
+                Some(body),
+                Some(&cookie),
+                &[],
+                None,
+            )
+            .await
+        }
+    };
+    let invite = |email: &'static str| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            let (status, body, _, _) = json_request(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/invitations"),
+                Some(json!({"email": email, "role": "member"})),
+                Some(&cookie),
+                &[],
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            assert!(body["mailDelayed"].is_null());
+            body["acceptUrl"].as_str().unwrap().to_string()
+        }
+    };
+    let reset_password = |octet: u8| {
+        let app = app.clone();
+        async move {
+            let (status, _, _, _) = json_request(
+                app,
+                "POST",
+                "/api/v1/auth/password-reset",
+                Some(json!({"email": "admin@example.com"})),
+                None,
+                &[],
+                Some(std::net::SocketAddr::from(([198, 51, 100, octet], 9))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+        }
+    };
+
+    let overrides = json!({
+        "mail.invite.subject": "Team invite\r\nBcc: intruder@example.com",
+        "mail.magic.reset.subject": "Reset your password",
+        "mail.magic.link.text": "Open {{url}} within {{minutes}} minutes. {{title}}",
+        "mail.identity.linked.subject": "Sign-in linked",
+        "mail.identity.linked.text": "Provider {{provider}} was linked."
+    });
+    // `{{title}}` is not a variable of this key: the PATCH is rejected.
+    let (status, body, _, _) = patch(json!({"i18n": {"overrides": overrides}})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let mut overrides = overrides;
+    overrides["mail.magic.link.text"] = json!("Open {{url}} within {{minutes}} minutes.");
+    let (status, body, _, _) = patch(json!({"i18n": {"overrides": overrides}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Invitation: override subject, header-safe (no injected Bcc header or
+    // extra recipient), body unchanged.
+    let accept_url = invite("first@example.com").await;
+    let mail = sink.wait_for(|m| m.to == "first@example.com").await;
+    assert_eq!(
+        header_values(&mail, "subject"),
+        ["Team invite  Bcc: intruder@example.com"]
+    );
+    assert!(header_values(&mail, "bcc").is_empty());
+    assert!(mail.text().contains(&accept_url));
+
+    // Password reset: override subject and link text with both variables.
+    reset_password(20).await;
+    let mail = sink
+        .wait_for(|m| m.text().contains("/reset-password?token="))
+        .await;
+    assert!(mail.text().contains("Subject: Reset your password"));
+    assert!(mail
+        .text()
+        .contains("Open http://localhost/reset-password?token="));
+    assert!(mail.text().contains(" within 15 minutes."));
+    assert!(!mail.text().contains("분 안에"));
+
+    // Outbox identity mail (read at delivery, in the consumer transaction).
+    deliver_identity_linked(&harness, mailer.clone(), user_id).await;
+    let mail = sink
+        .wait_for(|m| m.text().contains("Provider oidc was linked."))
+        .await;
+    assert!(mail.text().contains("Subject: Sign-in linked"));
+
+    // Invalid PATCHes leave the stored map and the next mail unchanged.
+    for bad in [
+        json!({"i18n": {"overrides": {"mail.invite.subject": "<b>x</b>"}}}),
+        json!({"i18n": {"overrides": {"mail.magic.link.text": "no url"}}}),
+        json!({"i18n": {"overrides": {"mail.comment.subject": "not overridable"}}}),
+        json!({"i18n": {"overrides": {"mail.invite.subject": "   "}}}),
+    ] {
+        let (status, body, _, _) = patch(bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    invite("second@example.com").await;
+    let mail = sink.wait_for(|m| m.to == "second@example.com").await;
+    assert!(mail.text().contains("Subject: Team invite  Bcc:"));
+
+    // The anonymous projection never carries the map.
+    let (status, public, _, _) = json_request(
+        app.clone(),
+        "GET",
+        "/api/v1/instance",
+        None,
+        None,
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(public["values"].get("i18n").is_none());
+    assert!(!public.to_string().contains("Team invite"));
+
+    // Live update: the next send uses the new copy, no restart.
+    let (status, _, _, _) = patch(json!({"i18n": {"overrides": {
+        "mail.invite.subject": "Invitation v2"
+    }}}))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    invite("third@example.com").await;
+    let mail = sink.wait_for(|m| m.to == "third@example.com").await;
+    assert!(mail.text().contains("Subject: Invitation v2"));
+    // Keys dropped from the map are back to the default.
+    reset_password(21).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let resets = loop {
+        let resets: Vec<CapturedMail> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|m| m.text().contains("/reset-password?token="))
+            .collect();
+        if resets.len() >= 2 {
+            break resets;
+        }
+        assert!(std::time::Instant::now() < deadline, "second reset mail");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(resets[1].text().contains("Subject: FVOCI 비밀번호 재설정"));
+    assert!(resets[1].text().contains("15분 안에 사용할 수 있습니다."));
+
+    // Reset to the absent default.
+    let (status, body, _, _) = patch(json!({"i18n": null})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let admin = harness.admin().await;
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.instance_settings WHERE key = 'i18n'")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0);
+    admin.close().await;
+    invite("fourth@example.com").await;
+    let mail = sink.wait_for(|m| m.to == "fourth@example.com").await;
+    assert!(mail.text().contains("Subject: 워크스페이스 초대"));
+    harness.cleanup().await;
+}

@@ -144,9 +144,13 @@ impl Mailer {
         self.smtp.is_some()
     }
 
-    pub async fn send_invite(&self, to: &str, url: &str) -> Result<(), MailSendError> {
-        self.send_op("sendInvite", to, templates::INVITE_SUBJECT, url)
-            .await
+    pub async fn send_invite(
+        &self,
+        to: &str,
+        subject: &str,
+        url: &str,
+    ) -> Result<(), MailSendError> {
+        self.send_op("sendInvite", to, subject, url).await
     }
 
     pub async fn send(&self, to: &str, subject: &str, text: &str) -> Result<(), MailSendError> {

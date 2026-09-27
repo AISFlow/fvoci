@@ -27,6 +27,7 @@ use crate::db::tasks::{
 };
 use crate::display_id::{format_display_id, parse_display_id};
 use crate::projects::ProjectPermission;
+use crate::settings::messages::{Message, Messages};
 use crate::tasks::activity::ActivitySnapshot;
 
 /// A task the actor can currently view, with its locked project.
@@ -252,10 +253,10 @@ pub async fn create_time_entry(
 // Clone
 // ---------------------------------------------------------------------------
 
-/// Source `task.duplicate.suffix` (ko): "{{title}} 복사", or the plain title
-/// when the labelled one would exceed the title limit.
-pub fn clone_title(source_title: &str) -> String {
-    let labeled = format!("{source_title} 복사");
+/// Source `task.duplicate.suffix` (ko default "{{title}} 복사"), or the plain
+/// title when the labelled one would exceed the title limit.
+pub fn clone_title(messages: &Messages, source_title: &str) -> String {
+    let labeled = messages.render(Message::TaskDuplicateSuffix, &[("title", source_title)]);
     if crate::tasks::title_is_valid(&labeled) {
         labeled
     } else {
@@ -307,7 +308,8 @@ pub async fn clone_task(
             .bind(source.project_id)
             .fetch_one(&mut *tx)
             .await?;
-    let title = clone_title(&source.title);
+    let messages = crate::settings::messages::load(&mut *tx).await?;
+    let title = clone_title(&messages, &source.title);
     let input = CreateTaskInput {
         title: &title,
         task_type: &source.task_type,
@@ -1019,9 +1021,19 @@ mod tests {
 
     #[test]
     fn clone_title_keeps_the_title_limit() {
-        assert_eq!(clone_title("Fix login"), "Fix login 복사");
+        let defaults = Messages::defaults();
+        assert_eq!(clone_title(&defaults, "Fix login"), "Fix login 복사");
         let long = "a".repeat(498);
-        assert_eq!(clone_title(&long), long);
+        assert_eq!(clone_title(&defaults, &long), long);
+        let custom = Messages::from_row(Some(&json!({"overrides": {
+            "task.duplicate.suffix": "[copy] {{title}}"
+        }})));
+        assert_eq!(
+            clone_title(&custom, "Fix {{title}}"),
+            "[copy] Fix {{title}}"
+        );
+        let long = "a".repeat(494);
+        assert_eq!(clone_title(&custom, &long), long);
     }
 
     #[test]

@@ -262,6 +262,10 @@ async fn request_password_reset(
         return Err(AppError::rate_limited(retry_after));
     }
     let started = std::time::Instant::now();
+    // Read for known and unknown addresses alike (same work on both paths).
+    let messages = crate::settings::messages::load(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
     if let Some((user_id, generation, suspended_at)) =
         crate::db::identity::find_reset_user_by_email(&state.auth.db.pool, &email)
             .await
@@ -283,8 +287,8 @@ async fn request_password_reset(
             let url = format!("{origin}/reset-password?token={}", issued.token);
             state.mailer.send_detached(
                 email,
-                crate::mail::templates::RESET_SUBJECT.to_string(),
-                crate::mail::templates::reset_text(&url),
+                messages.subject(crate::settings::messages::Message::MagicResetSubject),
+                crate::mail::templates::magic_link_text(&messages, &url),
             );
         }
     }

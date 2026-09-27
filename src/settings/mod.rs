@@ -7,6 +7,7 @@
 //! restart-required keys changed since this process started".
 
 pub mod catalog;
+pub mod messages;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};

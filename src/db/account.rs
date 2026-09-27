@@ -19,14 +19,13 @@ use crate::db::context::{
 use crate::db::identity::{append_audit, lock_sign_in, AuditAppend, INSTANCE_ADMIN_LOCK_KEY};
 use crate::db::magic::{MagicPayload, MAGIC_KIND_EMAIL_CHANGE, MAGIC_KIND_LOGIN};
 use crate::db::quota::acquire_admission_lock;
+use crate::settings::messages::Message;
 use crate::validate::normalize_email;
 
 /// Source `ERASE_AFTER_MS`: 14 days between withdraw and anonymization.
 pub const WITHDRAW_GRACE_DAYS: i64 = 14;
 /// Source `WITHDRAWN_ANONYMIZE_BATCH`.
 pub const WITHDRAWN_ANONYMIZE_BATCH: i64 = 200;
-/// Source `withdrawn.displayName` (ko).
-pub const WITHDRAWN_DISPLAY_NAME: &str = "탈퇴한 사용자";
 /// Source `scrubNamesByUploader(user.id, "deleted")`.
 pub const SCRUBBED_ATTACHMENT_NAME: &str = "deleted";
 
@@ -746,10 +745,16 @@ pub async fn anonymize_withdrawn_user(
             return Ok(false);
         }
     }
+    // Source `withdrawn.displayName`, read in this transaction; an override
+    // the name limit would reject keeps the default.
+    let messages = crate::settings::messages::load(&mut *tx).await?;
+    let display_name = messages.field(Message::WithdrawnDisplayName, |name| {
+        crate::validate::validate_given_name(name).is_ok()
+    });
     let anonymized: bool =
         sqlx::query_scalar("SELECT fvoci.app_user_anonymize($1, $2, $3, $4, $5)")
             .bind(user_id)
-            .bind(WITHDRAWN_DISPLAY_NAME)
+            .bind(display_name)
             .bind(anonymized_email())
             .bind(now)
             .bind(cutoff)
