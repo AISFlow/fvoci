@@ -341,3 +341,77 @@ async fn https_origin_adds_hsts_and_upgrade_insecure_requests() {
         .unwrap()
         .ends_with("; upgrade-insecure-requests;"));
 }
+
+/// `HEAD /s/{token}` answers like the GET shell (source server.ts `/s/:token`
+/// headers): private no-store, noindex, no-referrer, the HTML content type,
+/// an empty body and the Content-Length of the GET body. Other paths keep
+/// the generic static HEAD handling.
+#[tokio::test]
+async fn share_shell_head_matches_get_headers_with_empty_body() {
+    let dir = std::env::temp_dir().join(format!("fvoci-static-head-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).expect("tmpdir");
+    std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
+    std::fs::write(dir.join("assets.txt"), "asset").unwrap();
+    let app: Router = router(app_state().await, Some(dir.clone()));
+    let send = |method: &'static str, uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, headers, bytes)
+        }
+    };
+    for uri in ["/s/some-share-token", "/s/some-share-token/"] {
+        let (status, get_headers, get_body) = send("GET", uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        let (status, h, body) = send("HEAD", uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(body.is_empty(), "{uri}");
+        assert_eq!(h["content-type"], "text/html; charset=utf-8", "{uri}");
+        assert_eq!(h["cache-control"], "private, no-store", "{uri}");
+        assert_eq!(h["x-robots-tag"], "noindex", "{uri}");
+        assert_eq!(h["referrer-policy"], "no-referrer", "{uri}");
+        assert_eq!(
+            h["content-length"],
+            get_body.len().to_string().as_str(),
+            "{uri}"
+        );
+        for name in ["content-type", "cache-control", "x-robots-tag", "referrer-policy"] {
+            assert_eq!(h[name], get_headers[name], "{uri} {name}");
+        }
+    }
+    // Non-share paths keep the generic static HEAD: no noindex, own caching.
+    for (uri, cache) in [
+        ("/", Some("no-store")),
+        ("/w/some/wiki", Some("no-store")),
+        ("/s/some-share-token/attachments/x", Some("no-store")),
+        ("/assets.txt", None),
+    ] {
+        let (status, h, body) = send("HEAD", uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(body.is_empty(), "{uri}");
+        assert!(h.get("x-robots-tag").is_none(), "{uri}");
+        assert_eq!(
+            h.get("cache-control").map(|v| v.to_str().unwrap()),
+            cache,
+            "{uri}"
+        );
+    }
+    let (status, _, body) = send("HEAD", "/missing-asset.js").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
