@@ -59,6 +59,30 @@ def copy_workflows(dst: Path) -> None:
             shutil.copy2(path, target / path.name)
 
 
+def write_minimal_rust_registry_stub(repo: Path, extra_targets: list[str] | None = None) -> None:
+    (repo / "scripts").mkdir(parents=True, exist_ok=True)
+    for rel in (SEL.RUST_COLLAB_CI_SCRIPT, SEL.RUST_CAPACITY_PROBE_SCRIPT):
+        dst = repo / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / rel, dst)
+    lines = [
+        "[features]",
+        'db-tests = []',
+        "",
+    ]
+    for name in ("db_integration", *(extra_targets or [])):
+        lines.extend(
+            [
+                "[[test]]",
+                f'name = "{name}"',
+                f'path = "tests/{name}.rs"',
+                'required-features = ["db-tests"]',
+                "",
+            ]
+        )
+    (repo / "Cargo.toml").write_text("\n".join(lines), encoding="utf-8")
+
+
 def configure_git(repo: Path) -> None:
     git(repo, "config", "user.email", "ci@test")
     git(repo, "config", "user.name", "ci")
@@ -316,6 +340,7 @@ class PrCheckoutFixture:
         configure_git(self.origin)
         git(self.origin, "config", "uploadpack.allowReachableSHA1InWant", "true")
         copy_workflows(self.origin)
+        write_minimal_rust_registry_stub(self.origin)
         write_file(self.origin, "README.md", "base docs\n")
         git(self.origin, "add", ".")
         git(self.origin, "commit", "-m", "base")
@@ -721,22 +746,12 @@ class RustSuiteRegistryFixture:
         self.close()
 
     def write_cargo(self, extra_targets: list[str] | None = None) -> None:
-        lines = [
-            "[features]",
-            'db-tests = []',
-            "",
-        ]
-        for name in ("db_integration", *(extra_targets or [])):
-            lines.extend(
-                [
-                    "[[test]]",
-                    f'name = "{name}"',
-                    f'path = "tests/{name}.rs"',
-                    'required-features = ["db-tests"]',
-                    "",
-                ]
-            )
-        (self.root / "Cargo.toml").write_text("\n".join(lines), encoding="utf-8")
+        write_minimal_rust_registry_stub(self.root, extra_targets)
+
+    def write_autotest_rs(self, name: str) -> None:
+        path = self.root / "tests" / f"{name}.rs"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('#![cfg(feature = "db-tests")]\n', encoding="utf-8")
 
 
 class RustSuiteRegistryTest(unittest.TestCase):
@@ -782,12 +797,82 @@ class RustSuiteRegistryTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("unfurl_integration", proc.stderr)
 
+    def test_missing_cargo_fails_instead_of_silent_pass(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            (fx.root / "Cargo.toml").unlink()
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertIn("missing root Cargo.toml", "\n".join(errors))
+
+    def test_autodiscovered_root_test_without_ci_row_fails(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            fx.write_autotest_rs("unfurl_integration")
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("unfurl_integration" in err for err in errors))
+
+    def test_postgres_decoy_test_string_without_matrix_execution_fails(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            rust = fx.root / ".github" / "workflows" / "rust.yml"
+            text = rust.read_text(encoding="utf-8")
+            decoy = (
+                "      - name: PostgreSQL integration tests decoy\n"
+                "        run: echo --test db_integration --features db-tests\n"
+            )
+            text = text.replace(
+                "      - name: PostgreSQL integration tests\n",
+                decoy + "      - name: PostgreSQL integration tests\n",
+                1,
+            )
+            text = text.replace(
+                "        run: cargo test --locked --offline --no-fail-fast --features db-tests ${{ matrix.tests }}\n",
+                "        run: cargo test --locked --offline --no-fail-fast --features db-tests\n",
+                1,
+            )
+            rust.write_text(text, encoding="utf-8")
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        joined = "\n".join(errors)
+        self.assertIn("matrix.tests", joined)
+
+    def test_s3_missing_db_features_on_execution_command_fails(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            rust = fx.root / ".github" / "workflows" / "rust.yml"
+            text = rust.read_text(encoding="utf-8")
+            rust.write_text(
+                text.replace(
+                    SEL.RUST_S3_INTEGRATION_RUN,
+                    "bash scripts/start-test-minio.sh cargo test --locked --offline --no-fail-fast "
+                    "--test attachment_s3_integration",
+                ),
+                encoding="utf-8",
+            )
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("S3 integration step" in err for err in errors))
+
+    def test_collaboration_echo_script_not_execution_fails(self) -> None:
+        with RustSuiteRegistryFixture() as fx:
+            fx.write_cargo()
+            rust = fx.root / ".github" / "workflows" / "rust.yml"
+            text = rust.read_text(encoding="utf-8")
+            rust.write_text(
+                text.replace(
+                    "        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
+                    "        run: echo bash scripts/run-rust-collaboration-ci-tests.sh\n",
+                ),
+                encoding="utf-8",
+            )
+            errors = SEL.verify_rust_suite_registry(fx.root)
+        self.assertTrue(any("collaboration integration step" in err for err in errors))
+
 
 class RegistryMutationCliTest(unittest.TestCase):
     def _mutated_root(self) -> Path:
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
         copy_workflows(tmp)
+        write_minimal_rust_registry_stub(tmp)
         return tmp
 
     def _plan_against(self, repo_root: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
