@@ -1,7 +1,8 @@
 import { createHmac } from "node:crypto";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
+import { login } from "./helpers";
 
 const owner = {
   email: "Admin@Example.COM",
@@ -131,4 +132,120 @@ test("owner creates a signed webhook, receives project.created, then deletes it"
     receiver.server.closeAllConnections();
     await new Promise<void>((resolve) => receiver.server.close(() => resolve()));
   }
+});
+
+const INSTANCE_PATH = "/api/v1/instance";
+
+function isInstanceRead(url: string): boolean {
+  return new URL(url).pathname === INSTANCE_PATH;
+}
+
+/** The webhook test above runs setup first; alone (or after its failure) this still signs in. */
+async function signInOwner(page: Page): Promise<void> {
+  await page.goto("/");
+  await expect(
+    page
+      .getByRole("button", { name: "시작하기" })
+      .or(page.getByRole("button", { name: "로그아웃" }))
+      .or(page.getByRole("button", { name: "로그인", exact: true })),
+  ).toBeVisible();
+  if ((await page.getByRole("button", { name: "시작하기" }).count()) > 0) {
+    await page.getByLabel("성").fill(owner.familyName);
+    await page.getByLabel("이름", { exact: true }).fill(owner.givenName);
+    await page.getByLabel("이메일").fill(owner.email);
+    await page.getByLabel("비밀번호").fill(owner.password);
+    await page.getByLabel("워크스페이스 이름").fill(owner.workspaceName);
+    await page.getByLabel("주소(영문)").fill(owner.workspaceSlug);
+    await page.getByRole("button", { name: "시작하기" }).click();
+    await expect(page).toHaveURL(/\/$/);
+  } else if ((await page.getByRole("button", { name: "로그인", exact: true }).count()) > 0) {
+    await login(page, owner.email, owner.password);
+  }
+}
+
+test("public features.ai gates the document AI menu; the server keeps its own AI gate", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(90_000);
+  await signInOwner(page);
+
+  const workspacesRes = await page.request.get("/api/v1/me/workspaces");
+  expect(workspacesRes.ok()).toBe(true);
+  const workspace = (await workspacesRes.json()).items.find(
+    (item: { slug: string }) => item.slug === owner.workspaceSlug,
+  ) as { id: string };
+  const docRes = await page.request.post(`/api/v1/workspaces/${workspace.id}/documents`, {
+    data: { parentId: null, title: "AI 게이트 문서" },
+  });
+  expect(docRes.status(), await docRes.text()).toBe(201);
+  const doc = (await docRes.json()) as { id: string; number: number };
+  const docPath = `/w/${owner.workspaceSlug}/WIKI-${doc.number}`;
+  const aiMenu = page.getByRole("group", { name: "AI 도구" });
+
+  // Default instance: the public view says off and the menu is absent once that answer is in.
+  const initial = await request.get(INSTANCE_PATH);
+  expect(initial.ok()).toBe(true);
+  expect((await initial.json()).values.features.ai).toBe(false);
+  const instanceRead = page.waitForResponse((res) => isInstanceRead(res.url()));
+  await page.goto(docPath);
+  await instanceRead;
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(aiMenu).toHaveCount(0);
+
+  // Turn it on from the real admin settings card without reloading the app, so the
+  // document screen must pick the change up from the shared ["instance"] query.
+  // WHY: the document shell has no admin link; a same-document history push keeps the SPA cache.
+  await page.evaluate((path) => {
+    window.history.pushState(null, "", path);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, "/settings/admin");
+  const features = page.getByRole("region", { name: "기능 토글", exact: true });
+  await expect(features.getByLabel("features.ai")).toBeEnabled();
+  await expect(features.getByLabel("features.ai")).not.toBeChecked();
+  await features.getByLabel("features.ai").check();
+  const saved = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+  );
+  await features.getByRole("button", { name: "저장", exact: true }).click();
+  expect((await saved).status()).toBe(200);
+
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`${docPath}$`));
+  await expect(aiMenu).toBeVisible();
+  await page.reload();
+  await expect(aiMenu).toBeVisible();
+
+  // The flag is public and changes only the UI; anonymous callers still cannot write settings.
+  const publicView = await request.get(INSTANCE_PATH);
+  expect((await publicView.json()).values.features.ai).toBe(true);
+  const anonPatch = await request.patch("/api/v1/admin/instance-settings", {
+    data: { features: { ai: false } },
+  });
+  expect([401, 403]).toContain(anonPatch.status());
+
+  // The server's own AI gate (FVOCI_AI_ENABLED/FVOCI_AI_SECRET) is unset in e2e: the menu shows
+  // but the action answers 503 ai_unavailable and the buttons lock.
+  const direct = await page.request.post(`/api/v1/workspaces/${workspace.id}/ai/summarize`, {
+    data: { documentId: doc.id },
+  });
+  expect(direct.status()).toBe(503);
+  expect((await direct.json()).code).toBe("ai_unavailable");
+  await aiMenu.getByRole("button", { name: "요약", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "AI 기능을 지금 사용할 수 없습니다" })).toBeVisible();
+  await expect(aiMenu.getByRole("button", { name: "요약", exact: true })).toBeDisabled();
+
+  // Back to the default: the card's reset writes null and the menu disappears again.
+  await page.goto("/settings/admin");
+  const reset = page.getByRole("region", { name: "기능 토글", exact: true });
+  const cleared = page.waitForResponse(
+    (res) => res.url().endsWith("/api/v1/admin/instance-settings") && res.request().method() === "PATCH",
+  );
+  await reset.getByRole("button", { name: "기본값으로", exact: true }).click();
+  expect((await cleared).status()).toBe(200);
+  const offRead = page.waitForResponse((res) => isInstanceRead(res.url()));
+  await page.goto(docPath);
+  await offRead;
+  await expect(page.locator('[data-collab-status="connected"]')).toBeVisible({ timeout: 15_000 });
+  await expect(aiMenu).toHaveCount(0);
 });

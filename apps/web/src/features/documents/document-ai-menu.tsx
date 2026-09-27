@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { documentPath, wikiDisplayId } from "@/lib/href";
 import { treeQuery } from "@/lib/queries/documents";
+import { aiEnabledQuery } from "@/lib/queries/instance-settings";
 
 type AiAction = "summarize" | "generateTasks" | "suggestLinks";
 
@@ -24,7 +25,8 @@ const MENU_LABEL: Record<AiAction, I18nKey> = {
 /**
  * Source `DocumentAiMenu`, reduced to a read-only preview: the three AI actions run against the
  * saved document and the result is shown in a panel. Applying the result (inserting into the
- * body or creating tasks) is not ported yet.
+ * body or creating tasks) is not ported yet. Like the source, the menu renders only once the public
+ * `features.ai` setting is `true` — while loading, on error or when off it is absent.
  */
 export function DocumentAiMenu({
   workspaceId,
@@ -35,10 +37,12 @@ export function DocumentAiMenu({
   slug: string;
   documentId: string;
 }) {
+  const aiEnabled = useQuery(aiEnabledQuery);
   const tree = useQuery(treeQuery(workspaceId));
   const [result, setResult] = useState<AiResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // WHY: the server answers 503 ai_unavailable when AI is off — lock the buttons from then on.
+  // WHY: the public flag is only a UI gate; the server keeps its own AI gate and answers 503
+  // ai_unavailable when that is off — lock the buttons from then on.
   const [unavailable, setUnavailable] = useState(false);
 
   const run = useMutation({
@@ -84,6 +88,8 @@ export function DocumentAiMenu({
       setError(problemMessage(err, "ai.failed"));
     },
   });
+
+  if (aiEnabled.data !== true) return null;
 
   const nodes = new Map((tree.data?.items ?? []).map((node) => [node.id, node]));
   const items: Array<{ key: string; label: string; href?: string }> = [];
