@@ -250,11 +250,16 @@ test("public features.ai gates the document AI menu; the server keeps its own AI
   await expect(aiMenu).toHaveCount(0);
 });
 
-type BodyNode = { type?: string; text?: string; attrs?: { id?: string }; content?: BodyNode[] };
+type BodyNode = {
+  type?: string;
+  text?: string;
+  attrs?: { id?: string; name?: string };
+  content?: BodyNode[];
+};
 
 /**
  * Top-level blocks of a stored body in order: a paragraph as its text (mentions as `@<id>`,
- * empty paragraphs as ""), any other block as `type[paragraph|texts]`.
+ * emoji nodes as `:<name>:`, empty paragraphs as ""), any other block as `type[paragraph|texts]`.
  */
 function blocksOf(root: BodyNode): string[] {
   const inline = (child: BodyNode): string =>
@@ -262,7 +267,9 @@ function blocksOf(root: BodyNode): string[] {
       ? (child.text ?? "")
       : child.type === "mention"
         ? `@${child.attrs?.id ?? ""}`
-        : (child.content ?? []).map(inline).join("");
+        : child.type === "emoji"
+          ? `:${child.attrs?.name ?? ""}:`
+          : (child.content ?? []).map(inline).join("");
   const paragraphs = (node: BodyNode): string[] =>
     node.type === "paragraph" ? [inline(node)] : (node.content ?? []).flatMap(paragraphs);
   return (root.content ?? []).map((node) =>
@@ -358,12 +365,13 @@ test("confirmed AI results apply through the live editor and the project task ro
 
     await page.getByRole("button", { name: "저장", exact: true }).click();
     await expect(page.locator('[data-collab-persisted="true"]')).toBeVisible({ timeout: 15_000 });
+    // The editor's Emoji extension stores 🙂 as an emoji node; the text before it stays as is.
     await expect
       .poll(bodyOf, { timeout: 15_000 })
       .toEqual([
         "기존 본문",
         "bulletList[항목 하나]",
-        "요약 첫 줄 🙂",
+        expect.stringMatching(/^요약 첫 줄 :[\w+-]+:$/),
         "요약 둘째 줄",
         `@${linkDoc.id}`,
       ]);
@@ -419,7 +427,7 @@ test("confirmed AI results apply through the live editor and the project task ro
     expect(aiCalls).toEqual(["summarize", "suggest-links", "generate-tasks", "summarize"]);
   } finally {
     const off = await page.request.patch("/api/v1/admin/instance-settings", {
-      data: { features: { ai: null } },
+      data: { features: null },
     });
     expect(off.status(), await off.text()).toBe(200);
   }
