@@ -86,6 +86,55 @@ export function readProcMember(pid: number): ProcMember | null {
   }
 }
 
+export function isCollabEngineComm(comm: string): boolean {
+  return comm.startsWith("collab-engine");
+}
+
+export function directChildren(pid: number): number[] {
+  const pids: number[] = [];
+  let taskNames: string[] = [];
+  try {
+    taskNames = readdirSync(`/proc/${pid}/task`);
+  } catch {
+    return pids;
+  }
+  for (const tid of taskNames) {
+    if (!/^\d+$/.test(tid)) continue;
+    try {
+      const children = readFileSync(`/proc/${pid}/task/${tid}/children`, "utf8");
+      for (const token of children.split(/\s+/)) {
+        if (token === "") continue;
+        const child = Number(token);
+        if (Number.isFinite(child)) pids.push(child);
+      }
+    } catch {
+      /* task exited while scanning */
+    }
+  }
+  pids.sort((a, b) => a - b);
+  return [...new Set(pids)];
+}
+
+/** Walk the fvoci-server process tree the same way collab_process_server.rs does. */
+export function collabEngineDescendants(root: number): ProcMember[] {
+  const found: ProcMember[] = [];
+  const stack = [root];
+  const seen = new Set<number>();
+  while (stack.length > 0) {
+    const pid = stack.pop()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    for (const child of directChildren(pid)) {
+      stack.push(child);
+      const member = readProcMember(child);
+      if (member != null && isCollabEngineComm(member.comm)) {
+        found.push(member);
+      }
+    }
+  }
+  return found;
+}
+
 export function processGroupMembers(pgid: number): ProcMember[] {
   const members: ProcMember[] = [];
   let names: string[] = [];
@@ -182,16 +231,37 @@ export class OwnedServer {
     await this.spawnAt(bind, bind);
   }
 
+  private requireObservedLiveHelper(): ProcMember[] {
+    const members = this.observeOwnedMembers();
+    if (!members.some((member) => isCollabEngineComm(member.comm))) {
+      throw new Error("process-tree crash requires an observed live collaboration helper");
+    }
+    return members;
+  }
+
+  /** SIGKILL the owned tree while a collab-engine child is still observable. */
+  async crashKillWhenHelperLive(): Promise<void> {
+    if (this.bind === "") {
+      throw new Error("cannot crash-kill before the owned server has bound a port");
+    }
+    this.requireObservedLiveHelper();
+    await this.killGroupObserved();
+  }
+
+  async rebindAfterCrash(): Promise<void> {
+    if (this.bind === "") {
+      throw new Error("cannot restart before the owned server has bound a port");
+    }
+    await this.spawnAt(this.bind, this.bind);
+  }
+
   /** Process-tree crash durability: SIGKILL the group, then rebind the same port. */
   async crashAndRestart(): Promise<void> {
     if (this.bind === "") {
       throw new Error("cannot restart before the owned server has bound a port");
     }
     const bind = this.bind;
-    const members = this.observeOwnedMembers();
-    if (!members.some((member) => member.comm === "collab-engine")) {
-      throw new Error("process-tree crash requires an observed live collaboration helper");
-    }
+    this.requireObservedLiveHelper();
     await this.killGroupObserved();
     await this.spawnAt(bind, bind);
   }
@@ -254,7 +324,14 @@ export class OwnedServer {
   private observeOwnedMembers(): ProcMember[] {
     if (this.parentPid != null && this.pgid != null &&
       sameIdentity(this.parentIdentity, this.parentPid)) {
-      this.ownedMembers = processGroupMembers(this.pgid);
+      const byPid = new Map<number, ProcMember>();
+      for (const member of processGroupMembers(this.pgid)) {
+        byPid.set(member.pid, member);
+      }
+      for (const helper of collabEngineDescendants(this.parentPid)) {
+        byPid.set(helper.pid, helper);
+      }
+      this.ownedMembers = [...byPid.values()];
     }
     return this.ownedMembers;
   }

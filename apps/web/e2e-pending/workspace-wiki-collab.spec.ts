@@ -673,15 +673,23 @@ test("fresh context after process-tree crash SIGKILL reloads two-client persiste
     await expectConverged(pageA, pageB);
   } catch (error) {
     seedBodyFailed = true;
-    throw error;
-  } finally {
     await Promise.all([
-      closeCollabContext(seedA, seedBodyFailed),
-      closeCollabContext(seedB, seedBodyFailed),
+      closeCollabContext(seedA, true),
+      closeCollabContext(seedB, true),
     ]);
+    throw error;
   }
+  await test.step(
+    "SIGKILL owned process tree while collaboration helper is live",
+    () => collabApp.crashKillWhenHelperLive(),
+  );
+  phase("process tree crashed with live helper");
+  await Promise.all([
+    closeCollabContext(seedA, false),
+    closeCollabContext(seedB, false),
+  ]);
   phase("persist acknowledged and old clients closed");
-  await test.step("kill owned process tree and restart from DB", () => collabApp.crashAndRestart());
+  await test.step("restart owned server from DB", () => collabApp.rebindAfterCrash());
   phase("server restarted");
 
   const freshA = await newCollabContext(browser, collabApp.baseUrl);

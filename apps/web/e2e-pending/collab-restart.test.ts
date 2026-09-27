@@ -3,6 +3,9 @@ import test from "node:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  collabEngineDescendants,
+  directChildren,
+  isCollabEngineComm,
   ownedServerChildEnv,
   processGroupMembers,
   readProcMember,
@@ -88,6 +91,19 @@ test("owned server child env forwards an explicit storage directory", () => {
   });
   assert.equal(env.FVOCI_STORAGE_DIR, "/tmp/owned-storage");
   assert.equal(env.DATABASE_URL, undefined);
+});
+
+test("collab-engine comm matches the Linux proc prefix rule", () => {
+  assert.equal(isCollabEngineComm("collab-engine"), true);
+  assert.equal(isCollabEngineComm("collab-engine-w"), true);
+  assert.equal(isCollabEngineComm("fvoci-server"), false);
+});
+
+test("directChildren lists this Node process tree", () => {
+  const kids = directChildren(process.pid);
+  assert.ok(kids.every((pid) => Number.isFinite(pid)));
+  const descendants = collabEngineDescendants(process.pid);
+  assert.ok(descendants.every((member) => isCollabEngineComm(member.comm)));
 });
 
 test("process group observation reads this Node process without pid-file daemons", () => {
