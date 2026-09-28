@@ -1454,8 +1454,9 @@ async fn slow_smtp_sends_each_mail_event_once() {
     harness.cleanup().await;
 }
 
-/// A permanent 550 for one of three recipients is final for that recipient:
-/// the other two get one mail each and the event is processed, not retried.
+/// A 550 5.1.1 (no such user) for one of three recipients is final for that
+/// recipient: the other two get one mail each and the event is processed,
+/// not retried.
 #[tokio::test]
 async fn permanent_rejection_of_one_recipient_does_not_resend_to_the_others() {
     let harness = TestDb::bootstrap().await;
@@ -1721,6 +1722,21 @@ async fn acceptance_before_a_relay_limit_does_not_clear_it() {
     let outcome =
         deliver_three_recipient_comment([Some(POLICY_REFUSAL), None, Some(RELAY_LIMIT)]).await;
     assert_eq!(outcome.counts, vec![0, 1, 0], "mails per recipient");
+    assert!(!outcome.processed);
+    assert!(outcome.dead);
+}
+
+/// cPanel's hourly sending limit is a bare 550 with no enhanced status code.
+/// Starting after the first recipient was accepted, it is not taken as a
+/// refusal of the later recipients' mailboxes: the event dead-letters where
+/// it can be requeued, and the accepted recipient is not sent the mail again.
+#[tokio::test]
+async fn bare_550_relay_limit_after_an_accepted_recipient_dead_letters_the_event() {
+    const CPANEL_LIMIT: &str =
+        "550 Domain example.com has exceeded the max emails per hour (100/100 (100%)) allowed.";
+    let outcome =
+        deliver_three_recipient_comment([None, Some(CPANEL_LIMIT), Some(CPANEL_LIMIT)]).await;
+    assert_eq!(outcome.counts, vec![1, 0, 0], "mails per recipient");
     assert!(!outcome.processed);
     assert!(outcome.dead);
 }
