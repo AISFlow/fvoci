@@ -409,6 +409,28 @@ async fn setup_session_with(
     (app, cookie, user_id.0, workspace_id.0)
 }
 
+/// Close `pool` and wait (bounded) until none of its connections is open.
+/// sqlx 0.8.6 `Pool::close` can return while a connection is still being
+/// returned (its on-release ping): closing an idle connection releases an
+/// extra semaphore permit, so close's wait for all permits passes early. That
+/// connection then goes idle in the closed pool and stays open while any clone
+/// of the pool lives; each further `close` sweeps whatever went idle since.
+pub async fn close_pool(pool: PgPool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        pool.close().await;
+        if pool.size() == 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} pool connections still open after close",
+            pool.size()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 pub async fn admin_pool(harness: &TestDb) -> PgPool {
     PgPoolOptions::new()
         .max_connections(5)

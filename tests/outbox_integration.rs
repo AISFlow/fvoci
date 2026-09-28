@@ -1402,8 +1402,8 @@ async fn xid_epoch_mismatch_refuses_advance_and_recover_rebases() {
         .1
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
-    app.close().await;
-    admin.close().await;
+    project_harness::close_pool(app).await;
+    project_harness::close_pool(admin).await;
     wait_for_client_backends_gone(&harness.admin_url, &harness.db_name).await;
     let report = recover_outbox(
         &harness.admin_url,
