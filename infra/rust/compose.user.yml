@@ -1,67 +1,44 @@
-# FVOCI standalone install. Save this file as compose.yml in an empty folder, run
+# FVOCI install. In an empty folder with this file and .env.example:
 #
+#   cp .env.example .env     # fill in the empty values as its comments show
 #   docker compose up -d
 #
-# and open http://localhost:8080 to create the first administrator. No .env,
-# build or key generation is needed: postgres and meilisearch generate their
-# own owner password and master key on first start, and the one-shot `init`
-# service generates the server's keys, prepares the database and exits before
-# `fvoci` starts. The server mounts only its own keys, never the database owner
-# password or the Meilisearch master key.
-#
-# Keep the volumes: `docker compose down` keeps them, `down -v` deletes all data
-# and keys. If data exists without its keys, the install refuses to start rather
-# than generate keys that cannot open it. Backups: RUNNING.md "Standalone install".
-# Optional settings (domain/HTTPS, S3, SMTP, SSO, AI, tuning) go in a
-# compose.override.yml next to this file: RUNNING.md "Standalone install".
+# then open FVOCI_PUBLIC_ORIGIN (http://localhost:8080) and create the first
+# administrator. On every start the fvoci container checks .env, waits for
+# PostgreSQL and Meilisearch, creates the app role, migrates, grants and writes
+# the search key, then starts the server without the database owner password
+# or the Meilisearch master key. Optional settings: RUNNING.md "Install".
 name: fvoci
 
-# One product image for init and fvoci. Release files pin it to a digest.
+# One product image. Release files pin it to a digest.
 x-fvoci-image: &fvoci-image ${FVOCI_IMAGE:-ghcr.io/aisflow/fvoci:0.1.0}
-
-# First start of postgres/meilisearch: write a random secret to $1 (mode 0640,
-# owner $3, group 1001 = init) unless it exists; refuse if the data directory
-# $2 already holds data without it. Export it as $4 when set, then exec the service.
-x-own-secret: &own-secret |
-  set -eu
-  file=$$1 data=$$2 owner=$$3 var=$$4
-  shift 4
-  if [ ! -s "$$file" ]; then
-    if [ -n "$$(ls -A "$$data")" ]; then
-      echo "fvoci: $$file is missing but $$data holds data; restore its volume from the backup taken with that data" >&2
-      exit 1
-    fi
-    (umask 077; head -c 32 /dev/urandom | od -An -tx1 -v | tr -d ' \n' >"$$file.tmp")
-    chown "$$owner:1001" "$$file.tmp"
-    chmod 0640 "$$file.tmp"
-    sync
-    mv -f "$$file.tmp" "$$file"
-    sync
-    echo "fvoci: generated $$file"
-  fi
-  if [ -n "$$var" ]; then value=$$(cat "$$file"); export "$$var=$$value"; fi
-  exec "$$@"
 
 services:
   fvoci:
     image: *fvoci-image
     ports:
-      # Local only. Changing the host port or address needs the same change in
-      # FVOCI_PUBLIC_ORIGIN.
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${FVOCI_PUBLISH_PORT:?set FVOCI_PUBLISH_PORT in .env}:8080"
     environment:
-      # The exact origin (scheme://host[:port]) users open; the server never
-      # derives it from Host or Forwarded headers.
-      FVOCI_PUBLIC_ORIGIN: http://localhost:8080
+      FVOCI_PUBLIC_ORIGIN: ${FVOCI_PUBLIC_ORIGIN:?set FVOCI_PUBLIC_ORIGIN in .env}
+      PASSWORD_PEPPER_KEYS: ${PASSWORD_PEPPER_KEYS:?set PASSWORD_PEPPER_KEYS in .env}
+      PASSWORD_PEPPER_ACTIVE_KEY_ID: ${PASSWORD_PEPPER_ACTIVE_KEY_ID:?set PASSWORD_PEPPER_ACTIVE_KEY_ID in .env}
+      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:?set ENCRYPTION_KEYS in .env}
+      ENCRYPTION_ACTIVE_KEY_ID: ${ENCRYPTION_ACTIVE_KEY_ID:?set ENCRYPTION_ACTIVE_KEY_ID in .env}
+      # Preparation only; removed before the server starts.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      FVOCI_APP_PASSWORD: ${FVOCI_APP_PASSWORD:?set FVOCI_APP_PASSWORD in .env}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
       # Verified capacity pair: 64 collaboration rooms need postgres
       # max_connections=150 below (64 room fences + app pool 64 + reserve 10).
       FVOCI_COLLAB_MAX_ROOMS: "64"
     volumes:
-      - server_secrets:/run/fvoci/secrets:ro
       - storage:/data/storage
+      - meili_key:/run/fvoci/meili
     depends_on:
-      init:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
     restart: unless-stopped
     mem_limit: 4g
     stop_grace_period: 45s
@@ -70,38 +47,17 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
-      start_period: 10s
-
-  # Holds the owner password and master key the server must not: creates the
-  # app role, generates the server keys, migrates, grants, writes the scoped
-  # search key, and exits. Runs on every `up`; each step is idempotent.
-  init:
-    image: *fvoci-image
-    entrypoint: ["/opt/fvoci/bin/fvoci-migrate", "--install"]
-    group_add: ["1001"]
-    volumes:
-      - postgres_secrets:/run/fvoci/install/postgres:ro
-      - meili_secrets:/run/fvoci/install/meilisearch:ro
-      - server_secrets:/run/fvoci/install/server
-    depends_on:
-      postgres:
-        condition: service_healthy
-      meilisearch:
-        condition: service_healthy
-    restart: "no"
+      start_period: 60s
 
   postgres:
     image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-    entrypoint: ["/bin/sh", "-c", *own-secret, "sh", "/run/fvoci/secrets/postgres_password", "/var/lib/postgresql", "999", ""]
-    command: ["docker-entrypoint.sh", "postgres", "-c", "max_connections=150"]
+    command: ["postgres", "-c", "max_connections=150"]
     environment:
-      # Same names as the init defaults.
       POSTGRES_USER: fvoci_owner
       POSTGRES_DB: fvoci
-      POSTGRES_PASSWORD_FILE: /run/fvoci/secrets/postgres_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql
-      - postgres_secrets:/run/fvoci/secrets
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fvoci_owner -d fvoci"]
@@ -112,13 +68,12 @@ services:
 
   meilisearch:
     image: getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9
-    command: ["/bin/sh", "-c", *own-secret, "sh", "/run/fvoci/secrets/master_key", "/meili_data", "0", "MEILI_MASTER_KEY", "/bin/meilisearch"]
     environment:
       MEILI_ENV: production
       MEILI_NO_ANALYTICS: "true"
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
     volumes:
       - searchdata:/meili_data
-      - meili_secrets:/run/fvoci/secrets
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7700/health"]
@@ -131,6 +86,4 @@ volumes:
   pgdata:
   storage:
   searchdata:
-  postgres_secrets:
-  meili_secrets:
-  server_secrets:
+  meili_key:

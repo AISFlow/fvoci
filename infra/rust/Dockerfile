@@ -69,15 +69,9 @@ COPY --chown=root:root packages/editor/src/fonts/*-OFL.txt ./share/licenses/font
 COPY --chown=root:root src/http/api_docs_assets/LICENSE src/http/api_docs_assets/NOTICE src/http/api_docs_assets/swagger-ui-bundle.js.LICENSE.txt ./share/licenses/swagger-ui-dist-5.33.0/
 COPY --from=web-build --chown=root:root /src/apps/web/dist ./static/
 COPY --chown=root:root infra/rust/init-db.sh ./sbin/init-db.sh
-# /run/fvoci/secrets: where the server mounts its install settings
-# (config::INSTALL_SETTINGS_DIR); empty and world-searchable otherwise, so any
-# uid can see there is nothing to read. /run/fvoci/install/server: the same
-# volume as `fvoci-migrate --install` first mounts and writes it; a new named
-# volume takes over that directory's owner and mode (the service user, 0700).
 RUN chmod 755 ./sbin/init-db.sh ./bin/* \
- && mkdir -p /data/storage /run/fvoci/meili /run/fvoci/secrets /run/fvoci/install/server \
- && chown fvoci:fvoci /data/storage /run/fvoci/meili /run/fvoci/secrets /run/fvoci/install/server \
- && chmod 700 /run/fvoci/install/server
+ && mkdir -p /data/storage /run/fvoci/meili \
+ && chown fvoci:fvoci /data/storage /run/fvoci/meili
 ENV FVOCI_EXPORT_FONT_DIR=/opt/fvoci/share/fonts \
     FVOCI_STATIC_DIR=/opt/fvoci/static \
     FVOCI_COLLAB_ENGINE=/opt/fvoci/bin/collab-engine \
@@ -86,4 +80,9 @@ ENV FVOCI_EXPORT_FONT_DIR=/opt/fvoci/share/fonts \
     FVOCI_BIND=0.0.0.0:8080
 USER fvoci
 EXPOSE 8080
-ENTRYPOINT ["/opt/fvoci/bin/fvoci-server"]
+# `fvoci-migrate --start` execs fvoci-server (same pid, arguments passed on).
+# Given the database owner password (the Compose install, compose.user.yml) it
+# first validates the settings, waits for PostgreSQL and Meilisearch, creates
+# the app role, migrates, grants and writes the scoped search key, and the
+# server starts without the owner password or master key (src/prepare.rs).
+ENTRYPOINT ["/opt/fvoci/bin/fvoci-migrate", "--start"]
