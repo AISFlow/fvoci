@@ -1,6 +1,6 @@
 # FVOCI @VERSION@ (trial pre-release)
 
-<!-- notes-for: 0.1.0 -->
+<!-- notes-for: 0.1.1 -->
 
 This is a 0.x trial release. It is not covered by any compatibility promise:
 a later 0.y release may change configuration, data layout or behaviour.
@@ -17,8 +17,8 @@ Installs are never updated automatically.
 
 ## Accepted in this release
 
-FVOCI 0.1.0 is the first build of the Rust server with the existing React web
-app. The features below were accepted on `main` with their tests, CI and an
+FVOCI 0.1.1 is the first published build of the Rust server with the
+existing React web app. The features below were accepted on `main` with their tests, CI and an
 independent review (feature table in `docs/rewrite.md` at `@SHA@`):
 
 - **Accounts:** first-admin setup, sign-in and sessions, profile, password
@@ -75,6 +75,15 @@ stand-ins. Treat them as untested with a real provider:
   not tried.
 - **Korean input (IME):** checked with a real Linux (IBus) input method in
   Chromium only. Windows, macOS and mobile input methods were not tried.
+
+## About 0.1.0
+
+The `v0.1.0` tag exists in git but was never published: its release smoke
+failed inside the release test client (a cookie handling bug in the smoke
+script, not in the product), so no `0.1.0` image tag or GitHub release was
+created. 0.1.1 is the first published trial build. Its product code is
+identical to `v0.1.0` (`57497e2f`); only the release tooling, documentation
+and version number changed.
 
 ## Known limitations
 
