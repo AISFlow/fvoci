@@ -414,7 +414,9 @@ test("a: login to workspace shown", async ({ browser }) => {
     await watch(page, id, { selector: ".workspace-list__item strong", text: owner.workspaceName });
     const before = await pageNow(page);
     await loginButton.click();
-    const hit = await waitHit(page, id, HIT_TIMEOUT);
+    const found = await waitHit(page, id, HIT_TIMEOUT);
+    // A target already present when the watch started is not a measurement.
+    const hit = found && !found.pre ? found : null;
     const paint = hit ? await elementPaint(page, id) : null;
     const click = (await inputsSince(page, before)).find((i) => i.t === "pointerdown")?.ts ?? null;
     const res = await resourcesSince(page, before);
@@ -429,9 +431,9 @@ test("a: login to workspace shown", async ({ browser }) => {
       clickToShownPaint: paint && click !== null ? round(paint - click) : null,
       clickToShownFrame: hit?.raf && click !== null ? round(hit.raf - click) : null,
       requestsAfterClick: res.length,
-      loginStatusOk: loginApi ? hit !== null : null,
+      loginStatusOk: loginApi ? found !== null : null,
       pacedMs,
-      pre: hit?.pre ?? false,
+      pre: found?.pre ?? false,
       t0,
     });
   };
@@ -559,7 +561,7 @@ test("b: task detail and document open", async ({ browser }) => {
         .waitFor({ timeout: 60_000 })
         .then(() => pageNow(page))
         .catch(() => null);
-      const textPaint = text ? await elementPaint(page, idText) : null;
+      const textPaint = text && !text.pre ? await elementPaint(page, idText) : null;
       const res = await resourcesSince(page, 0);
       const api = res.filter((r) => r.name.includes("/api/v1/"));
       const lcp = await page.evaluate(
@@ -1137,7 +1139,7 @@ test("g: first open of freshly seeded documents", async ({ browser }) => {
         i,
         textDom: text && !text.pre ? round(text.dom) : null,
         collabConnectedDom: conn && !conn.pre ? round(conn.dom) : null,
-        connectedToText: text && conn ? round(text.dom - conn.dom) : null,
+        connectedToText: text && !text.pre && conn && !conn.pre ? round(text.dom - conn.dom) : null,
         sockets: sockets.map((s) => ({
           openedAfterMs: round(s.opened - t0),
           closedAfterMs: s.closed === null ? null : round(s.closed - t0),
