@@ -1339,9 +1339,6 @@ impl RoomActor {
                                         admission.conn_generation,
                                         admission.drop_rx,
                                     );
-                                    // Publish the member before the hub drops its joining
-                                    // lease, so reclaim never sees an empty admitted room.
-                                    self.publish_live_conns();
                                     let _ = reply.send(Ok(admission.lease));
                                 }
                                 Err(err) => {
@@ -2079,6 +2076,8 @@ impl RoomActor {
                 revoked: false,
             },
         );
+        // Published before the join reply lets the hub drop its joining lease,
+        // so reclaim never sees an empty admitted room.
         self.publish_live_conns();
         let encoded = self.awareness.encode_all();
         if !encoded.is_empty() {

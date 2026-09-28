@@ -1199,6 +1199,12 @@ impl CollabHub {
                 let _ = done_tx.send(());
             }));
         }
+        // The admission waits for the victim's teardown (engine kill and thread
+        // join, fence guard release) plus the rest of a last-disconnect session
+        // revision still running, which only a revision outlasting the reclaim
+        // grace can be. No inner timeout: HTTP callers are already bounded by
+        // rpc_timeout, and a WebSocket join would turn a near success into
+        // RoomFull and a client backoff.
         done_rx.await.is_ok()
     }
 
