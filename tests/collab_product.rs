@@ -26,10 +26,11 @@ use fvoci_server::collab::hub::{
 };
 use fvoci_server::collab::room::{
     arm_append_in_tx_reject_barrier, arm_append_revoke_barrier, arm_force_primary_apply_fail,
-    arm_force_primary_load_fail, arm_spawn_room_block, disarm_append_in_tx_reject_barrier,
-    disarm_append_revoke_barrier, disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
-    disarm_spawn_room_block, AuthenticatedConnection, CollabSession, ConnectionLease, JoinError,
-    RoomClientEvent, RoomJoin,
+    arm_force_primary_load_fail, arm_session_revision_persist_barrier, arm_spawn_room_block,
+    disarm_append_in_tx_reject_barrier, disarm_append_revoke_barrier,
+    disarm_force_primary_apply_fail, disarm_force_primary_load_fail,
+    disarm_session_revision_persist_barrier, disarm_spawn_room_block, AuthenticatedConnection,
+    CollabSession, ConnectionLease, JoinError, RoomClientEvent, RoomJoin,
 };
 use fvoci_server::collab::transport::take_data_frame_send_budget;
 use fvoci_server::collab::wire::{
@@ -2267,6 +2268,166 @@ async fn collab_room_cap_reclaim_skips_room_started_for_paused_borrow() {
             assert!(hub.shutdown().await.is_clean());
             harness.cleanup().await;
         },
+    )
+    .await;
+}
+
+/// A real Yrs revision snapshot (`pending_u1.v1`) that differs from the one a
+/// fresh, unedited document captures.
+fn foreign_revision_snapshot() -> Vec<u8> {
+    let mut session = EngineSession::spawn(SpawnRequest {
+        engine_bin: engine_bin(),
+        limits: collab_engine::Limits::for_tests(),
+        slot_kind: collab_engine::process::ChildSlotKind::Primary,
+        slot_wait: None,
+        test_hang_ms: None,
+        test_exit_after_read: None,
+        test_close_stdout_hang_ms: None,
+        test_exit_after_write: None,
+    })
+    .expect("spawn helper for a revision snapshot");
+    match session
+        .call(&Request::Load {
+            snapshot_b64: Some(engine_fixture("pending_u1.v1")),
+            tail_b64: Vec::new(),
+            encoding: 1,
+        })
+        .outcome
+    {
+        EngineStatus::Ok { applied: true, .. } => {}
+        other => panic!("fixture load must apply, got {other:?}"),
+    }
+    match session.call(&Request::RevisionSnapshot).outcome {
+        EngineStatus::Ok {
+            update_b64: Some(encoded),
+            ..
+        } => collab_engine::b64::decode(&encoded).expect("revision snapshot bytes"),
+        other => panic!("RevisionSnapshot must return bytes, got {other:?}"),
+    }
+}
+
+async fn count_revisions(harness: &TestDb, doc: &WikiDocFixture, reason: &str) -> i64 {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin pool");
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM fvoci.revisions \
+         WHERE workspace_id = $1 AND target_id = $2 AND reason = $3",
+    )
+    .bind(doc.session.workspace_id)
+    .bind(doc.document_id)
+    .bind(reason)
+    .fetch_one(&admin)
+    .await
+    .expect("count revisions");
+    admin.close().await;
+    count
+}
+
+/// A revision row committed by someone else between the session revision's
+/// head read and its insert, so the insert sees `StaleRevisionHead`.
+async fn insert_competing_revision(harness: &TestDb, doc: &WikiDocFixture, y_snapshot: Vec<u8>) {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .expect("admin pool");
+    sqlx::query(
+        "INSERT INTO fvoci.revisions (id, workspace_id, target_kind, target_id, y_snapshot, \
+         encoding, content_json, text, reason, created_by) \
+         VALUES ($1, $2, 'document', $3, $4, 1, $5, '', 'manual', $6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(doc.session.workspace_id)
+    .bind(doc.document_id)
+    .bind(y_snapshot)
+    .bind(empty_document_json())
+    .bind(doc.session.user_id)
+    .execute(&admin)
+    .await
+    .expect("insert competing revision");
+    admin.close().await;
+}
+
+/// The last member leaves room 0 and its session revision is paused just before
+/// the insert. An admission at the cap reclaims room 0 meanwhile (queued
+/// shutdown, no cancel). With `stale_head`, a competing revision lands in that
+/// window, so the insert must take its head retry before the room stops.
+async fn reclaim_keeps_last_disconnect_session_revision(stale_head: bool) {
+    let harness = TestDb::bootstrap().await;
+    let docs = setup_wiki_doc_batch(&harness, 5).await;
+    // The ACL tick never fires, so no later loop iteration can run the retry.
+    let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+    let keys = hub_keys(&docs);
+    let mut leases = DirectHubLeases::new();
+    let mut conn_ids = Vec::new();
+    for doc in docs.iter().take(4) {
+        conn_ids.push(
+            hub_join(&mut leases, &hub, doc, 1)
+                .await
+                .expect("join room"),
+        );
+    }
+    let competing = stale_head.then(foreign_revision_snapshot);
+
+    let (persist_reached, persist_release) =
+        arm_session_revision_persist_barrier(docs[0].document_id).await;
+    // Leave through the hub and keep the connection lease, so no lease drop
+    // wakes the actor between the revision attempts.
+    hub.leave_room(keys[0], conn_ids[0]).await;
+    await_barrier(persist_reached, "session revision persist barrier").await;
+    assert_eq!(hub.room_member_count(keys[0]).await, 0);
+    hub.age_room_past_reclaim_grace(keys[0]).await;
+
+    let reclaiming = tokio::spawn({
+        let hub = hub.clone();
+        let doc = docs[4].clone_fixture();
+        async move { hub_join_document(&hub, &doc, doc.document_id, 1).await }
+    });
+    wait_for_phase(&hub, keys[0], RoomLifecyclePhase::Closing).await;
+    if let Some(snapshot) = competing {
+        insert_competing_revision(&harness, &docs[0], snapshot).await;
+    }
+    persist_release
+        .send(())
+        .expect("release session revision persist barrier");
+
+    let (_, lease) = tokio::time::timeout(Duration::from_secs(10), reclaiming)
+        .await
+        .expect("reclaiming join finishes")
+        .expect("reclaiming join task")
+        .expect("reclaiming join starts its room");
+    leases.retain(lease);
+    assert_eq!(
+        hub.room_lifecycle_phase(keys[0]).await,
+        RoomLifecyclePhase::Absent
+    );
+    assert_eq!(
+        count_revisions(&harness, &docs[0], "session").await,
+        1,
+        "the reclaimed room writes its last-disconnect session revision"
+    );
+    disarm_session_revision_persist_barrier(docs[0].document_id).await;
+    assert!(hub.shutdown().await.is_clean());
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn collab_room_cap_reclaim_keeps_session_revision() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_keeps_session_revision",
+        reclaim_keeps_last_disconnect_session_revision(false),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn collab_room_cap_reclaim_keeps_session_revision_after_stale_head() {
+    run_lifecycle_test(
+        "collab_room_cap_reclaim_keeps_session_revision_after_stale_head",
+        reclaim_keeps_last_disconnect_session_revision(true),
     )
     .await;
 }
