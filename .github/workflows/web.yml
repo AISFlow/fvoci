@@ -156,8 +156,13 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: web-browser-shard-${{ matrix.shard }}-browser-failure-${{ github.run_attempt }}
-          # Traces contain network headers/cookies; retain only rendered test DOM.
-          path: ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
+          # Raw traces carry headers, cookies and bodies and stay on the runner;
+          # upload the rendered DOM, the redacted trace digest and server logs.
+          path: |
+            ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
+            ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/browser-summary.txt
+            ${{ steps.browser.outputs.failure-artifacts }}/server.log
+            ${{ steps.browser.outputs.failure-artifacts }}/owned-server/*.log
           retention-days: 3
           if-no-files-found: warn
 
@@ -219,7 +224,12 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: collaboration-browser-failure-${{ github.run_attempt }}
-          path: ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
+          # Same selection as the browser shards; raw traces are never uploaded.
+          path: |
+            ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/error-context.md
+            ${{ steps.browser.outputs.failure-artifacts }}/playwright-output/**/browser-summary.txt
+            ${{ steps.browser.outputs.failure-artifacts }}/server.log
+            ${{ steps.browser.outputs.failure-artifacts }}/owned-server/*.log
           retention-days: 3
           if-no-files-found: warn
 

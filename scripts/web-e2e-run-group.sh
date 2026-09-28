@@ -21,21 +21,133 @@ RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-web-e2e.XXXXXX")"
 SERVER_LOG="$RUN_DIR/server.log"
 PEPPER='{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
 
+redact_server_log() {
+  sed -E \
+    -e 's#postgres://[^[:space:]]+#postgres://redacted#g' \
+    -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL)=[^[:space:]]+#\1=redacted#g' \
+    "$1"
+}
+
+# Prints a digest of one Playwright trace.zip that CI may upload: each request's
+# method, status, resource type and path (no headers, cookies, bodies or query
+# strings), browser console warnings/errors and page errors. Share, invite,
+# invitation and ICS path tokens, token/code parameters and long base64url
+# runs are redacted. The raw trace (headers, cookies, DOM, bodies) stays local.
+summarize_trace() {
+  python3 - "$1" <<'PY'
+import json, re, sys, urllib.parse, zipfile
+from datetime import datetime, timedelta
+
+PATH_TOKEN = re.compile(r"(/(?:s|invite|share|invitations|ics)/)[^/?#\s\"'<>]+")
+PARAM_TOKEN = re.compile(r"(?i)\b(token|code|secret|password)=[^&\s\"'<>]+")
+LONG_TOKEN = re.compile(r"[A-Za-z0-9_-]{40,}")
+DB_URL = re.compile(r"postgres(?:ql)?://\S+")
+MAX_LINES = 2000
+
+def redact(text):
+    text = DB_URL.sub("postgres://redacted", text)
+    text = PATH_TOKEN.sub(r"\1<redacted>", text)
+    text = PARAM_TOKEN.sub(r"\1=<redacted>", text)
+    return LONG_TOKEN.sub("<redacted>", text)
+
+def short_url(url):
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "<unparsable url>"
+    host = parts.hostname or ""
+    prefix = "" if host in ("127.0.0.1", "localhost", "::1", "") else f"{parts.scheme}://{host}"
+    path = redact(prefix + (parts.path or "/"))
+    if parts.query:
+        path += "?…"
+    return path[:120]
+
+def clip(text, limit=600):
+    text = redact(str(text))
+    return text if len(text) <= limit else text[:limit] + "…"
+
+rows = []
+with zipfile.ZipFile(sys.argv[1]) as trace:
+    names = sorted(trace.namelist())
+    for name in names:
+        if not name.endswith(".network"):
+            continue
+        for line in trace.read(name).decode("utf-8", "replace").splitlines():
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            snap = entry.get("snapshot") if entry.get("type") == "resource-snapshot" else None
+            if not snap:
+                continue
+            request, response = snap.get("request", {}), snap.get("response", {})
+            status = response.get("status", 0)
+            failure = response.get("_failureText") or ""
+            wall = snap.get("startedDateTime", "")[11:23]
+            rows.append((snap.get("_monotonicTime", 0.0), "request",
+                         f"{wall} {request.get('method', '?')} {status if status and status > 0 else 'ERR'} "
+                         f"{snap.get('_resourceType', '-')} {short_url(request.get('url', ''))} "
+                         f"{snap.get('time', -1):.0f}ms {clip(failure, 120)}".rstrip()))
+    for name in names:
+        if not name.endswith(".trace") or name == "test.trace":
+            continue
+        for line in trace.read(name).decode("utf-8", "replace").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            kind = event.get("type")
+            when = event.get("time", 0.0)
+            if kind == "console" and event.get("messageType") in ("error", "warning"):
+                location = event.get("location") or {}
+                where = short_url(location.get("url", "")) if location.get("url") else ""
+                rows.append((when, "console", f"{event['messageType']} {clip(event.get('text', ''))} {where}".rstrip()))
+            elif kind == "event" and event.get("method") == "pageError":
+                params = event.get("params") or {}
+                error = (params.get("error") or {}).get("error") or {}
+                message = error.get("stack") or f"{error.get('name', 'Error')}: {error.get('message', params.get('error'))}"
+                lines = str(message).splitlines()[:12]
+                rows.append((when, "pageerror", clip("\n      ".join(lines), 2000)))
+            elif kind == "event" and event.get("method") == "crash":
+                rows.append((when, "crash", "page crashed"))
+
+print("browser summary: headers, cookies, bodies and query strings omitted; tokens redacted")
+print("columns: +ms since first entry, kind, then for requests: wall clock UTC, method, status, type, path, duration")
+if not rows:
+    print("(no requests, console warnings/errors or page errors recorded)")
+base = min((row[0] for row in rows), default=0.0)
+for count, (when, kind, text) in enumerate(sorted(rows, key=lambda row: row[0])):
+    if count >= MAX_LINES:
+        print(f"… {len(rows) - MAX_LINES} more entries omitted")
+        break
+    print(f"+{when - base:9.1f} {kind:9} {text}")
+PY
+}
+
 retain_failure_artifacts() {
-  local retain_dir log dest
+  local retain_dir log dest trace
   retain_dir="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-collab-e2e-fail.XXXXXX")"
   chmod 700 "$retain_dir"
   if [[ -d "$RUN_DIR/playwright-output" ]] && [[ -n "$(ls -A "$RUN_DIR/playwright-output" 2>/dev/null || true)" ]]; then
     cp -a "$RUN_DIR/playwright-output" "$retain_dir/playwright-output"
   fi
+  # The group's own server (ordinary runs); pending runs start servers per spec.
+  if [[ -f "$SERVER_LOG" ]]; then
+    redact_server_log "$SERVER_LOG" >"$retain_dir/server.log"
+  fi
   mkdir -p "$retain_dir/owned-server"
   while IFS= read -r -d '' log; do
     dest="$retain_dir/owned-server/$(basename "$(dirname "$log")").log"
-    sed -E \
-      -e 's#postgres://[^[:space:]]+#postgres://redacted#g' \
-      -e 's#(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL)=[^[:space:]]+#\1=redacted#g' \
-      "$log" >"$dest"
+    redact_server_log "$log" >"$dest"
   done < <(find "$RUN_DIR" -mindepth 2 -name server.log -type f -print0 2>/dev/null || true)
+  while IFS= read -r -d '' trace; do
+    dest="$(dirname "$trace")/browser-summary.txt"
+    # Python's own error text is not redacted, so it never reaches the file.
+    if ! summarize_trace "$trace" >"$dest" 2>/dev/null; then
+      echo "trace summary failed; inspect trace.zip on the runner" >"$dest"
+      echo "could not summarize $(basename "$(dirname "$trace")")/trace.zip" >&2
+    fi
+  done < <(find "$retain_dir" -name trace.zip -type f -print0 2>/dev/null || true)
   echo "retained failure artifacts for group ${GROUP_LABEL} in $retain_dir" >&2
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     printf 'failure-artifacts=%s\n' "$retain_dir" >>"$GITHUB_OUTPUT"
