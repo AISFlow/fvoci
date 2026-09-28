@@ -4275,3 +4275,187 @@ async fn totp_code_shared_by_adjacent_steps_is_accepted_once() {
     assert_eq!(h.login_methods(user_id).await, vec!["password", "totp"]);
     h.finish().await;
 }
+
+/// What happens to the MFA row while a request waits on the user's row.
+enum Swap {
+    /// `--secrets-rotate`: the same secret, a new ciphertext (fresh nonce
+    /// under the active key).
+    Reseal,
+    /// Another secret: a new setup for a pending row, disable + setup +
+    /// enable (a new `enabled_at`) for an enabled one.
+    Replace(Vec<u8>),
+}
+
+async fn swap_mfa(conn: &mut sqlx::PgConnection, user_id: Uuid, swap: &Swap) {
+    let stored: String =
+        sqlx::query_scalar("SELECT totp_secret FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    let keys = encryption_keys();
+    let context = fvoci_server::identity::user_mfa_context(user_id);
+    let plain = match swap {
+        Swap::Reseal => fvoci_server::secret_box::open(&keys, &stored, &context).unwrap(),
+        Swap::Replace(secret) => hex::encode(secret),
+    };
+    let again = fvoci_server::secret_box::seal(&keys, &plain, &context).unwrap();
+    assert_ne!(again, stored);
+    let sql = match swap {
+        Swap::Reseal => {
+            "UPDATE fvoci.user_mfa SET totp_secret = $3, updated_at = now() WHERE user_id = $1 AND totp_secret = $2"
+        }
+        Swap::Replace(_) => {
+            "UPDATE fvoci.user_mfa SET totp_secret = $3, last_used_step = NULL, updated_at = now(),
+                 enabled_at = CASE WHEN enabled_at IS NULL THEN NULL ELSE clock_timestamp() END
+             WHERE user_id = $1 AND totp_secret = $2"
+        }
+    };
+    let updated = sqlx::query(sql)
+        .bind(user_id)
+        .bind(&stored)
+        .bind(&again)
+        .execute(&mut *conn)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(updated, 1);
+}
+
+/// Holds the user's row (the sign-in / session-recheck lock) while `request`
+/// runs up to it, swaps the MFA row, then lets the request finish.
+async fn swap_during(
+    h: &Harness,
+    user_id: Uuid,
+    swap: Swap,
+    request: impl std::future::Future<Output = Response> + Send + 'static,
+) -> Response {
+    let mut lock = h.admin.begin().await.unwrap();
+    sqlx::query("SELECT id FROM fvoci.users WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(user_id)
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let task = tokio::spawn(request);
+    wait_for_lock_waiter(h).await;
+    swap_mfa(&mut lock, user_id, &swap).await;
+    lock.commit().await.unwrap();
+    task.await.unwrap()
+}
+
+fn enable_request(
+    h: &Harness,
+    cookie: &str,
+    code: String,
+) -> impl std::future::Future<Output = Response> + Send + 'static {
+    let app = h.app.clone();
+    let cookie = cookie.to_string();
+    async move {
+        call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/enable",
+            Some(json!({ "code": code })),
+            Some(&cookie),
+            peer(190),
+        )
+        .await
+    }
+}
+
+fn verify_request(
+    h: &Harness,
+    token: String,
+    code: String,
+) -> impl std::future::Future<Output = Response> + Send + 'static {
+    let app = h.app.clone();
+    async move {
+        call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/verify",
+            Some(json!({ "mfaToken": token, "code": code })),
+            None,
+            peer(191),
+        )
+        .await
+    }
+}
+
+/// `--secrets-rotate` runs against a live server: re-sealing the same secret
+/// between the code check and the write must not reject a valid code, while
+/// a secret replaced meanwhile still must.
+#[tokio::test]
+async fn mfa_enable_survives_a_concurrent_reseal() {
+    let h = Harness::start().await;
+    let (user_id, _email, cookie) = h.member("reseal-enable").await;
+    let res = call(
+        &h.app,
+        "POST",
+        "/api/v1/auth/mfa/setup",
+        Some(json!({ "currentPassword": PASSWORD })),
+        Some(&cookie),
+        peer(190),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    let first = decode_base32(res.json["secret"].as_str().unwrap());
+
+    // A concurrent setup replaced the secret: the code was for the old one.
+    let second = totp::new_secret().to_vec();
+    let request = enable_request(&h, &cookie, h.code_now(&first));
+    let res = swap_during(&h, user_id, Swap::Replace(second.clone()), request).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{:?}", res.json);
+    assert_eq!(res.code(), "mfa_not_setup");
+
+    // The same secret re-sealed meanwhile: enabled.
+    let request = enable_request(&h, &cookie, h.code_now(&second));
+    let res = swap_during(&h, user_id, Swap::Reseal, request).await;
+    assert_eq!(res.status, StatusCode::OK, "enable: {:?}", res.json);
+    let enabled: bool =
+        sqlx::query_scalar("SELECT enabled_at IS NOT NULL FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert!(enabled);
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn mfa_verify_survives_a_concurrent_reseal() {
+    let h = Harness::start().await;
+    let (user_id, email, cookie) = h.member("reseal-verify").await;
+    let (first, _codes) = h.enable_mfa(&cookie, Some(PASSWORD)).await;
+
+    // Disabled and enabled again with another secret meanwhile: refused.
+    h.advance_steps(1);
+    let second = totp::new_secret().to_vec();
+    let token = mfa_challenge(&h, &email, peer(191)).await;
+    let request = verify_request(&h, token, h.code_now(&first));
+    let res = swap_during(&h, user_id, Swap::Replace(second.clone()), request).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{:?}", res.json);
+    assert_eq!(res.code(), "mfa_invalid");
+
+    // The same secret re-sealed meanwhile: signed in.
+    h.advance_steps(1);
+    sqlx::query("UPDATE fvoci.user_mfa SET verify_count = 0 WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&h.admin)
+        .await
+        .unwrap();
+    let token = mfa_challenge(&h, &email, peer(192)).await;
+    let request = verify_request(&h, token, h.code_now(&second));
+    let res = swap_during(&h, user_id, Swap::Reseal, request).await;
+    assert_eq!(res.status, StatusCode::OK, "verify: {:?}", res.json);
+    assert!(res.cookie().is_some());
+    // The re-seal cost no extra attempt.
+    let attempts: i32 =
+        sqlx::query_scalar("SELECT verify_count FROM fvoci.user_mfa WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap();
+    assert_eq!(attempts, 1);
+    h.finish().await;
+}
