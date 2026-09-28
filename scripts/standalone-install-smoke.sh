@@ -108,6 +108,17 @@ MANIFEST1="$(secret_manifest)"
 awk '{print $1, $2, $4}' <<<"$MANIFEST1"
 awk '$4 !~ /\.fvoci-bootstrap-complete$/ && $1 != "600" {bad=1} END {exit bad}' <<<"$MANIFEST1" \
   || fail "secret file not 0600"
+# Each audience's secret files belong to its reader (postgres 999, meilisearch
+# 0, init and server fvoci 1000); markers are root's.
+awk '
+  $4 ~ /\.fvoci-bootstrap-complete$/ { if ($2 != "0:0") bad = bad " " $4; next }
+  { want = "unexpected file" }
+  $4 ~ /^secrets_postgres\//    { want = "999:999" }
+  $4 ~ /^secrets_meilisearch\// { want = "0:0" }
+  $4 ~ /^secrets_(init|server)\// { want = "1000:1000" }
+  { if ($1 != "600" || $2 != want) bad = bad " " $4 }
+  END { if (bad != "") { print "wrong mode/owner:" bad > "/dev/stderr"; exit 1 } }
+' <<<"$MANIFEST1" || fail "secret file mode or owner"
 [[ "$(awk '$4 ~ /\.fvoci-bootstrap-complete$/ {print $3}' <<<"$MANIFEST1" | sort -u | wc -l)" == 1 ]] \
   || fail "markers differ"
 mapfile -t SECRETS < <(secret_values | awk 'length($0) >= 32')
