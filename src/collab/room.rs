@@ -1198,18 +1198,10 @@ pub async fn spawn_room(
     live_conns: Arc<AtomicUsize>,
 ) -> Result<(RoomHandle, oneshot::Receiver<()>), JoinError> {
     wait_spawn_room_block(document_id).await;
-    let engine = match EngineBridge::spawn(config.engine_bin.clone(), config.limits) {
-        Ok(engine) => engine,
-        Err(report) => {
-            if matches!(
-                report.outcome,
-                collab_engine::EngineStatus::ResourceLimit { .. }
-            ) {
-                return Err(JoinError::CapacityRetry);
-            }
-            return Err(JoinError::EngineUnavailable);
-        }
-    };
+    // Starts only the bridge thread (it fails only if the OS refuses a thread);
+    // the helper spawns on the actor's first reload.
+    let engine = EngineBridge::spawn(config.engine_bin.clone(), config.limits)
+        .map_err(|_| JoinError::EngineUnavailable)?;
     let (tx, mut rx) = mpsc::channel(config.max_queued_room_ops);
     let (session_cancel_tx, session_cancel_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = oneshot::channel();
