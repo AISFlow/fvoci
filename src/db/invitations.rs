@@ -373,16 +373,30 @@ pub struct IdentityAcceptRequest<'a> {
     /// Issuer that verified `subject` (see `db::oidc::find_link`).
     pub issuer: &'a str,
     pub link_email: Option<&'a str>,
+    /// The provider verified `link_email` (`email_verified`).
+    pub email_verified: bool,
     pub given_name: Option<&'a str>,
     pub client_ip: Option<&'a str>,
     pub consents: &'a [(String, i32)],
     pub defaults: &'a crate::settings::DefaultsUserSettings,
 }
 
+/// A new account needs the provider's proof of the invited mailbox: the
+/// invitation token is a bearer credential its inviter also holds. The
+/// comparison folds ASCII case only, like the stored addresses.
+fn proves_invited_mailbox(request: &IdentityAcceptRequest<'_>, invited: &str) -> bool {
+    request.email_verified
+        && request
+            .link_email
+            .and_then(|email| crate::validate::normalize_email(email).ok())
+            .is_some_and(|email| email == invited)
+}
+
 /// Grants the invitation to the account behind an external identity. An
-/// existing account must already own that identity; otherwise a new
-/// password-less account is created with the link. Returns the user id; the
-/// caller issues the session through the MFA gate.
+/// existing account must already own that identity (whatever email the
+/// provider now reports); otherwise a new password-less account is created
+/// with the link, only for a provider-verified invited address. Returns the
+/// user id; the caller issues the session through the MFA gate.
 pub async fn accept_invitation_with_identity(
     pool: &PgPool,
     license: &crate::license::Entitlements,
@@ -427,6 +441,9 @@ pub async fn accept_invitation_with_identity(
     }
     if link.subject_taken() {
         return Ok(Err(InvitationDbError::AlreadyLinked));
+    }
+    if !proves_invited_mailbox(&request, &invitation.email) {
+        return Ok(Err(InvitationDbError::Unauthorized));
     }
     let user_id = Uuid::now_v7();
     let given_name = request
