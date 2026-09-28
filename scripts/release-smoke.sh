@@ -114,6 +114,11 @@ case "$(uname -m)" in
 esac
 ARCH_DIGEST="$(json_get "$RECORD" platforms "linux/$ARCH")"
 log_assert "== release ${VERSION} (${SOURCE_SHA}) on linux/${ARCH}: ${IMAGE_REF}"
+# The product and its expected SHA come only from the record above; this
+# checkout supplies the smoke tooling and may be a later commit (the workflow
+# ref, docs/RELEASING.md).
+TOOLING_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+log_assert "smoke tooling ${TOOLING_SHA}; record names tooling $(python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get("toolingSha", "none"))' "$RECORD")"
 
 if docker image inspect "$IMAGE_REF" >/dev/null 2>&1 || docker image inspect "$REPO@$ARCH_DIGEST" >/dev/null 2>&1; then
   fail "the daemon already holds $REPO; the smoke must pull the published digest onto a clean daemon"

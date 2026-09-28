@@ -212,7 +212,9 @@ jobs:
           fi
           tee -a "$GITHUB_OUTPUT" <"$RUNNER_TEMP/index.out"
 
-  # Release files rendered from the tagged tree and the published index.
+  # Release files rendered from the tagged tree and the published index, then
+  # stamped with the smoke tooling commit (github.sha, see smoke below) so the
+  # record and notes name both commits.
   dist:
     needs: [verify, index]
     if: always() && needs.index.result == 'success'
@@ -224,6 +226,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
           persist-credentials: false
       - name: Render compose.yml, release.json, notes and SHA256SUMS
         run: |
@@ -237,6 +244,8 @@ jobs:
             --arm64-digest "${{ needs.index.outputs.arm64_digest }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --out "$RUNNER_TEMP/dist"
+          python3 tooling/scripts/release-provenance.py --dist "$RUNNER_TEMP/dist" \
+            --tooling-sha "${{ github.sha }}" --tooling-ref "${{ github.ref }}"
           cat "$RUNNER_TEMP/dist/SHA256SUMS"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -247,6 +256,13 @@ jobs:
 
   # Anonymous pull of the index BY DIGEST on each native architecture: no
   # registry login, no packages permission, no locally built image, no tag yet.
+  # The smoke is test tooling and runs from the ref this run started from
+  # (github.sha: the tag commit on a tag push, the dispatching branch head on
+  # workflow_dispatch), so a smoke fix on main can re-verify an existing tag.
+  # The product under test stays the tagged SHA: the image is pulled by the
+  # digest in the release-dist record, compose.yml/env.example are the files
+  # dist rendered from the tag, and release-smoke.sh takes the expected
+  # version and OCI revision from that record, never from this checkout.
   smoke:
     needs: [verify, dist]
     if: always() && needs.dist.result == 'success'
@@ -266,7 +282,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.verify.outputs.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:

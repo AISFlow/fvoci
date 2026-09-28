@@ -63,8 +63,8 @@ verify-workflows` rejects other triggers or write scopes outside the jobs below.
 | verify | ubuntu-24.04 | contents, checks, packages: read | tag format, first-parent `main`, CI gates, version policy, preflight, existing release/image |
 | build-amd64 / build-arm64 | ubuntu-24.04 / ubuntu-24.04-arm | contents: read, packages: write | native build of the tagged SHA, OCI labels, push by digest; skipped when the version already has a tagged image |
 | index | ubuntu-24.04 | contents: read, packages: write | pushes the two-platform index **by digest, without a tag** (`scripts/release-api.py push-index`), records the index and per-arch digests |
-| dist | ubuntu-24.04 | contents: read | `scripts/release-dist.sh`: `compose.yml`, `env.example`, `INSTALL.md`, `release.json`, `RELEASE-NOTES.md`, and `SHA256SUMS` over those five |
-| smoke-amd64 / smoke-arm64 | ubuntu-24.04 / ubuntu-24.04-arm | contents: read | `scripts/release-smoke.sh` against the digest, no registry login |
+| dist | ubuntu-24.04 | contents: read | `scripts/release-dist.sh` at the tag: `compose.yml`, `env.example`, `INSTALL.md`, `release.json`, `RELEASE-NOTES.md`, and `SHA256SUMS` over those five; then `scripts/release-provenance.py` from the workflow ref records the smoke tooling commit |
+| smoke-amd64 / smoke-arm64 | ubuntu-24.04 / ubuntu-24.04-arm | contents: read | `scripts/release-smoke.sh` from the workflow ref against the digest, no registry login |
 | publish | ubuntu-24.04 | contents: read, packages: write | tags the smoked index `:0.y.z` (never moved), then `:0.y` when this is the newest `v0.y.*` tag |
 | release | ubuntu-24.04 | contents: write | `scripts/release-publish.sh`: pre-release for the existing git tag |
 
@@ -83,6 +83,36 @@ only jobs that create a tag or a release. Order:
 `release.json` records the same order in `publishOrder`. If a smoke fails, the
 index stays untagged: no user-facing tag names an image nobody exercised, and a
 fixed re-run builds again.
+
+## Product commit and smoke tooling commit
+
+Every job except the smoke builds, renders or publishes from the tagged SHA
+(`verify` resolves it): the image and its `FVOCI_BUILD_SHA`, the OCI
+`version`/`revision` labels, `compose.yml`, `env.example`, `INSTALL.md`, the
+notes and the version checks. The smoke jobs are test tooling and check out
+`github.sha`, the commit the run started from: the tag commit on a tag push,
+the dispatching branch head (normally `main`) on `workflow_dispatch`. The
+smoke still tests only the tagged product: it pulls the index digest from the
+`release-dist` record, installs from the `compose.yml` and `env.example` that
+`dist` rendered at the tag, and takes the expected version and OCI revision
+from `release.json` (`sourceSha`), never from its own checkout. The test
+clients, browser specs, fixtures and npm lockfiles come from the workflow ref.
+
+`dist` records both commits: `release.json` keeps `sourceSha` (product) and
+gains `toolingSha` and `toolingRef`; `RELEASE-NOTES.md` ends with a Provenance
+section naming both; `SHA256SUMS` is recomputed over the same five files. On a
+tag push the two SHAs are equal.
+
+- A smoke tooling fix (test client, spec, fixture) does not need a new tag:
+  merge it to `main`, then `gh workflow run release.yml --ref main -f
+  tag=v0.y.z`. The tag and its SHA stay as they are; when no `:0.y.z` image
+  exists yet (the smoke failed before `publish`), the image is built again from
+  that same SHA and the smoke from `main` exercises it. "Re-run failed jobs"
+  on the old run does not pick up the fix: a re-run keeps that run's
+  `github.sha`.
+- A product change (server, web app, image, compose, env example, install
+  guide, notes) needs a new patch tag `v0.y.(z+1)`; the smoke never makes a
+  later commit's product part of an existing tag.
 
 Checkouts use `persist-credentials: false`. `verify` fetches full history
 (every branch, so `origin/main` is present) without a later authenticated

@@ -934,7 +934,17 @@ async fn try_authenticate(
         Err(JoinError::RoomFull | JoinError::CapacityRetry) if hub.is_shutting_down() => {
             AuthAttempt::Restarting
         }
-        Err(JoinError::RoomFull | JoinError::CapacityRetry) => AuthAttempt::RetryLater,
+        Err(err @ (JoinError::RoomFull | JoinError::CapacityRetry)) => {
+            // Debug, not warn: a refused client retries every few seconds, so at
+            // a saturated cap one line per refusal grows with the waiting clients.
+            tracing::debug!(
+                workspace_id = %room.workspace_id,
+                document_id = %room.resource_id,
+                error = ?err,
+                "collab join refused at capacity"
+            );
+            AuthAttempt::RetryLater
+        }
         Err(JoinError::EngineUnavailable | JoinError::WriterStale | JoinError::DbError)
             if hub.is_shutting_down() =>
         {

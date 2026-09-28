@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Dry runs of scripts/release-dist.sh and scripts/release-preflight.sh.
+"""Dry runs of scripts/release-dist.sh, scripts/release-provenance.py and
+scripts/release-preflight.sh.
 
 Each case copies the scripts into a scratch root with a user compose, its
 env example and start guide (the testdata copies of infra/rust/compose.user.*,
@@ -29,6 +30,7 @@ INDEX = "sha256:" + "1" * 64
 AMD64 = "sha256:" + "2" * 64
 ARM64 = "sha256:" + "3" * 64
 SHA = "a" * 40
+TOOLING_SHA = "b" * 40
 PINNED = f"{IMAGE}:{VERSION}@{INDEX}"
 DOCKERFILE = """FROM rust:1 AS rust-sources
 FROM rust-sources AS rust-build
@@ -52,7 +54,7 @@ class Scratch:
         self.root = Path(self.tmp.name)
         (self.root / "scripts").mkdir()
         (self.root / "infra/rust").mkdir(parents=True)
-        for name in ("release-dist.sh", "release-preflight.sh", "release-notes-template.md"):
+        for name in ("release-dist.sh", "release-preflight.sh", "release-notes-template.md", "release-provenance.py"):
             shutil.copy(ROOT / "scripts" / name, self.root / "scripts" / name)
         (self.root / "infra/rust/compose.user.yml").write_text(compose, encoding="utf-8")
         for suffix in SIDECARS:
@@ -71,6 +73,12 @@ class Scratch:
              "--repository", "AISFlow/fvoci", "--image", IMAGE, "--index-digest", INDEX,
              "--amd64-digest", AMD64, "--arm64-digest", ARM64,
              "--run-url", "https://github.com/AISFlow/fvoci/actions/runs/1", "--out", str(self.root / "dist")],
+            capture_output=True, text=True, check=False)
+
+    def stamp(self, sha: str = TOOLING_SHA, ref: str = "refs/heads/main") -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["python3", str(self.root / "scripts/release-provenance.py"), "--dist", str(self.root / "dist"),
+             "--tooling-sha", sha, "--tooling-ref", ref],
             capture_output=True, text=True, check=False)
 
     def preflight(self) -> subprocess.CompletedProcess:
@@ -149,6 +157,52 @@ class ReleaseDistTest(unittest.TestCase):
                 self.assert_rejected(compose, needle)
         with self.subTest("unused env.example variable"):
             self.assert_rejected(base, "unused ['SMTP_HOST']", "SMTP_HOST=\n")
+
+
+class ReleaseProvenanceTest(unittest.TestCase):
+    def rendered(self) -> Scratch:
+        s = Scratch(FIXTURE.read_text(encoding="utf-8"))
+        self.addCleanup(s.tmp.cleanup)
+        proc = s.dist()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return s
+
+    def test_records_both_commits_and_keeps_the_product_bound_to_the_tag(self) -> None:
+        s = self.rendered()
+        before = {name: s.read(f"dist/{name}") for name in ("compose.yml", "env.example", "INSTALL.md")}
+        record_before = json.loads(s.read("dist/release.json"))
+        proc = s.stamp()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        record = json.loads(s.read("dist/release.json"))
+        self.assertEqual(record, {**record_before, "toolingSha": TOOLING_SHA, "toolingRef": "refs/heads/main"})
+        self.assertEqual(record["sourceSha"], SHA)
+        for name, text in before.items():
+            self.assertEqual(s.read(f"dist/{name}"), text)
+        notes = s.read("dist/RELEASE-NOTES.md")
+        self.assertIn(f"`{SHA}` (tag v{VERSION})", notes)
+        self.assertIn(f"Release smoke tooling: `{TOOLING_SHA}` (refs/heads/main)", notes)
+        check = subprocess.run(["sha256sum", "--strict", "-c", "SHA256SUMS"], cwd=s.root / "dist",
+                               capture_output=True, text=True, check=False)
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        self.assertEqual(len(s.read("dist/SHA256SUMS").splitlines()), 5)
+
+    def test_refuses_a_second_stamp_bad_input_or_tampered_files(self) -> None:
+        s = self.rendered()
+        for sha, ref, needle in (("B" * 40, "refs/heads/main", "full commit SHA"),
+                                 (TOOLING_SHA, "main", "refs/heads/<name>")):
+            with self.subTest(sha=sha, ref=ref):
+                proc = s.stamp(sha, ref)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn(needle, proc.stderr)
+        self.assertEqual(s.stamp().returncode, 0)
+        proc = s.stamp()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("already stamped", proc.stderr)
+        t = self.rendered()
+        t.write("dist/compose.yml", t.read("dist/compose.yml") + "# edited\n")
+        proc = t.stamp()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("does not match compose.yml", proc.stderr)
 
 
 class ReleasePreflightTest(unittest.TestCase):

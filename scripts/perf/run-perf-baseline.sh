@@ -8,6 +8,10 @@
 # Optional: FVOCI_PERF_SAMPLES (default 30), FVOCI_PERF_QUIET_MAX_MS (contention
 # wait per window, default 300000), FVOCI_PERF_GREP + FVOCI_PERF_TAG to re-run
 # selected flows (the setup test must match too) into suffixed result files.
+# Flow h (collab room saturation; FVOCI_PERF_SAMPLES × 47 s of drain pacing
+# alone) is skipped unless FVOCI_PERF_ROOM_SATURATION=1; run it on its own with
+# FVOCI_PERF_GREP="setup dataset|h: " and a FVOCI_PERF_TAG, optionally with
+# FVOCI_COLLAB_MAX_ROOMS for another room cap.
 #
 # Prerequisites (not built here, so build time never mixes with results):
 #   cargo build --release --locked --bin fvoci-server --bin fvoci-migrate

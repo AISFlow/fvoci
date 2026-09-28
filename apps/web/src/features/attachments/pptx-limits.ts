@@ -1,7 +1,7 @@
 import { Unzip, UnzipInflate, zipSync, type Unzipped } from "fflate";
 
-/** Largest PPTX the browser viewer downloads; bigger files stay download-only. */
-export const PPTX_MAX_BYTES = 64 * 1024 * 1024;
+// Defined beside the other caps so the attachment page can read it without this module's zip reader.
+export { PPTX_MAX_BYTES } from "./viewer-download.ts";
 
 /** Total inflated size of every package entry, checked before the renderer runs. */
 export const PPTX_MAX_EXPANDED_BYTES = 128 * 1024 * 1024;

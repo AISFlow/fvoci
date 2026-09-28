@@ -238,7 +238,7 @@ consent or bearer checks (source `INFRA_PATHS`):
 | --- | --- |
 | `GET /health` | Liveness: always `200 {"ok":true}`. |
 | `GET /ready` | `200 {"ok":true}`, or `503 {"ok":false,"checks":{"pg":false,...}}`. Checks the app-role PostgreSQL pool (`SELECT 1`) and, when collaboration is enabled, that the hub is not shutting down (`collab`). Each check is bounded by 2 s. There is no Redis to check. |
-| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers get the generic `404 not_found` problem. `fvoci_http_request_duration_seconds{method,route,status}` (route is the router template or `unmatched`), `fvoci_outbox_lag_seconds` (age of the oldest event some outbox consumer cursor has not yet passed, as in the source, including events committed behind a long-running or idle-in-transaction session), `fvoci_outbox_xmin_stall_seconds` (age of the oldest transaction holding an xid anywhere in the PostgreSQL cluster, prepared transactions included; outbox delivery waits for it to end. The source instead counted relay warnings above `OUTBOX_XMIN_AGE_WARN_MS` in `fvoci_outbox_xmin_stall_total`; alert on this gauge with the threshold in the rule). Both are refreshed at most every 15 s and keep their last value when the query fails. `fvoci_task_stream_subscribers` (open SSE streams), `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections`. No label holds a workspace, user, token or concrete path. |
+| `GET /metrics` | Prometheus scrape in OpenMetrics text (`application/openmetrics-text; version=1.0.0`), only for peers inside `METRICS_ALLOW_IPS`; other peers and other methods get the generic `404 not_found` problem. Metrics and scrape setup: "Prometheus scrape" below. |
 
 `fvoci-server healthcheck` requests `GET /ready` from the address in `FVOCI_BIND`
 (a wildcard bind is probed on loopback) and exits 0 on a 2xx answer within 4 s,
@@ -249,6 +249,100 @@ run inside the server here. The Compose server healthcheck runs
 source Compose used its binary's `healthcheck` with the same timeout), so the
 container is healthy only once `/ready` reports PostgreSQL (and collab, when
 enabled) ready.
+
+### Prometheus scrape
+
+`/metrics` is the only monitoring surface: the server adds no exporter, and
+neither Compose file starts Prometheus, Grafana or a collector. Point an
+existing Prometheus at it.
+
+**Access.** Every response is OpenMetrics 1.0.0 text whatever the `Accept`
+header (Prometheus 2.x/3.x parse it by the response `Content-Type`). Only a
+direct TCP peer inside `METRICS_ALLOW_IPS` (Environment table) gets it; an
+unset or empty list, any other peer and any method other than GET/HEAD get the
+same `404 not_found` problem. `X-Forwarded-For`, `X-Real-IP` and `Forwarded`
+are never read, so a proxy cannot vouch for a client. The user install passes
+`METRICS_ALLOW_IPS` from the `fvoci` service environment through the preparation
+to the server process unchanged; `.env` alone does not reach the container, so
+set it with the override below.
+
+**Compose override.** `infra/rust/compose.metrics.yml` (optional, next to
+`compose.yml`) adds `METRICS_ALLOW_IPS` from `.env` and joins `fvoci` to an
+internal network with no outside route and no published port. In `.env`:
+
+```sh
+FVOCI_METRICS_SUBNET=172.31.250.0/29   # a free private range on this host
+METRICS_ALLOW_IPS=172.31.250.6/32      # the Prometheus address in it
+```
+
+`docker compose -f compose.yml -f compose.metrics.yml up -d`, then attach the
+existing Prometheus container to network `fvoci_metrics` with that address
+(`docker network connect --ip 172.31.250.6 fvoci_metrics <prometheus>`, or
+`networks: {fvoci_metrics: {ipv4_address: 172.31.250.6}}` with the network
+declared `external` in its own Compose file). Use the highest address: `fvoci`
+takes a low dynamic one and the host holds the first. List that single
+address, not the subnet, or every host process can reach `/metrics` from the
+bridge address. Scraping through the
+published `127.0.0.1` port instead arrives from the default network's gateway,
+so allowing that address lets every local process read `/metrics`.
+
+The override targets the `fvoci` service of the user install (`compose.user.yml`
+rendered as `compose.yml`); it is not a release asset and does not apply to the
+developer `infra/rust/compose.yml`, where `docker compose config` fails closed.
+
+**Scrape config** (Prometheus 2.49 or newer for `scrape_protocols`):
+
+```yaml
+scrape_configs:
+  - job_name: fvoci
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    scrape_protocols: [OpenMetricsText1.0.0, PrometheusText0.0.4]
+    static_configs:
+      - targets: ["fvoci:8080"]
+```
+
+**Metrics.** No label holds a workspace, user, document, room, token, URL or
+concrete path. Database-derived values are refreshed at most every 15 s by one
+bounded (2 s) query; everything else is read on each scrape.
+
+| Name | Type | Meaning | On failure |
+| --- | --- | --- | --- |
+| `fvoci_http_request_duration_seconds{method,route,status}` | histogram | Request duration; `route` is the router template or `unmatched`, `method` one of the standard verbs or `OTHER` | In-process, cannot fail |
+| `fvoci_outbox_lag_seconds` | gauge | Age of the oldest event some outbox consumer cursor has not passed, including events committed behind a long-running or idle-in-transaction session (source `lagSeconds()`) | `NaN` before the first successful refresh and after a failed or timed-out one |
+| `fvoci_outbox_xmin_stall_seconds` | gauge | Age of the oldest transaction holding an xid anywhere in the PostgreSQL cluster, prepared transactions included; outbox delivery waits for it (replaces the source counter `fvoci_outbox_xmin_stall_total`; alert on a threshold) | As above |
+| `fvoci_db_metrics_last_success_timestamp_seconds` | gauge | Unix time of the last successful outbox refresh | `0` until the first; kept on failure |
+| `fvoci_db_metrics_refresh_failures_total` | counter | Outbox refreshes that failed or timed out | — |
+| `fvoci_db_pool_connections{state="idle"\|"active"}`, `fvoci_db_pool_max_connections` | gauge | This server's application-role connection pool and its limit. Not total PostgreSQL connections: collab room locks (one per live room, detached from the pool), the preparation, other servers and tools are outside it; use `pg_stat_activity` for totals | In-process, cannot fail |
+| `fvoci_task_stream_subscribers` | gauge | Open project task SSE streams | In-process |
+| `fvoci_process_resident_memory_bytes` | gauge | Observed RSS (`VmRSS`) of the server process, helpers excluded | `NaN` when `/proc/self/status` is unreadable |
+| `fvoci_collab_helper_resident_memory_bytes` | gauge | Observed RSS summed over live collaboration helper processes, the same sum collab admission reads | A helper exiting mid-read is skipped; a helper whose `/proc/<pid>/status` cannot be read contributes 0, so the sum can under-report |
+| `fvoci_collab_helper_memory_budget_bytes` | gauge | Configured helper budget `FVOCI_COLLAB_MEMORY_BUDGET` (not an observation) | `NaN` when collaboration is off |
+
+Collab admission refuses a room start when helper RSS plus the start's own
+estimate (`max(16 MiB, factor × persisted bytes)`) would exceed the budget;
+that per-start estimate, room occupancy and refusals by reason are not
+exported yet.
+
+**PromQL examples.**
+
+```promql
+# request rate and 5xx ratio
+sum(rate(fvoci_http_request_duration_seconds_count[5m]))
+sum(rate(fvoci_http_request_duration_seconds_count{status=~"5.."}[5m]))
+  / sum(rate(fvoci_http_request_duration_seconds_count[5m]))
+# p95 latency per route
+histogram_quantile(0.95, sum by (le, route) (rate(fvoci_http_request_duration_seconds_bucket[5m])))
+# outbox stuck (NaN compares false, so pair it with the staleness rule)
+fvoci_outbox_lag_seconds > 300
+time() - fvoci_db_metrics_last_success_timestamp_seconds > 120
+increase(fvoci_db_metrics_refresh_failures_total[10m]) > 0
+fvoci_outbox_xmin_stall_seconds > 600
+# app pool saturation and helper memory against the budget
+fvoci_db_pool_connections{state="active"} / fvoci_db_pool_max_connections > 0.9
+fvoci_collab_helper_resident_memory_bytes / fvoci_collab_helper_memory_budget_bytes > 0.8
+```
 
 ### Response security headers
 
@@ -313,7 +407,7 @@ Optional tuning:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `FVOCI_COLLAB_MAX_ROOMS` | 30 (clamp 1–512) | Hub room slots; immediate refusal when full. Default fits stock PostgreSQL `max_connections=100`; the 64-room capacity probe sets `64` and needs a higher Postgres limit. |
+| `FVOCI_COLLAB_MAX_ROOMS` | 30 (clamp 1–512) | Hub room slots. When full, a new room first reclaims the least recently active room that has no members, no join in flight and no HTTP body operation, and whose last activity is older than `max(COLLAB_RPC_TIMEOUT_MS, 3 s)` (5 s by default, at most the idle timer); it waits for that room to close. With no such room the join is refused (WebSocket close 1013, the editor retries with bounded backoff). Default fits stock PostgreSQL `max_connections=100`; the 64-room capacity probe sets `64` and needs a higher Postgres limit. |
 | `FVOCI_COLLAB_MAX_CHILDREN` | primary + validator headroom | Bounds the validator helper pool only. Primary cap is `max_rooms + 4` for offline revision capture headroom. |
 | `FVOCI_COLLAB_MEMORY_BUDGET` | 2 GiB | Aggregate admission: sum live helper VmRSS plus `max(16 MiB, 14× persisted bytes)` per room start |
 | `FVOCI_COLLAB_MAX_CONNECTIONS` | 32 | Per-room WebSocket members |
@@ -785,6 +879,7 @@ services:
 | OIDC sign-in | providers are set up in the app, sealed with `ENCRYPTION_KEYS`; `OIDC_ALLOW_INSECURE=1` only for a local http provider |
 | GitHub integration | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_STATE_SECRET` |
 | AI | `FVOCI_AI_ENABLED`, `FVOCI_AI_SECRET`, `FVOCI_AI_EMBEDDINGS_*` |
+| Prometheus scrape | `METRICS_ALLOW_IPS` via `compose.metrics.yml` ("Prometheus scrape"); no monitoring service is added |
 | Tuning | `FVOCI_COLLAB_*`, `FVOCI_EXTRACT_POLL_SECS`, `FVOCI_SHUTDOWN_DEADLINE_MS`, `FVOCI_UPLOAD_*`, `FVOCI_PREPARE_TIMEOUT_SECS`, `RUST_LOG` |
 
 Unset variables keep the product default; an empty value is a value, so do not
@@ -1366,6 +1461,7 @@ and what backup and restore run (the server binary stays single-purpose):
 | `fvoci bootstrap` (migrate) | `fvoci-migrate`, then `--grant-app-role <role>` | owner `DATABASE_URL` |
 | `fvoci search-rebuild [workspaceId]` | `fvoci-migrate --rebuild-search [workspace-id]` | owner `DATABASE_URL`, Meili |
 | `fvoci outbox-recover` | `fvoci-migrate --recover-outbox ...` | owner `DATABASE_URL` |
+| `fvoci outbox-reset [--override-reason=...]` | `fvoci-migrate --outbox-reset [--consumer <name>]... [--apply --reason <text> [--override-reason <text>] [--ack-external-replay]]` | owner `DATABASE_URL` (see below) |
 | `fvoci backup <collect\|restore\|...>` | `scripts/backup.sh`, `scripts/restore.sh` (below) | Compose project |
 | — (restore check) | `fvoci-migrate --verify-storage` | the server's |
 | `fvoci secrets rotate-vapid` | `fvoci-migrate --rotate-vapid` | the server's (`DATABASE_APP_URL`, `ENCRYPTION_KEYS`) |
@@ -1410,6 +1506,83 @@ Key rotation: add the new key to `ENCRYPTION_KEYS`, switch
 ```sh
 docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
   run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate server --secrets-audit
+```
+
+**`--outbox-reset`** (source `fvoci outbox-reset`) puts outbox consumer
+cursors back at the point their `processed_events` marks show, without
+replaying everything or deleting anything. The source had one relay cursor and
+moved it to just before the first event of the last 29 days that the
+`notifications` consumer had not marked; the Rust server keeps one cursor per
+consumer, so the same rule runs per consumer against that consumer's own marks
+(no mark in the window: the newest event of the window; no events in the
+window: unchanged). Use it when a cursor was hand-edited, lost or moved past
+events that were never delivered on the same cluster. After a restore, or when
+a consumer reports an outbox xid epoch mismatch, use `--recover-outbox`
+instead; `--outbox-reset` refuses an epoch mismatch.
+
+- Without `--apply` it only diagnoses: a read-only transaction that is safe
+  while the server runs. It prints one JSON line: `mode`, `windowDays` (29),
+  per consumer `before`, `target`, `direction` (`forward`, `backward`,
+  `unchanged`), `leaseActive`, `externalEffects`, `redelivered` (unmarked
+  events a backward move hands to the consumer again), `deadLettered` (unmarked
+  events in the same range with a dead-letter failure row: the dispatcher passes
+  them without delivery while that row stays, so they are not in `redelivered`),
+  `externalReplay` (see below) and `skip` (unmarked events older than the
+  window that a forward move passes: `skippedCount`, the `(xact, seq)` lexical
+  `min`/`max`, `oldestCreatedAt`, up to 100 `sample` ids and verbs), and
+  `excluded` with the reason for each consumer left out.
+- The default set is every consumer of this build that marks each event it
+  passes: `notifications`, `mail`, `push`, `webhooks`, and `search-index` when
+  `FVOCI_MEILI_URL` is configured in the environment. `github` is left out
+  because it does not mark events while the GitHub app is unconfigured (a reset
+  would rewind it and replay up to 29 days of status changes once configured).
+  `--consumer <name>` (repeatable) selects exactly the named cursors, `github`
+  included.
+- Consumers with external effects (`mail`, `push`, `webhooks`, `github`, and
+  any name this build does not know) are not rewound past their replay floor:
+  just before the first event they marked, and never behind their current cursor
+  when they marked nothing. Migrations 027/040/041 seed such consumers at the
+  tail on upgrade, so they hold no marks for older events; the per-consumer rule
+  alone would move them back to the start of the window and send up to 29 days
+  of pre-upgrade events to devices and external URLs again. When the rule asks
+  for more than the floor, the consumer reports `externalReplay` with the
+  `floor`, the rule's `target`, its `redelivered`/`deadLettered` counts and
+  `acknowledged`. By default the move stops at the floor (events after the floor
+  that are unmarked are still redelivered). `--apply --ack-external-replay`
+  (the same flag as `--recover-outbox`) moves them to the rule's target and
+  accepts that at-least-once external replay; the top-level `ackExternalReplay`
+  records it. `notifications` writes only this database and `search-index`
+  only re-indexes Meilisearch, which is idempotent, so both follow the rule
+  without a floor.
+- `--apply --reason <text>` moves the cursors in one transaction. It refuses
+  unless the `DATABASE_URL` role is a superuser or has the privileges of
+  `pg_read_all_stats` (membership through a `NOINHERIT` role or an
+  `INHERIT FALSE` grant does not count; a plain schema owner cannot see other
+  roles' sessions in `pg_stat_activity`, so the next check would pass
+  blindly); while any other
+  session is connected to the database (stop the server and every other client
+  first); while a selected consumer holds a live lease; when a forward target is
+  at or above the cluster snapshot xmin (a transaction in any database that may
+  still commit an earlier event is running, including prepared transactions:
+  retry after it ends); and when a move would skip unmarked events older than
+  the window unless `--override-reason <text>` acknowledges them. Both reasons
+  are echoed in the JSON report. Events, marks and failure rows are never
+  deleted; a second run reports every consumer `unchanged`.
+- `fvoci-migrate` installs no log subscriber, so the JSON line on stdout is the
+  only record of an apply: keep it with the ticket.
+- Unlike the source, which ran as the app role, this runs as the owner
+  `DATABASE_URL` like `--recover-outbox`: the app role has no access to the
+  consumer cursor tables by design (`scripts/grant-app-role.sql`), and this
+  operator path does not widen it. Consumers that moved backward redeliver only
+  events without their mark; delivery stays at-least-once for external effects.
+
+```sh
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --outbox-reset
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env stop server
+docker compose -f infra/rust/compose.yml --env-file infra/rust/.env \
+  run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init \
+  --outbox-reset --apply --reason "cursor ahead of marks, ticket 123"
 ```
 
 **`--init-env`** writes the Compose env file from `infra/rust/.env.example` with

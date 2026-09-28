@@ -1,10 +1,11 @@
 import { t } from "@fvoci/i18n";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, readCapped, zoomIn, zoomOut } from "./pdf-limits";
+import { PDF_ZOOM_MAX, PDF_ZOOM_MIN, zoomIn, zoomOut } from "./pdf-limits";
 import { openPptxInWorker, PptxWorkerError, type RemotePptxDeck } from "./pptx-client";
 import { PPTX_MAX_BYTES } from "./pptx-limits";
 import { SLIDE_IMAGE_TYPE } from "./pptx-svg";
+import { downloadCapped, type ViewerPrefetch } from "./viewer-download";
 import { ViewerErrorPane, ViewerLoadingPane, ViewerZoomToolbar } from "./viewer-shell";
 import "./pptx-viewer.css";
 
@@ -38,7 +39,13 @@ type SlideImage =
  * (`pptx-svg.ts`), shown through `<img>` from a blob URL, so deck links,
  * scripts and external references stay inert.
  */
-export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode {
+export function PptxViewer({
+  downloadUrl,
+  prefetch,
+}: {
+  downloadUrl: string;
+  prefetch?: ViewerPrefetch;
+}): ReactNode {
   const [generation, setGeneration] = useState(0);
   const [state, setState] = useState<DeckState>({ status: "loading" });
   const [source, setSource] = useState<Source | null>(null);
@@ -63,17 +70,13 @@ export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
     setSlide(0);
     void (async () => {
       try {
-        const response = await fetch(downloadUrl, {
-          credentials: "include",
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          await response.body?.cancel();
+        const body = await (prefetch?.take(controller.signal) ??
+          downloadCapped(downloadUrl, PPTX_MAX_BYTES, controller.signal));
+        if (!alive) return;
+        if (body.status === "failed") {
           fail(t("load.failed"), true);
           return;
         }
-        const body = await readCapped(response, PPTX_MAX_BYTES);
-        if (!alive) return;
         if (body.status === "tooLarge") {
           fail(t("attachment.viewer.previewUnavailable"), false);
           return;
@@ -88,7 +91,7 @@ export function PptxViewer({ downloadUrl }: { downloadUrl: string }): ReactNode 
       alive = false;
       controller.abort();
     };
-  }, [downloadUrl, generation]);
+  }, [downloadUrl, generation, prefetch]);
 
   // Opens `source` in a worker; again whenever `epoch` moves on (a terminated layout).
   useEffect(() => {

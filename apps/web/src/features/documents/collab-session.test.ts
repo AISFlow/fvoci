@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { PRESENCE_COLORS, presenceColorOf } from "../../lib/presence.ts";
-import { collabUserOf } from "./collab-model.ts";
+import { collabStatusOf, collabUserOf } from "./collab-model.ts";
 
 const sessionPath = path.join(import.meta.dirname, "collab-session.tsx");
 const cssPath = path.join(import.meta.dirname, "../../styles/app.css");
@@ -75,4 +75,56 @@ test("다른 uuid 뒷자리는 다른 라벨 색을 고른다", () => {
   assert.notEqual(a.color, b.color);
   assert.match(a.color, /^#[0-9a-fA-F]{6}$/);
   assert.match(b.color, /^#[0-9a-fA-F]{6}$/);
+});
+
+test("collabStatusOf: unauthorized > 방 거절 > 연결 상태 순이다", () => {
+  for (const connection of ["connecting", "connected", "disconnected"] as const) {
+    assert.equal(collabStatusOf(false, null, connection), connection, "no refusal: the raw connection state");
+    assert.equal(collabStatusOf(false, "capacity", connection), "busy");
+    assert.equal(collabStatusOf(false, "unavailable", connection), "unavailable");
+    for (const refusal of [null, "capacity", "unavailable"] as const) {
+      assert.equal(
+        collabStatusOf(true, refusal, connection),
+        "unauthorized",
+        `a refusal must not hide the unauthorized note: ${refusal}/${connection}`,
+      );
+    }
+  }
+});
+
+/* The repo has no DOM test setup; like the tests above, these read the React glue's source. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+}
+
+function between(src: string, start: string, end: string): string {
+  const from = src.indexOf(start);
+  assert.notEqual(from, -1, `missing ${start}`);
+  const to = src.indexOf(end, from);
+  assert.notEqual(to, -1, `missing ${end} after ${start}`);
+  return src.slice(from, to);
+}
+
+test("collab-session: 소켓 층은 재선언 세대에만 리마운트한다(거절로는 리마운트하지 않는다)", () => {
+  const src = stripComments(readFileSync(sessionPath, "utf8"));
+  const tags = [...src.matchAll(/<HocuspocusProviderWebsocketComponent\b[^>]*>/g)];
+  assert.equal(tags.length, 1);
+  const keys = [...tags[0][0].matchAll(/\bkey=\{([^}]*)\}/g)].map((m) => m[1].trim());
+  assert.deepEqual(keys, ["room.generation"], "keyed on anything a refusal changes remounts the page per refusal");
+  assert.match(tags[0][0], /\bwebsocketProvider=\{room\.socket\}/);
+});
+
+test("collab-session: 방의 인증 결과를 연결 상태 기계로 넘기고 거절 사유를 컨텍스트로 내린다", () => {
+  const src = stripComments(readFileSync(sessionPath, "utf8"));
+  const room = between(src, "<HocuspocusRoom", "</HocuspocusRoom>");
+  assert.match(room, /\bonAuthenticated=\{\(\) => connection\.current\?\.authenticated\(\)\}/);
+  assert.match(room, /\bonAuthenticationFailed=\{\(\) => connection\.current\?\.reclaim\(\)\}/);
+  assert.match(room, /<CollabRefusalContext\.Provider value=\{room\.refusal\}>/);
+});
+
+test("collab-session: 세션 상태는 collabStatusOf 로만 정한다", () => {
+  const src = stripComments(readFileSync(sessionPath, "utf8"));
+  const hook = between(src, "export function useCollabSession", "if (!user) return null;");
+  assert.match(hook, /\bstatus: collabStatusOf\(unauthorized, refusal, connectionStatus\),/);
+  assert.match(hook, /const refusal = useContext\(CollabRefusalContext\);/);
 });

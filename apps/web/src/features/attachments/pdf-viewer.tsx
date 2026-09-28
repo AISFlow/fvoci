@@ -7,12 +7,12 @@ import {
   PDF_MAX_IMAGE_PIXELS,
   PDF_ZOOM_MAX,
   PDF_ZOOM_MIN,
-  readCapped,
   renderScale,
   zoomIn,
   zoomOut,
 } from "./pdf-limits";
 import { pdfjsAssetBase } from "./pdf-assets";
+import { downloadCapped, type ViewerPrefetch } from "./viewer-download";
 import {
   ViewerErrorPane,
   ViewerLoadingPane,
@@ -52,7 +52,13 @@ type DocState =
  * document scripts — pdf.js core never runs PDF JavaScript and nothing here
  * navigates to URLs from the document.
  */
-export function PdfViewer({ downloadUrl }: { downloadUrl: string }): ReactNode {
+export function PdfViewer({
+  downloadUrl,
+  prefetch,
+}: {
+  downloadUrl: string;
+  prefetch?: ViewerPrefetch;
+}): ReactNode {
   const [generation, setGeneration] = useState(0);
   const [state, setState] = useState<DocState>({ status: "loading" });
   const [page, setPage] = useState(1);
@@ -69,17 +75,13 @@ export function PdfViewer({ downloadUrl }: { downloadUrl: string }): ReactNode {
     setRenderFailed(false);
     void (async () => {
       try {
-        const response = await fetch(downloadUrl, {
-          credentials: "include",
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          await response.body?.cancel();
-          if (alive) setState({ status: "error", message: t("load.failed"), retry: true });
+        const body = await (prefetch?.take(controller.signal) ??
+          downloadCapped(downloadUrl, PDF_MAX_BYTES, controller.signal));
+        if (!alive) return;
+        if (body.status === "failed") {
+          setState({ status: "error", message: t("load.failed"), retry: true });
           return;
         }
-        const body = await readCapped(response, PDF_MAX_BYTES);
-        if (!alive) return;
         if (body.status === "tooLarge") {
           setState({
             status: "error",
@@ -116,7 +118,7 @@ export function PdfViewer({ downloadUrl }: { downloadUrl: string }): ReactNode {
       controller.abort();
       void task?.destroy();
     };
-  }, [downloadUrl, generation]);
+  }, [downloadUrl, generation, prefetch]);
 
   const doc = state.status === "ready" ? state.doc : null;
 
