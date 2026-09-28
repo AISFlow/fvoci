@@ -461,7 +461,7 @@ export interface paths {
         };
         get: operations["oidc_start"];
         put?: never;
-        post?: never;
+        post: operations["oidc_start_invite"];
         delete?: never;
         options?: never;
         head?: never;
@@ -556,6 +556,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["auth_sso"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/sso/{workspace_id}/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["sso_callback"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4935,6 +4951,19 @@ export interface components {
             /** Format: int64 */
             count: number;
         };
+        /**
+         * @description Form body of the invite-mode start (`application/x-www-form-urlencoded`,
+         *     these fields once each and nothing else).
+         */
+        OidcInviteStartForm: {
+            /**
+             * @description JSON array of `{kind, version}`: the legal documents accepted on the
+             *     invite page. Optional; absent means none.
+             */
+            consents?: string;
+            /** @description Invitation token: accept the invitation with this identity. */
+            invitation: string;
+        };
         OkResponse: {
             ok: boolean;
         };
@@ -7358,10 +7387,6 @@ export interface operations {
     oidc_start: {
         parameters: {
             query?: {
-                /** @description Invitation token: accept with this identity */
-                invitation?: string;
-                /** @description JSON array of {kind, version} */
-                consents?: string;
                 /** @description Workspace SSO (generic) */
                 workspaceId?: string;
             };
@@ -7374,15 +7399,77 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Redirect to the provider; sets fvoci_oidc_state */
+            /** @description Sign-in only: redirect to the provider; sets fvoci_oidc_state. Accepting an invitation is the POST on this path; an `invitation` or `consents` query answers 400 */
             302: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Invalid input or invalid_consents_query */
+            /** @description Invalid input (including any other query parameter) */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description provider_not_configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    oidc_start_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description google | microsoft | kakao | naver | generic */
+                provider: string;
+            };
+            cookie?: never;
+        };
+        /** @description Same-origin form post from the invite page; no query string */
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["OidcInviteStartForm"];
+            };
+        };
+        responses: {
+            /** @description Redirect to the provider in invite mode; sets fvoci_oidc_state */
+            303: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid input (not a form, unknown or repeated field, missing invitation, any query) or invalid_consents_query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description origin_mismatch */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7645,6 +7732,63 @@ export interface operations {
             };
             /** @description provider_not_configured */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+        };
+    };
+    sso_callback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id: the redirect URI its SSO provider registers */
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Workspace SSO callback. Completes only a flow started for this workspace (otherwise error `oidc_state_mismatch`, before any request to the provider). To `/` with a session, `/login#mfa=<token>`, `/settings/account?linked=1`, or `/login?error=<oidc code>` / `/settings/account?error=<oidc code>` */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid workspace id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description The session that asked for the link is gone */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Seat limit */
+            402: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8364,6 +8508,15 @@ export interface operations {
             };
             /** @description Consent required */
             428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemResponse"];
+                };
+            };
+            /** @description Rate limited: per address, per address and token, or (existing account) the login password budget */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };

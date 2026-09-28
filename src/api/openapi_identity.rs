@@ -1,6 +1,6 @@
 // Path stubs for MFA / OIDC; merged into the main document by `spec_json`.
 
-use utoipa::OpenApi;
+use utoipa::{OpenApi, ToSchema};
 
 use crate::api::dto::{
     MfaDisableBody, MfaEnableBody, MfaSetupBody, MfaSetupOutput, MfaStatusOutput, MfaVerifyBody,
@@ -18,7 +18,9 @@ use crate::api::dto::{
         mfa_verify,
         auth_sso,
         oidc_start,
+        oidc_start_invite,
         oidc_callback,
+        sso_callback,
         oidc_link,
         oidc_unlink,
         workspace_oidc_get,
@@ -32,6 +34,7 @@ use crate::api::dto::{
         MfaSetupOutput,
         MfaStatusOutput,
         MfaVerifyBody,
+        OidcInviteStartForm,
         SessionIssuedOutput,
         WorkspaceOidcBody,
         WorkspaceOidcGetOutput,
@@ -133,18 +136,48 @@ fn auth_sso() {}
     tag = "auth",
     params(
         ("provider" = String, Path, description = "google | microsoft | kakao | naver | generic"),
-        ("invitation" = Option<String>, Query, description = "Invitation token: accept with this identity"),
-        ("consents" = Option<String>, Query, description = "JSON array of {kind, version}"),
         ("workspaceId" = Option<String>, Query, description = "Workspace SSO (generic)"),
     ),
     responses(
-        (status = 302, description = "Redirect to the provider; sets fvoci_oidc_state"),
-        (status = 400, description = "Invalid input or invalid_consents_query", body = ProblemResponse),
+        (status = 302, description = "Sign-in only: redirect to the provider; sets fvoci_oidc_state. Accepting an invitation is the POST on this path; an `invitation` or `consents` query answers 400"),
+        (status = 400, description = "Invalid input (including any other query parameter)", body = ProblemResponse),
         (status = 404, description = "provider_not_configured", body = ProblemResponse),
         (status = 429, description = "Rate limited", body = ProblemResponse),
     )
 )]
 fn oidc_start() {}
+
+/// Form body of the invite-mode start (`application/x-www-form-urlencoded`,
+/// these fields once each and nothing else).
+#[derive(ToSchema)]
+struct OidcInviteStartForm {
+    /// Invitation token: accept the invitation with this identity.
+    invitation: String,
+    /// JSON array of `{kind, version}`: the legal documents accepted on the
+    /// invite page. Optional; absent means none.
+    #[schema(required = false)]
+    consents: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/oidc/{provider}/start",
+    tag = "auth",
+    params(("provider" = String, Path, description = "google | microsoft | kakao | naver | generic")),
+    request_body(
+        content = OidcInviteStartForm,
+        content_type = "application/x-www-form-urlencoded",
+        description = "Same-origin form post from the invite page; no query string"
+    ),
+    responses(
+        (status = 303, description = "Redirect to the provider in invite mode; sets fvoci_oidc_state"),
+        (status = 400, description = "Invalid input (not a form, unknown or repeated field, missing invitation, any query) or invalid_consents_query", body = ProblemResponse),
+        (status = 403, description = "origin_mismatch", body = ProblemResponse),
+        (status = 404, description = "provider_not_configured", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn oidc_start_invite() {}
 
 #[utoipa::path(
     get,
@@ -158,6 +191,21 @@ fn oidc_start() {}
     )
 )]
 fn oidc_callback() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/sso/{workspace_id}/callback",
+    tag = "auth",
+    params(("workspace_id" = String, Path, description = "Workspace id: the redirect URI its SSO provider registers")),
+    responses(
+        (status = 302, description = "Workspace SSO callback. Completes only a flow started for this workspace (otherwise error `oidc_state_mismatch`, before any request to the provider). To `/` with a session, `/login#mfa=<token>`, `/settings/account?linked=1`, or `/login?error=<oidc code>` / `/settings/account?error=<oidc code>`"),
+        (status = 400, description = "Invalid workspace id", body = ProblemResponse),
+        (status = 401, description = "The session that asked for the link is gone", body = ProblemResponse),
+        (status = 402, description = "Seat limit", body = ProblemResponse),
+        (status = 429, description = "Rate limited", body = ProblemResponse),
+    )
+)]
+fn sso_callback() {}
 
 #[utoipa::path(
     post,

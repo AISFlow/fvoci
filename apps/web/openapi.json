@@ -1959,24 +1959,6 @@
             }
           },
           {
-            "name": "invitation",
-            "in": "query",
-            "description": "Invitation token: accept with this identity",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "consents",
-            "in": "query",
-            "description": "JSON array of {kind, version}",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
             "name": "workspaceId",
             "in": "query",
             "description": "Workspace SSO (generic)",
@@ -1988,10 +1970,83 @@
         ],
         "responses": {
           "302": {
-            "description": "Redirect to the provider; sets fvoci_oidc_state"
+            "description": "Sign-in only: redirect to the provider; sets fvoci_oidc_state. Accepting an invitation is the POST on this path; an `invitation` or `consents` query answers 400"
           },
           "400": {
-            "description": "Invalid input or invalid_consents_query",
+            "description": "Invalid input (including any other query parameter)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "provider_not_configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "oidc_start_invite",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "google | microsoft | kakao | naver | generic",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Same-origin form post from the invite page; no query string",
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcInviteStartForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "303": {
+            "description": "Redirect to the provider in invite mode; sets fvoci_oidc_state"
+          },
+          "400": {
+            "description": "Invalid input (not a form, unknown or repeated field, missing invitation, any query) or invalid_consents_query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "origin_mismatch",
             "content": {
               "application/json": {
                 "schema": {
@@ -2307,6 +2362,70 @@
           },
           "404": {
             "description": "provider_not_configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/sso/{workspace_id}/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "sso_callback",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "description": "Workspace id: the redirect URI its SSO provider registers",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Workspace SSO callback. Completes only a flow started for this workspace (otherwise error `oidc_state_mismatch`, before any request to the provider). To `/` with a session, `/login#mfa=<token>`, `/settings/account?linked=1`, or `/login?error=<oidc code>` / `/settings/account?error=<oidc code>`"
+          },
+          "400": {
+            "description": "Invalid workspace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The session that asked for the link is gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Seat limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -3206,6 +3325,16 @@
           },
           "428": {
             "description": "Consent required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited: per address, per address and token, or (existing account) the login password budget",
             "content": {
               "application/json": {
                 "schema": {
@@ -27983,6 +28112,23 @@
           "count": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "OidcInviteStartForm": {
+        "type": "object",
+        "description": "Form body of the invite-mode start (`application/x-www-form-urlencoded`,\nthese fields once each and nothing else).",
+        "required": [
+          "invitation"
+        ],
+        "properties": {
+          "consents": {
+            "type": "string",
+            "description": "JSON array of `{kind, version}`: the legal documents accepted on the\ninvite page. Optional; absent means none."
+          },
+          "invitation": {
+            "type": "string",
+            "description": "Invitation token: accept the invitation with this identity."
           }
         }
       },
