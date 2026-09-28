@@ -22,6 +22,7 @@ use crate::http::rate_limit::peer_ip;
 use crate::http::state::AppState;
 use crate::validate::{normalize_slug, validate_given_name};
 
+mod events;
 mod export;
 
 pub fn router() -> Router<AppState> {
@@ -46,6 +47,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{workspace_id}/export",
             get(export::workspace_export),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/events",
+            get(events::list_workspace_events_route),
         )
 }
 

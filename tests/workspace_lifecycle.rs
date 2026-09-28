@@ -12,6 +12,7 @@ use project_harness::{
     insert_project_document, insert_stored_attachment, json_request, setup_session, TestDb,
 };
 use serde_json::json;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 fn item_for<'a>(body: &'a serde_json::Value, slug: &str) -> &'a serde_json::Value {
@@ -1639,5 +1640,412 @@ async fn member_self_remove_stays_forbidden() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
     assert_eq!(body["code"], "workspace_member_self_change_forbidden");
+    harness.cleanup().await;
+}
+
+async fn insert_marked_event(
+    admin: &sqlx::PgPool,
+    workspace_id: Uuid,
+    verb: &str,
+    target: Option<(&str, Uuid)>,
+    payload: serde_json::Value,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO fvoci.events (id, workspace_id, verb, target_type, target_id, payload)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(verb)
+    .bind(target.map(|(kind, _)| kind))
+    .bind(target.map(|(_, id)| id))
+    .bind(payload)
+    .execute(admin)
+    .await
+    .expect("insert event");
+}
+
+type XidHolder = (Option<String>, i32, Option<String>, Option<String>);
+
+/// The event log only serves rows whose transaction precedes the snapshot xmin,
+/// so wait until every transaction up to now has finished before reading.
+async fn settle_committed_events(admin: &sqlx::PgPool) {
+    let horizon: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(admin)
+        .await
+        .expect("current xid");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !sqlx::query_scalar::<_, bool>(
+        "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8",
+    )
+    .bind(&horizon)
+    .fetch_one(admin)
+    .await
+    .expect("snapshot xmin")
+    {
+        if Instant::now() >= deadline {
+            let xmin: String =
+                sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+                    .fetch_one(admin)
+                    .await
+                    .expect("snapshot xmin");
+            let holders: Vec<XidHolder> = sqlx::query_as(
+                "SELECT datname::text, pid, backend_xid::text, backend_xmin::text \
+                     FROM pg_stat_activity \
+                     WHERE backend_xid IS NOT NULL OR backend_xmin IS NOT NULL \
+                     ORDER BY age(COALESCE(backend_xid, backend_xmin)) DESC LIMIT 5",
+            )
+            .fetch_all(admin)
+            .await
+            .expect("xmin holders");
+            panic!("events never settled: xmin {xmin} <= {horizon}; oldest holders {holders:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn event_markers(body: &serde_json::Value) -> Vec<String> {
+    body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["payload"]["marker"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+async fn workspace_events_are_manage_only_and_hide_unviewable_projects() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let ws_admin = add_workspace_user(&admin, workspace_id, "admin", "wsadmin").await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
+    let guest = add_workspace_user(&admin, workspace_id, "guest", "guest").await;
+    let outsider = add_workspace_user(&admin, workspace_id, "member", "outsider").await;
+    sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1 AND user_id = $2")
+        .bind(workspace_id)
+        .bind(outsider.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+
+    // Private project nobody but `member` belongs to; an open project for contrast.
+    let hidden_project = Uuid::now_v7();
+    insert_minimal_project(
+        &admin,
+        workspace_id,
+        hidden_project,
+        "HID",
+        member.user_id,
+        "private",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES (uuidv7(), $1, $2, $3, 'lead')",
+    )
+    .bind(workspace_id)
+    .bind(hidden_project)
+    .bind(member.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let hidden_doc = Uuid::now_v7();
+    insert_project_document(
+        &admin,
+        workspace_id,
+        hidden_project,
+        hidden_doc,
+        member.user_id,
+        1,
+    )
+    .await;
+    let hidden_attachment =
+        insert_stored_attachment(&admin, workspace_id, hidden_doc, member.user_id).await;
+    let open_project = Uuid::now_v7();
+    insert_minimal_project(
+        &admin,
+        workspace_id,
+        open_project,
+        "OPN",
+        owner_id,
+        "workspace",
+    )
+    .await;
+
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "workspace.created",
+        None,
+        json!({"marker": "v1"}),
+    )
+    .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "task.created",
+        None,
+        json!({"marker": "h-project", "projectId": hidden_project.to_string()}),
+    )
+    .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "project.updated",
+        None,
+        json!({"marker": "v2", "projectId": open_project.to_string()}),
+    )
+    .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "document.updated",
+        Some(("document", hidden_doc)),
+        json!({"marker": "h-doc-target"}),
+    )
+    .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "attachment.completed",
+        Some(("attachment", hidden_attachment)),
+        json!({"marker": "h-attachment", "name": "secret.bin"}),
+    )
+    .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "comment.created",
+        None,
+        json!({"marker": "h-doc-payload", "documentId": hidden_doc.to_string()}),
+    )
+    .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "task.updated",
+        None,
+        json!({"marker": "h-garbage", "projectId": "not-a-uuid"}),
+    )
+    .await;
+    insert_marked_event(
+        &admin,
+        workspace_id,
+        "invitation.created",
+        None,
+        json!({"marker": "v3"}),
+    )
+    .await;
+    // Another tenant's row never leaks through this workspace's log.
+    insert_marked_event(
+        &admin,
+        Uuid::now_v7(),
+        "workspace.created",
+        None,
+        json!({"marker": "x"}),
+    )
+    .await;
+    settle_committed_events(&admin).await;
+
+    let path = format!("/api/v1/workspaces/{workspace_id}/events?limit=100");
+    let (status, body) = json_request(app.clone(), "GET", &path, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:?}");
+    for (who, user) in [
+        ("member", &member),
+        ("guest", &guest),
+        ("outsider", &outsider),
+    ] {
+        let (status, body) =
+            json_request(app.clone(), "GET", &path, None, Some(&user.cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{who}: {body:?}");
+        assert_eq!(body["code"], "not_found", "{who}");
+    }
+    let missing = format!("/api/v1/workspaces/{}/events", Uuid::now_v7());
+    let (status, _) = json_request(app.clone(), "GET", &missing, None, Some(&cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for cookie in [cookie.as_str(), ws_admin.cookie.as_str()] {
+        let (status, body) = json_request(app.clone(), "GET", &path, None, Some(cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(event_markers(&body), ["v1", "v2", "v3"], "{body}");
+        assert!(body["nextCursor"].is_null(), "{body}");
+        let first = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["payload"]["marker"] == "v1")
+            .unwrap();
+        assert_eq!(first["verb"], "workspace.created");
+        assert_eq!(first["workspaceId"], workspace_id.to_string());
+        assert_eq!(first["channel"], "web");
+        assert!(first["actorUserId"].is_null());
+        assert!(first["targetType"].is_null() && first["targetId"].is_null());
+        assert!(first["createdAt"].as_str().unwrap().ends_with('Z'));
+    }
+
+    // Visibility follows current project access: joining the project reveals its rows.
+    sqlx::query(
+        "INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES (uuidv7(), $1, $2, $3, 'viewer')",
+    )
+    .bind(workspace_id)
+    .bind(hidden_project)
+    .bind(owner_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let (status, body) = json_request(app.clone(), "GET", &path, None, Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        event_markers(&body),
+        [
+            "v1",
+            "h-project",
+            "v2",
+            "h-doc-target",
+            "h-attachment",
+            "h-doc-payload",
+            "v3"
+        ],
+        "{body}"
+    );
+    let (status, body) =
+        json_request(app.clone(), "GET", &path, None, Some(&ws_admin.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(event_markers(&body), ["v1", "v2", "v3"], "{body}");
+
+    // Demoting the admin revokes the log on the next request.
+    sqlx::query(
+        "UPDATE fvoci.memberships SET role = 'member' WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(ws_admin.user_id)
+    .execute(&admin)
+    .await
+    .unwrap();
+    let (status, _) = json_request(app.clone(), "GET", &path, None, Some(&ws_admin.cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn workspace_events_paginate_visible_rows_in_relay_order() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner_id, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let member = add_workspace_user(&admin, workspace_id, "member", "member").await;
+    let hidden_project = Uuid::now_v7();
+    insert_minimal_project(
+        &admin,
+        workspace_id,
+        hidden_project,
+        "HID",
+        member.user_id,
+        "private",
+    )
+    .await;
+    settle_committed_events(&admin).await;
+    let base = format!("/api/v1/workspaces/{workspace_id}/events");
+    let (status, before) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}?limit=100"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{before:?}");
+    let preexisting = before["items"].as_array().unwrap().len();
+    assert!(preexisting < 100 && before["nextCursor"].is_null());
+
+    let mut expected = Vec::new();
+    for i in 0..5 {
+        insert_marked_event(
+            &admin,
+            workspace_id,
+            "task.created",
+            None,
+            json!({"marker": format!("h{i}"), "projectId": hidden_project.to_string()}),
+        )
+        .await;
+        let marker = format!("p{i}");
+        insert_marked_event(
+            &admin,
+            workspace_id,
+            "workspace.created",
+            None,
+            json!({"marker": marker}),
+        )
+        .await;
+        expected.push(marker);
+    }
+    settle_committed_events(&admin).await;
+
+    // First page skips the pre-existing rows; every later page is exactly `limit`
+    // visible rows even though hidden rows sit between them.
+    let mut cursor: Option<String> = None;
+    let mut seen = Vec::new();
+    let mut pages = 0;
+    let mut skip = preexisting;
+    loop {
+        let limit = if skip > 0 { skip } else { 2 };
+        let path = match &cursor {
+            Some(c) => format!("{base}?limit={limit}&cursor={c}"),
+            None => format!("{base}?limit={limit}"),
+        };
+        let (status, body) = json_request(app.clone(), "GET", &path, None, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        let items = body["items"].as_array().unwrap();
+        pages += 1;
+        if skip > 0 {
+            assert_eq!(items.len(), skip);
+            skip = 0;
+        } else {
+            seen.extend(event_markers(&body));
+            assert!(items.len() <= 2);
+        }
+        match body["nextCursor"].as_str() {
+            Some(next) => {
+                assert!(
+                    !items.is_empty(),
+                    "a cursor is only returned after a full page"
+                );
+                cursor = Some(next.to_string());
+            }
+            None => break,
+        }
+        assert!(pages < 20, "pagination must terminate");
+    }
+    assert_eq!(seen, expected);
+
+    // Query contract: strict params, coerced limit bounds, opaque cursor.
+    for bad in [
+        format!("{base}?limit=0"),
+        format!("{base}?limit=101"),
+        format!("{base}?limit=1.5"),
+        format!("{base}?limit=abc"),
+        format!("{base}?verb=task.created"),
+        format!("{base}?cursor={}", "A".repeat(1025)),
+    ] {
+        let (status, body) = json_request(app.clone(), "GET", &bad, None, Some(&cookie)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body:?}");
+    }
+    for bad_cursor in ["not-a-cursor", "eyJ4YWN0IjoiMSJ9"] {
+        let (status, body) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}?cursor={bad_cursor}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+        assert_eq!(body["params"]["code"], "invalid_cursor", "{body:?}");
+    }
+
+    admin.close().await;
     harness.cleanup().await;
 }

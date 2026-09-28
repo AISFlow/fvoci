@@ -12,6 +12,7 @@ import { WorkspaceWebhooksSection } from "@/features/settings/workspace-webhooks
 import { WorkspaceGithubSection } from "@/features/settings/workspace-github";
 import { DeletedProjectsSection } from "@/features/settings/deleted-projects";
 import { WorkspaceExportSection } from "@/features/settings/workspace-export";
+import { WorkspaceEventsSection } from "@/features/settings/workspace-events";
 import { WorkspaceImportSection } from "@/features/settings/workspace-import";
 import { NotificationPrefsSection } from "@/features/notifications/notification-prefs";
 import { WorkspaceShell } from "@/features/workspace/workspace-shell";
@@ -154,6 +155,7 @@ export function WorkspaceSettingsPage() {
         {canManage && workspace.kind === "team" ? (
           <DeletedProjectsSection workspaceId={workspace.id} />
         ) : null}
+        {canManage ? <WorkspaceEventsSection workspaceId={workspace.id} /> : null}
       </div>
     </WorkspaceShell>
   );
